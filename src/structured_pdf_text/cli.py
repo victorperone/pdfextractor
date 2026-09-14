@@ -55,6 +55,14 @@ def main(argv: list[str] | None = None) -> int:
             "Overrides --mode and other flags."
         ),
     )
+    extract_parser.add_argument(
+        "--output-file",
+        "-o",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Save output to FILE instead of printing to stdout",
+    )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
     inspect_parser.add_argument("pdf", type=Path)
@@ -147,13 +155,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         document = PdfTextExtractor(config).extract(args.pdf)
         if args.output == "raw":
-            print(document.raw_text)
+            result = document.raw_text
         elif args.output == "json":
-            print(render_json(document))
+            result = render_json(document)
         elif args.output == "markdown":
-            print(render_markdown(document))
+            result = render_markdown(document)
         else:
-            print(document.reading_text)
+            result = document.reading_text
+        if args.output_file is not None:
+            args.output_file.parent.mkdir(parents=True, exist_ok=True)
+            args.output_file.write_text(result, encoding="utf-8")
+        else:
+            print(result)
         return 0
 
     if args.command == "inspect":

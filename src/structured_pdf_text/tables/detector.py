@@ -176,22 +176,75 @@ def _table_from_grid(
     grid: _Grid,
     lines: list[TextLine],
 ) -> StructuredTable:
+    # Derive the same thickness used by _detect_strict_grid so span checks
+    # use consistent tolerances.
+    raw_paths = [p.bbox for p in page.objects.paths if p.bbox is not None]
+    median_stroke = median(
+        [min(p.width, p.height) for p in raw_paths if min(p.width, p.height) > 0] or [2.0]
+    )
+    thickness = max(4.0, median_stroke * 2.5)
+
+    n_rows = len(grid.y_edges) - 1
+    n_cols = len(grid.x_edges) - 1
+
+    # Detect span extents for each grid cell. A cell is "covered" when it falls
+    # inside the bounding box of a previously computed merged cell.
+    covered: set[tuple[int, int]] = set()
+    span_map: dict[tuple[int, int], tuple[int, int]] = {}  # (row,col) -> (rs, cs)
+
+    for row in range(n_rows):
+        for col in range(n_cols):
+            if (row, col) in covered:
+                continue
+            # Colspan: extend right while the internal vertical separator at the
+            # next x_edge is absent for this row band.
+            cs = 1
+            while col + cs < n_cols:
+                x_inner = grid.x_edges[col + cs]
+                if _segment_exists_at_x(
+                    raw_paths, x_inner,
+                    grid.y_edges[row], grid.y_edges[row + 1],
+                    thickness,
+                ):
+                    break
+                cs += 1
+            # Rowspan: extend down while the internal horizontal separator at the
+            # next y_edge is absent for this (possibly merged) column band.
+            rs = 1
+            while row + rs < n_rows:
+                y_inner = grid.y_edges[row + rs]
+                if _segment_exists_at_y(
+                    raw_paths, y_inner,
+                    grid.x_edges[col], grid.x_edges[col + cs],
+                    thickness,
+                ):
+                    break
+                rs += 1
+            span_map[(row, col)] = (rs, cs)
+            for r in range(row, row + rs):
+                for c in range(col, col + cs):
+                    if r != row or c != col:
+                        covered.add((r, c))
+
     cells: list[TableCell] = []
-    for row in range(len(grid.y_edges) - 1):
-        for col in range(len(grid.x_edges) - 1):
+    for row in range(n_rows):
+        for col in range(n_cols):
+            if (row, col) in covered:
+                continue
+            rs, cs = span_map.get((row, col), (1, 1))
             bbox = BBox(
                 grid.x_edges[col],
                 grid.y_edges[row],
-                grid.x_edges[col + 1],
-                grid.y_edges[row + 1],
+                grid.x_edges[col + cs],
+                grid.y_edges[row + rs],
             )
             tokens = tokens_in_cell(lines, bbox)
             cells.append(
                 TableCell(
                     row=row,
                     col=col,
-                    rowspan=1,
-                    colspan=1,
+                    rowspan=rs,
+                    colspan=cs,
                     bbox=bbox,
                     text="".join(token.text for token in tokens).strip(),
                     tokens=tokens,
@@ -205,15 +258,53 @@ def _table_from_grid(
                 page_index=page.page_index,
                 bbox=grid.bbox,
                 row_start=0,
-                row_end=len(grid.y_edges) - 2,
+                row_end=n_rows - 1,
             )
         ],
         cells=cells,
-        column_count=len(grid.x_edges) - 1,
-        row_count=len(grid.y_edges) - 1,
+        column_count=n_cols,
+        row_count=n_rows,
         confidence=grid.coherence,
         method=TableMethod.STRICT_GRID,
     )
+
+
+def _segment_exists_at_x(
+    paths: list[BBox],
+    x_center: float,
+    y0: float,
+    y1: float,
+    thickness: float,
+) -> bool:
+    """Return True if a vertical path segment exists at x≈x_center covering [y0, y1]."""
+    for p in paths:
+        if (
+            p.width <= thickness
+            and abs(p.cx - x_center) <= thickness
+            and p.y0 <= y0 + thickness
+            and p.y1 >= y1 - thickness
+        ):
+            return True
+    return False
+
+
+def _segment_exists_at_y(
+    paths: list[BBox],
+    y_center: float,
+    x0: float,
+    x1: float,
+    thickness: float,
+) -> bool:
+    """Return True if a horizontal path segment exists at y≈y_center covering [x0, x1]."""
+    for p in paths:
+        if (
+            p.height <= thickness
+            and abs(p.cy - y_center) <= thickness
+            and p.x0 <= x0 + thickness
+            and p.x1 >= x1 - thickness
+        ):
+            return True
+    return False
 
 
 def _cluster_edges(values: list[float], tolerance: float) -> list[float]:
