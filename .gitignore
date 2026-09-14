@@ -1,0 +1,237 @@
+# structured-pdf-text
+# Keep source code and test code in git. Keep private PDF corpora, fixtures,
+# generated dumps, overlays, OCR artifacts and model weights out of git.
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.dmypy.json
+dmypy.json
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.cache/
+*.cover
+*.py,cover
+
+# Virtual environments and local Python installs
+.venv/
+venv/
+ENV/
+env/
+.virtualenv/
+__pypackages__/
+.python-local/
+
+# Build and packaging output
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+wheels/
+*.whl
+*.tar.gz
+
+# Native extension and future Rust/PyO3 build output
+target/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.pyd
+*.dylib
+*.dll
+*.exp
+*.pdb
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+ehthumbs.db
+Icon?
+*~
+*.swp
+*.swo
+
+# Local environment, credentials and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+.secrets/
+secrets/
+credentials.json
+token.json
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Project runtime output
+out/
+output/
+outputs/
+exports/
+artifacts/
+run-artifacts/
+reports/generated/
+benchmark-results/
+benchmarks/results/
+diagnostics/out/
+diagnostics/generated/
+overlays/
+visual-overlays/
+page-overlays/
+table-viewer/
+
+# Local databases and queues used in experiments
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Private PDF corpus and acceptance corpus
+corpus/**
+!corpus/
+!corpus/.gitkeep
+!corpus/README.md
+!corpus/README.example.md
+private-corpus/**
+local-corpus/**
+acceptance-corpus/**
+golden-private/**
+fixtures-private/**
+
+# Test data, fixtures and generated expectations
+# Do not ignore tests/**/*.py. Test code should stay versioned.
+tests/fixtures/**
+!tests/fixtures/
+!tests/fixtures/.gitkeep
+!tests/fixtures/README.md
+tests/data/**
+!tests/data/
+!tests/data/.gitkeep
+!tests/data/README.md
+tests/corpus/**
+!tests/corpus/
+!tests/corpus/.gitkeep
+!tests/corpus/README.md
+tests/golden/**
+!tests/golden/
+!tests/golden/.gitkeep
+!tests/golden/README.md
+tests/output/**
+tests/outputs/**
+tests/tmp/**
+tests/.cache/**
+
+# PDFs are private by default in this project.
+# Publish a synthetic PDF only intentionally, preferably under docs/public.
+*.pdf
+*.PDF
+!docs/public/**/*.pdf
+
+# Scans and rasterized pages used as test material
+*.tif
+*.tiff
+*.heic
+*.HEIC
+corpus/**/*.png
+corpus/**/*.jpg
+corpus/**/*.jpeg
+corpus/**/*.webp
+tests/fixtures/**/*.png
+tests/fixtures/**/*.jpg
+tests/fixtures/**/*.jpeg
+tests/fixtures/**/*.webp
+tests/data/**/*.png
+tests/data/**/*.jpg
+tests/data/**/*.jpeg
+tests/data/**/*.webp
+
+# Generated smoke test samples and diagnostic artifacts
+sample.pdf
+sample-overlay.*
+*-overlay.png
+*-overlay.jpg
+*-overlay.jpeg
+*-overlay.webp
+page-*.png
+page-*.jpg
+page-*.jpeg
+page-*.webp
+page-*.json
+page-*.csv
+page-*.html
+raw-page-*.json
+raw-page-*.csv
+character-dump*.json
+character-dump*.csv
+evidence-dump*.json
+evidence-report*.json
+layout-regions*.json
+ocr-tokens*.json
+table-viewer*.html
+comparison*.json
+comparison*.csv
+diff*.txt
+
+# OCR, layout and table model caches or weights
+models/**
+model-cache/**
+.model-cache/**
+.paddleocr/**
+paddleocr_cache/**
+PaddleOCR/inference_results/**
+inference_results/**
+*.onnx
+*.pdmodel
+*.pdiparams
+*.pdiparams.info
+*.nb
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# ML or experiment trackers, should not contain document text in git
+mlruns/
+wandb/
+runs/
+
+# Jupyter local state
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+notebooks/output/
+notebooks/tmp/

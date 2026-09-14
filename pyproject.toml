@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "structured-pdf-text"
+version = "0.1.0"
+description = "Local, auditable structured PDF text extraction with native evidence first."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Proprietary or internal, define before distribution"}
+authors = [{name = "structured-pdf-text maintainers"}]
+dependencies = [
+    "pypdfium2>=5.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "reportlab>=4.0",
+]
+ocr = [
+    "paddlepaddle>=3.3",
+    "paddleocr>=3.7",
+]
+
+[project.scripts]
+pdftext = "structured_pdf_text.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
