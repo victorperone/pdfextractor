@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from numbers import Real
+from pathlib import Path
 from typing import Any, Callable
 
 from structured_pdf_text.document import OcrToken, SourceKind
@@ -26,7 +27,7 @@ class PaddleOcrEngine:
         self.language = language
         self.cache_home = options.pop("cache_home", None) or os.environ.get(
             "PADDLE_PDX_CACHE_HOME",
-            "/tmp/structured_pdf_text/paddlex",
+            str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
         )
         self.options = options
         self.batch_size = max(1, int(options.pop("ocr_batch_size", 3)))
@@ -51,7 +52,17 @@ class PaddleOcrEngine:
         ocr = self._get_ocr()
         raw = self._predict_counted(ocr, page_image)
         tokens = _tokens_from_result(raw, page_index, page_image, page_bbox)
-        rotation_candidates = _rotation_candidates(tokens, page_image, page_bbox)
+        # F25: when the first pass returns nothing, try all four orientations
+        # before giving up. A sideways or upside-down scan would otherwise
+        # produce an empty result with no rotation fallback.
+        if not tokens:
+            rotation_candidates = [
+                (90, _counterclockwise_box_to_original),
+                (180, _half_turn_box_to_original),
+                (270, _clockwise_box_to_original),
+            ]
+        else:
+            rotation_candidates = _rotation_candidates(tokens, page_image, page_bbox)
         if not rotation_candidates:
             candidates = [tokens]
             if quality_variants:

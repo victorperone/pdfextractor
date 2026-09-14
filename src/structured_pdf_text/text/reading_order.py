@@ -351,8 +351,8 @@ def _order_prose_lines(lines: list[TextLine], region_width: float) -> tuple[list
 def _split_columns(lines: list[TextLine], region_width: float) -> list[list[TextLine]]:
     if len(lines) < 4:
         return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-    # Cluster starts rather than splitting at one accidental large gap. This
-    # is stable when a paragraph begins with an indent or a short bullet.
+    # Cluster x0 starts rather than splitting at one accidental large gap.
+    # This is stable when a paragraph begins with an indent or a short bullet.
     starts = sorted(line.bbox.x0 for line in lines)
     tolerance = max(12.0, region_width * 0.045)
     clusters: list[list[float]] = []
@@ -361,27 +361,39 @@ def _split_columns(lines: list[TextLine], region_width: float) -> list[list[Text
             clusters.append([start])
         else:
             clusters[-1].append(start)
-    if len(clusters) != 2:
+    if len(clusters) < 2:
         return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-    left_edge = median(clusters[0])
-    right_edge = median(clusters[1])
-    if right_edge - left_edge < max(18.0, region_width * 0.10):
+
+    # Build column edges and validate minimum separation between each pair.
+    column_edges = [median(c) for c in clusters]
+    min_col_separation = max(18.0, region_width * 0.10)
+    for i in range(len(column_edges) - 1):
+        if column_edges[i + 1] - column_edges[i] < min_col_separation:
+            return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
+
+    # Assign each line to the nearest column edge.
+    columns: list[list[TextLine]] = [[] for _ in column_edges]
+    for line in lines:
+        nearest = min(range(len(column_edges)), key=lambda i: abs(line.bbox.x0 - column_edges[i]))
+        columns[nearest].append(line)
+
+    # Filter empty slots and require at least 2 lines per column.
+    valid_columns = [
+        sorted(col, key=lambda line: (line.bbox.y0, line.bbox.x0))
+        for col in columns
+        if len(col) >= 2
+    ]
+    if len(valid_columns) < 2:
         return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-    left = sorted(
-        [line for line in lines if abs(line.bbox.x0 - left_edge) <= abs(line.bbox.x0 - right_edge)],
-        key=lambda line: (line.bbox.y0, line.bbox.x0),
-    )
-    right = sorted(
-        [line for line in lines if abs(line.bbox.x0 - right_edge) < abs(line.bbox.x0 - left_edge)],
-        key=lambda line: (line.bbox.y0, line.bbox.x0),
-    )
-    if len(left) < 2 or len(right) < 2:
-        return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
+
     # A short punctuation mark or an indented continuation is not a column.
-    # Requiring a meaningful median line width on both sides keeps the split
+    # Requiring a meaningful median line width on all sides keeps the split
     # conservative while still accepting ordinary narrow newspaper columns.
-    left_width = median(line.bbox.width for line in left)
-    right_width = median(line.bbox.width for line in right)
-    if min(left_width, right_width) < max(24.0, region_width * 0.12):
+    min_col_width = max(24.0, region_width * 0.12)
+    if any(
+        median(line.bbox.width for line in col) < min_col_width
+        for col in valid_columns
+    ):
         return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-    return [left, right]
+
+    return valid_columns

@@ -5,6 +5,16 @@ from structured_pdf_text.document import StructuredDocument, StructuredTable
 
 def render_markdown(document: StructuredDocument) -> str:
     """Render page boundaries and detected tables without changing the model."""
+    # Index tables by the first page they appear on so they can be inlined.
+    tables_by_page: dict[int, list[StructuredTable]] = {}
+    for table in document.tables:
+        first_page = min(
+            (fragment.page_index for fragment in table.page_fragments),
+            default=None,
+        )
+        if first_page is not None:
+            tables_by_page.setdefault(first_page, []).append(table)
+
     sections: list[str] = []
     for page in document.pages:
         body = page.reading_text.strip()
@@ -12,14 +22,14 @@ def render_markdown(document: StructuredDocument) -> str:
             sections.append(f"## Página {page.page_index + 1}\n\n{body}")
         else:
             sections.append(f"## Página {page.page_index + 1}")
-    for table in document.tables:
-        rendered = _render_table(table)
-        if rendered:
-            pages = sorted({fragment.page_index + 1 for fragment in table.page_fragments})
-            page_label = ", ".join(str(page) for page in pages) or "desconhecida"
-            sections.append(
-                f"### Tabela {table.table_id} (página(s): {page_label})\n\n{rendered}"
-            )
+        for table in tables_by_page.get(page.page_index, []):
+            rendered = _render_table(table)
+            if rendered:
+                all_pages = sorted({fragment.page_index + 1 for fragment in table.page_fragments})
+                page_label = ", ".join(str(p) for p in all_pages) or "desconhecida"
+                sections.append(
+                    f"### Tabela {table.table_id} (página(s): {page_label})\n\n{rendered}"
+                )
     return "\n\n".join(sections).strip()
 
 

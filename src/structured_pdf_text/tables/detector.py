@@ -105,15 +105,38 @@ def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
         or [2.0]
     )
     thickness = max(4.0, median_stroke * 2.5)
+    # Candidate horizontal lines: thin, wide enough to span most of the limit.
     horizontal = [
         path
         for path in paths
         if path.height <= thickness and path.width >= max(40.0, limit.width * 0.45)
     ]
+    if not horizontal:
+        return None
+    # Derive grid height for vertical line filtering. Using all horizontal
+    # lines inflates the estimate when header/footer rules are present. Instead
+    # use any short-height vertical line candidates (height >= 30 pt) to anchor
+    # the actual table extent. Fall back to the horizontal span if none exist.
+    vertical_seeds = [
+        path for path in paths if path.width <= thickness and path.height >= 30.0
+    ]
+    if vertical_seeds:
+        v_y0 = min(path.y0 for path in vertical_seeds)
+        v_y1 = max(path.y1 for path in vertical_seeds)
+        grid_height = max(v_y1 - v_y0, 1.0)
+        # Exclude horizontal rules that lie outside the vertical grid extent;
+        # page-level header/footer rules would inflate the grid otherwise.
+        horizontal = [
+            path for path in horizontal if v_y0 - thickness <= path.cy <= v_y1 + thickness
+        ]
+    else:
+        h_y0 = min(path.cy for path in horizontal)
+        h_y1 = max(path.cy for path in horizontal)
+        grid_height = max(h_y1 - h_y0, 1.0)
     vertical = [
         path
         for path in paths
-        if path.width <= thickness and path.height >= max(30.0, limit.height * 0.45)
+        if path.width <= thickness and path.height >= max(30.0, grid_height * 0.50)
     ]
     x_edges = _cluster_edges([path.cx for path in vertical], tolerance=max(2.0, thickness))
     y_edges = _cluster_edges([path.cy for path in horizontal], tolerance=max(2.0, thickness))
@@ -125,12 +148,19 @@ def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
     y1 = max(path.y1 for path in horizontal + vertical)
     if x1 <= x0 or y1 <= y0:
         return None
-    expected_horizontal = len(x_edges)
-    expected_vertical = len(y_edges)
-    horizontal_coverage = sum(path.width for path in horizontal) / max(limit.width * expected_horizontal, 1.0)
-    vertical_coverage = sum(path.height for path in vertical) / max(limit.height * expected_vertical, 1.0)
+    table_width = x1 - x0
+    table_height = y1 - y0
+    # Coherence: each horizontal line should span the full table width, and
+    # each vertical line should span the full table height.
+    horizontal_coverage = sum(path.width for path in horizontal) / max(table_width * len(horizontal), 1.0)
+    if vertical:
+        vertical_coverage = sum(path.height for path in vertical) / max(table_height * len(vertical), 1.0)
+    else:
+        # Tables with only horizontal rules (no vertical separators) are
+        # still valid — treat missing verticals as partial evidence.
+        vertical_coverage = 0.70
     coherence = min(1.0, max(0.0, (horizontal_coverage + vertical_coverage) / 2.0))
-    if coherence < 0.70:
+    if coherence < 0.65:
         return None
     return _Grid(
         x_edges=tuple(x_edges),

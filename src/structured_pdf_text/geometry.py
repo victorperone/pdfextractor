@@ -104,6 +104,47 @@ class BBox:
         y1 = top_of_page - min(bottom, top)
         return BBox(x0, y0, x1, y1)
 
+    def rotate_to_visual(self, rotation: int, page_width: float, page_height: float) -> BBox:
+        """Transform this bbox from canonical PDF user space to visual/raster space.
+
+        PDFium renders pages with /Rotate applied, so the raster image is in
+        visual orientation. Native character bboxes are in canonical PDF user
+        space (top-left origin, y-down, before rotation). This method applies
+        the same rotation so that the returned bbox can be used to crop the
+        rendered image correctly.
+
+        ``rotation`` must be one of 0, 90, 180, 270 (counterclockwise degrees).
+        ``page_width`` and ``page_height`` are the canonical PDF user space dims.
+        """
+        r = rotation % 360
+        if r == 0:
+            return self
+        if r == 90:
+            # CCW 90°: visual dims are (page_height × page_width)
+            return BBox(
+                page_height - self.y1,
+                self.x0,
+                page_height - self.y0,
+                self.x1,
+            )
+        if r == 180:
+            # 180°: visual dims are (page_width × page_height)
+            return BBox(
+                page_width - self.x1,
+                page_height - self.y1,
+                page_width - self.x0,
+                page_height - self.y0,
+            )
+        if r == 270:
+            # CCW 270° (= CW 90°): visual dims are (page_height × page_width)
+            return BBox(
+                self.y0,
+                page_width - self.x1,
+                self.y1,
+                page_width - self.x0,
+            )
+        return self
+
     @staticmethod
     def union_all(boxes: list[BBox] | tuple[BBox, ...]) -> BBox:
         if not boxes:

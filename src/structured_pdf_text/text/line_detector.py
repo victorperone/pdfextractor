@@ -70,7 +70,11 @@ def reconstruct_native_lines(characters: tuple[NativeCharacter, ...]) -> list[Te
 
 
 def lines_to_text(lines: list[TextLine]) -> str:
-    return "\n".join(line.text.rstrip() for line in lines).strip()
+    # F12: apply NFC to each assembled line so that combining characters that
+    # were stored as separate codepoints (e.g. 'e' + combining accent) compose
+    # into their canonical forms (e.g. 'é') in the final output.
+    from unicodedata import normalize as _nfc
+    return "\n".join(_nfc("NFC", line.text).rstrip() for line in lines).strip()
 
 
 def _is_visible_text_char(char: NativeCharacter) -> bool:
@@ -79,6 +83,10 @@ def _is_visible_text_char(char: NativeCharacter) -> bool:
     if char.text in {"\r", "\n"}:
         return False
     if char.bbox.width < 0 or char.bbox.height < 0:
+        return False
+    # PDF text render mode 3 means "invisible" (clip only, no fill/stroke).
+    # These chars exist for searchability but must not appear in text output.
+    if char.text_render_mode == 3:
         return False
     return True
 
@@ -123,7 +131,43 @@ def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCha
         else:
             groups[best_index].append(char)
             group_centers[best_index] = median([_line_center(item, median_height) for item in groups[best_index]])
-    return groups
+    return _split_groups_by_column_gap(groups)
+
+
+def _split_groups_by_column_gap(
+    groups: list[list[NativeCharacter]],
+) -> list[list[NativeCharacter]]:
+    """Split baseline groups that span multiple columns.
+
+    Characters sharing the same baseline may belong to different columns.
+    A large horizontal gap between consecutive characters (sorted by x0)
+    indicates a column boundary and must produce separate line segments.
+    """
+    result: list[list[NativeCharacter]] = []
+    for group in groups:
+        if len(group) < 2:
+            result.append(group)
+            continue
+        sorted_by_x = sorted(group, key=lambda c: (c.bbox.x0, c.char_index))
+        widths = [c.bbox.width for c in sorted_by_x if c.bbox.width > 0]
+        if not widths:
+            result.append(group)
+            continue
+        median_width = median(widths)
+        # Column gaps are typically several times a character width. A
+        # threshold of 2.5× median width catches standard column gutters
+        # while keeping normal word spacing (≈0.5–1× width) unsplit.
+        gap_threshold = max(20.0, median_width * 2.5)
+        current: list[NativeCharacter] = [sorted_by_x[0]]
+        for prev, curr in zip(sorted_by_x, sorted_by_x[1:]):
+            horizontal_gap = curr.bbox.x0 - prev.bbox.x1
+            if horizontal_gap > gap_threshold:
+                result.append(current)
+                current = [curr]
+            else:
+                current.append(curr)
+        result.append(current)
+    return result
 
 
 def _line_center(char: NativeCharacter, median_height: float) -> float:

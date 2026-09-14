@@ -1,5 +1,5 @@
 from .api import PdfTextExtractor
-from .config import ExtractionMode, ExtractorConfig, SecurityLimits
+from .config import ExtractionMode, ExtractorConfig, SecurityLimits, best_extraction_config
 from .document import (
     NativeCharacter,
     NativeObjectEvidence,
@@ -13,6 +13,7 @@ __all__ = [
     "ExtractorConfig",
     "PdfTextExtractor",
     "SecurityLimits",
+    "best_extraction_config",
     "NativeCharacter",
     "NativeObjectEvidence",
     "NativePageEvidence",

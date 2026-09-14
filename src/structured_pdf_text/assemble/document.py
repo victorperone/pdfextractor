@@ -110,9 +110,12 @@ def _reading_page_text(
         return text
     repeated_keys = set(repeated)
     line_keys = repeated_line_keys(page)
-    retained = [
-        line
-        for line in text.splitlines()
-        if line_keys.get(line.strip()) not in repeated_keys
-    ]
+    retained = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        text_key = line_keys.get(stripped)
+        pos_key = line_keys.get(f"__pos__{stripped}")
+        if text_key in repeated_keys or pos_key in repeated_keys:
+            continue
+        retained.append(line)
     return "\n".join(retained).strip()

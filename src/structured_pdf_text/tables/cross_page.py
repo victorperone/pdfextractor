@@ -51,7 +51,7 @@ def resolve_cross_page_tables_with_diagnostics(
             (index, previous)
             for index, previous in enumerate(resolved)
             if _last_page(previous) is not None
-            and following_page == (_last_page(previous) or -1) + 1
+            and following_page == _last_page(previous) + 1
         ]
         evaluated = [
             (
@@ -248,12 +248,16 @@ def _continuation_decision(
         score -= 0.5
 
     if not both_boundaries and not marker:
+        # No direct boundary/marker evidence — apply a score penalty instead of
+        # a hard rejection. Tables with identical headers and matching column
+        # structure score well above the threshold despite the missing evidence.
         reasons.append("missing_boundary_or_marker_evidence")
-        hard_rejection = True
-    accepted = not hard_rejection and score >= 7.0
+        score -= 3.0
+    threshold = 7.0
+    accepted = not hard_rejection and score >= threshold
     if not accepted and not hard_rejection:
         reasons.append("continuation_score_below_threshold")
-    facts["threshold"] = 7.0
+    facts["threshold"] = threshold
     return TableContinuationDecision(
         previous_table_id=previous.table_id,
         following_table_id=following.table_id,

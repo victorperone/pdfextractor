@@ -1,0 +1,41 @@
+# Runtime dependencies — structured-pdf-text
+# Generated from working environment on 2026-09-14
+#
+# Core (always required)
+pypdfium2==5.13.0
+Pillow==12.3.0
+
+# OCR (required for ExtractionMode.BALANCED / OCR and regional recovery)
+# Install CPU variant — paddlepaddle-gpu for GPU inference
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+paddlex==3.7.2
+
+# Required by PaddleOCR internals
+numpy==2.3.5
+opencv-contrib-python==4.10.0.84
+
+# Development
+pytest==9.1.1
+
+# ─── Model download ────────────────────────────────────────────────────────────
+#
+# On first run, PaddleOCR/PaddleX will attempt to download model weights to
+# ~/.cache/pdfextractor/paddlex/official_models/.
+#
+# If the environment is behind a corporate proxy with custom SSL certificates,
+# the download may fail with SSL errors. Fix:
+#
+#   cat /etc/ssl/certs/ca-certificates.crt >> \
+#       .venv/lib/python3.12/site-packages/certifi/cacert.pem
+#
+# Models used (PP-OCRv4 / PP-OCRv5 series):
+#   - PP-OCRv4_mobile_det          (text detection)
+#   - latin_PP-OCRv5_mobile_rec    (text recognition — Latin script)
+#   - PP-LCNet_x1_0_textline_ori   (text-line orientation classifier)
+#
+# To pre-download models (useful for air-gapped environments):
+#   python - <<'EOF'
+#   from paddleocr import PaddleOCR
+#   PaddleOCR(use_angle_cls=True, lang="en")
+#   EOF

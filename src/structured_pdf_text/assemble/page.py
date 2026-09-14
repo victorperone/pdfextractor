@@ -22,7 +22,30 @@ def assemble_page(
     native_evidence: NativePageEvidence | None = None,
 ) -> StructuredPage:
     reading_lines, reading_decision = order_region_lines(regions)
+    # F16: table cell content must not appear in both the table and reading_text.
+    # Filter any line whose center falls inside a detected table bbox so it is
+    # represented only by the StructuredTable object, not duplicated in prose.
+    if tables:
+        table_bboxes = [
+            fragment.bbox
+            for table in tables
+            for fragment in table.page_fragments
+            if fragment.bbox is not None and fragment.page_index == page_index
+        ]
+        reading_lines = [
+            line
+            for line in reading_lines
+            if not any(
+                tb.x0 <= line.bbox.cx <= tb.x1 and tb.y0 <= line.bbox.cy <= tb.y1
+                for tb in table_bboxes
+            )
+        ]
     reading_text = lines_to_text(reading_lines)
+    # F02: raw_text must include OCR-recovered content. For scan pages
+    # (native layer empty) the ordered lines already contain OCR text; use
+    # them instead of returning an empty string.
+    if not raw_text.strip() and reading_lines:
+        raw_text = lines_to_text(reading_lines)
     diagnostics.facts.update(
         {
             "reading_region_count": len(regions),

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import resource
 import time
+
+try:
+    import resource as _resource
+except ImportError:
+    _resource = None  # type: ignore[assignment]
 from pathlib import Path
 from typing import Any
 
@@ -260,6 +264,7 @@ class PdfTextExtractor:
                                     page_bbox=native_page.bbox,
                                     regions=selected_regions,
                                     quality_variants=self.config.ocr_quality_variants,
+                                    page_rotation=native_page.objects.rotation,
                                 )
                             timings["ocr_ms"] = (
                                 time.perf_counter() - ocr_start
@@ -346,7 +351,9 @@ class PdfTextExtractor:
                     )
                 table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] = {}
                 if not tables and rendered_page is not None and (
-                    self.config.enable_tables or complexity.layout_needed
+                    self.config.enable_tables
+                    or complexity.layout_needed
+                    or mode in {ExtractionMode.BALANCED, ExtractionMode.OCR}
                 ):
                     try:
                         visual_table = detect_visual_table(
@@ -536,7 +543,12 @@ def _process_memory_snapshot() -> dict[str, int]:
                 break
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
         pass
-    peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    peak_rss = None
+    if _resource is not None:
+        try:
+            peak_rss = int(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss) * 1024
+        except Exception:
+            pass
     return {
         "current_rss_bytes": current_rss,
         "peak_rss_bytes": peak_rss,
@@ -565,6 +577,7 @@ def _recover_selected_regions(
     page_bbox: BBox,
     regions: list[LayoutRegion],
     quality_variants: bool,
+    page_rotation: int = 0,
 ) -> tuple[list[OcrToken], int, int, dict[str, dict[str, Any]]]:
     """Recover only regions selected by the quality gate."""
     refiner = OcrRegionRefiner(engine)
@@ -573,6 +586,7 @@ def _recover_selected_regions(
             bbox=region.bbox,
             quality_variants=quality_variants,
             goal=RegionRefinementGoal.TEXT,
+            page_rotation=page_rotation,
         )
         for region in regions
     ]
@@ -598,12 +612,16 @@ def _recover_selected_regions(
         tokens.extend(region_tokens)
         passes += result.ocr_passes
         batches += result.ocr_batches
+        all_errors = [a.error for a in result.attempts if a.error is not None]
+        ocr_failed = bool(result.attempts) and not region_tokens
         stats[region.region_id] = {
             "kind": region.kind.value,
             "tokens": len(region_tokens),
             "suppressed_shape_tokens": suppressed_tokens,
             "attempts": len(result.attempts),
-            "attempt_errors": sum(attempt.error is not None for attempt in result.attempts),
+            "attempt_errors": len(all_errors),
+            "ocr_failed": ocr_failed,
+            "attempt_error_messages": all_errors if all_errors else None,
             "selected_scale_factor": result.selected_scale_factor,
             "selected_rotation": result.selected_rotation,
             "ocr_passes": result.ocr_passes,
@@ -827,7 +845,6 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
             if cell.bbox.x0 <= token.bbox.cx <= cell.bbox.x1
             and cell.bbox.y0 <= token.bbox.cy <= cell.bbox.y1
         ]
-        selected = _merge_short_table_fragments(selected)
         while selected and selected[0].text.isspace():
             selected.pop(0)
         while selected and selected[-1].text.isspace():
@@ -1058,7 +1075,7 @@ def _refine_wide_figure_ocr(
             batch_count += label_result.ocr_batches
             label_tokens = list(label_result.tokens)
             if label_tokens:
-                label_tokens = [_normalize_chart_label(token) for token in label_tokens]
+                # F18: arbitrary month normalization removed — let OCR output stand as-is.
                 panel_tokens = [
                     token
                     for token in panel_tokens
@@ -1148,7 +1165,7 @@ def _refine_wide_figure_ocr(
             panel_tokens.extend(axis_text)
         if not panel_tokens:
             continue
-        panel_tokens = [token for token in panel_tokens if _keep_wide_figure_token(token)]
+        # F18: A-D single-letter filter removed — all OCR tokens retained.
         all_lines = reconstruct_ocr_lines(panel_tokens, page_index, page.bbox)
         figure_fusion = fuse_native_and_ocr(native_lines, panel_tokens)
         unmatched_tokens = list(figure_fusion.unmatched_ocr_tokens)
@@ -1233,7 +1250,9 @@ def _layout_regions_if_requested(
     output: list[LayoutRegion],
 ) -> list[str]:
     mode = config.normalized_mode()
-    requested = config.enable_layout or mode == ExtractionMode.BALANCED
+    # OCR mode needs layout regions just as much as BALANCED — without regions
+    # the recovery gate has nothing to select, falling back to whole-page OCR.
+    requested = config.enable_layout or mode in {ExtractionMode.BALANCED, ExtractionMode.OCR}
     if mode == ExtractionMode.FAST:
         requested = requested or complexity.layout_needed
     if not requested:

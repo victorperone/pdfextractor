@@ -606,7 +606,11 @@ def _get_bool_feature(function_name: str, textpage: Any, index: int) -> bool | N
     if pdfium_c is None or not hasattr(pdfium_c, function_name):
         return None
     try:
-        return bool(getattr(pdfium_c, function_name)(textpage.raw, index))
+        result = getattr(pdfium_c, function_name)(textpage.raw, index)
+        # PDFium returns -1 on error; bool(-1) would be True, which is wrong.
+        if result == -1:
+            return None
+        return bool(result)
     except Exception:
         return None
 
@@ -651,12 +655,18 @@ def _get_character_style(
     if textobj is None:
         return None, None, None, None, None
     raw = getattr(textobj, "raw", None)
+    key: Any = None
     try:
         hash(raw)
-        key: Any = ("raw", raw)
-    except Exception:
-        key = ("id", id(textobj))
-    if key in cache:
+        key = ("raw", raw)
+    except TypeError:
+        # raw is a ctypes pointer — try to get its integer address as a stable key.
+        try:
+            ptr_int = int(raw)
+            key = ("ptr", ptr_int)
+        except (TypeError, ValueError):
+            pass  # no stable key available; skip cache for this object
+    if key is not None and key in cache:
         return cache[key]
     font_name: str | None = None
     font_size: float | None = None
@@ -696,7 +706,8 @@ def _get_character_style(
         text_render_mode,
         marked_content_id,
     )
-    cache[key] = value
+    if key is not None:
+        cache[key] = value
     return value
 
 

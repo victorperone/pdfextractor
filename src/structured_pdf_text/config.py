@@ -51,6 +51,32 @@ class ExtractorConfig:
         return ExtractionMode(self.mode)
 
 
+def best_extraction_config(
+    *,
+    language: str = "pt",
+    preserve_headers: bool = False,
+) -> "ExtractorConfig":
+    """Return the config that extracts the maximum content from any PDF.
+
+    Uses BALANCED mode: native text first, OCR fallback for scans/figures,
+    table detection (bordered and borderless), cross-page table merging, and
+    automatic removal of repeated headers/footers.
+
+    Args:
+        language: OCR language hint (default "pt" for Brazilian Portuguese).
+        preserve_headers: set True to keep repeated page headers/footers in
+            reading_text (default False — removes them).
+    """
+    return ExtractorConfig(
+        mode=ExtractionMode.BALANCED,
+        language=language,
+        enable_tables=True,
+        merge_cross_page_tables=True,
+        preserve_headers_footers=preserve_headers,
+        ocr_quality_variants=True,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentContext:
     path: Path

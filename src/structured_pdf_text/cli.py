@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .api import PdfTextExtractor
-from .config import ExtractionMode, ExtractorConfig
+from .config import ExtractionMode, ExtractorConfig, best_extraction_config
 from .diagnostics.overlay import render_overlay
 from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
@@ -40,6 +40,20 @@ def main(argv: list[str] | None = None) -> int:
         "--omit-repeated-headers-footers",
         action="store_true",
         help="Remove repeated edge regions from reading output while preserving raw output",
+    )
+    extract_parser.add_argument(
+        "--merge-cross-page-tables",
+        action="store_true",
+        help="Merge table fragments that continue across page boundaries",
+    )
+    extract_parser.add_argument(
+        "--best",
+        action="store_true",
+        help=(
+            "Use the best full-extraction profile: BALANCED mode, tables enabled, "
+            "cross-page merging, headers removed, quality OCR variants. "
+            "Overrides --mode and other flags."
+        ),
     )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
@@ -120,13 +134,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.ocr_batch_size < 1:
             print("--ocr-batch-size must be at least 1", file=sys.stderr)
             return 2
-        config = ExtractorConfig(
-            mode=args.mode,
-            language=args.language,
-            ocr_batch_size=args.ocr_batch_size,
-            ocr_quality_variants=not args.no_ocr_quality_variants,
-            preserve_headers_footers=not args.omit_repeated_headers_footers,
-        )
+        if args.best:
+            config = best_extraction_config(language=args.language)
+        else:
+            config = ExtractorConfig(
+                mode=args.mode,
+                language=args.language,
+                ocr_batch_size=args.ocr_batch_size,
+                ocr_quality_variants=not args.no_ocr_quality_variants,
+                preserve_headers_footers=not args.omit_repeated_headers_footers,
+                merge_cross_page_tables=args.merge_cross_page_tables,
+            )
         document = PdfTextExtractor(config).extract(args.pdf)
         if args.output == "raw":
             print(document.raw_text)

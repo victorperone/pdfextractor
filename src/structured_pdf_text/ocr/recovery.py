@@ -25,6 +25,7 @@ class RegionRefinementRequest:
     quality_variants: bool = False
     goal: RegionRefinementGoal = RegionRefinementGoal.TEXT
     min_confidence: float = 0.0
+    page_rotation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +80,7 @@ class OcrRegionRefiner:
                 ocr_batches=0,
             )
 
-        crop = crop_page_region(page_image, page_bbox, region_bbox)
+        crop = crop_page_region(page_image, page_bbox, region_bbox, request.page_rotation)
         attempts: list[RegionRefinementAttempt] = []
         candidates: list[tuple[float, float, float, list[OcrToken]]] = []
         total_passes = 0
@@ -195,21 +196,36 @@ def recover_ocr_tokens(
     return list(result.tokens)
 
 
-def crop_page_region(image: Any, page_bbox: BBox, region_bbox: BBox) -> Any:
-    """Crop a rendered page using canonical PDF-point coordinates."""
+def crop_page_region(
+    image: Any,
+    page_bbox: BBox,
+    region_bbox: BBox,
+    page_rotation: int = 0,
+) -> Any:
+    """Crop a rendered page using canonical PDF-point coordinates.
+
+    When ``page_rotation`` is non-zero the rendered image is in visual
+    orientation (PDFium applies /Rotate during rendering) while
+    ``region_bbox`` and ``page_bbox`` are in canonical PDF user space.
+    This function applies the same rotation so the crop is correct.
+    """
     width, height = image_size(image)
-    scale_x = width / max(page_bbox.width, 1.0)
-    scale_y = height / max(page_bbox.height, 1.0)
-    left = max(0, int((region_bbox.x0 - page_bbox.x0) * scale_x))
-    top = max(0, int((region_bbox.y0 - page_bbox.y0) * scale_y))
-    right = min(
-        width,
-        max(left + 1, int(math.ceil((region_bbox.x1 - page_bbox.x0) * scale_x))),
-    )
-    bottom = min(
-        height,
-        max(top + 1, int(math.ceil((region_bbox.y1 - page_bbox.y0) * scale_y))),
-    )
+    r = page_rotation % 360
+    if r in (90, 270):
+        # Visual dims are swapped relative to canonical PDF dims.
+        visual_page_width = page_bbox.height
+        visual_page_height = page_bbox.width
+    else:
+        visual_page_width = page_bbox.width
+        visual_page_height = page_bbox.height
+    # Transform region_bbox to visual/raster space.
+    visual_region = region_bbox.rotate_to_visual(r, page_bbox.width, page_bbox.height)
+    scale_x = width / max(visual_page_width, 1.0)
+    scale_y = height / max(visual_page_height, 1.0)
+    left = max(0, int(visual_region.x0 * scale_x))
+    top = max(0, int(visual_region.y0 * scale_y))
+    right = min(width, max(left + 1, int(math.ceil(visual_region.x1 * scale_x))))
+    bottom = min(height, max(top + 1, int(math.ceil(visual_region.y1 * scale_y))))
     if hasattr(image, "crop"):
         return image.crop((left, top, right, bottom))
     return image[top:bottom, left:right]
