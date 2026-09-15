@@ -194,6 +194,7 @@ def _table_from_grid(
          if min(p.bbox.width, p.bbox.height) > 0] or [2.0]
     )
     thickness = max(4.0, median_stroke * 2.5)
+    region_path_bboxes: list[BBox] = [p.bbox for p in region_paths]
 
     n_rows = len(grid.y_edges) - 1
     n_cols = len(grid.x_edges) - 1
@@ -213,7 +214,7 @@ def _table_from_grid(
             while col + cs < n_cols:
                 x_inner = grid.x_edges[col + cs]
                 if _segment_exists_at_x(
-                    raw_paths, x_inner,
+                    region_path_bboxes, x_inner,
                     grid.y_edges[row], grid.y_edges[row + 1],
                     thickness,
                 ):
@@ -225,7 +226,7 @@ def _table_from_grid(
             while row + rs < n_rows:
                 y_inner = grid.y_edges[row + rs]
                 if _segment_exists_at_y(
-                    raw_paths, y_inner,
+                    region_path_bboxes, y_inner,
                     grid.x_edges[col], grid.x_edges[col + cs],
                     thickness,
                 ):

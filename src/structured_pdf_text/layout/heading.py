@@ -33,7 +33,7 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
     elif n == 2:
         thresholds = (all_sizes[0], all_sizes[1])
     else:
-        thresholds = (all_sizes[n // 3], all_sizes[2 * n // 3])
+        thresholds = (all_sizes[n // 3 - 1], all_sizes[2 * n // 3 - 1])
 
     level_map: dict[str, int] = {}
     for _, region_id, font_size in title_font_sizes:
