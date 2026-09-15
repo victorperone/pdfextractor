@@ -37,6 +37,7 @@ class PaddleOcrEngine:
         self._init_error: Exception | None = None
         self.last_pass_count = 0
         self.last_batch_count = 0
+        self.last_deskew_angle: float = 0.0
 
     def recognize_page(
         self,
@@ -51,6 +52,7 @@ class PaddleOcrEngine:
         self.last_pass_count = 0
         self.last_batch_count = 0
         ocr = self._get_ocr()
+        page_image, self.last_deskew_angle = _deskew_image(page_image)
         raw = self._predict_counted(ocr, page_image)
         tokens = _tokens_from_result(raw, page_index, page_image, page_bbox)
         # F25: when the first pass returns nothing, try all four orientations
@@ -698,3 +700,63 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _deskew_image(
+    image: object,
+    min_angle_deg: float = 0.5,
+    max_angle_deg: float = 20.0,
+) -> tuple[object, float]:
+    """Detecta e corrige inclinação pequena em imagens de página (scan ou foto).
+
+    Cobre todas as 4 orientações base (0/90/180/270°) porque cv2.minAreaRect
+    detecta o desvio em relação ao eixo mais próximo, não só ao horizontal.
+
+    Retorna (imagem_corrigida, angulo_aplicado).
+    angulo_aplicado == 0.0 significa que nenhuma correção foi aplicada.
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageOps
+
+        pil = image if hasattr(image, "mode") else Image.fromarray(image)
+        gray = np.asarray(ImageOps.grayscale(pil))
+
+        _, binary = cv2.threshold(
+            gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 3))
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        coords = np.column_stack(np.where(closed > 0))
+        if len(coords) < 50:
+            return image, 0.0
+
+        coords_xy = coords[:, ::-1].astype(np.float32)
+
+        angle = cv2.minAreaRect(coords_xy)[-1]
+
+        if angle < -45.0:
+            angle = 90.0 + angle
+
+        if abs(angle) < min_angle_deg:
+            return image, 0.0
+        if abs(angle) > max_angle_deg:
+            return image, 0.0
+
+        h, w = gray.shape
+        M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -angle, 1.0)
+        rgb_array = np.asarray(pil.convert("RGB"))
+        corrected = cv2.warpAffine(
+            rgb_array,
+            M,
+            (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        return Image.fromarray(corrected), round(angle, 2)
+
+    except Exception:  # noqa: BLE001
+        return image, 0.0

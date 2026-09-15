@@ -486,6 +486,11 @@ class PdfTextExtractor:
                         "ocr_engine": type(self.ocr_engine).__name__ if self.ocr_engine is not None else None,
                         "ocr_passes": ocr_passes_total,
                         "ocr_batches": ocr_batches_total,
+                        "deskew_angle_deg": (
+                            getattr(self.ocr_engine, "last_deskew_angle", 0.0)
+                            if page_ocr_requested and self.ocr_engine is not None
+                            else None
+                        ),
                         "ocr_table_tokens": ocr_table_tokens,
                         "ocr_figure_tokens": ocr_figure_tokens,
                         "ocr_matched_tokens": fusion.matched_ocr_tokens if fusion else 0,
