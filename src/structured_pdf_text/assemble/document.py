@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import unicodedata
 
 from structured_pdf_text.document import (
     DocumentDiagnostics,
@@ -112,7 +113,7 @@ def _reading_page_text(
     line_keys = repeated_line_keys(page)
     retained = []
     for line in text.splitlines():
-        stripped = line.strip()
+        stripped = unicodedata.normalize("NFC", line.strip())
         text_key = line_keys.get(stripped)
         pos_key = line_keys.get(f"__pos__{stripped}")
         if text_key in repeated_keys or pos_key in repeated_keys:

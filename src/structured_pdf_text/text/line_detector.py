@@ -262,15 +262,15 @@ def _chars_to_text_tokens(
                 if direction == WritingDirection.TOP_TO_BOTTOM:
                     gap_box = BBox(
                         previous.bbox.x0,
-                        min(previous.bbox.y0, char.bbox.y1),
+                        previous.bbox.y1,
                         previous.bbox.x1,
-                        max(previous.bbox.y0, char.bbox.y1),
+                        char.bbox.y0,
                     )
                 else:
                     gap_box = BBox(
-                        min(previous.bbox.x0, char.bbox.x1),
+                        previous.bbox.x1,
                         previous.bbox.y0,
-                        max(previous.bbox.x0, char.bbox.x1),
+                        char.bbox.x0,
                         previous.bbox.y1,
                     )
                 tokens.append(

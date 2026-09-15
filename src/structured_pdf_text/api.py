@@ -462,10 +462,11 @@ class PdfTextExtractor:
                         "ocr_region_stats": ocr_region_stats,
                         "memory": {
                             **page_memory_end,
-                            "peak_rss_growth_bytes": max(
-                                0,
-                                page_memory_end["peak_rss_bytes"]
-                                - page_memory_start["peak_rss_bytes"],
+                            "peak_rss_growth_bytes": (
+                                max(0, page_memory_end["peak_rss_bytes"] - page_memory_start["peak_rss_bytes"])
+                                if page_memory_end["peak_rss_bytes"] is not None
+                                and page_memory_start["peak_rss_bytes"] is not None
+                                else None
                             ),
                         },
                         "native_source_calls": _counter_delta(
@@ -523,9 +524,11 @@ class PdfTextExtractor:
         document.diagnostics.facts["open_pdf_ms"] = open_pdf_ms
         document.diagnostics.facts["memory"] = {
             **memory_end,
-            "peak_rss_growth_bytes": max(
-                0,
-                memory_end["peak_rss_bytes"] - memory_start["peak_rss_bytes"],
+            "peak_rss_growth_bytes": (
+                max(0, memory_end["peak_rss_bytes"] - memory_start["peak_rss_bytes"])
+                if memory_end["peak_rss_bytes"] is not None
+                and memory_start["peak_rss_bytes"] is not None
+                else None
             ),
         }
         document.diagnostics.facts["native_source_calls"] = source.metrics_snapshot()
@@ -870,9 +873,11 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
                 row_tokens.append(
                     TextToken(
                         text=" ",
-                        bbox=BBox(previous.bbox.x1, cell.bbox.y0, current.bbox.x0, cell.bbox.y1)
-                        if previous.bbox.x1 <= current.bbox.x0
-                        else cell.bbox,
+                        bbox=(
+                            BBox(previous.bbox.x1, cell.bbox.y0, current.bbox.x0, cell.bbox.y1)
+                            if previous.bbox.x1 <= current.bbox.x0
+                            else BBox(previous.bbox.x1, cell.bbox.y0, previous.bbox.x1, cell.bbox.y1)
+                        ),
                         sources=[
                             EvidenceRef(
                                 SourceKind.TABLE_MODEL,

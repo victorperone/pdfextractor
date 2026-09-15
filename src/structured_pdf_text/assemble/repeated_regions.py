@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import defaultdict
 from statistics import median
 
@@ -68,7 +69,7 @@ def repeated_line_keys(page: StructuredPage) -> dict[str, str]:
     """
     result: dict[str, str] = {}
     for kind, line in _candidate_lines(page):
-        text = line.text.strip()
+        text = unicodedata.normalize("NFC", line.text.strip())
         key = _signature_key(kind, text)
         if key is not None:
             result[text] = key

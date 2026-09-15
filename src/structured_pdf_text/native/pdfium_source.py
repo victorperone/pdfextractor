@@ -868,8 +868,8 @@ def _get_annotation_contents(annot: Any) -> str | None:
         buffer = ctypes.create_string_buffer(size)
         function(annot, b"Contents", buffer, size)
         raw = bytes(buffer.raw[:size])
-        if raw.startswith(b"\xff\xfe") or len(raw) % 2 == 0:
-            return raw.decode("utf-16-le", errors="replace").rstrip("\x00")
+        if raw.startswith(b"\xff\xfe"):
+            return raw[2:].decode("utf-16-le", errors="replace").rstrip("\x00")
         return raw.rstrip(b"\x00").decode("utf-8", errors="replace")
     except Exception:
         return None

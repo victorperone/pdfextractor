@@ -177,10 +177,21 @@ def _table_from_grid(
     lines: list[TextLine],
 ) -> StructuredTable:
     # Derive the same thickness used by _detect_strict_grid so span checks
-    # use consistent tolerances.
-    raw_paths = [p.bbox for p in page.objects.paths if p.bbox is not None]
+    # use consistent tolerances. Filter paths to the grid bbox to avoid
+    # inflating median_stroke with decorative borders outside the table.
+    grid_bbox = BBox(
+        min(grid.x_edges),
+        min(grid.y_edges),
+        max(grid.x_edges),
+        max(grid.y_edges),
+    )
+    region_paths = [
+        p for p in page.objects.paths
+        if p.bbox is not None and p.bbox.overlap_ratio(grid_bbox) > 0.30
+    ]
     median_stroke = median(
-        [min(p.width, p.height) for p in raw_paths if min(p.width, p.height) > 0] or [2.0]
+        [min(p.bbox.width, p.bbox.height) for p in region_paths
+         if min(p.bbox.width, p.bbox.height) > 0] or [2.0]
     )
     thickness = max(4.0, median_stroke * 2.5)
 
