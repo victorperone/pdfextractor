@@ -197,12 +197,12 @@ class PaddleOcrEngine:
             "enable_mkldnn": False,
             **self.options,
         }
-        # PP-OCRv5 server models offer higher accuracy on dense/small text
-        # and noisy scans compared to mobile models. The recognizer server
-        # model is the most impactful upgrade; both are overridable via options.
+        # PP-OCRv5 server det + latin mobile rec: best available combination for
+        # Portuguese in PaddleX 3.7.2. latin_PP-OCRv5_server_rec does not exist
+        # in this version; latin_PP-OCRv5_mobile_rec is the v5 Latin-script model.
         if self.language == "pt":
             options.setdefault("text_detection_model_name", "PP-OCRv5_server_det")
-            options.setdefault("text_recognition_model_name", "latin_PP-OCRv5_server_rec")
+            options.setdefault("text_recognition_model_name", "latin_PP-OCRv5_mobile_rec")
         if not any(
             options.get(name)
             for name in (
