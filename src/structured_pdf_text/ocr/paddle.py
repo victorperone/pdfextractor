@@ -23,8 +23,9 @@ class PaddleOcrEngine:
     the newer ``predict`` result fields used by PaddleOCR 3.x.
     """
 
-    def __init__(self, language: str = "pt", **options: Any) -> None:
+    def __init__(self, language: str = "pt", num_threads: int = 0, **options: Any) -> None:
         self.language = language
+        self.num_threads = num_threads
         self.cache_home = options.pop("cache_home", None) or os.environ.get(
             "PADDLE_PDX_CACHE_HOME",
             str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
@@ -210,6 +211,14 @@ class PaddleOcrEngine:
             )
         ):
             options.setdefault("lang", self.language)
+        effective_threads = self.num_threads
+        if effective_threads > 0:
+            options.setdefault("cpu_threads", effective_threads)
+            try:
+                import paddle
+                paddle.set_num_threads(effective_threads)
+            except (ImportError, AttributeError):
+                pass
         try:
             self._ocr = PaddleOCR(**options)
         except Exception as exc:  # pragma: no cover - depends on runtime/model setup

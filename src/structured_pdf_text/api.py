@@ -6,6 +6,7 @@ try:
     import resource as _resource
 except ImportError:
     _resource = None  # type: ignore[assignment]
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -67,13 +68,20 @@ class PdfTextExtractor:
 
             self.ocr_engine = PaddleOcrEngine(
                 language=self.config.language,
+                num_threads=_resolve_num_threads(self.config.num_threads),
                 ocr_batch_size=self.config.ocr_batch_size,
                 quality_variants=self.config.ocr_quality_variants,
             )
         else:
             self.ocr_engine = None
 
-    def extract(self, path: str | Path, password: str | None = None) -> StructuredDocument:
+    def extract(
+        self,
+        path: str | Path,
+        password: str | None = None,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> StructuredDocument:
         pages = []
         document_start = time.perf_counter()
         memory_start = _process_memory_snapshot()
@@ -95,6 +103,8 @@ class PdfTextExtractor:
                     )
                     break
                 start = time.perf_counter()
+                if progress_callback is not None:
+                    progress_callback(len(pages) + 1, len(page_indices))
                 page_memory_start = _process_memory_snapshot()
                 source_metrics_start = source.metrics_snapshot()
                 timings: dict[str, float] = {}
@@ -532,6 +542,7 @@ class PdfTextExtractor:
             ),
         }
         document.diagnostics.facts["native_source_calls"] = source.metrics_snapshot()
+        document.diagnostics.facts["num_threads"] = _resolve_num_threads(self.config.num_threads)
         document.diagnostics.facts["timed_out"] = timed_out
         return document
 
@@ -556,6 +567,21 @@ def _process_memory_snapshot() -> dict[str, int]:
         "current_rss_bytes": current_rss,
         "peak_rss_bytes": peak_rss,
     }
+
+
+def _resolve_num_threads(num_threads: int) -> int:
+    """Resolve o número efetivo de threads para o motor OCR.
+
+    0  → auto: usa os.cpu_count() com fallback 2
+    -1 → não configurar (deixar PaddlePaddle decidir)
+    n  → usar exatamente n (mínimo 1)
+    """
+    import os
+    if num_threads == -1:
+        return -1
+    if num_threads == 0:
+        return max(2, os.cpu_count() or 2)
+    return max(1, num_threads)
 
 
 def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:

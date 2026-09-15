@@ -44,6 +44,8 @@ class ExtractorConfig:
     # keeps the normal full-document behavior.
     page_indices: tuple[int, ...] | None = None
     security_limits: SecurityLimits = SecurityLimits()
+    # 0 = auto-detect (usa os.cpu_count()); -1 = não configurar (PaddlePaddle decide)
+    num_threads: int = 0
 
     def normalized_mode(self) -> ExtractionMode:
         if isinstance(self.mode, ExtractionMode):

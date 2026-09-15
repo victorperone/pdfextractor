@@ -254,6 +254,7 @@ class LayoutRegion:
     native_lines: list[TextLine]
     ocr_tokens: list[OcrToken]
     quality: RegionQuality
+    heading_level: int | None = None  # 1, 2 ou 3; None para regiões não-título
 
 
 @dataclass(slots=True)

@@ -63,6 +63,17 @@ def main(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help="Save output to FILE instead of printing to stdout",
     )
+    extract_parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print page progress to stderr during extraction",
+    )
+    extract_parser.add_argument(
+        "--threads",
+        type=int,
+        default=0,
+        help="CPU threads for OCR engine (0 = auto-detect, -1 = PaddlePaddle default)",
+    )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
     inspect_parser.add_argument("pdf", type=Path)
@@ -113,6 +124,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Merge compatible table fragments across adjacent pages",
     )
+    report_parser.add_argument(
+        "--threads",
+        type=int,
+        default=0,
+        help="CPU threads for OCR engine (0 = auto-detect, -1 = PaddlePaddle default)",
+    )
 
     compare_parser = subparsers.add_parser(
         "compare",
@@ -152,8 +169,15 @@ def main(argv: list[str] | None = None) -> int:
                 ocr_quality_variants=not args.no_ocr_quality_variants,
                 preserve_headers_footers=not args.omit_repeated_headers_footers,
                 merge_cross_page_tables=args.merge_cross_page_tables,
+                num_threads=args.threads,
             )
-        document = PdfTextExtractor(config).extract(args.pdf)
+        def _progress(current: int, total: int) -> None:
+            print(f"\rExtraindo página {current}/{total}...", end="", file=sys.stderr, flush=True)
+
+        callback = _progress if args.progress else None
+        document = PdfTextExtractor(config).extract(args.pdf, progress_callback=callback)
+        if args.progress:
+            print(file=sys.stderr)
         if args.output == "raw":
             result = document.raw_text
         elif args.output == "json":
@@ -229,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_batch_size=args.ocr_batch_size,
             ocr_quality_variants=not args.no_ocr_quality_variants,
             merge_cross_page_tables=args.merge_cross_page_tables,
+            num_threads=args.threads,
         )
         if args.workers < 1:
             print("--workers must be at least 1", file=sys.stderr)

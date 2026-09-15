@@ -14,6 +14,7 @@ from structured_pdf_text.document import (
     StructuredTable,
 )
 from structured_pdf_text.assemble.repeated_regions import detect_repeated_headers_footers, repeated_line_keys
+from structured_pdf_text.layout.heading import assign_heading_levels
 from structured_pdf_text.tables.cross_page import resolve_cross_page_tables_with_diagnostics
 
 
@@ -59,6 +60,7 @@ def assemble_document(
             for decision in resolution.decisions
         ]
     cross_page_table_ms = (time.perf_counter() - cross_page_start) * 1000
+    pages = assign_heading_levels(pages)
     raw_text = "\n\n".join(page.raw_text.strip() for page in pages if page.raw_text.strip())
     repeated = detect_repeated_headers_footers(pages)
     page_reading_text = [
