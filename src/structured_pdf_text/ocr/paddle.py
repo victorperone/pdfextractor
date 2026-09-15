@@ -182,23 +182,24 @@ class PaddleOcrEngine:
                 "PaddleOCR is not installed; install the optional OCR dependencies"
             ) from exc
         # Document orientation classification and UVDoc unwarping are useful
-        # for photographed documents, but add large model downloads and are
-        # not required for this page-level OCR fallback. Keep text-line
-        # orientation enabled so rotated scans can still be read.
+        # Document orientation classification (PP-LCNet) detects 0/90/180/270°
+        # rotation before the line detector runs, complementing the manual
+        # _rotation_candidates() heuristic which remains as fallback.
+        # UVDoc unwarping is kept disabled — only useful for photographed docs.
+        # Text-line orientation stays enabled for mixed-direction pages.
         options = {
-            "use_doc_orientation_classify": False,
+            "use_doc_orientation_classify": True,
             "use_doc_unwarping": False,
             "use_textline_orientation": True,
             "enable_mkldnn": False,
             **self.options,
         }
-        # PaddleOCR 3.7 selects the 62 MB PP-OCRv6 medium detector for
-        # Portuguese by default. A mobile detector paired with the Latin
-        # recognizer is a better default for this CPU-oriented fallback and
-        # can still be overridden through constructor options.
+        # PP-OCRv5 server models offer higher accuracy on dense/small text
+        # and noisy scans compared to mobile models. The recognizer server
+        # model is the most impactful upgrade; both are overridable via options.
         if self.language == "pt":
-            options.setdefault("text_detection_model_name", "PP-OCRv4_mobile_det")
-            options.setdefault("text_recognition_model_name", "latin_PP-OCRv5_mobile_rec")
+            options.setdefault("text_detection_model_name", "PP-OCRv5_server_det")
+            options.setdefault("text_recognition_model_name", "latin_PP-OCRv5_server_rec")
         if not any(
             options.get(name)
             for name in (
@@ -511,10 +512,13 @@ def _enhancement_variants(image: object) -> list[object]:
             gray_array = np.asarray(ImageOps.grayscale(pil_image))
             denoised = cv2.medianBlur(gray_array, 3)
             _, otsu = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            clahe_filter = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            clahe_applied = clahe_filter.apply(gray_array)
             variants.extend(
                 [
                     Image.fromarray(denoised).convert("RGB"),
                     Image.fromarray(otsu).convert("RGB"),
+                    Image.fromarray(clahe_applied).convert("RGB"),
                 ]
             )
         except (ImportError, AttributeError, TypeError, ValueError):
