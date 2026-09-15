@@ -14,12 +14,7 @@ def render_markdown(document: StructuredDocument) -> str:
         if first_page is not None:
             tables_by_page.setdefault(first_page, []).append(table)
 
-    table_region_ids: set[str] = {
-        region_id
-        for table in document.tables
-        for fragment in table.page_fragments
-        for region_id in getattr(fragment, "region_ids", [])
-    }
+    preserve_hf: bool = document.diagnostics.facts.get("preserve_headers_footers", True)
 
     sections: list[str] = []
     for page in document.pages:
@@ -41,7 +36,9 @@ def render_markdown(document: StructuredDocument) -> str:
 
         page_parts: list[str] = []
         for region in page.regions:
-            if region.region_id in table_region_ids:
+            if region.kind == RegionKind.TABLE:
+                continue
+            if not preserve_hf and region.kind in (RegionKind.HEADER, RegionKind.FOOTER):
                 continue
             if region.kind == RegionKind.TITLE and region.heading_level is not None:
                 prefix = "#" * region.heading_level
