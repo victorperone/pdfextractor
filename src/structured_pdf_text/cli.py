@@ -12,9 +12,9 @@ from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
 from .diagnostics.corpus import corpus_report
 from .diagnostics.compare import compare_extractors
+from .ocr.models import get_profile
 from .ocr.paddle import (
     PaddleOcrUnavailable,
-    _LOCAL_MODEL_DIRECTORIES,
     _local_model_root,
     validate_local_ocr_models,
 )
@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser.add_argument("pdf", type=Path)
     inspect_parser.add_argument("--page", type=int, default=None, help="1-based page number")
     inspect_parser.add_argument("--mode", choices=[mode.value for mode in ExtractionMode], default=ExtractionMode.NATIVE.value)
+    inspect_parser.add_argument("--language", default="pt")
     inspect_parser.add_argument(
         "--raw-page-json",
         action="store_true",
@@ -240,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         config = ExtractorConfig(
             mode=args.mode,
+            language=args.language,
             retain_native_evidence=args.raw_page_json,
             page_indices=(args.page - 1,) if args.page is not None else None,
         )
@@ -280,6 +282,16 @@ def main(argv: list[str] | None = None) -> int:
         if index < 0:
             print(f"Invalid page: {args.page}", file=sys.stderr)
             return 2
+        # overlay always uses BALANCED which can trigger OCR.
+        try:
+            validate_local_ocr_models(language="pt")
+        except PaddleOcrUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            print(
+                "Run: python -m structured_pdf_text.cli setup-models",
+                file=sys.stderr,
+            )
+            return 1
         try:
             document = PdfTextExtractor(
                 ExtractorConfig(
@@ -309,6 +321,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.workers < 1:
             print("--workers must be at least 1", file=sys.stderr)
             return 2
+        if _mode_requires_ocr(config.mode):
+            try:
+                validate_local_ocr_models(language=config.language)
+            except PaddleOcrUnavailable as exc:
+                print(str(exc), file=sys.stderr)
+                print(
+                    "Run: python -m structured_pdf_text.cli setup-models",
+                    file=sys.stderr,
+                )
+                return 1
         print(
             json.dumps(
                 corpus_report(args.pdfs, config, workers=args.workers),
@@ -319,6 +341,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "compare":
+        ocr_adapters = {"structured-balanced"}
+        if any(adapter in ocr_adapters for adapter in args.adapters):
+            try:
+                validate_local_ocr_models(language=args.language)
+            except PaddleOcrUnavailable as exc:
+                print(str(exc), file=sys.stderr)
+                print(
+                    "Run: python -m structured_pdf_text.cli setup-models",
+                    file=sys.stderr,
+                )
+                return 1
         try:
             comparison = compare_extractors(
                 args.pdf,
@@ -348,10 +381,38 @@ def _mode_requires_ocr(mode: ExtractionMode | str) -> bool:
     return mode in ocr_modes
 
 
+_WEIGHT_EXTENSIONS = frozenset({
+    ".pdmodel", ".pdiparams", ".pdparams", ".pdiparams.info",
+    ".nb", ".onnx", ".bin", ".pt",
+})
+
+
+def _model_is_ready(model_dir: "Path") -> bool:
+    """Return True when model_dir looks like a properly installed PaddleOCR model.
+
+    A directory that exists but contains only README or JSON files is NOT ready.
+    At least one weight file (by extension) must be present.
+    """
+    if not model_dir.is_dir():
+        return False
+    for entry in model_dir.iterdir():
+        suffix = entry.suffix.lower()
+        # .pdiparams.info has two suffixes; check the full name too.
+        if suffix in _WEIGHT_EXTENSIONS or entry.name.endswith(".pdiparams.info"):
+            return True
+    return False
+
+
 def _cmd_models_status(language: str, cache_home: str | None) -> int:
     """Print offline OCR readiness without loading models or accessing the network."""
     import os
     from pathlib import Path
+
+    try:
+        profile = get_profile(language)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     effective_cache = cache_home or os.environ.get(
         "PADDLE_PDX_CACHE_HOME",
@@ -361,9 +422,9 @@ def _cmd_models_status(language: str, cache_home: str | None) -> int:
     print(f"OCR model home:\n  {root}\n")
 
     all_ok = True
-    for model_name in _LOCAL_MODEL_DIRECTORIES.values():
+    for model_name in profile.dir_kwargs.values():
         model_dir = root / model_name
-        if model_dir.is_dir() and any(model_dir.iterdir()):
+        if _model_is_ready(model_dir):
             print(f"[ok] {model_name}")
         else:
             print(f"[missing] {model_name}")
@@ -383,6 +444,12 @@ def _cmd_setup_models(language: str, cache_home: str | None) -> int:
     """Download OCR model weights using PaddleOCR (requires internet). Idempotent."""
     import os
     from pathlib import Path
+
+    try:
+        profile = get_profile(language)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     effective_cache = cache_home or os.environ.get(
         "PADDLE_PDX_CACHE_HOME",
@@ -409,25 +476,14 @@ def _cmd_setup_models(language: str, cache_home: str | None) -> int:
         )
         return 1
 
-    from .ocr.paddle import _LOCAL_MODEL_DIRECTORIES as _DIRS
     root = _local_model_root(resolved_cache)
-
-    model_names: dict[str, str] = {}
-    if language == "pt":
-        model_names = {
-            "doc_orientation_classify_model_name": "PP-LCNet_x1_0_doc_ori",
-            "textline_orientation_model_name": "PP-LCNet_x1_0_textline_ori",
-            "text_detection_model_name": "PP-OCRv5_server_det",
-            "text_recognition_model_name": "latin_PP-OCRv5_mobile_rec",
-        }
-
     options: dict = {
         "use_doc_orientation_classify": True,
         "use_doc_unwarping": False,
         "use_textline_orientation": True,
         "enable_mkldnn": False,
+        **profile.name_kwargs,
     }
-    options.update(model_names)
 
     try:
         PaddleOCR(**options)
@@ -437,9 +493,9 @@ def _cmd_setup_models(language: str, cache_home: str | None) -> int:
 
     print("\nVerifying installed models...")
     all_ok = True
-    for model_name in _DIRS.values():
+    for model_name in profile.dir_kwargs.values():
         model_dir = root / model_name
-        if model_dir.is_dir() and any(model_dir.iterdir()):
+        if _model_is_ready(model_dir):
             print(f"  [ok] {model_dir}")
         else:
             print(f"  [missing] {model_dir}", file=sys.stderr)
