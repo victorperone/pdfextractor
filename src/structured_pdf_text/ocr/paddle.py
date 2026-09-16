@@ -13,7 +13,8 @@ from structured_pdf_text.geometry import BBox
 class PaddleOcrUnavailable(RuntimeError):
     """Raised when the optional PaddleOCR runtime is not installed."""
 
-    _LOCAL_MODEL_DIRECTORIES = {
+
+_LOCAL_MODEL_DIRECTORIES = {
     "doc_orientation_classify_model_dir": "PP-LCNet_x1_0_doc_ori",
     "textline_orientation_model_dir": "PP-LCNet_x1_0_textline_ori",
     "text_detection_model_dir": "PP-OCRv5_server_det",
@@ -129,6 +130,27 @@ def _resolve_required_local_models(
         )
         for key in required_keys
     }
+
+
+def validate_local_ocr_models(
+    *,
+    language: str = "pt",
+    cache_home: str | Path | None = None,
+) -> None:
+    """Verify that all required local OCR model directories are present.
+
+    Does not import paddle, paddleocr, or open any network connection.
+    Raises PaddleOcrUnavailable if any model directory is missing or empty.
+    """
+    effective_cache = cache_home or os.environ.get(
+        "PADDLE_PDX_CACHE_HOME",
+        str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
+    )
+    _resolve_required_local_models(
+        effective_cache,
+        language=language,
+        options={},
+    )
 
 
 class PaddleOcrEngine:
