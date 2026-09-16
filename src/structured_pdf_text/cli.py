@@ -12,6 +12,12 @@ from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
 from .diagnostics.corpus import corpus_report
 from .diagnostics.compare import compare_extractors
+from .ocr.paddle import (
+    PaddleOcrUnavailable,
+    _LOCAL_MODEL_DIRECTORIES,
+    _local_model_root,
+    validate_local_ocr_models,
+)
 from .renderers.json import render_json
 from .renderers.markdown import render_markdown
 
@@ -154,6 +160,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Include full raw and reading text in the JSON report",
     )
 
+    setup_models_parser = subparsers.add_parser(
+        "setup-models",
+        help="Download OCR model weights (requires internet). Idempotent.",
+    )
+    setup_models_parser.add_argument("--language", default="pt")
+    setup_models_parser.add_argument(
+        "--cache-home",
+        default=None,
+        metavar="DIR",
+        help="Override the OCR model cache directory",
+    )
+
+    models_status_parser = subparsers.add_parser(
+        "models-status",
+        help="Check offline OCR readiness without loading models or accessing the network.",
+    )
+    models_status_parser.add_argument("--language", default="pt")
+    models_status_parser.add_argument(
+        "--cache-home",
+        default=None,
+        metavar="DIR",
+        help="Override the OCR model cache directory",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "extract":
         if args.ocr_batch_size < 1:
@@ -171,6 +201,17 @@ def main(argv: list[str] | None = None) -> int:
                 merge_cross_page_tables=args.merge_cross_page_tables,
                 num_threads=args.threads,
             )
+        if _mode_requires_ocr(config.mode):
+            try:
+                validate_local_ocr_models(language=config.language)
+            except PaddleOcrUnavailable as exc:
+                print(str(exc), file=sys.stderr)
+                print(
+                    "Run: python -m structured_pdf_text.cli setup-models",
+                    file=sys.stderr,
+                )
+                return 1
+
         def _progress(current: int, total: int) -> None:
             print(f"\rExtraindo página {current}/{total}...", end="", file=sys.stderr, flush=True)
 
@@ -202,6 +243,16 @@ def main(argv: list[str] | None = None) -> int:
             retain_native_evidence=args.raw_page_json,
             page_indices=(args.page - 1,) if args.page is not None else None,
         )
+        if _mode_requires_ocr(config.mode):
+            try:
+                validate_local_ocr_models(language=config.language)
+            except PaddleOcrUnavailable as exc:
+                print(str(exc), file=sys.stderr)
+                print(
+                    "Run: python -m structured_pdf_text.cli setup-models",
+                    file=sys.stderr,
+                )
+                return 1
         try:
             document = PdfTextExtractor(config).extract(args.pdf)
         except ValueError as exc:
@@ -282,7 +333,127 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(comparison, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "setup-models":
+        return _cmd_setup_models(args.language, args.cache_home)
+
+    if args.command == "models-status":
+        return _cmd_models_status(args.language, args.cache_home)
+
     return 2
+
+
+def _mode_requires_ocr(mode: ExtractionMode | str) -> bool:
+    """Return True when the extraction mode can trigger OCR."""
+    ocr_modes = {ExtractionMode.BALANCED, ExtractionMode.OCR, "balanced", "ocr"}
+    return mode in ocr_modes
+
+
+def _cmd_models_status(language: str, cache_home: str | None) -> int:
+    """Print offline OCR readiness without loading models or accessing the network."""
+    import os
+    from pathlib import Path
+
+    effective_cache = cache_home or os.environ.get(
+        "PADDLE_PDX_CACHE_HOME",
+        str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
+    )
+    root = _local_model_root(effective_cache)
+    print(f"OCR model home:\n  {root}\n")
+
+    all_ok = True
+    for model_name in _LOCAL_MODEL_DIRECTORIES.values():
+        model_dir = root / model_name
+        if model_dir.is_dir() and any(model_dir.iterdir()):
+            print(f"[ok] {model_name}")
+        else:
+            print(f"[missing] {model_name}")
+            all_ok = False
+
+    print()
+    if all_ok:
+        print("Offline OCR readiness: READY")
+        return 0
+    else:
+        print("Offline OCR readiness: NOT READY")
+        print("Run: python -m structured_pdf_text.cli setup-models")
+        return 1
+
+
+def _cmd_setup_models(language: str, cache_home: str | None) -> int:
+    """Download OCR model weights using PaddleOCR (requires internet). Idempotent."""
+    import os
+    from pathlib import Path
+
+    effective_cache = cache_home or os.environ.get(
+        "PADDLE_PDX_CACHE_HOME",
+        str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
+    )
+
+    resolved_cache = str(Path(effective_cache).expanduser().resolve())
+    os.environ["PADDLE_PDX_CACHE_HOME"] = resolved_cache
+    # Allow remote model resolution during setup.
+    os.environ.pop("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", None)
+
+    print(f"OCR model cache: {resolved_cache}")
+    print(f"Language profile: {language}")
+    print("Initializing models (this may download weights if not already cached)...\n")
+
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError:
+        print(
+            "Error: PaddleOCR is not installed.\n"
+            "Install OCR dependencies first:\n"
+            "  pip install -r requirements.txt",
+            file=sys.stderr,
+        )
+        return 1
+
+    from .ocr.paddle import _LOCAL_MODEL_DIRECTORIES as _DIRS
+    root = _local_model_root(resolved_cache)
+
+    model_names: dict[str, str] = {}
+    if language == "pt":
+        model_names = {
+            "doc_orientation_classify_model_name": "PP-LCNet_x1_0_doc_ori",
+            "textline_orientation_model_name": "PP-LCNet_x1_0_textline_ori",
+            "text_detection_model_name": "PP-OCRv5_server_det",
+            "text_recognition_model_name": "latin_PP-OCRv5_mobile_rec",
+        }
+
+    options: dict = {
+        "use_doc_orientation_classify": True,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": True,
+        "enable_mkldnn": False,
+    }
+    options.update(model_names)
+
+    try:
+        PaddleOCR(**options)
+    except Exception as exc:
+        print(f"Error during model initialization: {exc}", file=sys.stderr)
+        return 1
+
+    print("\nVerifying installed models...")
+    all_ok = True
+    for model_name in _DIRS.values():
+        model_dir = root / model_name
+        if model_dir.is_dir() and any(model_dir.iterdir()):
+            print(f"  [ok] {model_dir}")
+        else:
+            print(f"  [missing] {model_dir}", file=sys.stderr)
+            all_ok = False
+
+    if all_ok:
+        print("\nAll models installed. Runtime is ready for offline extraction.")
+        return 0
+    else:
+        print(
+            "\nSome models are still missing. Re-run setup-models or check connectivity.",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover
