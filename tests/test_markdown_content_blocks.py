@@ -246,7 +246,7 @@ def test_header_footer_preserved_by_default() -> None:
 # FIGURE block → skipped
 # ---------------------------------------------------------------------------
 
-def test_figure_block_produces_no_text() -> None:
+def test_figure_block_without_text_produces_no_output() -> None:
     page = _page([
         _block(ContentKind.FIGURE, "", order_index=0),
         _block(ContentKind.TEXT, "After figure", order_index=1),
@@ -254,6 +254,24 @@ def test_figure_block_produces_no_text() -> None:
     doc = _document([page])
     md = render_markdown(doc)
     assert "After figure" in md
+
+
+def test_figure_block_with_ocr_text_is_preserved_in_markdown() -> None:
+    """OCR text on a FIGURE block must survive into the Markdown output.
+
+    Until figures have a dedicated semantic representation, block.text carries
+    the result of OCR performed on the image region. Silently dropping it would
+    lose content that the user explicitly extracted.
+    """
+    ocr_text = "Texto recuperado por OCR"
+    page = _page([
+        _block(ContentKind.FIGURE, ocr_text, order_index=0),
+        _block(ContentKind.TEXT, "Após figura", order_index=1),
+    ])
+    doc = _document([page])
+    md = render_markdown(doc)
+    assert ocr_text in md, f"OCR text from FIGURE block must appear in Markdown output"
+    assert "Após figura" in md
 
 
 # ---------------------------------------------------------------------------

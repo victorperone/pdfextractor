@@ -73,7 +73,9 @@ def _render_content_block(
         )
 
     if block.kind == ContentKind.FIGURE:
-        return ""
+        # No semantic representation yet. Preserve OCR text when present so it
+        # is not silently lost. Empty figures produce no Markdown output.
+        return block.text or ""
 
     return block.text
 
