@@ -215,14 +215,9 @@ def test_unknown_language_without_recognition_dir_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Create the three orientation/detection dirs but NOT a recognition dir
-    # for the unknown language — simulates "no profile registered".
-    names_without_rec = [
-        "PP-LCNet_x1_0_doc_ori",
-        "PP-LCNet_x1_0_textline_ori",
-        "PP-OCRv5_server_det",
-    ]
-    _make_model_dirs(tmp_path, names=names_without_rec)
+    # "en" has no registered profile — must fail with a clear ValueError before
+    # any network access or PaddleOCR initialization is attempted.
+    _make_model_dirs(tmp_path)
 
     paddleocr_called = {"called": False}
 
@@ -233,10 +228,9 @@ def test_unknown_language_without_recognition_dir_fails(
     fake_module = type("paddleocr", (), {"PaddleOCR": staticmethod(fake_paddle_ocr)})()
     monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake_module)
 
-    # Use a language that has no registered profile ("en" is not "pt").
     engine = _make_engine(tmp_path, language="en")
 
-    with pytest.raises(PaddleOcrUnavailable, match="text_recognition_model_dir"):
+    with pytest.raises(ValueError, match="No local OCR profile configured for language"):
         engine._get_ocr()
 
     assert not paddleocr_called["called"], "Network download must not be attempted"

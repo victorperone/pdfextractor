@@ -8,18 +8,11 @@ from typing import Any, Callable
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.ocr.models import get_profile
 
 
 class PaddleOcrUnavailable(RuntimeError):
     """Raised when the optional PaddleOCR runtime is not installed."""
-
-
-_LOCAL_MODEL_DIRECTORIES = {
-    "doc_orientation_classify_model_dir": "PP-LCNet_x1_0_doc_ori",
-    "textline_orientation_model_dir": "PP-LCNet_x1_0_textline_ori",
-    "text_detection_model_dir": "PP-OCRv5_server_det",
-    "text_recognition_model_dir": "latin_PP-OCRv5_mobile_rec",
-}
 
 
 def _local_model_root(
@@ -33,86 +26,48 @@ def _local_model_root(
     )
 
 
+# Derived from the centralised profile. Kept for callers that import this
+# symbol directly; prefer ocr.models.get_profile().dir_kwargs for new code.
+def _local_model_directories(language: str = "pt") -> dict[str, str]:
+    return get_profile(language).dir_kwargs
+
+
+# Module-level alias for the default "pt" profile — used by CLI status checks.
+_LOCAL_MODEL_DIRECTORIES: dict[str, str] = get_profile("pt").dir_kwargs
+
+
 def _resolve_required_local_models(
     cache_home: str | Path,
     *,
     language: str,
     options: dict[str, Any],
 ) -> dict[str, str]:
-    root = _local_model_root(cache_home)
+    """Resolve absolute model directory paths from the centralised profile.
 
+    Raises PaddleOcrUnavailable when any required directory is missing or
+    empty. Raises ValueError for unsupported language profiles.
+    """
+    profile = get_profile(language)  # raises ValueError for unknown languages
+    root = _local_model_root(cache_home)
     resolved = dict(options)
 
-    resolved.setdefault(
-        "doc_orientation_classify_model_dir",
-        str(
-            root
-            / "PP-LCNet_x1_0_doc_ori"
-        ),
-    )
+    for kwarg, model_name in profile.dir_kwargs.items():
+        resolved.setdefault(kwarg, str(root / model_name))
 
-    resolved.setdefault(
-        "textline_orientation_model_dir",
-        str(
-            root
-            / "PP-LCNet_x1_0_textline_ori"
-        ),
-    )
-
-    resolved.setdefault(
-        "text_detection_model_dir",
-        str(
-            root
-            / "PP-OCRv5_server_det"
-        ),
-    )
-
-    if language == "pt":
-        resolved.setdefault(
-            "text_recognition_model_dir",
-            str(
-                root
-                / "latin_PP-OCRv5_mobile_rec"
-            ),
-        )
-
-    required_keys = (
-        "doc_orientation_classify_model_dir",
-        "textline_orientation_model_dir",
-        "text_detection_model_dir",
-        "text_recognition_model_dir",
-    )
-
+    required_keys = tuple(profile.dir_kwargs)
     missing: list[str] = []
 
     for key in required_keys:
         value = resolved.get(key)
-
         if not value:
-            missing.append(
-                f"{key}=<not configured>"
-            )
+            missing.append(f"{key}=<not configured>")
             continue
-
-        model_dir = (
-            Path(str(value))
-            .expanduser()
-        )
-
-        if (
-            not model_dir.is_dir()
-            or not any(model_dir.iterdir())
-        ):
-            missing.append(
-                f"{key}={model_dir}"
-            )
+        model_dir = Path(str(value)).expanduser()
+        if not model_dir.is_dir() or not any(model_dir.iterdir()):
+            missing.append(f"{key}={model_dir}")
 
     if missing:
-        details = "\n".join(
-            f"  - {item}"
-            for item in missing
-        )
-
+        details = "\n".join(f"  - {item}" for item in missing)
         raise PaddleOcrUnavailable(
             "Local OCR model setup is incomplete.\n"
             "Runtime model downloads are disabled.\n"
@@ -123,11 +78,7 @@ def _resolve_required_local_models(
         )
 
     return {
-        key: str(
-            Path(str(resolved[key]))
-            .expanduser()
-            .resolve()
-        )
+        key: str(Path(str(resolved[key])).expanduser().resolve())
         for key in required_keys
     }
 
@@ -141,6 +92,7 @@ def validate_local_ocr_models(
 
     Does not import paddle, paddleocr, or open any network connection.
     Raises PaddleOcrUnavailable if any model directory is missing or empty.
+    Raises ValueError for unsupported language profiles.
     """
     effective_cache = cache_home or os.environ.get(
         "PADDLE_PDX_CACHE_HOME",
@@ -354,25 +306,12 @@ class PaddleOcrEngine:
             self._init_error = exc
             raise
 
-        options.update(
-            local_models
-        )
+        options.update(local_models)
 
-        options[
-            "doc_orientation_classify_model_name"
-        ] = "PP-LCNet_x1_0_doc_ori"
-
-        options[
-            "textline_orientation_model_name"
-        ] = "PP-LCNet_x1_0_textline_ori"
-
-        options[
-            "text_detection_model_name"
-        ] = "PP-OCRv5_server_det"
-
-        options[
-            "text_recognition_model_name"
-        ] = "latin_PP-OCRv5_mobile_rec"
+        # Model names are sourced from the centralised profile so they stay in
+        # sync with the directories resolved above.
+        profile = get_profile(self.language)
+        options.update(profile.name_kwargs)
 
         effective_threads = self.num_threads
 
