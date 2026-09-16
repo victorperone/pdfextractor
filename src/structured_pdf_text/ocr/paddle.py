@@ -13,6 +13,123 @@ from structured_pdf_text.geometry import BBox
 class PaddleOcrUnavailable(RuntimeError):
     """Raised when the optional PaddleOCR runtime is not installed."""
 
+    _LOCAL_MODEL_DIRECTORIES = {
+    "doc_orientation_classify_model_dir": "PP-LCNet_x1_0_doc_ori",
+    "textline_orientation_model_dir": "PP-LCNet_x1_0_textline_ori",
+    "text_detection_model_dir": "PP-OCRv5_server_det",
+    "text_recognition_model_dir": "latin_PP-OCRv5_mobile_rec",
+}
+
+
+def _local_model_root(
+    cache_home: str | Path,
+) -> Path:
+    return (
+        Path(cache_home)
+        .expanduser()
+        .resolve()
+        / "official_models"
+    )
+
+
+def _resolve_required_local_models(
+    cache_home: str | Path,
+    *,
+    language: str,
+    options: dict[str, Any],
+) -> dict[str, str]:
+    root = _local_model_root(cache_home)
+
+    resolved = dict(options)
+
+    resolved.setdefault(
+        "doc_orientation_classify_model_dir",
+        str(
+            root
+            / "PP-LCNet_x1_0_doc_ori"
+        ),
+    )
+
+    resolved.setdefault(
+        "textline_orientation_model_dir",
+        str(
+            root
+            / "PP-LCNet_x1_0_textline_ori"
+        ),
+    )
+
+    resolved.setdefault(
+        "text_detection_model_dir",
+        str(
+            root
+            / "PP-OCRv5_server_det"
+        ),
+    )
+
+    if language == "pt":
+        resolved.setdefault(
+            "text_recognition_model_dir",
+            str(
+                root
+                / "latin_PP-OCRv5_mobile_rec"
+            ),
+        )
+
+    required_keys = (
+        "doc_orientation_classify_model_dir",
+        "textline_orientation_model_dir",
+        "text_detection_model_dir",
+        "text_recognition_model_dir",
+    )
+
+    missing: list[str] = []
+
+    for key in required_keys:
+        value = resolved.get(key)
+
+        if not value:
+            missing.append(
+                f"{key}=<not configured>"
+            )
+            continue
+
+        model_dir = (
+            Path(str(value))
+            .expanduser()
+        )
+
+        if (
+            not model_dir.is_dir()
+            or not any(model_dir.iterdir())
+        ):
+            missing.append(
+                f"{key}={model_dir}"
+            )
+
+    if missing:
+        details = "\n".join(
+            f"  - {item}"
+            for item in missing
+        )
+
+        raise PaddleOcrUnavailable(
+            "Local OCR model setup is incomplete.\n"
+            "Runtime model downloads are disabled.\n"
+            "Missing or empty model directories:\n"
+            f"{details}\n"
+            "Install the OCR models while online "
+            "before extracting PDFs."
+        )
+
+    return {
+        key: str(
+            Path(str(resolved[key]))
+            .expanduser()
+            .resolve()
+        )
+        for key in required_keys
+    }
+
 
 class PaddleOcrEngine:
     """Lazy PaddleOCR adapter with page-coordinate token output.
@@ -175,21 +292,26 @@ class PaddleOcrEngine:
     def _get_ocr(self) -> Any:
         if self._ocr is not None:
             return self._ocr
+
         if self._init_error is not None:
             raise self._init_error
-        os.environ.setdefault("PADDLE_PDX_CACHE_HOME", self.cache_home)
-        try:
-            from paddleocr import PaddleOCR
-        except ImportError as exc:  # pragma: no cover - depends on optional runtime
-            raise PaddleOcrUnavailable(
-                "PaddleOCR is not installed; install the optional OCR dependencies"
-            ) from exc
-        # Document orientation classification and UVDoc unwarping are useful
-        # Document orientation classification (PP-LCNet) detects 0/90/180/270°
-        # rotation before the line detector runs, complementing the manual
-        # _rotation_candidates() heuristic which remains as fallback.
-        # UVDoc unwarping is kept disabled — only useful for photographed docs.
-        # Text-line orientation stays enabled for mixed-direction pages.
+
+        cache_home = (
+            Path(self.cache_home)
+            .expanduser()
+            .resolve()
+        )
+
+        # Runtime policy:
+        # extraction must never perform model-source discovery.
+        os.environ[
+            "PADDLE_PDX_CACHE_HOME"
+        ] = str(cache_home)
+
+        os.environ[
+            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"
+        ] = "True"
+
         options = {
             "use_doc_orientation_classify": True,
             "use_doc_unwarping": False,
@@ -197,35 +319,81 @@ class PaddleOcrEngine:
             "enable_mkldnn": False,
             **self.options,
         }
-        # PP-OCRv5 server det + latin mobile rec: best available combination for
-        # Portuguese in PaddleX 3.7.2. latin_PP-OCRv5_server_rec does not exist
-        # in this version; latin_PP-OCRv5_mobile_rec is the v5 Latin-script model.
-        if self.language == "pt":
-            options.setdefault("text_detection_model_name", "PP-OCRv5_server_det")
-            options.setdefault("text_recognition_model_name", "latin_PP-OCRv5_mobile_rec")
-        if not any(
-            options.get(name)
-            for name in (
-                "text_detection_model_name",
-                "text_detection_model_dir",
-                "text_recognition_model_name",
-                "text_recognition_model_dir",
-            )
-        ):
-            options.setdefault("lang", self.language)
-        effective_threads = self.num_threads
-        if effective_threads > 0:
-            options.setdefault("cpu_threads", effective_threads)
-            try:
-                import paddle
-                paddle.set_num_threads(effective_threads)
-            except (ImportError, AttributeError):
-                pass
+
         try:
-            self._ocr = PaddleOCR(**options)
-        except Exception as exc:  # pragma: no cover - depends on runtime/model setup
+            local_models = (
+                _resolve_required_local_models(
+                    cache_home,
+                    language=self.language,
+                    options=options,
+                )
+            )
+        except Exception as exc:
             self._init_error = exc
             raise
+
+        options.update(
+            local_models
+        )
+
+        options[
+            "doc_orientation_classify_model_name"
+        ] = "PP-LCNet_x1_0_doc_ori"
+
+        options[
+            "textline_orientation_model_name"
+        ] = "PP-LCNet_x1_0_textline_ori"
+
+        options[
+            "text_detection_model_name"
+        ] = "PP-OCRv5_server_det"
+
+        options[
+            "text_recognition_model_name"
+        ] = "latin_PP-OCRv5_mobile_rec"
+
+        effective_threads = self.num_threads
+
+        if effective_threads > 0:
+            options.setdefault(
+                "cpu_threads",
+                effective_threads,
+            )
+
+            try:
+                import paddle
+
+                paddle.set_num_threads(
+                    effective_threads
+                )
+            except (
+                ImportError,
+                AttributeError,
+            ):
+                pass
+
+        # Import only after local model validation and
+        # after disabling remote model-source checks.
+        try:
+            from paddleocr import PaddleOCR
+        except ImportError as exc:
+            error = PaddleOcrUnavailable(
+                "PaddleOCR is not installed; "
+                "install the OCR dependencies "
+                "during environment setup."
+            )
+
+            self._init_error = error
+            raise error from exc
+
+        try:
+            self._ocr = PaddleOCR(
+                **options
+            )
+        except Exception as exc:
+            self._init_error = exc
+            raise
+
         return self._ocr
 
     @staticmethod
