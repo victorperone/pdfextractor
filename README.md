@@ -154,6 +154,36 @@ python -m structured_pdf_text.cli extract documento.pdf \
 Extraction runs completely offline. If models are missing, the process fails
 before reading any page and prints the path to run `setup-models`.
 
+### Optional network-isolation check on Linux/WSL
+
+When validating the offline runtime with `sudo unshare --net`, remember that
+`sudo` normally changes `HOME` to `/root`. If the OCR models were installed in
+the current user's cache, preserve the same PaddleX cache path explicitly.
+
+```bash
+export PADDLE_PDX_CACHE_HOME="$HOME/.cache/pdfextractor/paddlex"
+
+sudo --preserve-env=PADDLE_PDX_CACHE_HOME unshare --net -- bash -lc '
+cd /path/to/pdfextractor
+source .venv/bin/activate
+
+python -m structured_pdf_text.cli models-status
+
+python -m structured_pdf_text.cli extract documento.pdf \
+  --mode balanced \
+  --output markdown \
+  -o documento.md
+'
+```
+
+`models-status` must report `Offline OCR readiness: READY`. During extraction,
+no model hoster lookup or download should occur.
+
+If the local `sudo` policy does not allow preserving environment variables,
+set `PADDLE_PDX_CACHE_HOME` explicitly inside the isolated shell instead.
+Use the same cache directory that was used during `setup-models`; do not copy
+models into `/root` only for this validation.
+
 If the environment is behind a corporate proxy with custom SSL certificates,
 apply this fix before running `setup-models`:
 
