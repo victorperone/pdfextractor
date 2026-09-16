@@ -18,8 +18,51 @@ class ReadingOrderDecision:
     deduplicated_lines: int = 0
 
 
+def order_regions(
+    regions: list[LayoutRegion],
+) -> tuple[list[LayoutRegion], tuple[tuple[str, str, float], ...]]:
+    """Return regions in reading order without flattening their lines.
+
+    Separating region ordering from line ordering allows the canonical
+    assembler to process each region independently — e.g. interleaving
+    table blocks between prose lines — without re-running the full graph.
+    """
+    consistency = _native_order_consistency(regions)
+    return _order_region_graph(regions, consistency)
+
+
+def order_lines_in_region(
+    region: LayoutRegion,
+) -> tuple[list[TextLine], int]:
+    """Return the lines of a single region in reading order.
+
+    Returns (ordered_lines, column_groups_detected).
+    The caller is responsible for handling rotated lines and deduplication
+    when combining lines from multiple regions.
+    """
+    if not region.native_lines:
+        return [], 0
+    if region.kind == RegionKind.TABLE:
+        return _order_table_lines(region.native_lines), 0
+    if region.kind in {
+        RegionKind.TEXT,
+        RegionKind.TITLE,
+        RegionKind.LIST,
+        RegionKind.CAPTION,
+        RegionKind.FOOTNOTE,
+        RegionKind.UNKNOWN,
+    }:
+        lines, groups = _order_prose_lines(region.native_lines, region.bbox.width)
+        return lines, groups
+    return sorted(region.native_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
+
+
 def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], ReadingOrderDecision]:
-    """Order page lines using region semantics and selective column splitting."""
+    """Order page lines using region semantics and selective column splitting.
+
+    Compatibility wrapper around order_regions() + order_lines_in_region().
+    Existing callers continue to work unchanged.
+    """
     consistency = _native_order_consistency(regions)
     ordered_regions, region_edges = _order_region_graph(regions, consistency)
     output: list[TextLine] = []
@@ -27,16 +70,12 @@ def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], Rea
     rotated_lines = 0
     table_regions = 0
     for region in ordered_regions:
-        if not region.native_lines:
+        lines, groups = order_lines_in_region(region)
+        if not lines:
             continue
         if region.kind == RegionKind.TABLE:
-            lines = _order_table_lines(region.native_lines)
             table_regions += 1
-        elif region.kind in {RegionKind.TEXT, RegionKind.TITLE, RegionKind.LIST, RegionKind.CAPTION, RegionKind.FOOTNOTE, RegionKind.UNKNOWN}:
-            lines, groups = _order_prose_lines(region.native_lines, region.bbox.width)
-            column_groups += groups
-        else:
-            lines = sorted(region.native_lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+        column_groups += groups
         rotated_lines += sum(1 for line in lines if line.direction != WritingDirection.LEFT_TO_RIGHT)
         output.extend(lines)
     output, deduplicated_lines = _deduplicate_adjacent_region_lines(output)
