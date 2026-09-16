@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from structured_pdf_text.document import OcrToken, SourceKind
+from structured_pdf_text.errors import (
+    FatalExtractionError,
+    PaddleOcrUnavailable,
+    raise_if_resource_exhausted,
+    is_resource_exhaustion,
+)
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.models import get_profile
-
-
-class PaddleOcrUnavailable(RuntimeError):
-    """Raised when the optional PaddleOCR runtime is not installed."""
 
 
 def _local_model_root(
@@ -138,12 +140,40 @@ class PaddleOcrEngine:
         *,
         quality_variants: bool | None = None,
     ) -> list[OcrToken]:
+        try:
+            return self._recognize_page_impl(
+                page_image,
+                page_index,
+                page_bbox,
+                quality_variants=quality_variants,
+            )
+        except FatalExtractionError:
+            raise
+        except Exception as exc:
+            raise_if_resource_exhausted(
+                exc,
+                page_index=page_index,
+                stage="ocr_inference",
+            )
+            raise
+
+    def _recognize_page_impl(
+        self,
+        page_image: object,
+        page_index: int,
+        page_bbox: BBox | None = None,
+        *,
+        quality_variants: bool | None = None,
+    ) -> list[OcrToken]:
         if quality_variants is None:
             quality_variants = self.quality_variants
         self.last_pass_count = 0
         self.last_batch_count = 0
         ocr = self._get_ocr()
-        page_image, self.last_deskew_angle = _deskew_image(page_image)
+        page_image, self.last_deskew_angle = _deskew_image(
+            page_image,
+            page_index=page_index,
+        )
         raw = self._predict_counted(ocr, page_image)
         tokens = _tokens_from_result(raw, page_index, page_image, page_bbox)
         # F25: when the first pass returns nothing, try all four orientations
@@ -246,7 +276,11 @@ class PaddleOcrEngine:
                 if len(raw_items) == len(chunk):
                     outputs.extend(raw_items)
                     continue
-            except (AttributeError, TypeError, ValueError, RuntimeError):
+            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                if isinstance(exc, FatalExtractionError):
+                    raise
+                if is_resource_exhaustion(exc):
+                    raise
                 pass
             # Some older PaddleOCR backends do not support list input.
             for image in chunk:
@@ -302,7 +336,11 @@ class PaddleOcrEngine:
                     options=options,
                 )
             )
+        except FatalExtractionError as exc:
+            self._init_error = exc
+            raise
         except Exception as exc:
+            raise_if_resource_exhausted(exc, stage="ocr_initialize")
             self._init_error = exc
             raise
 
@@ -327,16 +365,31 @@ class PaddleOcrEngine:
                 paddle.set_num_threads(
                     effective_threads
                 )
-            except (
-                ImportError,
-                AttributeError,
-            ):
+            except (ImportError, AttributeError):
                 pass
+            except FatalExtractionError as exc:
+                self._init_error = exc
+                raise
+            except Exception as exc:
+                raise_if_resource_exhausted(exc, stage="ocr_initialize")
+                error = PaddleOcrUnavailable(
+                    "Failed to initialize the required local PaddleOCR runtime.",
+                    stage="ocr_initialize",
+                    details={
+                        "cause_type": type(exc).__name__,
+                        "cause_message": str(exc),
+                    },
+                )
+                self._init_error = error
+                raise error from exc
 
         # Import only after local model validation and
         # after disabling remote model-source checks.
         try:
             from paddleocr import PaddleOCR
+        except FatalExtractionError as exc:
+            self._init_error = exc
+            raise
         except ImportError as exc:
             error = PaddleOcrUnavailable(
                 "PaddleOCR is not installed; "
@@ -346,14 +399,38 @@ class PaddleOcrEngine:
 
             self._init_error = error
             raise error from exc
+        except Exception as exc:
+            raise_if_resource_exhausted(exc, stage="ocr_initialize")
+            error = PaddleOcrUnavailable(
+                "Failed to initialize the required local PaddleOCR runtime.",
+                stage="ocr_initialize",
+                details={
+                    "cause_type": type(exc).__name__,
+                    "cause_message": str(exc),
+                },
+            )
+            self._init_error = error
+            raise error from exc
 
         try:
             self._ocr = PaddleOCR(
                 **options
             )
-        except Exception as exc:
+        except FatalExtractionError as exc:
             self._init_error = exc
             raise
+        except Exception as exc:
+            raise_if_resource_exhausted(exc, stage="ocr_initialize")
+            error = PaddleOcrUnavailable(
+                "Failed to initialize the required local PaddleOCR runtime.",
+                stage="ocr_initialize",
+                details={
+                    "cause_type": type(exc).__name__,
+                    "cause_message": str(exc),
+                },
+            )
+            self._init_error = error
+            raise error from exc
 
         return self._ocr
 
@@ -835,6 +912,8 @@ def _deskew_image(
     image: object,
     min_angle_deg: float = 0.5,
     max_angle_deg: float = 20.0,
+    *,
+    page_index: int | None = None,
 ) -> tuple[object, float]:
     """Detecta e corrige inclinação pequena em imagens de página (scan ou foto).
 
@@ -887,5 +966,12 @@ def _deskew_image(
         )
         return Image.fromarray(corrected), round(angle, 2)
 
-    except Exception:  # noqa: BLE001
+    except FatalExtractionError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise_if_resource_exhausted(
+            exc,
+            page_index=page_index,
+            stage="ocr_preprocess",
+        )
         return image, 0.0

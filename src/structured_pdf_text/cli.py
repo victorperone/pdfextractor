@@ -12,6 +12,7 @@ from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
 from .diagnostics.corpus import corpus_report
 from .diagnostics.compare import compare_extractors
+from .errors import FatalExtractionError
 from .ocr.models import get_profile
 from .ocr.paddle import (
     PaddleOcrUnavailable,
@@ -217,9 +218,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\rExtraindo página {current}/{total}...", end="", file=sys.stderr, flush=True)
 
         callback = _progress if args.progress else None
-        document = PdfTextExtractor(config).extract(args.pdf, progress_callback=callback)
+        try:
+            document = PdfTextExtractor(config).extract(
+                args.pdf,
+                progress_callback=callback,
+            )
+        except FatalExtractionError as exc:
+            if args.progress:
+                print(file=sys.stderr)
+            _print_fatal_extraction_error(exc)
+            return 1
         if args.progress:
             print(file=sys.stderr)
+        for warning in document.diagnostics.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
         if args.output == "raw":
             result = document.raw_text
         elif args.output == "json":
@@ -257,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         try:
             document = PdfTextExtractor(config).extract(args.pdf)
+        except FatalExtractionError as exc:
+            _print_fatal_extraction_error(exc)
+            return 1
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -273,6 +288,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"native_score={page.diagnostics.facts.get('native_text_score', '?')} "
                 f"facts={page.diagnostics.facts}"
             )
+            if page.diagnostics.warnings:
+                print("warnings:")
+                for warning in page.diagnostics.warnings:
+                    print(f"  - {warning}")
         else:
             print(document_report(document))
         return 0
@@ -299,6 +318,9 @@ def main(argv: list[str] | None = None) -> int:
                     page_indices=(index,),
                 )
             ).extract(args.pdf)
+        except FatalExtractionError as exc:
+            _print_fatal_extraction_error(exc)
+            return 1
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -331,13 +353,12 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
-        print(
-            json.dumps(
-                corpus_report(args.pdfs, config, workers=args.workers),
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        try:
+            report = corpus_report(args.pdfs, config, workers=args.workers)
+        except FatalExtractionError as exc:
+            _print_fatal_extraction_error(exc)
+            return 1
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "compare":
@@ -379,6 +400,25 @@ def _mode_requires_ocr(mode: ExtractionMode | str) -> bool:
     """Return True when the extraction mode can trigger OCR."""
     ocr_modes = {ExtractionMode.BALANCED, ExtractionMode.OCR, "balanced", "ocr"}
     return mode in ocr_modes
+
+
+def _print_fatal_extraction_error(exc: FatalExtractionError) -> None:
+    """Print a concise fatal error without exposing a normal-flow traceback."""
+    print("FATAL EXTRACTION ERROR", file=sys.stderr)
+    print(f"code: {exc.code}", file=sys.stderr)
+    if exc.page_index is not None:
+        print(f"page: {exc.page_index + 1}", file=sys.stderr)
+    if exc.stage:
+        print(f"stage: {exc.stage}", file=sys.stderr)
+    print(f"message: {exc}", file=sys.stderr)
+    cause_type = exc.details.get("cause_type")
+    cause_message = exc.details.get("cause_message")
+    if cause_type or cause_message:
+        print(f"cause: {cause_type}: {cause_message}", file=sys.stderr)
+    print(
+        "Extraction aborted. The document was not completed.",
+        file=sys.stderr,
+    )
 
 
 _WEIGHT_EXTENSIONS = frozenset({

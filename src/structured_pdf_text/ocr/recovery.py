@@ -6,6 +6,10 @@ from enum import Enum
 from typing import Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
+from structured_pdf_text.errors import (
+    FatalExtractionError,
+    raise_if_resource_exhausted,
+)
 from structured_pdf_text.geometry import BBox
 
 
@@ -80,7 +84,17 @@ class OcrRegionRefiner:
                 ocr_batches=0,
             )
 
-        crop = crop_page_region(page_image, page_bbox, region_bbox, request.page_rotation)
+        try:
+            crop = crop_page_region(page_image, page_bbox, region_bbox, request.page_rotation)
+        except FatalExtractionError:
+            raise
+        except Exception as exc:
+            raise_if_resource_exhausted(
+                exc,
+                page_index=page_index,
+                stage="ocr_region_refinement",
+            )
+            raise
         attempts: list[RegionRefinementAttempt] = []
         candidates: list[tuple[float, float, float, list[OcrToken]]] = []
         total_passes = 0
@@ -93,8 +107,18 @@ class OcrRegionRefiner:
             dict.fromkeys(float(value) for value in request.rotations)
         ) or (0.0,)
         for scale_factor in scales:
-            scaled = resize_image(crop, scale_factor)
-            scaled_size = image_size(scaled)
+            try:
+                scaled = resize_image(crop, scale_factor)
+                scaled_size = image_size(scaled)
+            except FatalExtractionError:
+                raise
+            except Exception as exc:
+                raise_if_resource_exhausted(
+                    exc,
+                    page_index=page_index,
+                    stage="ocr_region_refinement",
+                )
+                raise
             for rotation in rotations:
                 try:
                     transformed, inverse = rotate_image_expanded(scaled, rotation)
@@ -131,7 +155,14 @@ class OcrRegionRefiner:
                     )
                     if mapped:
                         candidates.append((score, scale_factor, rotation, mapped))
+                except FatalExtractionError:
+                    raise
                 except (AttributeError, ImportError, TypeError, ValueError, RuntimeError) as exc:
+                    raise_if_resource_exhausted(
+                        exc,
+                        page_index=page_index,
+                        stage="ocr_region_refinement",
+                    )
                     attempts.append(
                         RegionRefinementAttempt(
                             scale_factor=scale_factor,
@@ -142,6 +173,13 @@ class OcrRegionRefiner:
                             error=f"{type(exc).__name__}: {exc}",
                         )
                     )
+                except Exception as exc:
+                    raise_if_resource_exhausted(
+                        exc,
+                        page_index=page_index,
+                        stage="ocr_region_refinement",
+                    )
+                    raise
 
         if not candidates:
             return RegionRefinementResult(
