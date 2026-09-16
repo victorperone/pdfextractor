@@ -253,16 +253,11 @@ def _is_marginalia(line: Any, page_bbox: BBox) -> bool:
 
 
 def _table_boxes(page: NativePageEvidence) -> list[BBox]:
-    paths = [
-        path.bbox
-        for path in page.objects.paths
-        if path.bbox is not None and not _is_page_background(path.bbox, page.bbox)
+    from structured_pdf_text.tables.geometry import detect_path_table_candidates
+    return [
+        _clamp_bbox(candidate.bbox.expand(8.0), page.bbox)
+        for candidate in detect_path_table_candidates(page)
     ]
-    horizontal = [path for path in paths if path.height <= 4.0 and path.width >= page.bbox.width * 0.20]
-    vertical = [path for path in paths if path.width <= 4.0 and path.height >= page.bbox.height * 0.12]
-    if len(horizontal) < 2 or len(vertical) < 2:
-        return []
-    return [_clamp_bbox(BBox.union_all(horizontal + vertical).expand(8.0), page.bbox)]
 
 
 def _edge_band_lines(lines: list[Any]) -> tuple[list[Any], list[Any]]:
