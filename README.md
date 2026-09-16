@@ -268,6 +268,58 @@ indentation therefore remain text. Visual structure/OCR remains the fallback
 and requires raster containment plus cell-level textual support on mixed
 pages, preventing chart axes and image diagrams from becoming tables.
 
+## Architecture — canonical page content pipeline
+
+Extraction follows a strict three-stage pipeline. Each stage has a single
+responsibility; no stage makes decisions that belong to another.
+
+```
+Stage 1 — Evidence collection
+  PDFium native characters + paths + images
+    → NativePageEvidence
+
+Stage 2 — Structure assembly  (assemble/)
+  NativePageEvidence
+    → layout regions  (layout/engine.py + layout/assign.py)
+    → reading order   (text/reading_order.py)
+    → table geometry  (tables/geometry.py)
+    → StructuredTable (tables/)
+    → PageContentBlock[]  (assemble/content.py)
+        block_id, kind (ContentKind), bbox, order_index,
+        text, table_id, heading_level, confidence
+    → StructuredPage.content_blocks
+
+Stage 3 — Serialization  (renderers/)
+  PageContentBlock[]
+    → render_markdown() reads blocks in order_index order
+    → dispatches by ContentKind: text, title, table, header, footer, figure
+    → no geometry, no region lookup, no table positioning
+```
+
+### Separation guarantees (invariants)
+
+| ID | Guarantee |
+|----|-----------|
+| INV-01 | A line outside all valid table cells is never suppressed by a TABLE region label alone |
+| INV-02 | A line represented by a table block does not also appear as prose |
+| INV-03 | A table block appears only on the page that holds its physical fragment |
+| INV-04 | The logical `document.tables` list does not reposition physical content across pages |
+| INV-05 | A TABLE region with empty or missing cells falls back to prose text (no content loss) |
+| INV-06 | The Markdown renderer contains no geometric logic (`BBox`, `overlap_ratio`, `area`) |
+| INV-07 | Unicode NFC normalization is applied uniformly to all text blocks |
+| INV-08 | Each valid table appears at most once per page regardless of region overlap |
+| INV-09 | Block order is deterministic for identical input evidence |
+| INV-10 | No assembly rule is specific to any reference document or corpus coordinate |
+
+### Key types
+
+| Type | Module | Role |
+|------|--------|------|
+| `ContentKind` | `document.py` | Enum for block semantic type (TEXT, TITLE, TABLE, HEADER, FOOTER, …) |
+| `PageContentBlock` | `document.py` | One renderable unit on a page: kind + text + bbox + order |
+| `PageContentAssemblyResult` | `assemble/content.py` | Output of `assemble_page_content()`: blocks + diagnostics |
+| `TableGeometryCandidate` | `tables/geometry.py` | Connected-component grid region from native paths |
+
 ## Python API
 
 ```python
