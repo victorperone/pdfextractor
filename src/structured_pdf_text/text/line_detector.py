@@ -229,78 +229,215 @@ def _chars_to_text_tokens(
 ) -> list[TextToken]:
     if not characters:
         return []
+
     advances = [
-        (char.bbox.height if direction == WritingDirection.TOP_TO_BOTTOM else char.bbox.width)
+        (
+            char.bbox.height
+            if direction == WritingDirection.TOP_TO_BOTTOM
+            else char.bbox.width
+        )
         for char in characters
-        if (char.bbox.height if direction == WritingDirection.TOP_TO_BOTTOM else char.bbox.width) > 0
+        if (
+            char.bbox.height
+            if direction == WritingDirection.TOP_TO_BOTTOM
+            else char.bbox.width
+        )
+        > 0
         and not char.text.isspace()
     ]
+
     median_advance = median(advances) if advances else 5.0
-    inferred_gap_threshold = max(2.5, median_advance * 0.85)
+    inferred_gap_threshold = max(
+        2.5,
+        median_advance * 0.85,
+    )
+
     tokens: list[TextToken] = []
     previous: NativeCharacter | None = None
+
     for char in characters:
         if previous is not None:
-            if direction == WritingDirection.TOP_TO_BOTTOM:
-                gap = (
-                    previous.bbox.y0 - char.bbox.y1
-                    if reverse_axis
-                    else char.bbox.y0 - previous.bbox.y1
-                )
-            else:
-                gap = (
-                    previous.bbox.x0 - char.bbox.x1
-                    if reverse_axis
-                    else char.bbox.x0 - previous.bbox.x1
-                )
+            gap = _character_axis_gap(
+                previous,
+                char,
+                direction,
+                reverse_axis=reverse_axis,
+            )
+
             if (
                 gap > inferred_gap_threshold
                 and not previous.text.isspace()
                 and not char.text.isspace()
-                and not _typographically_attached(previous.text, char.text)
+                and not _typographically_attached(
+                    previous.text,
+                    char.text,
+                )
             ):
-                if direction == WritingDirection.TOP_TO_BOTTOM:
-                    gap_box = BBox(
-                        previous.bbox.x0,
-                        previous.bbox.y1,
-                        previous.bbox.x1,
-                        char.bbox.y0,
-                    )
-                else:
-                    gap_box = BBox(
-                        previous.bbox.x1,
-                        previous.bbox.y0,
-                        char.bbox.x0,
-                        previous.bbox.y1,
-                    )
+                gap_box = _inferred_gap_bbox(
+                    previous,
+                    char,
+                    direction,
+                    reverse_axis=reverse_axis,
+                )
+
                 tokens.append(
                     TextToken(
                         text=" ",
                         bbox=gap_box,
-                        sources=[EvidenceRef(SourceKind.NATIVE_GENERATED, char.page_index, f"gap:{previous.char_index}:{char.char_index}")],
+                        sources=[
+                            EvidenceRef(
+                                SourceKind.NATIVE_GENERATED,
+                                char.page_index,
+                                (
+                                    f"gap:"
+                                    f"{previous.char_index}:"
+                                    f"{char.char_index}"
+                                ),
+                            )
+                        ],
                         confidence=0.55,
                         normalized_text=" ",
-                        flags={TokenFlag.WHITESPACE_INFERRED},
+                        flags={
+                            TokenFlag.WHITESPACE_INFERRED
+                        },
                     )
                 )
+
         flags: set[TokenFlag] = set()
+
         if char.generated:
             flags.add(TokenFlag.GENERATED)
+
         if char.unicode_mapping_failed:
-            flags.add(TokenFlag.UNICODE_MAPPING_FAILED)
+            flags.add(
+                TokenFlag.UNICODE_MAPPING_FAILED
+            )
+
         tokens.append(
             TextToken(
                 text=char.text,
                 bbox=char.bbox,
                 sources=[char.evidence_ref],
-                confidence=0.95 if not flags else 0.75,
-                normalized_text=normalize_text(char.text),
+                confidence=(
+                    0.95
+                    if not flags
+                    else 0.75
+                ),
+                normalized_text=normalize_text(
+                    char.text
+                ),
                 flags=flags,
             )
         )
+
         previous = char
+
     return tokens
 
+
+def _character_axis_gap(
+    previous: NativeCharacter,
+    current: NativeCharacter,
+    direction: WritingDirection,
+    *,
+    reverse_axis: bool,
+) -> float:
+    """
+    Return the geometric distance between consecutive characters
+    along their logical writing axis.
+
+    Positive values represent empty space between glyphs.
+    Zero or negative values represent touching or overlapping glyphs.
+    """
+
+    if direction == WritingDirection.TOP_TO_BOTTOM:
+        if reverse_axis:
+            return (
+                previous.bbox.y0
+                - current.bbox.y1
+            )
+
+        return (
+            current.bbox.y0
+            - previous.bbox.y1
+        )
+
+    if reverse_axis:
+        return (
+            previous.bbox.x0
+            - current.bbox.x1
+        )
+
+    return (
+        current.bbox.x0
+        - previous.bbox.x1
+    )
+
+
+def _inferred_gap_bbox(
+    previous: NativeCharacter,
+    current: NativeCharacter,
+    direction: WritingDirection,
+    *,
+    reverse_axis: bool,
+) -> BBox:
+    """
+    Build the bounding box corresponding only to an inferred
+    whitespace interval between two characters.
+
+    This function is called only when _character_axis_gap()
+    returned a positive gap above the inference threshold.
+
+    BBox coordinates are always returned in canonical order:
+    x0 <= x1 and y0 <= y1.
+    """
+
+    if direction == WritingDirection.TOP_TO_BOTTOM:
+        x0 = min(
+            previous.bbox.x0,
+            current.bbox.x0,
+        )
+        x1 = max(
+            previous.bbox.x1,
+            current.bbox.x1,
+        )
+
+        if reverse_axis:
+            y0 = current.bbox.y1
+            y1 = previous.bbox.y0
+        else:
+            y0 = previous.bbox.y1
+            y1 = current.bbox.y0
+
+        return BBox(
+            x0,
+            y0,
+            x1,
+            y1,
+        )
+
+    y0 = min(
+        previous.bbox.y0,
+        current.bbox.y0,
+    )
+    y1 = max(
+        previous.bbox.y1,
+        current.bbox.y1,
+    )
+
+    if reverse_axis:
+        x0 = current.bbox.x1
+        x1 = previous.bbox.x0
+    else:
+        x0 = previous.bbox.x1
+        x1 = current.bbox.x0
+
+    return BBox(
+        x0,
+        y0,
+        x1,
+        y1,
+    )
 
 def _restore_inline_whitespace_order(
     characters: list[NativeCharacter],
