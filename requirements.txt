@@ -18,24 +18,27 @@ opencv-contrib-python==4.10.0.84
 # Development
 pytest==9.1.1
 
-# ─── Model download ────────────────────────────────────────────────────────────
+# ─── OCR model setup ───────────────────────────────────────────────────────────
 #
-# On first run, PaddleOCR/PaddleX will attempt to download model weights to
-# ~/.cache/pdfextractor/paddlex/official_models/.
+# Model weights must be downloaded once while online. They are stored in:
+#   ~/.cache/pdfextractor/paddlex/official_models/
 #
-# If the environment is behind a corporate proxy with custom SSL certificates,
-# the download may fail with SSL errors. Fix:
+# Models required (PP-OCRv5 / PP-LCNet series):
+#   - PP-LCNet_x1_0_doc_ori          (document orientation classifier)
+#   - PP-LCNet_x1_0_textline_ori      (text-line orientation classifier)
+#   - PP-OCRv5_server_det             (text detection)
+#   - latin_PP-OCRv5_mobile_rec       (text recognition — Latin script)
 #
+# Setup steps:
+#   1. Install dependencies:
+#        pip install -r requirements.txt
+#   2. Download models (requires internet):
+#        python -m structured_pdf_text.cli setup-models
+#   3. Verify readiness:
+#        python -m structured_pdf_text.cli models-status
+#   4. Extract offline:
+#        python -m structured_pdf_text.cli extract documento.pdf --mode balanced
+#
+# If the environment uses a corporate proxy with custom SSL certificates:
 #   cat /etc/ssl/certs/ca-certificates.crt >> \
 #       .venv/lib/python3.12/site-packages/certifi/cacert.pem
-#
-# Models used (PP-OCRv4 / PP-OCRv5 series):
-#   - PP-OCRv4_mobile_det          (text detection)
-#   - latin_PP-OCRv5_mobile_rec    (text recognition — Latin script)
-#   - PP-LCNet_x1_0_textline_ori   (text-line orientation classifier)
-#
-# To pre-download models (useful for air-gapped environments):
-#   python - <<'EOF'
-#   from paddleocr import PaddleOCR
-#   PaddleOCR(use_angle_cls=True, lang="en")
-#   EOF

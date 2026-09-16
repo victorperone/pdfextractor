@@ -97,7 +97,69 @@ Private PDFs for manual validation should be placed under `corpus/`; see
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements.txt
+```
+
+## OCR setup (requires internet, run once)
+
+The `balanced` and `ocr` extraction modes use PaddleOCR with locally stored
+model weights. Model downloads happen during setup, not during extraction.
+
+**The runtime never downloads models. If the setup is incomplete, extraction
+fails immediately with a clear error before processing any page.**
+
+### Step 1 — Download models
+
+```bash
+python -m structured_pdf_text.cli setup-models
+```
+
+This downloads the four required models to
+`~/.cache/pdfextractor/paddlex/official_models/`:
+
+- `PP-LCNet_x1_0_doc_ori` — document orientation classifier
+- `PP-LCNet_x1_0_textline_ori` — text-line orientation classifier
+- `PP-OCRv5_server_det` — text detection
+- `latin_PP-OCRv5_mobile_rec` — text recognition (Latin script)
+
+### Step 2 — Verify readiness
+
+```bash
+python -m structured_pdf_text.cli models-status
+```
+
+Expected output when ready:
+
+```text
+OCR model home:
+  /home/user/.cache/pdfextractor/paddlex/official_models
+
+[ok] PP-LCNet_x1_0_doc_ori
+[ok] PP-LCNet_x1_0_textline_ori
+[ok] PP-OCRv5_server_det
+[ok] latin_PP-OCRv5_mobile_rec
+
+Offline OCR readiness: READY
+```
+
+### Step 3 — Extract offline
+
+```bash
+python -m structured_pdf_text.cli extract documento.pdf \
+  --mode balanced \
+  --output markdown \
+  -o documento.md
+```
+
+Extraction runs completely offline. If models are missing, the process fails
+before reading any page and prints the path to run `setup-models`.
+
+If the environment is behind a corporate proxy with custom SSL certificates,
+apply this fix before running `setup-models`:
+
+```bash
+cat /etc/ssl/certs/ca-certificates.crt >> \
+    .venv/lib/python3.12/site-packages/certifi/cacert.pem
 ```
 
 ## Run tests
@@ -109,29 +171,37 @@ pytest
 ## CLI examples
 
 ```bash
+# Native extraction (no OCR required)
 pdftext extract documento.pdf
 pdftext extract documento.pdf --output raw
 pdftext extract documento.pdf --output json
+
+# OCR-assisted extraction (requires setup-models)
+pdftext extract documento.pdf --mode balanced --output markdown
+pdftext extract documento.pdf --mode balanced --output json
+pdftext extract documento.pdf --mode ocr --output reading
+pdftext extract documento.pdf --best --output markdown -o output.md
+
+# Inspection and diagnostics
 pdftext inspect documento.pdf --page 1
 pdftext inspect documento.pdf --page 1 --raw-page-json
 pdftext overlay documento.pdf --page 1 --out page-1.png
-pdftext extract documento.pdf --mode balanced --output json
-pdftext extract documento.pdf --mode ocr --output reading
-pdftext extract documento.pdf --omit-repeated-headers-footers
 pdftext report corpus/*.pdf --mode native
 pdftext report corpus/*.pdf --mode balanced --merge-cross-page-tables
 pdftext report corpus/*.pdf --mode native --workers 2
 pdftext compare documento.pdf --adapters structured-native pdfium-raw pymupdf
+
+# OCR model management
+pdftext setup-models
+pdftext setup-models --language pt
+pdftext models-status
 ```
 
-The `balanced` and `ocr` modes use the optional PaddleOCR adapter. Install it with
-`pip install -e ".[ocr]"` only when OCR is needed; native extraction remains
-available without that dependency. For Portuguese, the default is a mobile
-Paddle detector paired with the Latin recognizer, with document unwarping
-disabled and line-orientation enabled. On CPU/WSL the adapter disables
-MKL-DNN/OneDNN for compatibility. Models are downloaded lazily to
-`/tmp/structured_pdf_text/paddlex` and can be replaced through
-`PaddleOcrEngine` constructor options.
+The `balanced` and `ocr` modes use the optional PaddleOCR adapter. On CPU/WSL
+the adapter disables MKL-DNN/OneDNN for compatibility. Models are loaded from
+explicit local paths; remote model-source checks are disabled at runtime.
+Model paths and behaviour can be overridden through `PaddleOcrEngine`
+constructor options.
 
 Performance diagnostics are available in `page.diagnostics.facts` under
 `timings_ms` and `ocr_passes`, and in `document.diagnostics.facts` under
