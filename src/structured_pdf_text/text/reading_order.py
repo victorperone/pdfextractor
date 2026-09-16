@@ -31,6 +31,17 @@ def order_regions(
     return _order_region_graph(regions, consistency)
 
 
+def native_order_consistency(regions: list[LayoutRegion]) -> float | None:
+    """Return the native reading-order consistency score for a set of regions.
+
+    Exposes the private ``_native_order_consistency`` formula as a public API
+    so the canonical assembler can populate ``ReadingOrderDecision`` without
+    duplicating the formula or calling ``order_region_lines`` (which would run
+    a second, independent ordering pass).
+    """
+    return _native_order_consistency(regions)
+
+
 def order_lines_in_region(
     region: LayoutRegion,
 ) -> tuple[list[TextLine], int]:

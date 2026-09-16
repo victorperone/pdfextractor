@@ -1,11 +1,40 @@
-"""Path-based table geometry detection.
+"""Path-based table geometry detection — Level 1: candidate localisation.
 
-Replaces the global BBox.union_all approach with connected-component analysis:
-segments are only grouped when they actually touch or intersect, preventing
-decorative rules and table grids from merging into one oversized region.
+Responsibility
+--------------
+Analyse native PDF path objects to locate *regions of the page that are likely
+to contain a ruled table*. The output is a list of ``TableGeometryCandidate``
+bounding boxes — one per connected cluster of horizontal+vertical path
+segments — that downstream consumers use as search windows.
 
-Each connected component that has evidence on both axes (horizontal AND
-vertical segments) produces one TableGeometryCandidate.
+This module does NOT reconstruct cell grids, classify rows/columns, or resolve
+cell content. That is the responsibility of ``tables/detector.py``.
+
+Division of labour
+------------------
+``tables/geometry.py``  (this file)
+    Connected-component analysis of path segments → candidate BBoxes.
+    Requires evidence on *both* axes (≥2 H segments + ≥2 V segments) to
+    accept a component. Decorative rules and page-background paths are
+    discarded before clustering.
+
+``tables/detector.py``
+    Takes a candidate region (or the full page bbox when no candidates were
+    found) and reconstructs the logical grid inside it: clusters H/V edges,
+    measures coherence, handles partial separators (rows without full vertical
+    lines), assigns tokens to cells, and produces a ``StructuredTable``.
+    The detector intentionally keeps its own edge-level logic so it can accept
+    tables that have horizontal rules but incomplete vertical separators — a
+    case that the stricter H+V requirement here would reject at the geometry
+    stage.
+
+When to integrate
+-----------------
+The two levels are deliberately separate. Merging them would risk reducing
+recall for tables with partial borders. After real-document validation shows
+that all accepted detector candidates originate from geometry candidates (or
+vice-versa), it may make sense to expose a shared segment API. Until then,
+treat them as two independent analyses at different levels of abstraction.
 """
 from __future__ import annotations
 
