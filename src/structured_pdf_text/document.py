@@ -323,6 +323,38 @@ class DocumentMetadata:
     pdfium_version: str | None
 
 
+class ContentKind(str, Enum):
+    TEXT = "text"
+    TITLE = "title"
+    LIST = "list"
+    TABLE = "table"
+    CAPTION = "caption"
+    HEADER = "header"
+    FOOTER = "footer"
+    FOOTNOTE = "footnote"
+    MARGINALIA = "marginalia"
+    FIGURE = "figure"
+    UNKNOWN = "unknown"
+
+
+@dataclass(slots=True)
+class PageContentBlock:
+    block_id: str
+    page_index: int
+    kind: ContentKind
+    bbox: BBox
+    order_index: int
+
+    text: str = ""
+    table_id: str | None = None
+    heading_level: int | None = None
+
+    source_region_ids: list[str] = field(default_factory=list)
+
+    confidence: float | None = None
+    fallback_from_table: bool = False
+
+
 @dataclass(slots=True)
 class StructuredPage:
     page_index: int
@@ -333,6 +365,7 @@ class StructuredPage:
     reading_text: str
     diagnostics: PageDiagnostics
     native_evidence: NativePageEvidence | None = None
+    content_blocks: list[PageContentBlock] = field(default_factory=list)
 
 
 @dataclass(slots=True)
