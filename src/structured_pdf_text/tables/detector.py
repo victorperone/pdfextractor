@@ -1,3 +1,42 @@
+"""Ruled and borderless table detection — Level 2: grid reconstruction.
+
+Responsibility
+--------------
+Given a search region (a ``TableGeometryCandidate`` bbox or the full page bbox),
+reconstruct the logical cell grid: cluster horizontal and vertical edges, assess
+coherence, handle partial separators, assign tokens to cells, and produce a
+``StructuredTable``.
+
+This module operates inside a *known search window*. It does NOT perform
+connected-component analysis of path segments across the whole page — that is
+the role of ``tables/geometry.py``.
+
+Division of labour
+------------------
+``tables/geometry.py``
+    Connected-component analysis → candidate bounding boxes (Level 1).
+    Used by ``layout/engine.py`` to label TABLE regions before detection.
+
+``tables/detector.py``  (this file)
+    Grid reconstruction inside a region or full page (Level 2).
+    Three tiers, attempted in order:
+
+    1. ``_detect_strict_grid`` — full H/V grid with coherence score ≥ 0.65.
+       Deliberately uses its own edge-level logic (independent from
+       geometry.py) so it can accept tables where vertical separators are
+       partial or absent for some rows. Merging with geometry.py's stricter
+       H+V requirement would reduce recall for these cases.
+
+    2. ``detect_relaxed_table`` — fallback when strict coherence fails.
+
+    3. ``detect_borderless_table`` — alignment-track detection for tables
+       with no path-based borders at all.
+
+When to integrate
+-----------------
+See ``tables/geometry.py`` docstring. Shared segment APIs should be considered
+only after real-document validation confirms the two levels are fully redundant.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
