@@ -22,12 +22,14 @@ from structured_pdf_text.document import (
     StructuredTable,
     TableFragment,
     TextLine,
+    WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.line_detector import lines_to_text
 from structured_pdf_text.text.normalize import normalize_text
 from structured_pdf_text.text.reading_order import (
     ReadingOrderDecision,
+    native_order_consistency,
     order_lines_in_region,
     order_regions,
 )
@@ -55,15 +57,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     t0 = time.perf_counter()
 
     ordered_regions, region_edges = order_regions(page.regions)
-    reading_decision = ReadingOrderDecision(
-        region_order=tuple(r.region_id for r in ordered_regions),
-        column_groups=0,
-        rotated_lines=0,
-        table_regions=0,
-        native_order_consistency=None,
-        region_edges=region_edges,
-        deduplicated_lines=0,
-    )
+    consistency = native_order_consistency(page.regions)
 
     physical_tables = _physical_tables_for_page(page)
     emitted_table_ids: set[str] = set()
@@ -72,16 +66,46 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     claimed_table_lines = 0
     table_fallbacks = 0
 
+    # Diagnostic counters collected in the same pass that builds blocks, so
+    # they reflect what was actually assembled rather than a parallel estimate.
+    diag_column_groups = 0
+    diag_rotated_lines = 0
+    diag_table_regions = 0
+    # deduplicated_lines remains 0: the canonical assembler processes each
+    # region independently and does not run cross-region deduplication. If
+    # real-document validation shows duplicate lines between regions, that
+    # step should be reintroduced here rather than counted hypothetically.
+
     for region in ordered_regions:
+        ordered_lines, groups = order_lines_in_region(region)
+        diag_column_groups += groups
+        diag_rotated_lines += sum(
+            1 for line in ordered_lines
+            if line.direction != WritingDirection.LEFT_TO_RIGHT
+        )
+        if region.kind == RegionKind.TABLE and ordered_lines:
+            diag_table_regions += 1
+
         region_blocks, claimed, fallbacks = _build_region_blocks(
             region=region,
             page_index=page.page_index,
             tables=physical_tables,
             emitted_table_ids=emitted_table_ids,
+            ordered_lines=ordered_lines,
         )
         blocks.extend(region_blocks)
         claimed_table_lines += claimed
         table_fallbacks += fallbacks
+
+    reading_decision = ReadingOrderDecision(
+        region_order=tuple(r.region_id for r in ordered_regions),
+        column_groups=diag_column_groups,
+        rotated_lines=diag_rotated_lines,
+        table_regions=diag_table_regions,
+        native_order_consistency=consistency,
+        region_edges=region_edges,
+        deduplicated_lines=0,
+    )
 
     orphan_blocks, orphan_count = _insert_orphan_tables(
         page_index=page.page_index,
@@ -198,12 +222,16 @@ def _build_region_blocks(
     page_index: int,
     tables: list[StructuredTable],
     emitted_table_ids: set[str],
+    ordered_lines: list[TextLine] | None = None,
 ) -> tuple[list[PageContentBlock], int, int]:
     """Build blocks for one region, interleaving prose and table blocks.
 
     Returns (blocks, claimed_table_lines, table_fallbacks).
+    ``ordered_lines`` may be supplied by the caller to avoid a duplicate
+    ordering pass when the caller already has the lines (e.g. for diagnostics).
     """
-    ordered_lines, _ = order_lines_in_region(region)
+    if ordered_lines is None:
+        ordered_lines, _ = order_lines_in_region(region)
     kind = _content_kind_from_region(region.kind)
 
     # Find tables that intersect this region (can be >1 — INV-41).
@@ -392,17 +420,31 @@ def _insert_orphan_tables(
 
 
 def _order_content_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
-    """Sort blocks by geometric position (y0, then x0). Encapsulated for future improvement."""
+    """Sort blocks by geometric position (y0, then x0).
+
+    Used only to order orphan tables among themselves before appending them at
+    the end of the page. The main block list preserves the order produced by
+    order_regions() / order_lines_in_region() and must not be re-sorted here.
+    """
     return sorted(blocks, key=lambda b: (b.bbox.y0, b.bbox.x0))
 
 
 def _reindex_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
-    """Assign deterministic order_index values after all blocks are collected."""
-    ordered = _order_content_blocks(blocks)
+    """Assign deterministic order_index and block_id values in arrival order.
+
+    The incoming order is the reading order established by order_regions() and
+    order_lines_in_region(). Sorting globally by (y0, x0) here would undo the
+    sophisticated graph-based reading order for multi-column and mixed layouts.
+    Orphan tables are already sorted among themselves by _insert_orphan_tables()
+    and appended at the end; they do not justify reordering all other blocks.
+
+    TODO: orphan tables are currently appended after all region blocks. A future
+    improvement should anchor each orphan table at its correct reading position
+    using geometric proximity to a known region.
+    """
     result: list[PageContentBlock] = []
-    for i, block in enumerate(ordered):
+    for i, block in enumerate(blocks):
         block.order_index = i
-        # Reassign deterministic block_id based on final order.
         page_num = block.page_index + 1
         block.block_id = f"page-{page_num}:block-{i + 1}"
         result.append(block)
@@ -410,12 +452,19 @@ def _reindex_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
 
 
 def _build_reading_text(blocks: list[PageContentBlock]) -> str:
-    """Build reading_text from blocks in order_index sequence."""
+    """Build reading_text from blocks in order_index sequence.
+
+    FIGURE blocks without OCR text are skipped. When a FIGURE block carries
+    non-empty text (i.e. OCR was performed on the image), that text is included
+    so it is not silently lost before a dedicated figure representation exists.
+    """
     parts: list[str] = []
     for block in sorted(blocks, key=lambda b: b.order_index):
-        if block.kind in (ContentKind.HEADER, ContentKind.FOOTER, ContentKind.FIGURE):
+        if block.kind in (ContentKind.HEADER, ContentKind.FOOTER):
             continue
         if block.kind == ContentKind.TABLE:
+            continue
+        if block.kind == ContentKind.FIGURE and not block.text:
             continue
         if block.text:
             parts.append(block.text)

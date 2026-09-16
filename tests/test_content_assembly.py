@@ -415,3 +415,104 @@ def test_assembly_result_has_diagnostics() -> None:
     assert isinstance(result.table_fallbacks, int)
     assert isinstance(result.orphan_tables, int)
     assert result.assembly_ms >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# FIGURE blocks with OCR text must survive in reading_text
+# ---------------------------------------------------------------------------
+
+def test_figure_with_ocr_text_appears_in_reading_text() -> None:
+    """A FIGURE block carrying OCR text must not be filtered from reading_text.
+
+    Without a semantic figure representation, block.text is the only way the
+    OCR result survives. Filtering it silently loses content.
+    """
+    ocr_text = "Texto recuperado por OCR"
+    figure_line = _line(ocr_text, _bbox(0, 50, 200, 80))
+    figure_region = _region(RegionKind.FIGURE, _bbox(0, 50, 200, 80), [figure_line], region_id="fig1")
+    text_line = _line("Parágrafo após figura", _bbox(0, 100, 200, 120))
+    text_region = _region(RegionKind.TEXT, _bbox(0, 100, 200, 120), [text_line], region_id="txt1")
+
+    page = _page([figure_region, text_region], [])
+    result = assemble_page_content(page)
+
+    assert ocr_text in result.reading_text, (
+        f"OCR text from FIGURE block must appear in reading_text. Got: {result.reading_text!r}"
+    )
+    assert "Parágrafo após figura" in result.reading_text
+
+
+def test_figure_without_text_not_in_reading_text() -> None:
+    """A FIGURE block with empty text must not produce empty entries in reading_text."""
+    empty_figure = _region(RegionKind.FIGURE, _bbox(0, 50, 200, 80), [], region_id="fig1")
+    text_region = _region(RegionKind.TEXT, _bbox(0, 100, 200, 120), [_line("Texto", _bbox())], region_id="txt1")
+
+    page = _page([empty_figure, text_region], [])
+    result = assemble_page_content(page)
+
+    assert result.reading_text.strip() == "Texto"
+
+
+# ---------------------------------------------------------------------------
+# Reading order preservation — _reindex_blocks must not sort globally
+# ---------------------------------------------------------------------------
+
+def test_reading_order_preserved_two_column_layout() -> None:
+    """order_regions() canonical order must survive _reindex_blocks.
+
+    Two side-by-side columns: left column starts at x0=0 (lines at y=10..30),
+    right column starts at x0=300 (lines at y=10..30). A naive sort by (y0, x0)
+    would interleave them as L1, R1, L2, R2. The reading order engine places the
+    entire left column before the right column, so the correct order is:
+    L1, L2, R1, R2.
+
+    HEADER is placed before both columns regardless of geometry.
+    """
+    page_width = 595.0
+    # Header spans full width — must come first.
+    header_line = _line("Cabeçalho", _bbox(0, 0, page_width, 15))
+    header_region = _region(
+        RegionKind.HEADER,
+        _bbox(0, 0, page_width, 15),
+        [header_line],
+        region_id="header",
+    )
+
+    # Left column: x0=0, two lines vertically stacked.
+    left_line1 = _line("Esquerda-1", _bbox(0, 20, 280, 35))
+    left_line2 = _line("Esquerda-2", _bbox(0, 40, 280, 55))
+    left_region = _region(
+        RegionKind.TEXT,
+        _bbox(0, 20, 280, 55),
+        [left_line1, left_line2],
+        region_id="left",
+    )
+
+    # Right column: x0=300, same vertical band as left — a sort by (y0, x0)
+    # would interleave left and right lines.
+    right_line1 = _line("Direita-1", _bbox(300, 20, page_width, 35))
+    right_line2 = _line("Direita-2", _bbox(300, 40, page_width, 55))
+    right_region = _region(
+        RegionKind.TEXT,
+        _bbox(300, 20, page_width, 55),
+        [right_line1, right_line2],
+        region_id="right",
+    )
+
+    page = _page([header_region, left_region, right_region], [])
+    result = assemble_page_content(page)
+
+    texts = [b.text for b in result.blocks if b.text]
+
+    # Header must appear before any body text.
+    assert texts[0] == "Cabeçalho", f"Expected header first, got: {texts}"
+
+    # Within body blocks, all left-column text must come before right-column text.
+    left_indices = [i for i, t in enumerate(texts) if "Esquerda" in t]
+    right_indices = [i for i, t in enumerate(texts) if "Direita" in t]
+    assert left_indices, "Left column blocks missing"
+    assert right_indices, "Right column blocks missing"
+    assert max(left_indices) < min(right_indices), (
+        f"Left column must precede right column entirely. "
+        f"Got order: {texts}"
+    )
