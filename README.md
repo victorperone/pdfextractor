@@ -94,10 +94,24 @@ Private PDFs for manual validation should be placed under `corpus/`; see
 
 ## Install locally
 
+### Linux / WSL
+
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
+```
+
+### Windows PowerShell
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 ## OCR setup (requires internet, run once)
@@ -184,13 +198,20 @@ set `PADDLE_PDX_CACHE_HOME` explicitly inside the isolated shell instead.
 Use the same cache directory that was used during `setup-models`; do not copy
 models into `/root` only for this validation.
 
-If the environment is behind a corporate proxy with custom SSL certificates,
-apply this fix before running `setup-models`:
+If model hosts are blocked by organizational network policy, use offline model
+provisioning from an approved machine or an internal artifact repository. Copy
+the four model directories from an approved installation into:
 
-```bash
-cat /etc/ssl/certs/ca-certificates.crt >> \
-    .venv/lib/python3.12/site-packages/certifi/cacert.pem
+```text
+<cache>/official_models/
 ```
+
+Then run `models-status`; it must report `Offline OCR readiness: READY`.
+
+If the network allows the model hosts but TLS inspection requires a custom
+corporate CA, configure Python/PaddleX using the CA and proxy settings approved
+by your organization. Do not disable TLS verification or bypass organizational
+network controls.
 
 ## Run tests
 

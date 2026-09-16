@@ -86,6 +86,30 @@ class PdfTextExtractor:
         *,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> StructuredDocument:
+        """Extract a document and classify resource failures at the API boundary."""
+        try:
+            return self._extract_impl(
+                path,
+                password=password,
+                progress_callback=progress_callback,
+            )
+        except FatalExtractionError:
+            raise
+        except Exception as exc:
+            raise_if_resource_exhausted(
+                exc,
+                stage="document_extract",
+                details=_process_memory_snapshot(),
+            )
+            raise
+
+    def _extract_impl(
+        self,
+        path: str | Path,
+        password: str | None = None,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> StructuredDocument:
         pages = []
         document_start = time.perf_counter()
         memory_start = _process_memory_snapshot()
@@ -206,6 +230,7 @@ class PdfTextExtractor:
                 ocr_table_tokens = 0
                 ocr_figure_tokens = 0
                 ocr_region_stats: dict[str, dict[str, Any]] = {}
+                ocr_attempt_errors: list[str] = []
                 mode = self.config.normalized_mode()
                 ocr_available_by_mode = _ocr_enabled(self.config)
                 promotion_reasons = list(recovery_plan.reasons)
@@ -298,6 +323,9 @@ class PdfTextExtractor:
                                     ocr_batches_total = getattr(
                                         self.ocr_engine, "last_batch_count", None
                                     )
+                                    ocr_attempt_errors = list(
+                                        getattr(self.ocr_engine, "last_attempt_errors", [])
+                                    )
                                 else:
                                     (
                                         ocr_tokens,
@@ -340,6 +368,10 @@ class PdfTextExtractor:
                                             "OCR region recovery produced no usable tokens "
                                             f"for {region.region_id}"
                                         )
+                            for attempt_error in ocr_attempt_errors:
+                                warnings.append(
+                                    f"OCR optional attempt unavailable: {attempt_error}"
+                                )
 
                 if ocr_requested and self.ocr_engine is not None and ocr_image is not None:
                     figure_start = time.perf_counter()
@@ -567,6 +599,7 @@ class PdfTextExtractor:
                         "ocr_outcome": ocr_outcome,
                         "ocr_degraded": ocr_degraded,
                         "ocr_degraded_reasons": ocr_degraded_reasons,
+                        "ocr_attempt_errors": ocr_attempt_errors,
                         "page_ocr_requested": page_ocr_requested,
                         "region_ocr_requested": region_ocr_requested,
                         "ocr_candidate_region_ids": list(recovery_plan.region_ids),

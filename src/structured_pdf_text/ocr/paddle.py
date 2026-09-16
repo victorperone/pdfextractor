@@ -130,6 +130,7 @@ class PaddleOcrEngine:
         self._init_error: Exception | None = None
         self.last_pass_count = 0
         self.last_batch_count = 0
+        self.last_attempt_errors: list[str] = []
         self.last_deskew_angle: float = 0.0
 
     def recognize_page(
@@ -169,6 +170,7 @@ class PaddleOcrEngine:
             quality_variants = self.quality_variants
         self.last_pass_count = 0
         self.last_batch_count = 0
+        self.last_attempt_errors = []
         ocr = self._get_ocr()
         page_image, self.last_deskew_angle = _deskew_image(
             page_image,
@@ -285,7 +287,26 @@ class PaddleOcrEngine:
             # Some older PaddleOCR backends do not support list input.
             for image in chunk:
                 self.last_batch_count += 1
-                outputs.append(self._predict(ocr, image))
+                try:
+                    outputs.append(self._predict(ocr, image))
+                except FatalExtractionError:
+                    raise
+                except (
+                    AttributeError,
+                    TypeError,
+                    ValueError,
+                    RuntimeError,
+                ) as exc:
+                    raise_if_resource_exhausted(
+                        exc,
+                        stage="ocr_inference",
+                    )
+                    self.last_attempt_errors.append(
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    # Keep one output slot per input image so the following
+                    # zip(enhanced_images, outputs) preserves alignment.
+                    outputs.append(None)
         return outputs
 
     def recognize_region(
@@ -339,10 +360,22 @@ class PaddleOcrEngine:
         except FatalExtractionError as exc:
             self._init_error = exc
             raise
+        except ValueError:
+            # Unsupported language profiles are configuration errors and must
+            # remain distinguishable from an inaccessible local runtime.
+            raise
         except Exception as exc:
             raise_if_resource_exhausted(exc, stage="ocr_initialize")
-            self._init_error = exc
-            raise
+            error = PaddleOcrUnavailable(
+                "Failed to access or validate the required local OCR models.",
+                stage="ocr_initialize",
+                details={
+                    "cause_type": type(exc).__name__,
+                    "cause_message": str(exc),
+                },
+            )
+            self._init_error = error
+            raise error from exc
 
         options.update(local_models)
 
