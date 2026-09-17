@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from statistics import median
 
 from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine, WritingDirection
+from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.normalize import normalize_text
 
 
@@ -25,6 +27,52 @@ class ReadingOrderDecision:
     native_order_consistency: float | None = None
     region_edges: tuple[tuple[str, str, float], ...] = ()
     deduplicated_lines: int = 0
+    flow_mode: str = "fallback"
+    form_score: float = 0.0
+    column_score: float = 0.0
+    lane_count: int = 1
+    gutter_count: int = 0
+    spanning_band_count: int = 0
+    flow_segment_count: int = 0
+    fallback_used: bool = False
+    line_preservation_ok: bool = True
+    figure_caption_edges: tuple[tuple[str, str, float], ...] = ()
+    mixed_content_edges: tuple[tuple[str, str, float], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class FlowHypothesisScore:
+    name: str
+    score: float
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProseFlowDecision:
+    mode: str
+    form_score: float
+    column_score: float
+    lane_count: int
+    gutter_count: int
+    reasons: tuple[str, ...]
+    spanning_band_count: int = 0
+    flow_segment_count: int = 0
+    fallback_used: bool = False
+    line_preservation_ok: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ReadingLane:
+    x0: float
+    x1: float
+    lines: tuple[TextLine, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProseFlowResult:
+    lines: tuple[TextLine, ...]
+    decision: ProseFlowDecision
+    column_groups: int
 
 
 def order_regions(
@@ -69,7 +117,6 @@ def order_lines_in_region(
         RegionKind.TITLE,
         RegionKind.LIST,
         RegionKind.CAPTION,
-        RegionKind.FOOTNOTE,
         RegionKind.UNKNOWN,
     }:
         lines, groups = _order_prose_lines(region.native_lines, region.bbox.width)
@@ -89,8 +136,25 @@ def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], Rea
     column_groups = 0
     rotated_lines = 0
     table_regions = 0
+    prose_decisions: list[ProseFlowDecision] = []
     for region in ordered_regions:
-        lines, groups = order_lines_in_region(region)
+        if region.kind in {
+            RegionKind.TEXT,
+            RegionKind.TITLE,
+            RegionKind.LIST,
+            RegionKind.CAPTION,
+            RegionKind.UNKNOWN,
+        }:
+            prose_result = _order_prose_lines_with_decision(
+                region.native_lines,
+                region.bbox.x0,
+                region.bbox.width,
+                region.bbox,
+            )
+            lines, groups = list(prose_result.lines), prose_result.column_groups
+            prose_decisions.append(prose_result.decision)
+        else:
+            lines, groups = order_lines_in_region(region)
         if not lines:
             continue
         if region.kind == RegionKind.TABLE:
@@ -98,7 +162,22 @@ def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], Rea
         column_groups += groups
         rotated_lines += sum(1 for line in lines if line.direction != WritingDirection.LEFT_TO_RIGHT)
         output.extend(lines)
+    ordered_line_set_preserved = _preserves_flat_line_set(
+        [line for region in regions for line in region.native_lines], output
+    )
     output, deduplicated_lines = _deduplicate_adjacent_region_lines(output)
+    (
+        flow_mode,
+        form_score,
+        column_score,
+        lane_count,
+        gutter_count,
+        spanning_count,
+        segment_count,
+        fallback_used,
+        preserved,
+    ) = _aggregate_flow_decisions(prose_decisions)
+    figure_caption_edges, mixed_content_edges = _classify_mixed_edges(ordered_regions, region_edges)
     return output, ReadingOrderDecision(
         region_order=tuple(region.region_id for region in ordered_regions),
         column_groups=column_groups,
@@ -107,7 +186,58 @@ def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], Rea
         native_order_consistency=consistency,
         region_edges=region_edges,
         deduplicated_lines=deduplicated_lines,
+        flow_mode=flow_mode,
+        form_score=form_score,
+        column_score=column_score,
+        lane_count=lane_count,
+        gutter_count=gutter_count,
+        spanning_band_count=spanning_count,
+        flow_segment_count=segment_count,
+        fallback_used=fallback_used,
+        line_preservation_ok=preserved and ordered_line_set_preserved,
+        figure_caption_edges=figure_caption_edges,
+        mixed_content_edges=mixed_content_edges,
     )
+
+
+def _aggregate_flow_decisions(
+    decisions: list[ProseFlowDecision],
+) -> tuple[str, float, float, int, int, int, int, bool, bool]:
+    if not decisions:
+        return "fallback", 0.0, 0.0, 1, 0, 0, 0, False, True
+    modes = [decision.mode for decision in decisions]
+    mode = max(set(modes), key=modes.count)
+    return (
+        mode,
+        round(max(decision.form_score for decision in decisions), 6),
+        round(max(decision.column_score for decision in decisions), 6),
+        max(decision.lane_count for decision in decisions),
+        sum(decision.gutter_count for decision in decisions),
+        sum(decision.spanning_band_count for decision in decisions),
+        sum(decision.flow_segment_count for decision in decisions),
+        any(decision.fallback_used for decision in decisions),
+        all(decision.line_preservation_ok for decision in decisions),
+    )
+
+
+def _classify_mixed_edges(
+    regions: list[LayoutRegion],
+    edges: tuple[tuple[str, str, float], ...],
+) -> tuple[tuple[tuple[str, str, float], ...], tuple[tuple[str, str, float], ...]]:
+    by_id = {region.region_id: region for region in regions}
+    figure_caption: list[tuple[str, str, float]] = []
+    mixed: list[tuple[str, str, float]] = []
+    for edge in edges:
+        first = by_id.get(edge[0])
+        second = by_id.get(edge[1])
+        if first is None or second is None:
+            continue
+        kinds = {first.kind, second.kind}
+        if kinds == {RegionKind.FIGURE, RegionKind.CAPTION}:
+            figure_caption.append(edge)
+        if RegionKind.FIGURE in kinds or RegionKind.CAPTION in kinds:
+            mixed.append(edge)
+    return tuple(figure_caption), tuple(mixed)
 
 
 def _deduplicate_adjacent_region_lines(lines: list[TextLine]) -> tuple[list[TextLine], int]:
@@ -291,7 +421,9 @@ def _region_pair_score(
 
     first_order = _region_native_order(first)
     second_order = _region_native_order(second)
-    if first_order is not None and second_order is not None and first_order != second_order:
+    # Native order is a tie-breaker. It must not overturn strong geometric
+    # evidence such as a persistent side-by-side column relation.
+    if abs(score) < 4.0 and first_order is not None and second_order is not None and first_order != second_order:
         native_weight = 1.0 + 6.0 * (native_consistency or 0.0)
         score += native_weight if first_order < second_order else -native_weight
 
@@ -415,114 +547,333 @@ def _order_table_lines(lines: list[TextLine]) -> list[TextLine]:
         else:
             rows[index].append(line)
             centers[index] = median([item.bbox.cy for item in rows[index]])
-    return [line for row in sorted(rows, key=lambda row: min(item.bbox.y0 for item in row)) for line in sorted(row, key=lambda item: (item.bbox.x0, item.native_order_min or 0))]
+    return [
+        line
+        for row in sorted(rows, key=lambda row: min(item.bbox.y0 for item in row))
+        for line in sorted(row, key=lambda item: (item.bbox.x0, item.native_order_min or 0))
+    ]
 
 
 def _order_prose_lines(lines: list[TextLine], region_width: float) -> tuple[list[TextLine], int]:
-    if len(lines) < 4 or region_width <= 0:
-        return sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
+    if not lines:
+        return [], 0
+    result = _order_prose_lines_with_decision(
+        lines,
+        min(line.bbox.x0 for line in lines),
+        region_width,
+        BBox(
+            min(line.bbox.x0 for line in lines),
+            min(line.bbox.y0 for line in lines),
+            max(line.bbox.x1 for line in lines),
+            max(line.bbox.y1 for line in lines),
+        ),
+    )
+    return list(result.lines), result.column_groups
+
+
+def _order_prose_lines_with_decision(
+    lines: list[TextLine],
+    region_x0: float,
+    region_width: float,
+    region_bbox: BBox,
+) -> _ProseFlowResult:
+    if not lines:
+        decision = ProseFlowDecision("FALLBACK", 0.0, 0.0, 1, 0, ("no_lines",), fallback_used=True)
+        return _ProseFlowResult((), decision, 0)
+    if region_width <= 0:
+        ordered = tuple(sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0)))
+        decision = ProseFlowDecision("FALLBACK", 0.0, 0.0, 1, 0, ("invalid_region_width",), fallback_used=True)
+        return _ProseFlowResult(ordered, decision, 0)
     if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
-        # OCR already ordered these lines in its upright coordinate system.
-        # Sorting by the original page bbox would undo that correction.
-        return list(lines), 0
+        ordered = tuple(lines)
+        decision = ProseFlowDecision(
+            "FALLBACK", 0.0, 0.0, 1, 0,
+            ("canonical_rotated_coordinates",),
+            fallback_used=True,
+            line_preservation_ok=_preserves_flat_line_set(lines, ordered),
+        )
+        return _ProseFlowResult(ordered, decision, 0)
+
     ordered = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
-    if _looks_like_form(ordered):
-        return _order_form_rows(ordered), 0
-    result: list[TextLine] = []
-    current: list[TextLine] = []
-    column_groups = 0
+    gutters = _detect_persistent_gutters(ordered, region_bbox)
+    lanes = _build_reading_lanes(ordered, region_bbox, gutters)
+    form = _score_form_hypothesis(ordered, region_bbox, len(gutters))
+    column = _score_column_hypothesis(ordered, region_bbox, gutters, lanes)
+    margin = max(0.35, 0.12 * max(form.score, column.score, 1.0))
+    if column.score >= 1.0 and column.score >= form.score + margin and len(lanes) >= 2:
+        mode = "MULTI_COLUMN"
+    elif form.score >= 1.0 and form.score >= column.score + margin:
+        mode = "FORM"
+    else:
+        mode = "FALLBACK"
 
-    def flush_chunk(chunk: list[TextLine]) -> None:
-        nonlocal column_groups
-        if not chunk:
-            return
-        columns = _split_columns(chunk, region_width)
-        if len(columns) == 1:
-            result.extend(columns[0])
-        else:
-            column_groups += 1
-            result.extend(line for column in columns for line in column)
+    reasons = tuple(dict.fromkeys((*form.reasons, *column.reasons)))
+    if mode == "MULTI_COLUMN":
+        output, spanning_count, segment_count = _order_lane_segments(ordered, lanes, region_bbox)
+        groups = segment_count
+    elif mode == "FORM":
+        output = _order_form_rows(ordered)
+        spanning_count = 0
+        segment_count = 1
+        groups = 0
+    else:
+        output = ordered
+        spanning_count = 0
+        segment_count = 1
+        groups = 0
+    preserved = _preserves_flat_line_set(lines, output)
+    if not preserved:
+        output = ordered
+        mode = "FALLBACK"
+        reasons = (*reasons, "line_set_preservation_failed")
+    decision = ProseFlowDecision(
+        mode,
+        form.score,
+        column.score,
+        len(lanes),
+        len(gutters),
+        reasons,
+        spanning_count,
+        segment_count,
+        fallback_used=mode == "FALLBACK",
+        line_preservation_ok=preserved,
+    )
+    return _ProseFlowResult(tuple(output), decision, groups)
 
-    # Full-width lines are hard boundaries: emit the preceding prose chunk,
-    # then the band itself, so titles and section dividers retain their
-    # vertical position instead of being appended after all columns.
-    for line in ordered:
-        if line.bbox.width >= region_width * 0.72 or _spans_lanes(line, ordered, region_width):
-            flush_chunk(current)
-            current = []
-            result.append(line)
+
+def _detect_persistent_gutters(
+    lines: list[TextLine],
+    region_bbox: BBox,
+) -> list[tuple[float, float]]:
+    """Find x bands empty across many adaptive vertical bands."""
+    if len(lines) < 4 or region_bbox.width <= 0 or region_bbox.height <= 0:
+        return []
+    band_count = max(4, min(12, max(1, round(math.sqrt(len(lines)) * 2))))
+    occupied_by_band: list[list[tuple[float, float]]] = [[] for _ in range(band_count)]
+    for line in lines:
+        start = int((line.bbox.cy - region_bbox.y0) / region_bbox.height * band_count)
+        start = max(0, min(band_count - 1, start))
+        occupied_by_band[start].append((line.bbox.x0, line.bbox.x1))
+    candidate_gaps: list[tuple[float, float]] = []
+    minimum_gap = max(6.0, region_bbox.width * 0.012)
+    inner_left = region_bbox.x0 + region_bbox.width * 0.04
+    inner_right = region_bbox.x1 - region_bbox.width * 0.04
+    for intervals in occupied_by_band:
+        merged = _merge_intervals(intervals)
+        for first, second in zip(merged, merged[1:]):
+            gap = (first[1], second[0])
+            if gap[1] - gap[0] >= minimum_gap and gap[0] >= inner_left and gap[1] <= inner_right:
+                candidate_gaps.append(gap)
+    if not candidate_gaps:
+        return []
+    clusters: list[list[tuple[float, float]]] = []
+    tolerance = max(6.0, region_bbox.width * 0.025)
+    for gap in sorted(candidate_gaps):
+        center = (gap[0] + gap[1]) / 2.0
+        if not clusters or abs(center - (clusters[-1][0][0] + clusters[-1][0][1]) / 2.0) > tolerance:
+            clusters.append([gap])
         else:
-            current.append(line)
-    flush_chunk(current)
-    return result, column_groups
+            clusters[-1].append(gap)
+    # Sparse synthetic/test layouts may occupy only a few bands. Require at
+    # least three observations when available, while keeping the threshold
+    # adaptive to the selected number of bands.
+    required_observations = min(3, max(2, len(lines) // 2))
+    persistence = max(0.50, min(1.0, required_observations / band_count))
+    return [
+        (median(gap[0] for gap in cluster), median(gap[1] for gap in cluster))
+        for cluster in clusters
+        if len(cluster) / band_count >= persistence
+    ]
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    merged: list[list[float]] = []
+    for start, end in sorted(intervals):
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
+
+
+def _build_reading_lanes(
+    lines: list[TextLine],
+    region_bbox: BBox,
+    gutters: list[tuple[float, float]],
+) -> list[ReadingLane]:
+    edges = [region_bbox.x0]
+    for left, right in gutters:
+        edges.extend((left, right))
+    edges.append(region_bbox.x1)
+    lanes: list[ReadingLane] = []
+    for left, right in zip(edges[::2], edges[1::2]):
+        lane_lines = tuple(
+            line for line in lines
+            if _line_lane_overlap(line, left, right) > 0.0
+        )
+        if right > left:
+            lanes.append(ReadingLane(left, right, lane_lines))
+    return lanes
+
+
+def _line_lane_overlap(line: TextLine, x0: float, x1: float) -> float:
+    return _axis_overlap(line.bbox.x0, line.bbox.x1, x0, x1) / max(line.bbox.width, 1.0)
+
+
+def _score_form_hypothesis(
+    lines: list[TextLine], region_bbox: BBox, gutter_count: int,
+) -> FlowHypothesisScore:
+    rows = _group_form_rows(lines)
+    pair_rows = [row for row in rows if len(row) >= 2]
+    if not rows:
+        return FlowHypothesisScore("FORM", 0.0, ("no_rows",))
+    pair_ratio = len(pair_rows) / len(rows)
+    char_counts = [len("".join(line.text.split())) for line in lines]
+    widths = [line.bbox.width / max(region_bbox.width, 1.0) for line in lines]
+    shortness = 1.0 - min(1.0, median(char_counts) / 120.0)
+    local_gaps: list[float] = []
+    for row in pair_rows:
+        ordered = sorted(row, key=lambda line: line.bbox.x0)
+        local_gaps.extend(
+            max(0.0, second.bbox.x0 - first.bbox.x1) / max(region_bbox.width, 1.0)
+            for first, second in zip(ordered, ordered[1:])
+        )
+    gap_locality = 1.0 - min(1.0, median(local_gaps) / 0.30) if local_gaps else 0.0
+    long_prose = sum(width >= 0.55 or count >= 100 for width, count in zip(widths, char_counts)) / max(len(lines), 1)
+    score = 2.2 * pair_ratio + 0.8 * shortness + 0.6 * gap_locality - 2.0 * long_prose - 1.2 * min(1, gutter_count)
+    reasons = [f"paired_rows={len(pair_rows)}/{len(rows)}"]
+    if long_prose > 0.25:
+        reasons.append("long_prose_penalty")
+    if gutter_count:
+        reasons.append("persistent_gutter_penalty")
+    return FlowHypothesisScore("FORM", max(0.0, score), tuple(reasons))
+
+
+def _score_column_hypothesis(
+    lines: list[TextLine], region_bbox: BBox, gutters: list[tuple[float, float]], lanes: list[ReadingLane],
+) -> FlowHypothesisScore:
+    if len(lanes) < 2 or not gutters:
+        return FlowHypothesisScore("MULTI_COLUMN", 0.0, ("no_persistent_gutter",))
+    populated = [lane for lane in lanes if len(lane.lines) >= 2]
+    continuity = min(1.0, median(len(lane.lines) for lane in populated) / 4.0) if populated else 0.0
+    stable = min(1.0, len(populated) / len(lanes))
+    long_prose = sum(
+        line.bbox.width >= region_bbox.width * 0.20 or len("".join(line.text.split())) >= 40
+        for line in lines
+    ) / max(len(lines), 1)
+    gutter_ratio = median((right - left) / max(region_bbox.width, 1.0) for left, right in gutters)
+    gutter_strength = min(1.0, gutter_ratio / 0.08)
+    lane_widths = [lane.x1 - lane.x0 for lane in lanes]
+    lane_balance = min(lane_widths) / max(lane_widths) if lane_widths and max(lane_widths) > 0 else 0.0
+    score = (
+        2.0 * min(1.0, len(gutters) / 2.0) * gutter_strength
+        + 1.4 * stable * lane_balance
+        + continuity * lane_balance
+        + 0.8 * long_prose
+    )
+    reasons = [f"persistent_gutters={len(gutters)}", f"populated_lanes={len(populated)}/{len(lanes)}"]
+    if long_prose >= 0.5:
+        reasons.append("vertical_prose_continuity")
+    if gutter_strength < 0.75:
+        reasons.append("narrow_local_gap")
+    if lane_balance < 0.50:
+        reasons.append("unbalanced_form_like_lanes")
+    return FlowHypothesisScore("MULTI_COLUMN", score, tuple(reasons))
+
+
+def _group_form_rows(lines: list[TextLine]) -> list[list[TextLine]]:
+    if not lines:
+        return []
+    heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    tolerance = max(3.0, (median(heights) if heights else 10.0) * 0.75)
+    rows: list[list[TextLine]] = []
+    centers: list[float] = []
+    for line in sorted(lines, key=lambda item: (item.bbox.cy, item.bbox.x0)):
+        index = min(range(len(centers)), key=lambda item: abs(centers[item] - line.bbox.cy), default=None)
+        if index is None or abs(centers[index] - line.bbox.cy) > tolerance:
+            rows.append([line])
+            centers.append(line.bbox.cy)
+        else:
+            rows[index].append(line)
+            centers[index] = median(item.bbox.cy for item in rows[index])
+    return rows
+
+
+def _order_lane_segments(
+    lines: list[TextLine], lanes: list[ReadingLane], region_bbox: BBox,
+) -> tuple[list[TextLine], int, int]:
+    assignments: dict[int, list[TextLine]] = {index: [] for index in range(len(lanes))}
+    spanning: list[TextLine] = []
+    for line in lines:
+        overlaps = [_line_lane_overlap(line, lane.x0, lane.x1) for lane in lanes]
+        relevant = [index for index, overlap in enumerate(overlaps) if overlap >= 0.20]
+        covered = sum(_axis_overlap(line.bbox.x0, line.bbox.x1, lane.x0, lane.x1) for lane in lanes)
+        combined = sum(lane.x1 - lane.x0 for lane in lanes)
+        if len(relevant) >= 2 or covered / max(combined, 1.0) >= 0.70:
+            spanning.append(line)
+        else:
+            assignments[max(range(len(lanes)), key=lambda index: overlaps[index])].append(line)
+
+    spans = sorted(spanning, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    boundaries = [region_bbox.y0, *(line.bbox.cy for line in spans), region_bbox.y1]
+    output: list[TextLine] = []
+    segment_count = 0
+    for segment_index in range(len(boundaries) - 1):
+        top, bottom = boundaries[segment_index], boundaries[segment_index + 1]
+        has_lines = any(
+            top <= line.bbox.cy < bottom or (segment_index == len(boundaries) - 2 and top <= line.bbox.cy <= bottom)
+            for lane in assignments.values() for line in lane
+        )
+        if has_lines:
+            segment_count += 1
+            for lane_index in range(len(lanes)):
+                output.extend(
+                    sorted(
+                        (
+                            line for line in assignments[lane_index]
+                            if top <= line.bbox.cy < bottom
+                            or (segment_index == len(boundaries) - 2 and top <= line.bbox.cy <= bottom)
+                        ),
+                        key=lambda line: (line.bbox.y0, line.bbox.x0),
+                    )
+                )
+        if segment_index < len(spans):
+            output.append(spans[segment_index])
+    if not _preserves_flat_line_set(lines, output):
+        return sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0, 1
+    return output, len(spans), max(1, segment_count)
+
+
+def _preserves_flat_line_set(
+    lines: list[TextLine] | tuple[TextLine, ...],
+    output: list[TextLine] | tuple[TextLine, ...],
+) -> bool:
+    input_ids = [id(line) for line in lines]
+    output_ids = [id(line) for line in output]
+    return len(output_ids) == len(input_ids) and sorted(output_ids) == sorted(input_ids)
 
 
 def _split_columns(lines: list[TextLine], region_width: float) -> list[list[TextLine]]:
-    if len(lines) < 4:
-        return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-    # Cluster x0 starts rather than splitting at one accidental large gap.
-    # This is stable when a paragraph begins with an indent or a short bullet.
-    starts = sorted(line.bbox.x0 for line in lines)
-    tolerance = max(12.0, region_width * 0.045)
-    clusters: list[list[float]] = []
-    for start in starts:
-        if not clusters or abs(start - median(clusters[-1])) > tolerance:
-            clusters.append([start])
-        else:
-            clusters[-1].append(start)
-    if len(clusters) < 2:
-        return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-
-    # Build column edges and validate minimum separation between each pair.
-    column_edges = [median(c) for c in clusters]
-    min_col_separation = max(18.0, region_width * 0.10)
-    for i in range(len(column_edges) - 1):
-        if column_edges[i + 1] - column_edges[i] < min_col_separation:
-            return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-
-    # Assign each line to the nearest column edge.
-    columns: list[list[TextLine]] = [[] for _ in column_edges]
-    for line in lines:
-        nearest = min(range(len(column_edges)), key=lambda i: abs(line.bbox.x0 - column_edges[i]))
-        columns[nearest].append(line)
-
-    # A singleton cluster is not evidence of a real column, but its line is
-    # still content.  Keep it as an orphan and reassign it to the nearest
-    # validated lane instead of dropping it silently.
-    valid_indices = [index for index, column in enumerate(columns) if len(column) >= 2]
-    if len(valid_indices) < 2:
-        return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-
-    valid_columns = [columns[index] for index in valid_indices]
-
-    # A short punctuation mark or an indented continuation is not a column.
-    # Requiring a meaningful median line width on all sides keeps the split
-    # conservative while still accepting ordinary narrow newspaper columns.
-    min_col_width = max(24.0, region_width * 0.12)
-    if any(
-        median(line.bbox.width for line in col) < min_col_width
-        for col in valid_columns
-    ):
-        return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-
-    for index, column in enumerate(columns):
-        if index in valid_indices:
-            continue
-        for line in column:
-            target_index = min(
-                valid_indices,
-                key=lambda candidate: abs(line.bbox.x0 - column_edges[candidate]),
-            )
-            columns[target_index].append(line)
-
-    valid_columns = [
-        sorted(columns[index], key=lambda line: (line.bbox.y0, line.bbox.x0))
-        for index in valid_indices
-    ]
-    if not _preserves_line_set(lines, valid_columns):
-        return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
-
-    return valid_columns
+    # Keep this compatibility helper on the same geometry-first path as the
+    # main flow decision. In particular, do not use x0 alone for assignment.
+    if lines and region_width > 0:
+        bbox = BBox(
+            min(line.bbox.x0 for line in lines),
+            min(line.bbox.y0 for line in lines),
+            min(line.bbox.x0 for line in lines) + region_width,
+            max(line.bbox.y1 for line in lines),
+        )
+        gutters = _detect_persistent_gutters(lines, bbox)
+        lanes = _build_reading_lanes(lines, bbox, gutters)
+        if len(lanes) >= 2 and all(len(lane.lines) >= 2 for lane in lanes):
+            columns: list[list[TextLine]] = [[] for _ in lanes]
+            for line in lines:
+                overlaps = [_line_lane_overlap(line, lane.x0, lane.x1) for lane in lanes]
+                columns[max(range(len(lanes)), key=lambda index: overlaps[index])].append(line)
+            columns = [sorted(column, key=lambda line: (line.bbox.y0, line.bbox.x0)) for column in columns]
+            if _preserves_line_set(lines, columns):
+                return columns
+    return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
 
 
 def _preserves_line_set(lines: list[TextLine], columns: list[list[TextLine]]) -> bool:
@@ -575,4 +926,8 @@ def _order_form_rows(lines: list[TextLine]) -> list[TextLine]:
         else:
             rows[index].append(line)
             centers[index] = median(item.bbox.cy for item in rows[index])
-    return [line for row in sorted(rows, key=lambda item: min(line.bbox.y0 for line in item)) for line in sorted(row, key=lambda item: item.bbox.x0)]
+    return [
+        line
+        for row in sorted(rows, key=lambda item: min(line.bbox.y0 for line in item))
+        for line in sorted(row, key=lambda item: item.bbox.x0)
+    ]

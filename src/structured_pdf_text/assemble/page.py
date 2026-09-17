@@ -46,6 +46,17 @@ def assemble_page(
             "native_order_consistency": reading_decision.native_order_consistency,
             "reading_region_edges": [list(edge) for edge in reading_decision.region_edges],
             "reading_deduplicated_lines": reading_decision.deduplicated_lines,
+            "reading_flow_mode": reading_decision.flow_mode,
+            "reading_form_score": reading_decision.form_score,
+            "reading_column_score": reading_decision.column_score,
+            "reading_lane_count": reading_decision.lane_count,
+            "reading_gutter_count": reading_decision.gutter_count,
+            "reading_spanning_band_count": reading_decision.spanning_band_count,
+            "reading_flow_segment_count": reading_decision.flow_segment_count,
+            "reading_fallback_used": reading_decision.fallback_used,
+            "reading_line_preservation_ok": reading_decision.line_preservation_ok,
+            "figure_caption_edges": [list(edge) for edge in reading_decision.figure_caption_edges],
+            "mixed_content_edges": [list(edge) for edge in reading_decision.mixed_content_edges],
         }
     )
     return StructuredPage(

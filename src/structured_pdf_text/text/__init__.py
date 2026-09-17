@@ -2,10 +2,19 @@ from .line_detector import GapObservation, lines_to_text, reconstruct_native_lin
 from .lists import ListLineAssignment, ListSegment, ListSegmentationResult, segment_list_lines
 from .normalize import normalize_text
 from .word_detector import Word, words_from_line
-from .reading_order import ReadingOrderDecision, order_region_lines
+from .reading_order import (
+    FlowHypothesisScore,
+    ProseFlowDecision,
+    ReadingLane,
+    ReadingOrderDecision,
+    order_region_lines,
+)
 
 __all__ = [
     "ReadingOrderDecision",
+    "FlowHypothesisScore",
+    "ProseFlowDecision",
+    "ReadingLane",
     "Word",
     "lines_to_text",
     "normalize_text",

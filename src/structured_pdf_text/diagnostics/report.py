@@ -26,6 +26,9 @@ def document_report(document: StructuredDocument) -> str:
                 f"text_coverage={page.diagnostics.facts.get('text_coverage', '?')} "
                 f"image_coverage={page.diagnostics.facts.get('image_coverage', '?')} "
                 f"tables={page.diagnostics.tables} "
+                f"flow_mode={page.diagnostics.facts.get('reading_flow_mode', '?')} "
+                f"lanes={page.diagnostics.facts.get('reading_lane_count', '?')} "
+                f"gutters={page.diagnostics.facts.get('reading_gutter_count', '?')} "
                 f"ocr_outcome={page.diagnostics.facts.get('ocr_outcome', 'not_requested')} "
                 f"page_ms={page.diagnostics.processing_time_ms if page.diagnostics.processing_time_ms is not None else '?'}"
         )
