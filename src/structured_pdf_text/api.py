@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import asdict, replace
 
 try:
     import resource as _resource
@@ -57,6 +58,10 @@ from .ocr.recovery import (
 from .ocr.quality import assess_ocr_quality
 from .tables.detector import detect_tables_native
 from .tables.visual import detect_visual_table
+from .tables.validation import (
+    build_table_construction_diagnostics,
+    validate_table_geometry,
+)
 from .text.line_detector import reconstruct_native_lines, spacing_diagnostics
 from .geometry import BBox
 
@@ -237,6 +242,9 @@ class PdfTextExtractor:
                 ocr_batches_total = None
                 ocr_table_tokens = 0
                 ocr_figure_tokens = 0
+                table_validation_facts: list[dict[str, Any]] = []
+                table_construction_facts: list[dict[str, Any]] = []
+                table_source_provenance: list[dict[str, Any]] = []
                 ocr_region_stats: dict[str, dict[str, Any]] = {}
                 ocr_targeted_stats: dict[str, dict[str, Any]] = {}
                 ocr_targeted_passes = 0
@@ -583,6 +591,18 @@ class PdfTextExtractor:
                             ocr_passes_total = (ocr_passes_total or 0) + table_passes
                             ocr_batches_total = (ocr_batches_total or 0) + table_batches
                         tables = [visual_table]
+                (
+                    tables,
+                    table_validation_facts,
+                    table_construction_facts,
+                    table_source_provenance,
+                ) = _validate_detected_tables(
+                    tables=tables,
+                    regions=regions,
+                    extra_lines=ocr_lines,
+                    table_ocr_overrides=table_ocr_overrides,
+                    warnings=warnings,
+                )
                 if use_ocr_as_primary and any(table.method == TableMethod.VISUAL_MODEL for table in tables):
                     # In OCR-primary mode the page region would otherwise
                     # bypass table-aware reading order entirely.
@@ -728,6 +748,15 @@ class PdfTextExtractor:
                         "table_count": len(tables),
                         "table_methods": [table.method.value for table in tables],
                         "table_confidences": [table.confidence for table in tables],
+                        "table_geometry_valid": [item["valid"] for item in table_validation_facts],
+                        "table_row_monotonicity": [item["row_monotonicity"] for item in table_validation_facts],
+                        "table_column_monotonicity": [item["column_monotonicity"] for item in table_validation_facts],
+                        "table_cell_coverage": [item["token_coverage"] for item in table_validation_facts],
+                        "table_token_coverage": [item["token_coverage"] for item in table_validation_facts],
+                        "table_empty_cell_ratio": [item["empty_cell_ratio"] for item in table_validation_facts],
+                        "table_source_provenance": table_source_provenance,
+                        "table_construction_diagnostics": table_construction_facts,
+                        "table_geometry_validation": table_validation_facts,
                         "timings_ms": timings,
                         **complexity.facts,
                     },
@@ -1166,6 +1195,99 @@ def _append_hybrid_ocr_regions(
         regions.append(supplemental)
 
 
+def _validate_detected_tables(
+    *,
+    tables: list[Any],
+    regions: list[LayoutRegion],
+    extra_lines: list[TextLine],
+    table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]],
+    warnings: list[str],
+) -> tuple[list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate table candidates and retain rejected content as ordinary text."""
+    valid_tables: list[Any] = []
+    validation_facts: list[dict[str, Any]] = []
+    construction_facts: list[dict[str, Any]] = []
+    provenance_facts: list[dict[str, Any]] = []
+    for table in tables:
+        source_lines = _source_lines_for_table(
+            table,
+            regions,
+            extra_lines,
+            table_ocr_overrides,
+        )
+        direction = _table_writing_direction(source_lines)
+        validation = validate_table_geometry(
+            table,
+            writing_direction=direction,
+            source_lines=source_lines,
+        )
+        construction = build_table_construction_diagnostics(
+            table,
+            source_lines=source_lines,
+            writing_direction=direction,
+            region_bbox=_table_region_bbox(table, regions),
+        )
+        validation_facts.append(asdict(validation))
+        construction_data = asdict(construction)
+        construction_facts.append(construction_data)
+        provenance_facts.append(
+            {
+                "candidate_id": table.table_id,
+                "sources": list(construction.token_sources),
+            }
+        )
+        if validation.valid:
+            valid_tables.append(table)
+        else:
+            warnings.append("table_structure_uncertain")
+    return valid_tables, validation_facts, construction_facts, provenance_facts
+
+
+def _source_lines_for_table(
+    table: Any,
+    regions: list[LayoutRegion],
+    extra_lines: list[TextLine],
+    overrides: dict[str, tuple[list[Any], list[OcrToken]]],
+) -> list[TextLine]:
+    boxes = [fragment.bbox for fragment in table.page_fragments if fragment.bbox is not None]
+    if not boxes:
+        return []
+    override = overrides.get(table.table_id)
+    candidates: list[TextLine] = []
+    if override is not None:
+        candidates.extend(override[0])
+    for region in regions:
+        if any(_line_in_box(region, box) for box in boxes):
+            candidates.extend(region.native_lines)
+    candidates.extend(extra_lines)
+    output: list[TextLine] = []
+    seen: set[int] = set()
+    for line in candidates:
+        if id(line) in seen:
+            continue
+        if any(_line_in_box(line, box) for box in boxes):
+            output.append(line)
+            seen.add(id(line))
+    return output
+
+
+def _table_region_bbox(table: Any, regions: list[LayoutRegion]) -> BBox | None:
+    boxes = [fragment.bbox for fragment in table.page_fragments if fragment.bbox is not None]
+    for region in regions:
+        if boxes and any(_line_in_box(region, box) for box in boxes):
+            return region.bbox
+    return BBox.union_all(boxes) if boxes else None
+
+
+def _table_writing_direction(lines: list[TextLine]) -> WritingDirection:
+    directions = {line.direction for line in lines}
+    if WritingDirection.RIGHT_TO_LEFT in directions:
+        return WritingDirection.RIGHT_TO_LEFT
+    if WritingDirection.TOP_TO_BOTTOM in directions:
+        return WritingDirection.TOP_TO_BOTTOM
+    return WritingDirection.LEFT_TO_RIGHT
+
+
 def _line_in_box(value: Any, box: BBox) -> bool:
     bbox = value.bbox
     return bbox.overlap_ratio(box) >= 0.25 or box.overlap_ratio(bbox) >= 0.25
@@ -1302,7 +1424,10 @@ def _refine_visual_table_ocr(
             goal=RegionRefinementGoal.TEXT,
         ),
     )
-    refined_tokens = list(result.tokens)
+    refined_tokens = [
+        replace(token, provenance="visual_table_refinement")
+        for token in result.tokens
+    ]
     if not refined_tokens:
         return None
     refined_table = detect_visual_table(
@@ -1371,7 +1496,10 @@ def _refine_figure_ocr(
                 goal=RegionRefinementGoal.TEXT,
             ),
         )
-        figure_tokens = list(result.tokens)
+        figure_tokens = [
+            replace(token, provenance="figure_ocr")
+            for token in result.tokens
+        ]
         if not figure_tokens:
             continue
         all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox)

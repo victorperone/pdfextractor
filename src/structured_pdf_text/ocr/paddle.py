@@ -224,7 +224,13 @@ class PaddleOcrEngine:
             page_index=page_index,
         )
         raw = self._predict_counted(ocr, page_image)
-        tokens = _tokens_from_result(raw, page_index, page_image, page_bbox)
+        tokens = _tokens_from_result(
+            raw,
+            page_index,
+            page_image,
+            page_bbox,
+            provenance="baseline",
+        )
         # F25: when the first pass returns nothing, try all four orientations
         # before giving up. A sideways or upside-down scan would otherwise
         # produce an empty result with no rotation fallback.
@@ -276,6 +282,7 @@ class PaddleOcrEngine:
                 coordinate_size=original_size,
                 box_transform=transform,
                 rotation=angle,
+                provenance="orientation_recovery",
             )
             orientation_name = f"rotation-{angle}"
             orientation_candidates.append(
@@ -370,6 +377,7 @@ class PaddleOcrEngine:
                         coordinate_size=orientation_context.source_size,
                         box_transform=orientation_context.box_transform,
                         rotation=orientation_context.angle,
+                        provenance=f"quality_variant:{variant.name}",
                     )
                     candidate = _make_candidate(
                         variant.name,
@@ -662,6 +670,7 @@ def _tokens_from_result(
     coordinate_size: tuple[int, int] | None = None,
     box_transform: Callable[[float, float, float, float, int, int], tuple[float, float, float, float]] | None = None,
     rotation: int = 0,
+    provenance: str | None = None,
 ) -> list[OcrToken]:
     width, height = _image_size(image)
     coordinate_width, coordinate_height = coordinate_size or (width, height)
@@ -699,6 +708,7 @@ def _tokens_from_result(
                 language=None,
                 source=SourceKind.OCR_PAGE,
                 rotation=effective_rotation,
+                provenance=provenance or ("orientation_recovery" if rotation else "baseline"),
             )
         )
     return tokens
@@ -1075,7 +1085,7 @@ def _spatial_consensus(
         current_key = " ".join(current.text.strip().split()).casefold()
         family_count = len({_candidate_family(candidate) for candidate, _ in consensus})
         if family_count >= 2 and alternate_confidence > current_confidence and alternate_key != current_key:
-            merged[index] = best_alternate
+            merged[index] = _mark_consensus(best_alternate, "spatial_consensus")
             replacements += 1
         elif (
             len(consensus) == 1
@@ -1083,7 +1093,7 @@ def _spatial_consensus(
             and current_confidence < 0.65
             and _has_no_neighbor_conflict(merged, index, best_alternate)
         ):
-            merged[index] = best_alternate
+            merged[index] = _mark_consensus(best_alternate, "spatial_consensus")
             replacements += 1
 
     insertion_groups: dict[tuple[int, int, str], list[tuple[OcrCandidate, OcrToken]]] = {}
@@ -1099,7 +1109,8 @@ def _spatial_consensus(
             insertion_groups.setdefault(key, []).append((candidate, token))
     for tokens in insertion_groups.values():
         if len({_candidate_family(candidate) for candidate, _ in tokens}) >= 2:
-            merged.append(max((token for _, token in tokens), key=lambda token: token.confidence or 0.0))
+            best_token = max((token for _, token in tokens), key=lambda token: token.confidence or 0.0)
+            merged.append(_mark_consensus(best_token, "spatial_consensus"))
             insertions += 1
     return (
         _remove_contained_fragments(sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))),
@@ -1169,9 +1180,17 @@ def _line_level_consensus(
             token for token in merged
             if _bbox_overlap(token.bbox, primary_line.bbox) < 0.20
         ]
-        merged.extend(replacement_tokens)
+        merged.extend(_mark_consensus(token, "line_consensus") for token in replacement_tokens)
         replacements += 1
     return sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0)), replacements
+
+
+def _mark_consensus(token: OcrToken, stage: str) -> OcrToken:
+    existing = token.provenance or "unknown"
+    stages = existing.split("|")
+    if stage in stages:
+        return token
+    return replace(token, provenance="|".join((stage, *stages)))
 
 
 def _bbox_overlap(first: BBox, second: BBox) -> float:

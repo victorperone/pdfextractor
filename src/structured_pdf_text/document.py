@@ -200,6 +200,7 @@ class OcrToken:
     language: str | None
     source: SourceKind
     rotation: int = 0
+    provenance: str | None = None
 
 
 @dataclass(slots=True)
@@ -216,6 +217,7 @@ class TextToken:
     fill_color: tuple[int, int, int, int] | None = None
     stroke_color: tuple[int, int, int, int] | None = None
     text_render_mode: int | str | None = None
+    provenance: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -399,6 +399,7 @@ def _map_token_to_page(
         language=token.language,
         source=SourceKind.OCR_REGION,
         rotation=0,
+        provenance="targeted_region_recovery",
     )
 
 

@@ -21,6 +21,12 @@ from .text_tracks import (
 )
 from .visual import VisualGrid, detect_visual_grid, detect_visual_table
 from .visual_engine import OpenCvTableStructureEngine, TableStructureEngine
+from .validation import (
+    TableConstructionDiagnostics,
+    TableGeometryValidation,
+    build_table_construction_diagnostics,
+    validate_table_geometry,
+)
 
 __all__ = [
     "RowSignature",
@@ -43,4 +49,8 @@ __all__ = [
     "resolve_cross_page_tables",
     "resolve_cross_page_tables_with_diagnostics",
     "table_signature",
+    "TableConstructionDiagnostics",
+    "TableGeometryValidation",
+    "build_table_construction_diagnostics",
+    "validate_table_geometry",
 ]

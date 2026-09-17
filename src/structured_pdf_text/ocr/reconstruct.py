@@ -89,6 +89,7 @@ def reconstruct_ocr_lines(
                     sources=[EvidenceRef(token.source or SourceKind.OCR_PAGE, page_index, f"ocr:{line_index}:{token_index}")],
                     confidence=max(0.0, min(1.0, token.confidence if token.confidence is not None else 0.0)),
                     normalized_text=normalize_text(token.text),
+                    provenance=token.provenance or _default_ocr_provenance(token),
                 )
             )
             previous = token
@@ -106,6 +107,14 @@ def reconstruct_ocr_lines(
     if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
         return lines
     return sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+
+
+def _default_ocr_provenance(token: OcrToken) -> str:
+    if token.source == SourceKind.OCR_REGION:
+        return "targeted_region_recovery"
+    if token.source == SourceKind.TABLE_MODEL:
+        return "visual_table_refinement"
+    return "baseline"
 
 
 def _should_insert_space(
