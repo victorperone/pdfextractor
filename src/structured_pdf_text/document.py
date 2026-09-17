@@ -241,6 +241,8 @@ class TextLine:
     direction: WritingDirection
     native_order_min: int | None
     native_order_max: int | None
+    gap_mode: str = "fallback"
+    order_mode: str = "geometry"
 
     @property
     def text(self) -> str:
@@ -264,6 +266,8 @@ class LayoutRegion:
     ocr_tokens: list[OcrToken]
     quality: RegionQuality
     heading_level: int | None = None  # 1, 2 ou 3; None para regiões não-título
+    ocr_lines: list[TextLine] = field(default_factory=list)
+    semantic_role: str | None = None
 
 
 @dataclass(slots=True)

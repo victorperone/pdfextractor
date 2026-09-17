@@ -268,7 +268,7 @@ class PdfTextExtractor:
                 ):
                     # The visible native stream has already been recovered;
                     # a second OCR pass would reintroduce duplicate text on
-                    # metadata-rotated pages such as GS2-P34.
+                    # pages whose visible native stream was already recovered.
                     page_ocr_requested = False
                     promotion_reasons.append("page_ocr_suppressed_visible_native_stream")
                 selected_regions = [
@@ -282,6 +282,14 @@ class PdfTextExtractor:
                     ocr_available_by_mode and selected_regions and not page_ocr_requested
                 )
                 ocr_requested = page_ocr_requested or region_ocr_requested
+                figure_ocr_requested = bool(
+                    ocr_available_by_mode
+                    and self.ocr_engine is not None
+                    and native_page.objects.images
+                    and not page_ocr_requested
+                    and _figures_need_ocr(native_page, selected_regions)
+                )
+                figure_ocr_bindings: list[tuple[BBox, list[TextLine], list[OcrToken]]] = []
                 if ocr_requested:
                     ocr_image = rendered_page
                     ocr_render_start = time.perf_counter()
@@ -394,7 +402,35 @@ class PdfTextExtractor:
                                     f"OCR optional attempt unavailable: {attempt_error}"
                                 )
 
-                if ocr_requested and self.ocr_engine is not None and ocr_image is not None:
+                if figure_ocr_requested and ocr_image is None:
+                    ocr_image = rendered_page
+                    if (
+                        ocr_image is None
+                        or self.config.ocr_render_scale > self.config.complexity_render_scale
+                    ):
+                        try:
+                            ocr_image = source.render_page(
+                                page_index,
+                                scale=_safe_complexity_scale(
+                                    native_page.bbox.area,
+                                    self.config.security_limits.max_render_pixels,
+                                    self.config.ocr_render_scale,
+                                ),
+                            )
+                        except FatalExtractionError:
+                            raise
+                        except Exception as exc:
+                            raise_if_resource_exhausted(
+                                exc,
+                                page_index=page_index,
+                                stage="figure_ocr_render",
+                                details=_process_memory_snapshot(),
+                            )
+                            warnings.append(
+                                f"Figure OCR render unavailable: {type(exc).__name__}: {exc}"
+                            )
+
+                if figure_ocr_requested and self.ocr_engine is not None and ocr_image is not None:
                     figure_start = time.perf_counter()
                     figure_refinements = _refine_figure_ocr(
                         engine=self.ocr_engine,
@@ -402,18 +438,26 @@ class PdfTextExtractor:
                         page=native_page,
                         page_index=page_index,
                         native_lines=native_lines,
+                        quality_policy=effective_ocr_quality_policy(self.config).value,
                     )
                     if figure_refinements:
                         for (
                             box,
-                            _all_lines,
+                            all_lines,
                             all_tokens,
-                            _figure_lines,
-                            _figure_tokens,
+                            figure_lines,
+                            figure_tokens,
                             passes,
                             batches,
                         ) in figure_refinements:
                             ocr_tokens = _replace_tokens_in_box(ocr_tokens, box, all_tokens)
+                            figure_ocr_bindings.append((box, figure_lines, figure_tokens))
+                            _bind_figure_ocr_to_regions(
+                                regions,
+                                box,
+                                figure_lines,
+                                figure_tokens,
+                            )
                             ocr_figure_tokens += len(all_tokens)
                             ocr_passes_total = (ocr_passes_total or 0) + passes
                             ocr_batches_total = (ocr_batches_total or 0) + batches
@@ -559,6 +603,7 @@ class PdfTextExtractor:
                                 page_index=page_index,
                                 table=visual_table,
                                 native_lines=native_lines,
+                                quality_policy=effective_ocr_quality_policy(self.config).value,
                             )
                         except FatalExtractionError:
                             raise
@@ -616,8 +661,9 @@ class PdfTextExtractor:
                         page_bbox=native_page.bbox,
                         complexity=complexity,
                         table_ocr_overrides=table_ocr_overrides,
+                        figure_ocr_bindings=figure_ocr_bindings,
                     )
-                elif not use_ocr_as_primary and unmatched_ocr_lines:
+                elif not use_ocr_as_primary and (unmatched_ocr_lines or figure_ocr_bindings):
                     _append_hybrid_ocr_regions(
                         regions=regions,
                         tables=tables,
@@ -627,6 +673,7 @@ class PdfTextExtractor:
                         page_bbox=native_page.bbox,
                         complexity=complexity,
                         table_ocr_overrides=table_ocr_overrides,
+                        figure_ocr_bindings=figure_ocr_bindings,
                     )
                 timings["table_ms"] = (time.perf_counter() - table_start) * 1000
                 elapsed_ms = (time.perf_counter() - start) * 1000
@@ -635,9 +682,10 @@ class PdfTextExtractor:
                 actual_strategy = complexity.recommended_strategy
                 if page_ocr_requested:
                     actual_strategy = PageStrategy.OCR_CANDIDATE
-                elif region_ocr_requested and ocr_tokens:
+                elif (region_ocr_requested or figure_ocr_requested) and ocr_tokens:
                     actual_strategy = PageStrategy.MIXED
-                if not ocr_requested:
+                ocr_any_requested = ocr_requested or figure_ocr_requested
+                if not ocr_any_requested:
                     ocr_outcome = "not_requested"
                     ocr_degraded = False
                     ocr_degraded_reasons: list[str] = []
@@ -653,7 +701,7 @@ class PdfTextExtractor:
                         if self.ocr_engine is not None and ocr_image is not None
                         else "ocr_unavailable"
                     ]
-                ocr_diag_engine = self.ocr_engine if ocr_requested else None
+                ocr_diag_engine = self.ocr_engine if ocr_any_requested else None
                 diagnostics = PageDiagnostics(
                     page_index=page_index,
                     strategy=actual_strategy,
@@ -670,7 +718,7 @@ class PdfTextExtractor:
                         **spacing_diagnostics(native_lines),
                         "layout_regions": len(regions),
                         "layout_engine": type(self.layout_engine).__name__ if len(regions) > 0 else None,
-                        "ocr_requested": ocr_requested,
+                        "ocr_requested": ocr_any_requested,
                         "ocr_outcome": ocr_outcome,
                         "ocr_degraded": ocr_degraded,
                         "ocr_degraded_reasons": ocr_degraded_reasons,
@@ -1146,6 +1194,7 @@ def _append_hybrid_ocr_regions(
     page_bbox: BBox,
     complexity: Any,
     table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] | None = None,
+    figure_ocr_bindings: list[tuple[BBox, list[TextLine], list[OcrToken]]] | None = None,
 ) -> None:
     """Attach unmatched OCR to tables/remaining body without duplicating regions."""
     remaining = list(unmatched_lines)
@@ -1174,6 +1223,23 @@ def _append_hybrid_ocr_regions(
         regions.append(table_region)
         remaining = [line for line in remaining if not _line_in_box(line, table_bbox)]
 
+    figure_boxes: list[BBox] = []
+    for index, (figure_bbox, figure_lines, figure_tokens) in enumerate(
+        figure_ocr_bindings or (),
+        start=1,
+    ):
+        figure_boxes.append(figure_bbox)
+        existing = _best_figure_region(regions, figure_bbox)
+        if existing is None:
+            existing = full_page_text_region(page_index, figure_bbox, [], complexity)
+            existing.region_id = f"page-{page_index + 1}:figure-{index}:ocr"
+            existing.kind = RegionKind.FIGURE
+            existing.layout_confidence = 0.85
+            regions.append(existing)
+        existing.ocr_lines = list(figure_lines)
+        existing.ocr_tokens = list(figure_tokens)
+        remaining = [line for line in remaining if not _line_in_box(line, figure_bbox)]
+
     edge_boxes = [
         region.bbox
         for region in regions
@@ -1182,7 +1248,7 @@ def _append_hybrid_ocr_regions(
     remaining = [
         line
         for line in remaining
-        if not any(_line_in_box(line, box) for box in edge_boxes)
+        if not any(_line_in_box(line, box) for box in edge_boxes + table_boxes + figure_boxes)
     ]
     if remaining:
         supplemental = full_page_text_region(page_index, page_bbox, remaining, complexity)
@@ -1190,9 +1256,56 @@ def _append_hybrid_ocr_regions(
         supplemental.ocr_tokens = [
             token
             for token in unmatched_tokens
-            if not any(_line_in_box(token, box) for box in edge_boxes + table_boxes)
+            if not any(_line_in_box(token, box) for box in edge_boxes + table_boxes + figure_boxes)
         ]
         regions.append(supplemental)
+
+
+def _best_figure_region(
+    regions: list[LayoutRegion],
+    figure_bbox: BBox,
+) -> LayoutRegion | None:
+    candidates = [
+        region
+        for region in regions
+        if region.kind == RegionKind.FIGURE and region.bbox.iou(figure_bbox) >= 0.25
+    ]
+    return max(
+        candidates,
+        key=lambda region: region.bbox.iou(figure_bbox),
+        default=None,
+    )
+
+
+def _bind_figure_ocr_to_regions(
+    regions: list[LayoutRegion],
+    figure_bbox: BBox,
+    figure_lines: list[TextLine],
+    figure_tokens: list[OcrToken],
+) -> None:
+    region = _best_figure_region(regions, figure_bbox)
+    if region is None:
+        return
+    region.ocr_lines = list(figure_lines)
+    region.ocr_tokens = list(figure_tokens)
+
+
+def _figures_need_ocr(
+    page: NativePageEvidence,
+    selected_regions: list[LayoutRegion],
+) -> bool:
+    image_boxes = [image.bbox for image in page.objects.images if image.bbox is not None]
+    if not image_boxes:
+        return False
+    for image_bbox in image_boxes:
+        covered = any(
+            region.bbox.overlap_ratio(image_bbox) >= 0.80
+            or image_bbox.overlap_ratio(region.bbox) >= 0.80
+            for region in selected_regions
+        )
+        if not covered:
+            return True
+    return False
 
 
 def _validate_detected_tables(
@@ -1406,9 +1519,15 @@ def _refine_visual_table_ocr(
     page_index: int,
     table: Any,
     native_lines: list[TextLine],
+    quality_policy: str = "baseline",
 ) -> tuple[Any, list[TextLine], list[OcrToken], int, int] | None:
     """Run a quality-first OCR pass over a detected visual table crop."""
-    if engine is None or page_image is None or not table.page_fragments:
+    if (
+        engine is None
+        or page_image is None
+        or not table.page_fragments
+        or str(quality_policy).lower() == "baseline"
+    ):
         return None
     boxes = [fragment.bbox for fragment in table.page_fragments if fragment.bbox is not None]
     if not boxes:
@@ -1421,6 +1540,7 @@ def _refine_visual_table_ocr(
         RegionRefinementRequest(
             bbox=table_bbox,
             quality_variants=True,
+            quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
         ),
     )
@@ -1453,6 +1573,7 @@ def _refine_figure_ocr(
     page: Any,
     page_index: int,
     native_lines: list[TextLine],
+    quality_policy: str = "baseline",
 ) -> list[
     tuple[
         BBox,
@@ -1491,8 +1612,8 @@ def _refine_figure_ocr(
             page.bbox,
             RegionRefinementRequest(
                 bbox=figure_bbox,
-                quality_variants=True,
-                quality_policy=getattr(engine, "quality_policy", "baseline"),
+                quality_variants=str(quality_policy).lower() != "baseline",
+                quality_policy=quality_policy,
                 goal=RegionRefinementGoal.TEXT,
             ),
         )

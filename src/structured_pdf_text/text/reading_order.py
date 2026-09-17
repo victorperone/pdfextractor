@@ -109,6 +109,8 @@ def order_lines_in_region(
     when combining lines from multiple regions.
     """
     if not region.native_lines:
+        if region.kind == RegionKind.FIGURE and region.ocr_lines:
+            return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
         return [], 0
     if region.kind == RegionKind.TABLE:
         return _order_table_lines(region.native_lines), 0
@@ -121,6 +123,14 @@ def order_lines_in_region(
     }:
         lines, groups = _order_prose_lines(region.native_lines, region.bbox.width)
         return lines, groups
+    if region.kind == RegionKind.FIGURE and region.ocr_lines:
+        figure_lines = list(region.native_lines)
+        figure_lines.extend(
+            line
+            for line in region.ocr_lines
+            if not any(line.bbox.iou(existing.bbox) >= 0.20 for existing in figure_lines)
+        )
+        return sorted(figure_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
     return sorted(region.native_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
 
 

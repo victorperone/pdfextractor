@@ -202,6 +202,7 @@ def _line_from_chars(
     direction: WritingDirection,
     reverse_axis: bool = False,
 ) -> TextLine:
+    order_mode = "geometry"
     if direction == WritingDirection.TOP_TO_BOTTOM:
         ordered = sorted(
             characters,
@@ -220,11 +221,16 @@ def _line_from_chars(
             ordered = _restore_inline_whitespace_order(ordered)
             if _native_sequence_is_plausible(ordered):
                 ordered = sorted(ordered, key=lambda char: char.char_index)
+                order_mode = "native"
         bbox_for_baseline = BBox.union_all([char.bbox for char in ordered])
         baseline = Baseline(y=bbox_for_baseline.y1, angle=math.pi if reverse_axis else 0.0)
     boxes = [char.bbox for char in ordered]
     bbox = BBox.union_all(boxes)
-    token_chars = _chars_to_text_tokens(ordered, direction, reverse_axis=reverse_axis)
+    token_chars, gap_mode = _chars_to_text_tokens_with_diagnostics(
+        ordered,
+        direction,
+        reverse_axis=reverse_axis,
+    )
     native_indices = [char.char_index for char in ordered]
     return TextLine(
         tokens=token_chars,
@@ -233,6 +239,8 @@ def _line_from_chars(
         direction=direction,
         native_order_min=min(native_indices) if native_indices else None,
         native_order_max=max(native_indices) if native_indices else None,
+        gap_mode=gap_mode,
+        order_mode=order_mode,
     )
 
 
@@ -241,8 +249,21 @@ def _chars_to_text_tokens(
     direction: WritingDirection = WritingDirection.LEFT_TO_RIGHT,
     reverse_axis: bool = False,
 ) -> list[TextToken]:
+    tokens, _ = _chars_to_text_tokens_with_diagnostics(
+        characters,
+        direction,
+        reverse_axis=reverse_axis,
+    )
+    return tokens
+
+
+def _chars_to_text_tokens_with_diagnostics(
+    characters: list[NativeCharacter],
+    direction: WritingDirection = WritingDirection.LEFT_TO_RIGHT,
+    reverse_axis: bool = False,
+) -> tuple[list[TextToken], str]:
     if not characters:
-        return []
+        return [], "fallback"
 
     advances = [
         (
@@ -261,7 +282,11 @@ def _chars_to_text_tokens(
     ]
 
     median_advance = median(advances) if advances else 5.0
-    inferred_gap_threshold = _infer_gap_threshold(characters, direction, median_advance)
+    inferred_gap_threshold, gap_mode = _infer_gap_threshold_with_diagnostics(
+        characters,
+        direction,
+        median_advance,
+    )
 
     tokens: list[TextToken] = []
     previous: NativeCharacter | None = None
@@ -350,7 +375,17 @@ def _chars_to_text_tokens(
 
         previous = char
 
-    return tokens
+    has_inferred_space = any(
+        token.text.isspace() and TokenFlag.WHITESPACE_INFERRED in token.flags
+        for token in tokens
+    )
+    has_explicit_space = any(
+        token.text.isspace() and TokenFlag.WHITESPACE_INFERRED not in token.flags
+        for token in tokens
+    )
+    if has_explicit_space and not has_inferred_space:
+        gap_mode = "explicit"
+    return tokens, gap_mode
 
 
 def _native_sequence_is_plausible(characters: list[NativeCharacter]) -> bool:
@@ -373,12 +408,24 @@ def _infer_gap_threshold(
     direction: WritingDirection,
     median_advance: float,
 ) -> float:
+    return _infer_gap_threshold_with_diagnostics(
+        characters,
+        direction,
+        median_advance,
+    )[0]
+
+
+def _infer_gap_threshold_with_diagnostics(
+    characters: list[NativeCharacter],
+    direction: WritingDirection,
+    median_advance: float,
+) -> tuple[float, str]:
     observations = _gap_observations(characters, direction, median_advance)
     positive = sorted(observation.normalized_gap for observation in observations if observation.gap > 0)
     if not positive:
-        return max(2.5, median_advance * 0.85)
+        return max(2.5, median_advance * 0.85), "fallback"
     if len(positive) == 1:
-        return max(2.5, median_advance * 0.85)
+        return max(2.5, median_advance * 0.85), "fallback"
 
     # Look for a relative separation between two groups. Uniform tracking
     # produces one group and must not become a space between every glyph.
@@ -393,11 +440,16 @@ def _infer_gap_threshold(
         right = positive[split + 1 :]
         if left and right and gaps[split] >= 0.35 and len(left) >= 1 and len(right) >= 1:
             threshold_normalized = (positive[split] + positive[split + 1]) / 2.0
+            mode = "bimodal"
+        else:
+            mode = "unimodal_conservative"
+    else:
+        mode = "unimodal_conservative"
     if threshold_normalized is None:
         middle = median(positive)
         mad = median([abs(gap - middle) for gap in positive])
         threshold_normalized = middle + max(0.20, 2.5 * mad / max(median(positive), 0.01))
-    return max(2.5, min(median_advance * 2.0, threshold_normalized * median_advance))
+    return max(2.5, min(median_advance * 2.0, threshold_normalized * median_advance)), mode
 
 
 def _gap_observations(
@@ -605,34 +657,38 @@ def spacing_diagnostics(lines: list[TextLine]) -> dict[str, int]:
     inferred = 0
     native = 0
     geometry = 0
-    bimodal = 0
-    unimodal = 0
-    fallback = 0
+    gap_modes = {
+        "explicit": 0,
+        "bimodal": 0,
+        "unimodal_conservative": 0,
+        "fallback": 0,
+    }
+    order_modes = {
+        "native": 0,
+        "geometry": 0,
+    }
     for line in lines:
-        line_inferred = False
         for token in line.tokens:
             if token.text.isspace():
                 if TokenFlag.WHITESPACE_INFERRED in token.flags:
                     inferred += 1
-                    line_inferred = True
                 else:
                     explicit += 1
-        if line_inferred:
-            bimodal += 1
-        elif line.text.strip():
-            unimodal += 1
-        if line.native_order_min is not None:
-            native += 1
-        else:
-            geometry += 1
+        mode = getattr(line, "gap_mode", "fallback")
+        gap_modes[mode if mode in gap_modes else "fallback"] += 1
+        order_mode = getattr(line, "order_mode", "geometry")
+        order_modes[order_mode if order_mode in order_modes else "geometry"] += 1
+    native = order_modes["native"]
+    geometry = order_modes["geometry"]
     # The line reconstruction path is intentionally conservative; expose the
     # counters even when a line has no positive gaps for audit consumers.
     return {
         "explicit_whitespace_count": explicit,
         "inferred_whitespace_count": inferred,
-        "gap_bimodal_lines": bimodal,
-        "gap_unimodal_lines": unimodal,
-        "gap_fallback_lines": fallback,
+        "gap_explicit_lines": gap_modes["explicit"],
+        "gap_bimodal_lines": gap_modes["bimodal"],
+        "gap_unimodal_lines": gap_modes["unimodal_conservative"],
+        "gap_fallback_lines": gap_modes["fallback"],
         "native_order_used_lines": native,
         "geometry_order_used_lines": geometry,
     }

@@ -8,6 +8,12 @@ from structured_pdf_text.document import LayoutRegion, RegionKind, StructuredPag
 from structured_pdf_text.geometry import BBox
 
 
+# A title prediction needs more than positional/short-text heuristics.  The
+# contextual style check below keeps body-sized labels from becoming H1 while
+# retaining clear typography.
+HEADING_ACCEPTANCE_THRESHOLD = 1.0
+
+
 def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
     """Assign up to three heading levels from document typography and geometry."""
     pages = [_merge_heading_fragments(page) for page in pages]
@@ -36,9 +42,11 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
     body_median = statistics.median(body_sizes) if body_sizes else None
     body_p75 = _percentile(body_sizes, 0.75) if body_sizes else None
     valid_scores: dict[str, float] = {}
+    title_regions: dict[str, LayoutRegion] = {}
     for page in pages:
         for region in page.regions:
             if region.kind == RegionKind.TITLE and _region_has_alphanumeric_text(region):
+                title_regions[region.region_id] = region
                 valid_scores[region.region_id] = _heading_candidate_score(
                     region,
                     body_font_median=body_median,
@@ -46,14 +54,26 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
                     page_bbox=page.bbox,
                 )
 
-    # Convert punctuation-only title predictions back to ordinary text before
-    # assembly. This makes the rejection invariant independent of the renderer.
+    # Convert punctuation-only and weak title predictions back to ordinary
+    # text before assembly. This makes the rejection invariant independent of
+    # the renderer.
     pages = [
         dataclasses.replace(
             page,
             regions=[
                 dataclasses.replace(region, kind=RegionKind.TEXT, heading_level=None)
-                if region.kind == RegionKind.TITLE and not _region_has_alphanumeric_text(region)
+                if (
+                    region.kind == RegionKind.TITLE
+                    and (
+                        not _region_has_alphanumeric_text(region)
+                        or not _heading_is_accepted(
+                            region,
+                            valid_scores.get(region.region_id, 0.0),
+                            body_font_median=body_median,
+                            body_font_p75=body_p75,
+                        )
+                    )
+                )
                 else region
                 for region in page.regions
             ],
@@ -73,7 +93,13 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
     level_map: dict[str, int] = {}
     for _, region_id, font_size in title_font_sizes:
         ratio = font_size / body_median if body_median else font_size
-        if valid_scores.get(region_id, 0.0) < 1.0:
+        region = title_regions.get(region_id)
+        if region is None or not _heading_is_accepted(
+            region,
+            valid_scores.get(region_id, 0.0),
+            body_font_median=body_median,
+            body_font_p75=body_p75,
+        ):
             continue
         cluster = min(range(len(clusters)), key=lambda index: abs(clusters[index] - ratio)) if clusters else 0
         level_map[region_id] = min(3, cluster + 1)
@@ -153,6 +179,33 @@ def _heading_candidate_score(
     if len(text) <= 40 and score < 2.0:
         score -= 0.25
     return max(0.0, score)
+
+
+def _heading_is_accepted(
+    region: LayoutRegion,
+    score: float,
+    *,
+    body_font_median: float | None,
+    body_font_p75: float | None,
+) -> bool:
+    if score < HEADING_ACCEPTANCE_THRESHOLD:
+        return False
+    if body_font_median is None or body_font_median <= 0:
+        return True
+
+    tokens = [token for line in region.native_lines for token in line.tokens if token.text.strip()]
+    sizes = [token.font_size for token in tokens if token.font_size and token.font_size > 0]
+    median_size = statistics.median(sizes) if sizes else region.bbox.height
+    is_bold = any(
+        (token.font_weight or 0) >= 600 or "bold" in (token.font_name or "").casefold()
+        for token in tokens
+    )
+    text = " ".join(line.text for line in region.native_lines).strip()
+    has_numbered_prefix = bool(re.match(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[.)]?\s+", text))
+    size_signal = median_size >= body_font_median * 1.15
+    if body_font_p75 is not None:
+        size_signal = size_signal or median_size >= body_font_p75 * 1.10
+    return size_signal or is_bold or has_numbered_prefix
 
 
 def _merge_heading_fragments(page: StructuredPage) -> StructuredPage:

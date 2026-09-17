@@ -20,6 +20,7 @@ class LayoutRegionPrediction:
     bbox: BBox
     confidence: float | None = None
     label: str | None = None
+    semantic_role: str | None = None
 
 
 class PageImage(Protocol):
@@ -173,6 +174,16 @@ def _semantic_predictions(
         if cluster.role == DecorativeRole.DECORATIVE_WATERMARK
         for line in cluster.lines
     }
+    semantic_status_clusters = tuple(
+        cluster
+        for cluster in decorative_clusters
+        if cluster.role == DecorativeRole.SEMANTIC_STATUS
+    )
+    semantic_status_line_ids = {
+        id(line)
+        for cluster in semantic_status_clusters
+        for line in cluster.lines
+    }
     for index, cluster in enumerate(
         cluster for cluster in decorative_clusters
         if cluster.role == DecorativeRole.DECORATIVE_WATERMARK
@@ -185,8 +196,18 @@ def _semantic_predictions(
                 label="decorative_cluster:" + ",".join(cluster.reasons),
             )
         )
+    for cluster in semantic_status_clusters:
+        predictions.append(
+            LayoutRegionPrediction(
+                kind=RegionKind.TEXT,
+                bbox=_clamp_bbox(cluster.bbox.expand(3.0), page_bbox),
+                confidence=cluster.confidence,
+                label="semantic_status",
+                semantic_role="semantic_status",
+            )
+        )
     for line in candidates:
-        if id(line) in decorative_line_ids:
+        if id(line) in decorative_line_ids or id(line) in semantic_status_line_ids:
             continue
         text = " ".join(line.text.split())
         lower = text.casefold()
@@ -422,6 +443,7 @@ def _normalize_predictions(
                 bbox=bbox,
                 confidence=prediction.confidence,
                 label=prediction.label,
+                semantic_role=prediction.semantic_role,
             )
         )
     return normalized

@@ -96,9 +96,21 @@ def cluster_decorative_lines(
         if strong_count >= 2 and not _near_page_edge(bbox, page_bbox):
             role = DecorativeRole.DECORATIVE_WATERMARK
             confidence = min(0.99, 0.55 + strong_count * 0.09)
-        elif not light and not translucent and not broad and not angled and bbox.area <= page_bbox.area * 0.10:
+        elif _looks_like_semantic_status(
+            group=group,
+            bbox=bbox,
+            page_bbox=page_bbox,
+            body_font_median=body_font_median,
+            typical_height=typical_height,
+            luminance=luminance,
+            opacity=opacity,
+            angled=angled,
+            broad=broad,
+            light=light,
+            translucent=translucent,
+        ):
             role = DecorativeRole.SEMANTIC_STATUS
-            confidence = 0.58
+            confidence = 0.72
         else:
             role = DecorativeRole.UNKNOWN
             confidence = 0.25
@@ -135,3 +147,49 @@ def _line_distance(first: TextLine, second: TextLine) -> float:
 
 def _near_page_edge(box: BBox, page: BBox) -> bool:
     return box.y0 <= page.y0 + page.height * 0.12 or box.y1 >= page.y1 - page.height * 0.12
+
+
+def _looks_like_semantic_status(
+    *,
+    group: list[TextLine],
+    bbox: BBox,
+    page_bbox: BBox,
+    body_font_median: float | None,
+    typical_height: float,
+    luminance: float | None,
+    opacity: float | None,
+    angled: bool,
+    broad: bool,
+    light: bool,
+    translucent: bool,
+) -> bool:
+    """Require several visual signals before materializing a status cluster."""
+    compact = bbox.area <= page_bbox.area * 0.10
+    localized = bbox.width <= page_bbox.width * 0.45 and bbox.height <= page_bbox.height * 0.20
+    near_title_band = bbox.y0 <= page_bbox.y0 + page_bbox.height * 0.20
+    sizes = [_font_size(line) for line in group if _font_size(line) > 0]
+    median_size = median(sizes) if sizes else typical_height
+    font_above_body = median_size >= max(12.0, (body_font_median or typical_height) * 1.25)
+    fragmented = len(group) > 1
+    style_coherent = _style_is_coherent(group)
+    dark_contrast = luminance is not None and luminance <= 0.55
+    opaque_contrast = opacity is not None and opacity >= 0.82 and not light
+    contrast = dark_contrast or opaque_contrast
+    if not compact or not localized or near_title_band or angled or broad or light or translucent:
+        return False
+    if not style_coherent:
+        return False
+    return (contrast and (font_above_body or fragmented)) or (font_above_body and fragmented)
+
+
+def _style_is_coherent(lines: list[TextLine]) -> bool:
+    sizes = [_font_size(line) for line in lines if _font_size(line) > 0]
+    if sizes and max(sizes) / max(min(sizes), 0.01) > 1.35:
+        return False
+    fonts = {
+        token.font_name
+        for line in lines
+        for token in line.tokens
+        if token.font_name
+    }
+    return len(fonts) <= 1

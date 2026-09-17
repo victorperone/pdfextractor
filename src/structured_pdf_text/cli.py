@@ -6,7 +6,13 @@ import sys
 from pathlib import Path
 
 from .api import PdfTextExtractor
-from .config import ExtractionMode, ExtractorConfig, OcrQualityPolicy, best_extraction_config
+from .config import (
+    ExtractionMode,
+    ExtractorConfig,
+    OcrQualityPolicy,
+    best_extraction_config,
+    effective_ocr_quality_policy,
+)
 from .diagnostics.overlay import render_overlay
 from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
@@ -238,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
                 merge_cross_page_tables=args.merge_cross_page_tables,
                 num_threads=args.threads,
             )
-        _warn_if_exhaustive(args.ocr_quality_policy)
+        _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if _mode_requires_ocr(config.mode):
             try:
                 validate_local_ocr_models(language=config.language)
@@ -294,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_quality_policy=args.ocr_quality_policy,
             page_indices=(args.page - 1,) if args.page is not None else None,
         )
-        _warn_if_exhaustive(args.ocr_quality_policy)
+        _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if _mode_requires_ocr(config.mode):
             try:
                 validate_local_ocr_models(language=config.language)
@@ -379,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
             merge_cross_page_tables=args.merge_cross_page_tables,
             num_threads=args.threads,
         )
-        _warn_if_exhaustive(args.ocr_quality_policy)
+        _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if args.workers < 1:
             print("--workers must be at least 1", file=sys.stderr)
             return 2
