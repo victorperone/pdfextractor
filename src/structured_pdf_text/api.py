@@ -32,6 +32,10 @@ from .document import (
     TextToken,
     WritingDirection,
 )
+from .errors import (
+    FatalExtractionError,
+    raise_if_resource_exhausted,
+)
 from .evidence.complexity import ComplexityAnalyzer
 from .evidence.decision import assess_region_recovery
 from .fusion.token_fusion import fuse_native_and_ocr
@@ -82,6 +86,30 @@ class PdfTextExtractor:
         *,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> StructuredDocument:
+        """Extract a document and classify resource failures at the API boundary."""
+        try:
+            return self._extract_impl(
+                path,
+                password=password,
+                progress_callback=progress_callback,
+            )
+        except FatalExtractionError:
+            raise
+        except Exception as exc:
+            raise_if_resource_exhausted(
+                exc,
+                stage="document_extract",
+                details=_process_memory_snapshot(),
+            )
+            raise
+
+    def _extract_impl(
+        self,
+        path: str | Path,
+        password: str | None = None,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> StructuredDocument:
         pages = []
         document_start = time.perf_counter()
         memory_start = _process_memory_snapshot()
@@ -111,7 +139,15 @@ class PdfTextExtractor:
                 native_start = time.perf_counter()
                 try:
                     native_page = source.extract_page(page_index)
+                except FatalExtractionError:
+                    raise
                 except Exception as exc:
+                    raise_if_resource_exhausted(
+                        exc,
+                        page_index=page_index,
+                        stage="native_extract",
+                        details=_process_memory_snapshot(),
+                    )
                     elapsed_ms = (time.perf_counter() - start) * 1000
                     pages.append(_failed_page(page_index, exc, elapsed_ms))
                     continue
@@ -129,7 +165,15 @@ class PdfTextExtractor:
                                 self.config.complexity_render_scale,
                             ),
                         )
+                    except FatalExtractionError:
+                        raise
                     except Exception as exc:
+                        raise_if_resource_exhausted(
+                            exc,
+                            page_index=page_index,
+                            stage="complexity_render",
+                            details=_process_memory_snapshot(),
+                        )
                         warnings.append(f"Complexity render unavailable: {type(exc).__name__}: {exc}")
                 timings["render_lowres_ms"] = (time.perf_counter() - render_start) * 1000
                 complexity_start = time.perf_counter()
@@ -186,6 +230,7 @@ class PdfTextExtractor:
                 ocr_table_tokens = 0
                 ocr_figure_tokens = 0
                 ocr_region_stats: dict[str, dict[str, Any]] = {}
+                ocr_attempt_errors: list[str] = []
                 mode = self.config.normalized_mode()
                 ocr_available_by_mode = _ocr_enabled(self.config)
                 promotion_reasons = list(recovery_plan.reasons)
@@ -234,6 +279,22 @@ class PdfTextExtractor:
                                     self.config.ocr_render_scale,
                                 ),
                             )
+                    except FatalExtractionError:
+                        raise
+                    except Exception as exc:
+                        raise_if_resource_exhausted(
+                            exc,
+                            page_index=page_index,
+                            stage="ocr_render",
+                            details=_process_memory_snapshot(),
+                        )
+                        timings["render_ocr_ms"] = (
+                            time.perf_counter() - ocr_render_start
+                        ) * 1000
+                        warnings.append(
+                            f"OCR render unavailable: {type(exc).__name__}: {exc}"
+                        )
+                    else:
                         timings["render_ocr_ms"] = (
                             time.perf_counter() - ocr_render_start
                         ) * 1000
@@ -241,50 +302,76 @@ class PdfTextExtractor:
                             warnings.append("OCR requested but no OCR engine was configured")
                         else:
                             ocr_start = time.perf_counter()
-                            if page_ocr_requested:
-                                try:
-                                    ocr_tokens = self.ocr_engine.recognize_page(
-                                        ocr_image,
-                                        page_index,
-                                        native_page.bbox,
+                            try:
+                                if page_ocr_requested:
+                                    try:
+                                        ocr_tokens = self.ocr_engine.recognize_page(
+                                            ocr_image,
+                                            page_index,
+                                            native_page.bbox,
+                                        )
+                                    except TypeError:
+                                        # Preserve compatibility with early injected
+                                        # engines that implement the two-argument API.
+                                        ocr_tokens = self.ocr_engine.recognize_page(
+                                            ocr_image,
+                                            page_index,
+                                        )
+                                    ocr_passes_total = getattr(
+                                        self.ocr_engine, "last_pass_count", None
                                     )
-                                except TypeError:
-                                    # Preserve compatibility with early injected
-                                    # engines that implement the two-argument API.
-                                    ocr_tokens = self.ocr_engine.recognize_page(
-                                        ocr_image,
-                                        page_index,
+                                    ocr_batches_total = getattr(
+                                        self.ocr_engine, "last_batch_count", None
                                     )
-                                ocr_passes_total = getattr(
-                                    self.ocr_engine, "last_pass_count", None
-                                )
-                                ocr_batches_total = getattr(
-                                    self.ocr_engine, "last_batch_count", None
-                                )
-                            else:
-                                (
-                                    ocr_tokens,
-                                    ocr_passes_total,
-                                    ocr_batches_total,
-                                    ocr_region_stats,
-                                ) = _recover_selected_regions(
-                                    engine=self.ocr_engine,
-                                    page_image=ocr_image,
+                                    ocr_attempt_errors = list(
+                                        getattr(self.ocr_engine, "last_attempt_errors", [])
+                                    )
+                                else:
+                                    (
+                                        ocr_tokens,
+                                        ocr_passes_total,
+                                        ocr_batches_total,
+                                        ocr_region_stats,
+                                    ) = _recover_selected_regions(
+                                        engine=self.ocr_engine,
+                                        page_image=ocr_image,
+                                        page_index=page_index,
+                                        page_bbox=native_page.bbox,
+                                        regions=selected_regions,
+                                        quality_variants=self.config.ocr_quality_variants,
+                                        page_rotation=native_page.objects.rotation,
+                                    )
+                                timings["ocr_ms"] = (
+                                    time.perf_counter() - ocr_start
+                                ) * 1000
+                            except FatalExtractionError:
+                                raise
+                            except Exception as exc:
+                                raise_if_resource_exhausted(
+                                    exc,
                                     page_index=page_index,
-                                    page_bbox=native_page.bbox,
-                                    regions=selected_regions,
-                                    quality_variants=self.config.ocr_quality_variants,
-                                    page_rotation=native_page.objects.rotation,
+                                    stage="page_ocr",
+                                    details=_process_memory_snapshot(),
                                 )
-                            timings["ocr_ms"] = (
-                                time.perf_counter() - ocr_start
-                            ) * 1000
-                    except Exception as exc:
-                        timings.setdefault(
-                            "render_ocr_ms",
-                            (time.perf_counter() - ocr_render_start) * 1000,
-                        )
-                        warnings.append(f"OCR unavailable: {type(exc).__name__}: {exc}")
+                                timings["ocr_ms"] = (
+                                    time.perf_counter() - ocr_start
+                                ) * 1000
+                                warnings.append(
+                                    f"OCR unavailable: {type(exc).__name__}: {exc}"
+                                )
+
+                            if region_ocr_requested:
+                                for region in selected_regions:
+                                    stat = ocr_region_stats.get(region.region_id, {})
+                                    if stat.get("ocr_failed"):
+                                        warnings.append(
+                                            "OCR region recovery produced no usable tokens "
+                                            f"for {region.region_id}"
+                                        )
+                            for attempt_error in ocr_attempt_errors:
+                                warnings.append(
+                                    f"OCR optional attempt unavailable: {attempt_error}"
+                                )
 
                 if ocr_requested and self.ocr_engine is not None and ocr_image is not None:
                     figure_start = time.perf_counter()
@@ -313,6 +400,16 @@ class PdfTextExtractor:
                         timings["ocr_figure_ms"] = (
                             time.perf_counter() - figure_start
                         ) * 1000
+
+                if (
+                    page_ocr_requested
+                    and self.ocr_engine is not None
+                    and ocr_image is not None
+                    and not ocr_tokens
+                ):
+                    warnings.append(
+                        "OCR completed but produced no usable tokens for an OCR-primary page"
+                    )
 
                 if region_ocr_requested:
                     for region in selected_regions:
@@ -354,7 +451,15 @@ class PdfTextExtractor:
                 table_start = time.perf_counter()
                 try:
                     tables = detect_tables_native(native_page, regions)
+                except FatalExtractionError:
+                    raise
                 except Exception as exc:
+                    raise_if_resource_exhausted(
+                        exc,
+                        page_index=page_index,
+                        stage="native_table_detection",
+                        details=_process_memory_snapshot(),
+                    )
                     tables = []
                     warnings.append(
                         f"Native table detection unavailable: {type(exc).__name__}: {exc}"
@@ -371,7 +476,15 @@ class PdfTextExtractor:
                             rendered_page,
                             tokens=[token for line in ocr_lines for token in line.tokens],
                         )
+                    except FatalExtractionError:
+                        raise
                     except Exception as exc:
+                        raise_if_resource_exhausted(
+                            exc,
+                            page_index=page_index,
+                            stage="visual_table_detection",
+                            details=_process_memory_snapshot(),
+                        )
                         visual_table = None
                         warnings.append(
                             f"Visual table detection unavailable: {type(exc).__name__}: {exc}"
@@ -386,7 +499,15 @@ class PdfTextExtractor:
                                 table=visual_table,
                                 native_lines=native_lines,
                             )
+                        except FatalExtractionError:
+                            raise
                         except Exception as exc:
+                            raise_if_resource_exhausted(
+                                exc,
+                                page_index=page_index,
+                                stage="visual_table_ocr_refinement",
+                                details=_process_memory_snapshot(),
+                            )
                             refined = None
                             warnings.append(
                                 f"Visual table OCR refinement unavailable: "
@@ -443,6 +564,22 @@ class PdfTextExtractor:
                     actual_strategy = PageStrategy.OCR_CANDIDATE
                 elif region_ocr_requested and ocr_tokens:
                     actual_strategy = PageStrategy.MIXED
+                if not ocr_requested:
+                    ocr_outcome = "not_requested"
+                    ocr_degraded = False
+                    ocr_degraded_reasons: list[str] = []
+                elif ocr_tokens:
+                    ocr_outcome = "success"
+                    ocr_degraded = False
+                    ocr_degraded_reasons = []
+                else:
+                    ocr_outcome = "degraded"
+                    ocr_degraded = True
+                    ocr_degraded_reasons = [
+                        "no_usable_tokens"
+                        if self.ocr_engine is not None and ocr_image is not None
+                        else "ocr_unavailable"
+                    ]
                 diagnostics = PageDiagnostics(
                     page_index=page_index,
                     strategy=actual_strategy,
@@ -459,6 +596,10 @@ class PdfTextExtractor:
                         "layout_regions": len(regions),
                         "layout_engine": type(self.layout_engine).__name__ if len(regions) > 0 else None,
                         "ocr_requested": ocr_requested,
+                        "ocr_outcome": ocr_outcome,
+                        "ocr_degraded": ocr_degraded,
+                        "ocr_degraded_reasons": ocr_degraded_reasons,
+                        "ocr_attempt_errors": ocr_attempt_errors,
                         "page_ocr_requested": page_ocr_requested,
                         "region_ocr_requested": region_ocr_requested,
                         "ocr_candidate_region_ids": list(recovery_plan.region_ids),
@@ -1302,5 +1443,13 @@ def _layout_regions_if_requested(
             return ["Layout skipped: no page image available"]
         output.extend(regions_from_predictions(page, lines, predictions, complexity))
         return []
+    except FatalExtractionError:
+        raise
     except Exception as exc:
+        raise_if_resource_exhausted(
+            exc,
+            page_index=page.page_index,
+            stage="layout",
+            details=_process_memory_snapshot(),
+        )
         return [f"Layout detection unavailable: {type(exc).__name__}: {exc}"]

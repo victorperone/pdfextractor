@@ -94,10 +94,24 @@ Private PDFs for manual validation should be placed under `corpus/`; see
 
 ## Install locally
 
+### Linux / WSL
+
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
+```
+
+### Windows PowerShell
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 ## OCR setup (requires internet, run once)
@@ -184,13 +198,20 @@ set `PADDLE_PDX_CACHE_HOME` explicitly inside the isolated shell instead.
 Use the same cache directory that was used during `setup-models`; do not copy
 models into `/root` only for this validation.
 
-If the environment is behind a corporate proxy with custom SSL certificates,
-apply this fix before running `setup-models`:
+If model hosts are blocked by organizational network policy, use offline model
+provisioning from an approved machine or an internal artifact repository. Copy
+the four model directories from an approved installation into:
 
-```bash
-cat /etc/ssl/certs/ca-certificates.crt >> \
-    .venv/lib/python3.12/site-packages/certifi/cacert.pem
+```text
+<cache>/official_models/
 ```
+
+Then run `models-status`; it must report `Offline OCR readiness: READY`.
+
+If the network allows the model hosts but TLS inspection requires a custom
+corporate CA, configure Python/PaddleX using the CA and proxy settings approved
+by your organization. Do not disable TLS verification or bypass organizational
+network controls.
 
 ## Run tests
 
@@ -377,3 +398,36 @@ continuation markers and intervening titles. Accepted and rejected candidate
 pairs are available in
 `result.diagnostics.facts["cross_page_table_decisions"]` with their scores and
 reasons; merged tables retain every source page in `page_fragments`.
+
+### Runtime resource failures
+
+OCR extraction is intentionally strict about infrastructure failures. If the
+required OCR operation cannot run because the process runs out of memory,
+extraction is aborted and the CLI returns a non-zero exit status. A resource
+failure is different from an imperfect OCR result:
+
+- resource/runtime failure: abort;
+- low-quality or empty OCR result without a resource failure: warning and continue.
+
+The normal extraction runtime never silently reduces OCR resolution to fit
+available memory. Insufficient resources are reported as a fatal runtime error
+instead of silently changing extraction quality. Fatal failures that reach
+Python/Paddle as exceptions are controlled here; hard process termination by a
+kernel or cgroup OOM kill requires future OCR worker isolation.
+
+### Memory guidance
+
+The current PP-OCRv5 server detector can have a high peak memory footprint
+during full-page OCR at the normal render scale. The observed validation peak
+was approximately 10.8 GiB RSS.
+
+Provisional guidance:
+
+- 16 GiB available to the extraction environment: practical lower bound;
+- 20–24 GiB available to WSL/VM: recommended;
+- 32 GiB physical workstation RAM: recommended;
+- 8 GiB swap: recommended.
+
+These values are provisional and will be revisited after the planned 1000-page
+endurance benchmark. The runtime does not automatically lower text-detection
+resolution or switch to a lower-quality OCR profile when memory is scarce.
