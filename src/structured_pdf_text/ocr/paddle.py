@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +16,20 @@ from structured_pdf_text.errors import (
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.models import get_profile
+from structured_pdf_text.ocr.image_quality import profile_image
+from structured_pdf_text.ocr.quality import (
+    OcrQualityAssessment,
+    assess_ocr_quality,
+    raw_result_metrics,
+)
+from structured_pdf_text.config import OcrQualityThresholds
+
+
+@dataclass(frozen=True, slots=True)
+class OcrImageVariant:
+    name: str
+    image: object
+    family: str
 
 
 def _local_model_root(
@@ -126,12 +141,23 @@ class PaddleOcrEngine:
         self.options = options
         self.batch_size = max(1, int(options.pop("ocr_batch_size", 3)))
         self.quality_variants = bool(options.pop("quality_variants", True))
+        self.quality_policy = options.pop("quality_policy", None)
+        self.quality_thresholds = options.pop("quality_thresholds", OcrQualityThresholds())
         self._ocr: Any | None = None
         self._init_error: Exception | None = None
         self.last_pass_count = 0
         self.last_batch_count = 0
         self.last_attempt_errors: list[str] = []
         self.last_deskew_angle: float = 0.0
+        self.last_quality: OcrQualityAssessment | None = None
+        self.last_image_profile: Any | None = None
+        self.last_baseline_quality: OcrQualityAssessment | None = None
+        self.last_variants_attempted: list[str] = []
+        self.last_variants_succeeded: list[str] = []
+        self.last_selected_variant = "baseline"
+        self.last_variant_scores: dict[str, float] = {}
+        self.last_consensus_replacements = 0
+        self.last_consensus_insertions = 0
 
     def recognize_page(
         self,
@@ -140,6 +166,7 @@ class PaddleOcrEngine:
         page_bbox: BBox | None = None,
         *,
         quality_variants: bool | None = None,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
         try:
             return self._recognize_page_impl(
@@ -147,6 +174,7 @@ class PaddleOcrEngine:
                 page_index,
                 page_bbox,
                 quality_variants=quality_variants,
+                quality_policy=quality_policy,
             )
         except FatalExtractionError:
             raise
@@ -165,12 +193,19 @@ class PaddleOcrEngine:
         page_bbox: BBox | None = None,
         *,
         quality_variants: bool | None = None,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
         if quality_variants is None:
             quality_variants = self.quality_variants
         self.last_pass_count = 0
         self.last_batch_count = 0
         self.last_attempt_errors = []
+        self.last_variants_attempted = ["baseline"]
+        self.last_variants_succeeded = ["baseline"]
+        self.last_selected_variant = "baseline"
+        self.last_variant_scores = {}
+        self.last_consensus_replacements = 0
+        self.last_consensus_insertions = 0
         ocr = self._get_ocr()
         page_image, self.last_deskew_angle = _deskew_image(
             page_image,
@@ -189,40 +224,15 @@ class PaddleOcrEngine:
             ]
         else:
             rotation_candidates = _rotation_candidates(tokens, page_image, page_bbox)
-        if not rotation_candidates:
-            candidates = [tokens]
-            if quality_variants:
-                enhanced_images = _enhancement_variants(page_image)
-                for enhanced, raw_enhanced in zip(
-                    enhanced_images,
-                    self._predict_many_counted(ocr, enhanced_images),
-                ):
-                    candidates.append(
-                        _tokens_from_result(
-                            raw_enhanced,
-                            page_index,
-                            enhanced,
-                            page_bbox,
-                        )
-                    )
-            return _select_best_candidate(candidates, page_bbox)
-
+        candidates: list[tuple[list[OcrToken], Any, str]] = [(tokens, raw, "baseline")]
         original_size = _image_size(page_image)
-        candidates = [tokens]
-        rotated_candidates: list[
-            tuple[
-                list[OcrToken],
-                object,
-                Callable[[float, float, float, float, int, int], tuple[float, float, float, float]],
-                int,
-            ]
-        ] = []
         for angle, transform in rotation_candidates:
             rotated = _rotate_image(page_image, angle)
             if rotated is None:
                 continue
+            rotated_raw = self._predict_counted(ocr, rotated)
             rotated_tokens = _tokens_from_result(
-                self._predict_counted(ocr, rotated),
+                rotated_raw,
                 page_index,
                 rotated,
                 page_bbox,
@@ -230,35 +240,78 @@ class PaddleOcrEngine:
                 box_transform=transform,
                 rotation=angle,
             )
-            candidates.append(rotated_tokens)
-            rotated_candidates.append((rotated_tokens, rotated, transform, angle))
-            if quality_variants:
-                enhanced_images = _enhancement_variants(rotated)
-                for enhanced, raw_enhanced in zip(
-                    enhanced_images,
-                    self._predict_many_counted(ocr, enhanced_images),
-                ):
-                    candidates.append(
-                        _tokens_from_result(
-                            raw_enhanced,
-                            page_index,
-                            enhanced,
-                            page_bbox,
-                            coordinate_size=original_size,
-                            box_transform=transform,
-                            rotation=angle,
-                        )
+            candidates.append((rotated_tokens, rotated_raw, f"rotation-{angle}"))
+
+        # Orientation is resolved before enhancement, keeping recovery bounded.
+        orientation_tokens, orientation_raw, orientation_name = max(
+            candidates,
+            key=lambda item: _candidate_quality(item[0], page_bbox),
+        )
+        candidates = [(orientation_tokens, orientation_raw, orientation_name)]
+        policy = quality_policy or self.quality_policy
+        if policy is None:
+            policy = "baseline" if quality_variants is False else "adaptive"
+        policy = str(policy).lower()
+        baseline_quality = assess_ocr_quality(
+            orientation_tokens,
+            raw_metrics=raw_result_metrics(orientation_raw),
+            thresholds=self.quality_thresholds,
+            orientation_incoherent=bool(rotation_candidates and orientation_name == "baseline"),
+        )
+        self.last_baseline_quality = baseline_quality
+        self.last_variant_scores[orientation_name] = baseline_quality.score
+        if policy != "baseline":
+            _, image_height = _image_size(page_image)
+            page_height = page_bbox.height if page_bbox is not None else float(image_height)
+            heights = [
+                token.bbox.height * image_height / max(page_height, 1.0)
+                for token in orientation_tokens
+                if token.bbox.height > 0
+            ]
+            visual = profile_image(page_image, heights)
+            self.last_image_profile = visual
+            if policy == "adaptive" and baseline_quality.sufficient and not (
+                visual.low_contrast or visual.likely_blurred_or_small or visual.likely_noisy
+            ):
+                self.last_quality = baseline_quality
+                return orientation_tokens
+            variants = _select_variants(
+                _enhancement_variants(page_image),
+                visual,
+                exhaustive=policy == "exhaustive",
+            )
+            for start in range(0, len(variants), self.batch_size):
+                wave = variants[start : start + self.batch_size]
+                self.last_variants_attempted.extend(variant.name for variant in wave)
+                raw_wave = self._predict_many_counted(ocr, [variant.image for variant in wave])
+                wave_sufficient = False
+                for variant, raw_variant in zip(wave, raw_wave):
+                    if raw_variant is None:
+                        continue
+                    self.last_variants_succeeded.append(variant.name)
+                    variant_tokens = _tokens_from_result(
+                        raw_variant, page_index, variant.image, page_bbox,
                     )
-        best = _select_best_candidate(candidates, page_bbox)
-        best_quality = _candidate_quality(best, page_bbox)
-        # A global rotation can produce nearly identical confidence while
-        # recovering additional lines. Prefer that fuller candidate only when
-        # it is within the normal confidence noise of the current winner.
-        for candidate in candidates:
-            if len(candidate) > len(best) and _candidate_quality(candidate, page_bbox) >= best_quality - 0.0025:
-                best = candidate
-                best_quality = _candidate_quality(candidate, page_bbox)
-        return best
+                    candidates.append((variant_tokens, raw_variant, variant.name))
+                    assessment = assess_ocr_quality(
+                        variant_tokens,
+                        raw_metrics=raw_result_metrics(raw_variant),
+                        thresholds=self.quality_thresholds,
+                    )
+                    self.last_variant_scores[variant.name] = assessment.score
+                    wave_sufficient = wave_sufficient or assessment.sufficient
+                if policy == "adaptive" and wave_sufficient:
+                    break
+        best = _select_best_candidate([item[0] for item in candidates], page_bbox)
+        selected_item = max(candidates, key=lambda item: _candidate_quality(item[0], page_bbox))
+        self.last_selected_variant = selected_item[2]
+        self.last_quality = assess_ocr_quality(best, thresholds=self.quality_thresholds)
+        merged, replacements, insertions = _spatial_consensus(
+            best, [item[0] for item in candidates],
+        )
+        self.last_consensus_replacements = replacements
+        self.last_consensus_insertions = insertions
+        return merged
 
     def _predict_counted(self, ocr: Any, page_image: object) -> Any:
         self.last_pass_count += 1
@@ -707,7 +760,7 @@ def _remove_contained_fragments(tokens: list[OcrToken]) -> list[OcrToken]:
 
 def _candidate_quality(tokens: list[OcrToken], page_bbox: BBox | None) -> float:
     """Score OCR confidence together with generic page-edge coherence."""
-    score = _ocr_quality(tokens)
+    score = assess_ocr_quality(tokens).score
     if not tokens or page_bbox is None:
         return score
     try:
@@ -737,7 +790,7 @@ def _candidate_quality(tokens: list[OcrToken], page_bbox: BBox | None) -> float:
     return score
 
 
-def _enhancement_variants(image: object) -> list[object]:
+def _enhancement_variants(image: object) -> list[OcrImageVariant]:
     """Return quality-oriented image variants with the original geometry."""
     try:
         from PIL import Image, ImageEnhance, ImageFilter, ImageOps
@@ -747,10 +800,10 @@ def _enhancement_variants(image: object) -> list[object]:
             pil_image = pil_image.convert("RGB")
         gray = ImageOps.grayscale(pil_image).convert("RGB")
         variants = [
-            ImageOps.autocontrast(gray),
-            ImageEnhance.Sharpness(pil_image).enhance(2.0),
-            ImageEnhance.Contrast(pil_image).enhance(1.5),
-            pil_image.filter(ImageFilter.UnsharpMask(radius=1, percent=140, threshold=3)),
+            OcrImageVariant("autocontrast", ImageOps.autocontrast(gray), "contrast"),
+            OcrImageVariant("sharpness", ImageEnhance.Sharpness(pil_image).enhance(2.0), "sharpness"),
+            OcrImageVariant("contrast", ImageEnhance.Contrast(pil_image).enhance(1.5), "contrast"),
+            OcrImageVariant("unsharp", pil_image.filter(ImageFilter.UnsharpMask(radius=1, percent=140, threshold=3)), "sharpness"),
         ]
         # Keep every variant at the same dimensions so OCR boxes retain the
         # original page coordinate transform. These are especially useful for
@@ -766,9 +819,9 @@ def _enhancement_variants(image: object) -> list[object]:
             clahe_applied = clahe_filter.apply(gray_array)
             variants.extend(
                 [
-                    Image.fromarray(denoised).convert("RGB"),
-                    Image.fromarray(otsu).convert("RGB"),
-                    Image.fromarray(clahe_applied).convert("RGB"),
+                    OcrImageVariant("median_denoise", Image.fromarray(denoised).convert("RGB"), "noise"),
+                    OcrImageVariant("otsu", Image.fromarray(otsu).convert("RGB"), "noise"),
+                    OcrImageVariant("clahe", Image.fromarray(clahe_applied).convert("RGB"), "contrast"),
                 ]
             )
         except (ImportError, AttributeError, TypeError, ValueError):
@@ -776,6 +829,63 @@ def _enhancement_variants(image: object) -> list[object]:
         return variants
     except (ImportError, TypeError, ValueError):
         return []
+
+
+def _select_variants(
+    variants: list[OcrImageVariant],
+    profile: Any,
+    *,
+    exhaustive: bool,
+) -> list[OcrImageVariant]:
+    if exhaustive:
+        return variants
+    families: set[str] = set()
+    if profile.low_contrast:
+        families.add("contrast")
+    if profile.likely_blurred_or_small:
+        families.add("sharpness")
+    if profile.likely_noisy:
+        families.add("noise")
+    # An uncertain visual profile still gets bounded recovery in ADAPTIVE.
+    if not families:
+        return variants[:2]
+    return [variant for variant in variants if variant.family in families]
+
+
+def _spatial_consensus(
+    primary: list[OcrToken],
+    candidates: list[list[OcrToken]],
+) -> tuple[list[OcrToken], int, int]:
+    """Apply only local high-confidence alternate hypotheses."""
+    merged = list(primary)
+    replacements = 0
+    insertions = 0
+    for candidate in candidates:
+        if candidate is primary:
+            continue
+        for alternate in candidate:
+            confidence = alternate.confidence or 0.0
+            overlaps = [
+                index for index, current in enumerate(merged)
+                if _candidate_token_overlap(current, alternate)
+            ]
+            if overlaps:
+                index = max(overlaps, key=lambda item: merged[item].confidence or 0.0)
+                current = merged[index]
+                same = " ".join(current.text.strip().split()).casefold() == " ".join(alternate.text.strip().split()).casefold()
+                if same and confidence > (current.confidence or 0.0):
+                    merged[index] = alternate
+                elif confidence >= (current.confidence or 0.0) + 0.08:
+                    merged[index] = alternate
+                    replacements += 1
+            elif confidence >= 0.92:
+                merged.append(alternate)
+                insertions += 1
+    return (
+        _remove_contained_fragments(sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))),
+        replacements,
+        insertions,
+    )
 
 
 def _rotate_image(image: object, angle: int) -> object | None:

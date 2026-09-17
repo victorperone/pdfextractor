@@ -1,5 +1,12 @@
 from .api import PdfTextExtractor
-from .config import ExtractionMode, ExtractorConfig, SecurityLimits, best_extraction_config
+from .config import (
+    ExtractionMode,
+    ExtractorConfig,
+    OcrQualityPolicy,
+    OcrQualityThresholds,
+    SecurityLimits,
+    best_extraction_config,
+)
 from .errors import (
     ExtractionError,
     FatalExtractionError,
@@ -18,6 +25,8 @@ from .document import (
 __all__ = [
     "ExtractionMode",
     "ExtractorConfig",
+    "OcrQualityPolicy",
+    "OcrQualityThresholds",
     "PdfTextExtractor",
     "SecurityLimits",
     "best_extraction_config",

@@ -246,6 +246,24 @@ def _region_pair_score(
         second.bbox.y1,
     ) / max(min(first.bbox.height, second.bbox.height), 1.0)
     tolerance = max(3.0, min(first.bbox.height, second.bbox.height) * 0.10)
+    if first.kind == RegionKind.FIGURE and second.kind == RegionKind.CAPTION:
+        if second.bbox.y0 >= first.bbox.y1 - tolerance and horizontal_overlap >= 0.35:
+            score += 30.0
+        elif first.bbox.y0 >= second.bbox.y1 - tolerance:
+            score -= 30.0
+    elif second.kind == RegionKind.FIGURE and first.kind == RegionKind.CAPTION:
+        if first.bbox.y0 >= second.bbox.y1 - tolerance and horizontal_overlap >= 0.35:
+            score -= 30.0
+        elif second.bbox.y0 >= first.bbox.y1 - tolerance:
+            score += 30.0
+    # A narrow block overlapping a wider body flow is most often a sidebar.
+    # Keep its content after the main flow while leaving equal-width columns
+    # to the lane splitter below.
+    if vertical_overlap >= 0.35 and horizontal_overlap < 0.20:
+        if first.bbox.width >= second.bbox.width * 1.7:
+            score -= 10.0
+        elif second.bbox.width >= first.bbox.width * 1.7:
+            score += 10.0
     if first.bbox.y1 <= second.bbox.y0 + tolerance and horizontal_overlap >= 0.15:
         score += 8.0
     elif second.bbox.y1 <= first.bbox.y0 + tolerance and horizontal_overlap >= 0.15:
@@ -262,6 +280,7 @@ def _region_pair_score(
         native_weight = 1.0 + 6.0 * (native_consistency or 0.0)
         score += native_weight if first_order < second_order else -native_weight
 
+    # Geometry is primary. Semantic kind only resolves weak/tied relations.
     first_priority = _semantic_priority(first.kind)
     second_priority = _semantic_priority(second.kind)
     if first_priority != second_priority:
@@ -315,6 +334,7 @@ def _semantic_priority(kind: RegionKind) -> int:
         RegionKind.CAPTION: 5,
         RegionKind.FOOTNOTE: 6,
         RegionKind.MARGINALIA: 7,
+        RegionKind.DECORATIVE: 8,
         RegionKind.UNKNOWN: 8,
         RegionKind.FOOTER: 99,
     }.get(kind, 50)
@@ -369,6 +389,8 @@ def _order_prose_lines(lines: list[TextLine], region_width: float) -> tuple[list
         # Sorting by the original page bbox would undo that correction.
         return list(lines), 0
     ordered = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    if _looks_like_form(ordered):
+        return _order_form_rows(ordered), 0
     result: list[TextLine] = []
     current: list[TextLine] = []
     column_groups = 0
@@ -388,7 +410,7 @@ def _order_prose_lines(lines: list[TextLine], region_width: float) -> tuple[list
     # then the band itself, so titles and section dividers retain their
     # vertical position instead of being appended after all columns.
     for line in ordered:
-        if line.bbox.width >= region_width * 0.72:
+        if line.bbox.width >= region_width * 0.72 or _spans_lanes(line, ordered, region_width):
             flush_chunk(current)
             current = []
             result.append(line)
@@ -447,3 +469,49 @@ def _split_columns(lines: list[TextLine], region_width: float) -> list[list[Text
         return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
 
     return valid_columns
+
+
+def _spans_lanes(line: TextLine, lines: list[TextLine], region_width: float) -> bool:
+    if len(lines) < 6:
+        return False
+    narrow = [candidate for candidate in lines if candidate is not line and candidate.bbox.width < region_width * 0.55]
+    if len(narrow) < 4:
+        return False
+    starts = sorted(candidate.bbox.x0 for candidate in narrow)
+    if len(starts) < 4:
+        return False
+    midpoint = (starts[0] + starts[-1]) / 2
+    has_left = any(start < midpoint - region_width * 0.08 for start in starts)
+    has_right = any(start > midpoint + region_width * 0.08 for start in starts)
+    return has_left and has_right and line.bbox.width >= region_width * 0.45
+
+
+def _looks_like_form(lines: list[TextLine]) -> bool:
+    if len(lines) < 4:
+        return False
+    starts: dict[int, int] = {}
+    for line in lines:
+        key = round(line.bbox.x0 / 8.0)
+        starts[key] = starts.get(key, 0) + 1
+    tracks = sorted(starts.values(), reverse=True)
+    paired = sum(
+        1 for left, right in zip(lines, lines[1:])
+        if abs(left.bbox.cy - right.bbox.cy) <= max(left.bbox.height, right.bbox.height) * 0.8
+        and left.bbox.x0 < right.bbox.x0
+    )
+    return len([value for value in tracks if value >= 2]) >= 2 and paired >= 2
+
+
+def _order_form_rows(lines: list[TextLine]) -> list[TextLine]:
+    rows: list[list[TextLine]] = []
+    centers: list[float] = []
+    tolerance = max(3.0, median([line.bbox.height for line in lines]) * 0.75)
+    for line in sorted(lines, key=lambda item: (item.bbox.cy, item.bbox.x0)):
+        index = min(range(len(centers)), key=lambda item: abs(centers[item] - line.bbox.cy), default=None)
+        if index is None or abs(centers[index] - line.bbox.cy) > tolerance:
+            rows.append([line])
+            centers.append(line.bbox.cy)
+        else:
+            rows[index].append(line)
+            centers[index] = median(item.bbox.cy for item in rows[index])
+    return [line for row in sorted(rows, key=lambda item: min(line.bbox.y0 for line in item)) for line in sorted(row, key=lambda item: item.bbox.x0)]

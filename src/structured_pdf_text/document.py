@@ -36,6 +36,7 @@ class RegionKind(str, Enum):
     FOOTER = "footer"
     FOOTNOTE = "footnote"
     MARGINALIA = "marginalia"
+    DECORATIVE = "decorative"
     UNKNOWN = "unknown"
 
 
@@ -209,6 +210,12 @@ class TextToken:
     confidence: float
     normalized_text: str | None
     flags: set[TokenFlag] = field(default_factory=set)
+    font_name: str | None = None
+    font_size: float | None = None
+    font_weight: int | None = None
+    fill_color: tuple[int, int, int, int] | None = None
+    stroke_color: tuple[int, int, int, int] | None = None
+    text_render_mode: int | str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +345,16 @@ class ContentKind(str, Enum):
 
 
 @dataclass(slots=True)
+class StructuredListItem:
+    marker: str
+    text: str
+    level: int
+    bbox: BBox
+    order_index: int
+    confidence: float | None = None
+
+
+@dataclass(slots=True)
 class PageContentBlock:
     block_id: str
     page_index: int
@@ -353,6 +370,9 @@ class PageContentBlock:
 
     confidence: float | None = None
     fallback_from_table: bool = False
+    list_items: list[StructuredListItem] = field(default_factory=list)
+    # Compatibility-preserving view flag; raw/evidence remains available.
+    decorative: bool = False
 
 
 @dataclass(slots=True)

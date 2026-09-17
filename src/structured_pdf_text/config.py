@@ -12,6 +12,26 @@ class ExtractionMode(str, Enum):
     OCR = "ocr"
 
 
+class OcrQualityPolicy(str, Enum):
+    BASELINE = "baseline"
+    ADAPTIVE = "adaptive"
+    EXHAUSTIVE = "exhaustive"
+
+
+@dataclass(frozen=True, slots=True)
+class OcrQualityThresholds:
+    """Centralized, auditable starting points for OCR quality decisions."""
+
+    strong_mean_confidence: float = 0.90
+    strong_lower_quartile: float = 0.78
+    max_low_confidence_char_ratio: float = 0.12
+    severe_mean_confidence: float = 0.70
+    severe_low_confidence_char_ratio: float = 0.35
+    minimum_printable_ratio: float = 0.90
+    low_confidence_threshold: float = 0.70
+    minimum_orientation_ratio: float = 0.75
+
+
 @dataclass(frozen=True, slots=True)
 class SecurityLimits:
     max_pages: int = 5000
@@ -34,6 +54,8 @@ class ExtractorConfig:
     # OCR quality passes trade throughput and memory for recall. The default
     # keeps the high-recall behavior used by the corpus validations.
     ocr_quality_variants: bool = True
+    ocr_quality_policy: OcrQualityPolicy | str = OcrQualityPolicy.ADAPTIVE
+    ocr_quality_thresholds: OcrQualityThresholds = OcrQualityThresholds()
     ocr_batch_size: int = 3
     preserve_headers_footers: bool = True
     # Low-level PDFium characters and object summaries are useful for a raw
@@ -51,6 +73,18 @@ class ExtractorConfig:
         if isinstance(self.mode, ExtractionMode):
             return self.mode
         return ExtractionMode(self.mode)
+
+    def effective_ocr_quality_policy(self) -> OcrQualityPolicy:
+        """Resolve the legacy boolean and the explicit policy in one place."""
+        if not self.ocr_quality_variants:
+            return OcrQualityPolicy.BASELINE
+        if isinstance(self.ocr_quality_policy, OcrQualityPolicy):
+            return self.ocr_quality_policy
+        return OcrQualityPolicy(self.ocr_quality_policy)
+
+
+def effective_ocr_quality_policy(config: ExtractorConfig) -> OcrQualityPolicy:
+    return config.effective_ocr_quality_policy()
 
 
 def best_extraction_config(

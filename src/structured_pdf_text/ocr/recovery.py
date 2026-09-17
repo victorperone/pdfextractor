@@ -30,6 +30,7 @@ class RegionRefinementRequest:
     goal: RegionRefinementGoal = RegionRefinementGoal.TEXT
     min_confidence: float = 0.0
     page_rotation: int = 0
+    quality_policy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,7 @@ class OcrRegionRefiner:
                         page_index,
                         virtual_bbox,
                         quality_variants=request.quality_variants,
+                        quality_policy=request.quality_policy,
                     )
                     total_passes += getattr(self.engine, "last_pass_count", 0) or 0
                     total_batches += getattr(self.engine, "last_batch_count", 0) or 0
@@ -349,6 +351,7 @@ def _recognize(
     bbox: BBox,
     *,
     quality_variants: bool,
+    quality_policy: str | None = None,
 ) -> list[OcrToken]:
     try:
         return engine.recognize_page(
@@ -356,6 +359,7 @@ def _recognize(
             page_index,
             bbox,
             quality_variants=quality_variants,
+            quality_policy=quality_policy,
         )
     except TypeError:
         try:

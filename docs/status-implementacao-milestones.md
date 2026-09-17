@@ -35,6 +35,13 @@ coberto de forma geral.
 7. ~~Métricas restantes do M12.~~
 8. ~~Evidência PDFium adicional do M1 oferecida pela binding atual.~~
 
-Nenhum item acima exige contrariar as decisões do documento original. Os
+Nenhum item acima exige contrariar as decisões do documento original. A etapa
+de qualidade adaptativa adicionou `OcrQualityPolicy` (`baseline`, `adaptive` e
+`exhaustive`), avaliação ponderada por caracteres, perfil visual, consenso
+espacial, tipografia nativa em `TextToken`, listas estruturadas, ordenação de
+formulários/figura-caption e classificação conservadora de conteúdo decorativo.
+Os diagnósticos dessas decisões ficam em `page.diagnostics.facts`. O corpus de
+validação citado no plano não está neste checkout; a validação executada aqui é
+sintética e baseada nos testes do projeto. Os backends permanecem substituíveis e texto nativo confiável continua sendo a evidência principal.
 backends permanecem substituíveis e texto nativo confiável continua sendo a
 evidência principal.

@@ -229,6 +229,7 @@ pdftext extract documento.pdf --output json
 
 # OCR-assisted extraction (requires setup-models)
 pdftext extract documento.pdf --mode balanced --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-quality-policy adaptive
 pdftext extract documento.pdf --mode balanced --output json
 pdftext extract documento.pdf --mode ocr --output reading
 pdftext extract documento.pdf --best --output markdown -o output.md
@@ -253,6 +254,18 @@ the adapter disables MKL-DNN/OneDNN for compatibility. Models are loaded from
 explicit local paths; remote model-source checks are disabled at runtime.
 Model paths and behaviour can be overridden through `PaddleOcrEngine`
 constructor options.
+
+OCR quality policies are available through the API and CLI:
+
+- `baseline`: one normal inference, plus required orientation recovery;
+- `adaptive`: baseline followed by only the recovery families indicated by
+  quality and image evidence (the default);
+- `exhaustive`: all available enhancement variants, intended for diagnostics
+  and benchmark comparison.
+
+`ocr_quality_variants=False` remains a compatibility alias for `baseline`.
+Every policy records quality measurements, attempted variants, selection and
+consensus decisions in `page.diagnostics.facts`.
 
 Performance diagnostics are available in `page.diagnostics.facts` under
 `timings_ms` and `ocr_passes`, and in `document.diagnostics.facts` under

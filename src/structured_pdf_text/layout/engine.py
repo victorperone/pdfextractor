@@ -172,6 +172,10 @@ def _semantic_predictions(
             kind = RegionKind.FOOTNOTE
             confidence = 0.76
             label = "native_bottom_note"
+        elif _is_decorative(line, page_bbox, typical_height):
+            kind = RegionKind.DECORATIVE
+            confidence = 0.84
+            label = "native_decorative_text"
         elif _is_caption(line, text, lower, page_bbox):
             kind = RegionKind.CAPTION
             confidence = 0.78
@@ -195,6 +199,26 @@ def _semantic_predictions(
                 )
             )
     return predictions
+
+
+def _is_decorative(line: Any, page_bbox: BBox, typical_height: float) -> bool:
+    """Require multiple visual signals before hiding a native text line."""
+    tokens = [token for token in line.tokens if token.text.strip()]
+    if not tokens:
+        return False
+    signals = 0
+    sizes = [token.font_size for token in tokens if token.font_size and token.font_size > 0]
+    if sizes and median(sizes) >= max(24.0, typical_height * 2.5):
+        signals += 1
+    angles = [token.bbox.height > token.bbox.width * 1.35 for token in tokens]
+    if sum(angles) / len(angles) >= 0.60:
+        signals += 1
+    light = [token.fill_color[3] < 210 for token in tokens if token.fill_color is not None]
+    if light and sum(light) / len(light) >= 0.70:
+        signals += 1
+    if line.bbox.width >= page_bbox.width * 0.45 and line.bbox.height >= typical_height * 1.8:
+        signals += 1
+    return signals >= 2 and line.bbox.y0 > page_bbox.y0 + page_bbox.height * 0.12
 
 
 def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> bool:

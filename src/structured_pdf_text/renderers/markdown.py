@@ -49,6 +49,8 @@ def _render_content_block(
     *,
     preserve_hf: bool,
 ) -> str:
+    if block.decorative:
+        return ""
     if block.kind in (ContentKind.HEADER, ContentKind.FOOTER):
         if not preserve_hf:
             return ""
@@ -58,6 +60,12 @@ def _render_content_block(
         level = block.heading_level or 1
         prefix = "#" * max(1, min(level, 6))
         return f"{prefix} {block.text}" if block.text else ""
+
+    if block.kind == ContentKind.LIST and block.list_items:
+        return "\n".join(
+            f"{'  ' * max(0, item.level)}{item.marker} {item.text}"
+            for item in block.list_items
+        )
 
     if block.kind == ContentKind.TABLE:
         table = table_map.get(block.table_id or "")

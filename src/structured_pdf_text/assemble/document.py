@@ -92,6 +92,7 @@ def assemble_document(
                 "content_table_fallbacks": result.table_fallbacks,
                 "content_claimed_table_lines": result.claimed_table_lines,
                 "content_orphan_tables": result.orphan_tables,
+                "decorative_block_count": sum(1 for b in result.blocks if b.decorative),
                 "content_source_region_count": len(page.regions),
                 "content_assembly_ms": round(result.assembly_ms, 3),
                 "content_block_order": [

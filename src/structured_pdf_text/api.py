@@ -12,7 +12,7 @@ from typing import Any
 
 from .assemble.document import assemble_document
 from .assemble.page import assemble_page
-from .config import ExtractionMode, ExtractorConfig
+from .config import ExtractionMode, ExtractorConfig, effective_ocr_quality_policy
 from .document import (
     Baseline,
     ComplexityReason,
@@ -75,6 +75,8 @@ class PdfTextExtractor:
                 num_threads=_resolve_num_threads(self.config.num_threads),
                 ocr_batch_size=self.config.ocr_batch_size,
                 quality_variants=self.config.ocr_quality_variants,
+                quality_policy=effective_ocr_quality_policy(self.config).value,
+                quality_thresholds=self.config.ocr_quality_thresholds,
             )
         else:
             self.ocr_engine = None
@@ -309,6 +311,7 @@ class PdfTextExtractor:
                                             ocr_image,
                                             page_index,
                                             native_page.bbox,
+                                            quality_policy=effective_ocr_quality_policy(self.config).value,
                                         )
                                     except TypeError:
                                         # Preserve compatibility with early injected
@@ -339,6 +342,7 @@ class PdfTextExtractor:
                                         page_bbox=native_page.bbox,
                                         regions=selected_regions,
                                         quality_variants=self.config.ocr_quality_variants,
+                                        quality_policy=effective_ocr_quality_policy(self.config).value,
                                         page_rotation=native_page.objects.rotation,
                                     )
                                 timings["ocr_ms"] = (
@@ -600,6 +604,27 @@ class PdfTextExtractor:
                         "ocr_degraded": ocr_degraded,
                         "ocr_degraded_reasons": ocr_degraded_reasons,
                         "ocr_attempt_errors": ocr_attempt_errors,
+                        "ocr_quality_policy": effective_ocr_quality_policy(self.config).value,
+                        "ocr_baseline_quality": _quality_to_dict(getattr(self.ocr_engine, "last_baseline_quality", None)),
+                        "ocr_image_profile": _image_profile_to_dict(getattr(self.ocr_engine, "last_image_profile", None)),
+                        "ocr_recovery_triggered": bool(getattr(getattr(self.ocr_engine, "last_baseline_quality", None), "recovery_recommended", False)),
+                        "ocr_recovery_reasons": list(getattr(getattr(self.ocr_engine, "last_baseline_quality", None), "reasons", ())),
+                        "ocr_selected_variant": getattr(self.ocr_engine, "last_selected_variant", None),
+                        "ocr_variants_attempted": list(getattr(self.ocr_engine, "last_variants_attempted", [])),
+                        "ocr_variant_scores": dict(getattr(self.ocr_engine, "last_variant_scores", {})),
+                        "ocr_variants_succeeded": list(getattr(self.ocr_engine, "last_variants_succeeded", [])),
+                        "ocr_variants_failed": list(ocr_attempt_errors),
+                        "ocr_candidate_count": len(getattr(self.ocr_engine, "last_variant_scores", {})),
+                        "ocr_consensus_replacements": getattr(self.ocr_engine, "last_consensus_replacements", 0),
+                        "ocr_consensus_insertions": getattr(self.ocr_engine, "last_consensus_insertions", 0),
+                        "ocr_targeted_refinement_regions": [
+                            region_id for region_id, stat in ocr_region_stats.items()
+                            if stat.get("attempts", 0) > 0
+                        ],
+                        "ocr_targeted_refinement_passes": sum(
+                            int(stat.get("ocr_passes", 0)) for stat in ocr_region_stats.values()
+                        ),
+                        "ocr_early_stop": effective_ocr_quality_policy(self.config).value == "adaptive" and len(getattr(self.ocr_engine, "last_variants_attempted", [])) <= 2 if self.ocr_engine is not None else False,
                         "page_ocr_requested": page_ocr_requested,
                         "region_ocr_requested": region_ocr_requested,
                         "ocr_candidate_region_ids": list(recovery_plan.region_ids),
@@ -715,6 +740,32 @@ def _process_memory_snapshot() -> dict[str, int]:
     }
 
 
+def _quality_to_dict(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    names = (
+        "score", "sufficient", "recovery_recommended", "character_count",
+        "token_count", "char_weighted_confidence", "median_confidence",
+        "lower_quartile_confidence", "low_confidence_character_ratio",
+        "horizontal_token_ratio", "printable_character_ratio",
+        "alphanumeric_character_ratio", "suspicious_token_ratio",
+        "detection_count", "recognition_count", "recognition_yield",
+        "orientation_incoherent", "reasons",
+    )
+    return {name: list(getattr(value, name)) if name == "reasons" else getattr(value, name) for name in names}
+
+
+def _image_profile_to_dict(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    names = (
+        "contrast_span", "grayscale_stddev", "sharpness_score", "noise_score",
+        "median_token_height_px", "low_contrast", "likely_blurred_or_small",
+        "likely_noisy",
+    )
+    return {name: getattr(value, name) for name in names}
+
+
 def _resolve_num_threads(num_threads: int) -> int:
     """Resolve o número efetivo de threads para o motor OCR.
 
@@ -752,6 +803,7 @@ def _recover_selected_regions(
     page_bbox: BBox,
     regions: list[LayoutRegion],
     quality_variants: bool,
+    quality_policy: str | None = None,
     page_rotation: int = 0,
 ) -> tuple[list[OcrToken], int, int, dict[str, dict[str, Any]]]:
     """Recover only regions selected by the quality gate."""
@@ -759,7 +811,12 @@ def _recover_selected_regions(
     requests = [
         RegionRefinementRequest(
             bbox=region.bbox,
+            scale_factors=(1.0, 1.5, 2.0) if any(
+                marker in " ".join(region.quality.reasons).lower()
+                for marker in ("small", "sparse", "missing", "damaged")
+            ) else (1.0,),
             quality_variants=quality_variants,
+            quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
             page_rotation=page_rotation,
         )

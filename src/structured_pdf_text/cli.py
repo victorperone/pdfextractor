@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .api import PdfTextExtractor
-from .config import ExtractionMode, ExtractorConfig, best_extraction_config
+from .config import ExtractionMode, ExtractorConfig, OcrQualityPolicy, best_extraction_config
 from .diagnostics.overlay import render_overlay
 from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
@@ -42,6 +42,12 @@ def main(argv: list[str] | None = None) -> int:
         "--no-ocr-quality-variants",
         action="store_true",
         help="Use one OCR pass per page/region instead of enhancement variants",
+    )
+    extract_parser.add_argument(
+        "--ocr-quality-policy",
+        choices=[policy.value for policy in OcrQualityPolicy],
+        default=OcrQualityPolicy.ADAPTIVE.value,
+        help="OCR quality strategy: baseline, adaptive or exhaustive",
     )
     extract_parser.add_argument(
         "--omit-repeated-headers-footers",
@@ -88,6 +94,11 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser.add_argument("--mode", choices=[mode.value for mode in ExtractionMode], default=ExtractionMode.NATIVE.value)
     inspect_parser.add_argument("--language", default="pt")
     inspect_parser.add_argument(
+        "--ocr-quality-policy",
+        choices=[policy.value for policy in OcrQualityPolicy],
+        default=OcrQualityPolicy.ADAPTIVE.value,
+    )
+    inspect_parser.add_argument(
         "--raw-page-json",
         action="store_true",
         help="Include the immutable PDFium page evidence as JSON",
@@ -120,6 +131,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-ocr-quality-variants",
         action="store_true",
         help="Use one OCR pass per page/region instead of enhancement variants",
+    )
+    report_parser.add_argument(
+        "--ocr-quality-policy",
+        choices=[policy.value for policy in OcrQualityPolicy],
+        default=OcrQualityPolicy.ADAPTIVE.value,
     )
     report_parser.add_argument(
         "--workers",
@@ -199,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
                 language=args.language,
                 ocr_batch_size=args.ocr_batch_size,
                 ocr_quality_variants=not args.no_ocr_quality_variants,
+                ocr_quality_policy=args.ocr_quality_policy,
                 preserve_headers_footers=not args.omit_repeated_headers_footers,
                 merge_cross_page_tables=args.merge_cross_page_tables,
                 num_threads=args.threads,
@@ -255,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             language=args.language,
             retain_native_evidence=args.raw_page_json,
+            ocr_quality_policy=args.ocr_quality_policy,
             page_indices=(args.page - 1,) if args.page is not None else None,
         )
         if _mode_requires_ocr(config.mode):
@@ -337,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             language=args.language,
             ocr_batch_size=args.ocr_batch_size,
             ocr_quality_variants=not args.no_ocr_quality_variants,
+            ocr_quality_policy=args.ocr_quality_policy,
             merge_cross_page_tables=args.merge_cross_page_tables,
             num_threads=args.threads,
         )

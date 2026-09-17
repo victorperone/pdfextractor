@@ -26,7 +26,8 @@ from structured_pdf_text.document import (
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.line_detector import lines_to_text
-from structured_pdf_text.text.normalize import normalize_text
+from structured_pdf_text.text.normalize import normalize_reading_text
+from structured_pdf_text.text.lists import extract_list_items
 from structured_pdf_text.text.reading_order import (
     ReadingOrderDecision,
     native_order_consistency,
@@ -214,7 +215,7 @@ def _content_kind_from_region(region_kind: RegionKind) -> ContentKind:
 
 def _normalized_lines_text(lines: list[TextLine]) -> str:
     """Produce normalized text from a list of lines (NFC, no control chars)."""
-    return normalize_text(lines_to_text(lines)).strip()
+    return normalize_reading_text(lines_to_text(lines)).strip()
 
 
 def _build_region_blocks(
@@ -345,6 +346,9 @@ def _emit_prose_block(
 ) -> list[PageContentBlock]:
     if not lines:
         return []
+    list_items = extract_list_items(lines) if kind in {ContentKind.TEXT, ContentKind.LIST} else []
+    if list_items:
+        kind = ContentKind.LIST
     text = _normalized_lines_text(lines)
     if not text:
         return []
@@ -365,6 +369,8 @@ def _emit_prose_block(
             heading_level=region.heading_level if kind == ContentKind.TITLE else None,
             source_region_ids=[region.region_id],
             fallback_from_table=fallback_from_table,
+            list_items=list_items,
+            decorative=region.kind == RegionKind.DECORATIVE,
         )
     ]
 
@@ -461,6 +467,8 @@ def _build_reading_text(blocks: list[PageContentBlock]) -> str:
     parts: list[str] = []
     for block in sorted(blocks, key=lambda b: b.order_index):
         if block.kind in (ContentKind.HEADER, ContentKind.FOOTER):
+            continue
+        if block.decorative:
             continue
         if block.kind == ContentKind.TABLE:
             continue

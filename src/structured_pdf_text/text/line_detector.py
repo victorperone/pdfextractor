@@ -154,10 +154,11 @@ def _split_groups_by_column_gap(
             result.append(group)
             continue
         median_width = median(widths)
-        # Column gaps are typically several times a character width. A
-        # threshold of 2.5× median width catches standard column gutters
-        # while keeping normal word spacing (≈0.5–1× width) unsplit.
-        gap_threshold = max(20.0, median_width * 2.5)
+        # Column gaps are typically several times a character width. A more
+        # conservative boundary protects tracked headings whose inter-glyph
+        # spacing is intentionally large; ordinary word separation is handled
+        # later by _infer_gap_threshold.
+        gap_threshold = max(20.0, median_width * 4.0)
         current: list[NativeCharacter] = [sorted_by_x[0]]
         for prev, curr in zip(sorted_by_x, sorted_by_x[1:]):
             horizontal_gap = curr.bbox.x0 - prev.bbox.x1
@@ -206,6 +207,8 @@ def _line_from_chars(
         )
         if not reverse_axis:
             ordered = _restore_inline_whitespace_order(ordered)
+            if _native_sequence_is_plausible(ordered):
+                ordered = sorted(ordered, key=lambda char: char.char_index)
         bbox_for_baseline = BBox.union_all([char.bbox for char in ordered])
         baseline = Baseline(y=bbox_for_baseline.y1, angle=math.pi if reverse_axis else 0.0)
     boxes = [char.bbox for char in ordered]
@@ -247,10 +250,7 @@ def _chars_to_text_tokens(
     ]
 
     median_advance = median(advances) if advances else 5.0
-    inferred_gap_threshold = max(
-        2.5,
-        median_advance * 0.85,
-    )
+    inferred_gap_threshold = _infer_gap_threshold(characters, direction, median_advance)
 
     tokens: list[TextToken] = []
     previous: NativeCharacter | None = None
@@ -327,12 +327,52 @@ def _chars_to_text_tokens(
                     char.text
                 ),
                 flags=flags,
+                font_name=char.font_name,
+                font_size=char.font_size,
+                font_weight=char.font_weight,
+                fill_color=char.fill_color,
+                stroke_color=char.stroke_color,
+                text_render_mode=char.text_render_mode,
             )
         )
 
         previous = char
 
     return tokens
+
+
+def _native_sequence_is_plausible(characters: list[NativeCharacter]) -> bool:
+    """Prefer PDFium order only inside an already separated line segment."""
+    if len(characters) < 3:
+        return False
+    native = sorted(characters, key=lambda char: char.char_index)
+    positions = [char.bbox.x0 for char in native if not char.text.isspace()]
+    if len(positions) < 3:
+        return False
+    monotonic = sum(current >= previous - 0.75 for previous, current in zip(positions, positions[1:]))
+    consistency = monotonic / max(1, len(positions) - 1)
+    indices = [char.char_index for char in native]
+    compactness = sum((current - previous) <= 4 for previous, current in zip(indices, indices[1:])) / max(1, len(indices) - 1)
+    return consistency >= 0.85 and compactness >= 0.70
+
+
+def _infer_gap_threshold(
+    characters: list[NativeCharacter],
+    direction: WritingDirection,
+    median_advance: float,
+) -> float:
+    gaps = [
+        _character_axis_gap(previous, current, direction, reverse_axis=False)
+        for previous, current in zip(characters, characters[1:])
+        if not previous.text.isspace() and not current.text.isspace()
+    ]
+    positive = sorted(gap for gap in gaps if gap > 0)
+    if len(positive) < 2:
+        return max(2.5, median_advance * 0.85)
+    middle = median(positive)
+    mad = median([abs(gap - middle) for gap in positive])
+    threshold = middle + max(1.5, 2.5 * mad)
+    return max(2.5, min(median_advance * 2.0, threshold))
 
 
 def _character_axis_gap(

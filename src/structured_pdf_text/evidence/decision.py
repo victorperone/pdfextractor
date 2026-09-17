@@ -9,6 +9,7 @@ from structured_pdf_text.document import (
     RegionDecision,
     RegionKind,
     RegionQuality,
+    TokenFlag,
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.evidence.complexity import PageComplexity
@@ -147,6 +148,14 @@ def _assess_one_region(
         }
         & page_complexity.reasons
     )
+    unicode_mapping_failed = any(
+        TokenFlag.UNICODE_MAPPING_FAILED in token.flags
+        for line in region.native_lines
+        for token in line.tokens
+    )
+    if unicode_mapping_failed:
+        reasons.append("unicode_mapping_failed")
+        return RegionQuality(RegionDecision.MERGE_OCR, reasons, 0.64)
     if text and damaged_layer:
         reasons.append("page_text_layer_damaged")
         return RegionQuality(RegionDecision.MERGE_OCR, reasons, 0.68)
