@@ -12,7 +12,12 @@ from typing import Any
 
 from .assemble.document import assemble_document
 from .assemble.page import assemble_page
-from .config import ExtractionMode, ExtractorConfig, effective_ocr_quality_policy
+from .config import (
+    ExtractionMode,
+    ExtractorConfig,
+    OcrQualityThresholds,
+    effective_ocr_quality_policy,
+)
 from .document import (
     Baseline,
     ComplexityReason,
@@ -49,6 +54,7 @@ from .ocr.recovery import (
     RegionRefinementGoal,
     RegionRefinementRequest,
 )
+from .ocr.quality import assess_ocr_quality
 from .tables.detector import detect_tables_native
 from .tables.visual import detect_visual_table
 from .text.line_detector import reconstruct_native_lines
@@ -232,6 +238,9 @@ class PdfTextExtractor:
                 ocr_table_tokens = 0
                 ocr_figure_tokens = 0
                 ocr_region_stats: dict[str, dict[str, Any]] = {}
+                ocr_targeted_stats: dict[str, dict[str, Any]] = {}
+                ocr_targeted_passes = 0
+                ocr_targeted_batches = 0
                 ocr_attempt_errors: list[str] = []
                 mode = self.config.normalized_mode()
                 ocr_available_by_mode = _ocr_enabled(self.config)
@@ -421,6 +430,45 @@ class PdfTextExtractor:
                             token for token in ocr_tokens if _line_in_box(token, region.bbox)
                         ]
 
+                if page_ocr_requested and ocr_tokens and ocr_image is not None:
+                    weak_start = time.perf_counter()
+                    try:
+                        (
+                            ocr_tokens,
+                            ocr_targeted_passes,
+                            ocr_targeted_batches,
+                            ocr_targeted_stats,
+                        ) = _recover_weak_ocr_regions(
+                            engine=self.ocr_engine,
+                            page_image=ocr_image,
+                            page_index=page_index,
+                            page_bbox=native_page.bbox,
+                            tokens=ocr_tokens,
+                            lines=reconstruct_ocr_lines(
+                                ocr_tokens,
+                                page_index,
+                                native_page.bbox,
+                            ),
+                            quality_policy=effective_ocr_quality_policy(self.config).value,
+                            thresholds=self.config.ocr_quality_thresholds,
+                            page_rotation=native_page.objects.rotation,
+                        )
+                    except FatalExtractionError:
+                        raise
+                    except Exception as exc:
+                        raise_if_resource_exhausted(
+                            exc,
+                            page_index=page_index,
+                            stage="ocr_targeted_refinement",
+                            details=_process_memory_snapshot(),
+                        )
+                        warnings.append(
+                            f"Targeted OCR recovery unavailable: {type(exc).__name__}: {exc}"
+                        )
+                    timings["ocr_targeted_refinement_ms"] = (
+                        time.perf_counter() - weak_start
+                    ) * 1000
+
                 # Recompute alignment after refinements so diagnostics and
                 # supplemental text describe the final OCR evidence.
                 if ocr_tokens:
@@ -584,6 +632,7 @@ class PdfTextExtractor:
                         if self.ocr_engine is not None and ocr_image is not None
                         else "ocr_unavailable"
                     ]
+                ocr_diag_engine = self.ocr_engine if ocr_requested else None
                 diagnostics = PageDiagnostics(
                     page_index=page_index,
                     strategy=actual_strategy,
@@ -605,26 +654,36 @@ class PdfTextExtractor:
                         "ocr_degraded_reasons": ocr_degraded_reasons,
                         "ocr_attempt_errors": ocr_attempt_errors,
                         "ocr_quality_policy": effective_ocr_quality_policy(self.config).value,
-                        "ocr_baseline_quality": _quality_to_dict(getattr(self.ocr_engine, "last_baseline_quality", None)),
-                        "ocr_image_profile": _image_profile_to_dict(getattr(self.ocr_engine, "last_image_profile", None)),
-                        "ocr_recovery_triggered": bool(getattr(getattr(self.ocr_engine, "last_baseline_quality", None), "recovery_recommended", False)),
-                        "ocr_recovery_reasons": list(getattr(getattr(self.ocr_engine, "last_baseline_quality", None), "reasons", ())),
-                        "ocr_selected_variant": getattr(self.ocr_engine, "last_selected_variant", None),
-                        "ocr_variants_attempted": list(getattr(self.ocr_engine, "last_variants_attempted", [])),
-                        "ocr_variant_scores": dict(getattr(self.ocr_engine, "last_variant_scores", {})),
-                        "ocr_variants_succeeded": list(getattr(self.ocr_engine, "last_variants_succeeded", [])),
+                        "ocr_baseline_quality": _quality_to_dict(getattr(ocr_diag_engine, "last_baseline_quality", None)),
+                        "ocr_image_profile": _image_profile_to_dict(getattr(ocr_diag_engine, "last_image_profile", None)),
+                        "ocr_recovery_triggered": bool(getattr(ocr_diag_engine, "last_recovery_triggered", False)),
+                        "ocr_recovery_reasons": list(getattr(ocr_diag_engine, "last_recovery_reasons", [])),
+                        "ocr_selected_variant": getattr(ocr_diag_engine, "last_selected_variant", None),
+                        "ocr_variants_attempted": list(getattr(ocr_diag_engine, "last_variants_attempted", [])),
+                        "ocr_variant_scores": dict(getattr(ocr_diag_engine, "last_variant_scores", {})),
+                        "ocr_variants_succeeded": list(getattr(ocr_diag_engine, "last_variants_succeeded", [])),
                         "ocr_variants_failed": list(ocr_attempt_errors),
-                        "ocr_candidate_count": len(getattr(self.ocr_engine, "last_variant_scores", {})),
-                        "ocr_consensus_replacements": getattr(self.ocr_engine, "last_consensus_replacements", 0),
-                        "ocr_consensus_insertions": getattr(self.ocr_engine, "last_consensus_insertions", 0),
+                        "ocr_candidate_count": getattr(ocr_diag_engine, "last_candidate_count", 0),
+                        "ocr_consensus_replacements": getattr(ocr_diag_engine, "last_consensus_replacements", 0),
+                        "ocr_consensus_insertions": getattr(ocr_diag_engine, "last_consensus_insertions", 0),
+                        "ocr_orientation_selected": getattr(ocr_diag_engine, "last_orientation_selected", None),
+                        "ocr_orientation_attempts": list(getattr(ocr_diag_engine, "last_orientation_attempts", [])),
+                        "ocr_enhancement_orientation": getattr(ocr_diag_engine, "last_enhancement_orientation", None),
                         "ocr_targeted_refinement_regions": [
-                            region_id for region_id, stat in ocr_region_stats.items()
+                            region_id for region_id, stat in {
+                                **ocr_region_stats,
+                                **ocr_targeted_stats,
+                            }.items()
                             if stat.get("attempts", 0) > 0
                         ],
                         "ocr_targeted_refinement_passes": sum(
                             int(stat.get("ocr_passes", 0)) for stat in ocr_region_stats.values()
-                        ),
-                        "ocr_early_stop": effective_ocr_quality_policy(self.config).value == "adaptive" and len(getattr(self.ocr_engine, "last_variants_attempted", [])) <= 2 if self.ocr_engine is not None else False,
+                        ) + ocr_targeted_passes,
+                        "ocr_targeted_refinement_batches": sum(
+                            int(stat.get("ocr_batches", 0)) for stat in ocr_region_stats.values()
+                        ) + ocr_targeted_batches,
+                        "ocr_targeted_refinement_stats": ocr_targeted_stats,
+                        "ocr_early_stop": bool(getattr(ocr_diag_engine, "last_early_stop", False)),
                         "page_ocr_requested": page_ocr_requested,
                         "region_ocr_requested": region_ocr_requested,
                         "ocr_candidate_region_ids": list(recovery_plan.region_ids),
@@ -759,7 +818,7 @@ def _image_profile_to_dict(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     names = (
-        "contrast_span", "grayscale_stddev", "sharpness_score", "noise_score",
+        "available", "contrast_span", "grayscale_stddev", "sharpness_score", "noise_score",
         "median_token_height_px", "low_contrast", "likely_blurred_or_small",
         "likely_noisy",
     )
@@ -860,6 +919,96 @@ def _recover_selected_regions(
             "ocr_batches": result.ocr_batches,
         }
     return _deduplicate_region_ocr_tokens(tokens), passes, batches, stats
+
+
+def _recover_weak_ocr_regions(
+    engine: Any,
+    page_image: Any,
+    page_index: int,
+    page_bbox: BBox,
+    tokens: list[OcrToken],
+    lines: list[TextLine],
+    quality_policy: str | None,
+    thresholds: OcrQualityThresholds,
+    page_rotation: int = 0,
+) -> tuple[list[OcrToken], int, int, dict[str, dict[str, Any]]]:
+    """Refine only locally weak OCR lines after page candidate selection."""
+    if engine is None or not lines or page_bbox.area <= 0:
+        return tokens, 0, 0, {}
+    weak_lines: list[tuple[TextLine, tuple[str, ...]]] = []
+    for line in lines:
+        assessment = assess_ocr_quality(line.tokens, thresholds=thresholds)
+        if assessment.recovery_recommended or assessment.suspicious_token_ratio > 0.10:
+            weak_lines.append((line, assessment.reasons))
+    if not weak_lines:
+        return tokens, 0, 0, {}
+
+    groups: list[list[tuple[TextLine, tuple[str, ...]]]] = []
+    for item in weak_lines:
+        line = item[0]
+        if not groups:
+            groups.append([item])
+            continue
+        previous = groups[-1][-1][0]
+        gap = line.bbox.y0 - previous.bbox.y1
+        horizontal_gap = max(
+            0.0,
+            previous.bbox.x0 - line.bbox.x1,
+            line.bbox.x0 - previous.bbox.x1,
+        )
+        tolerance = max(previous.bbox.height, line.bbox.height, 4.0) * 1.6
+        if gap <= tolerance and horizontal_gap <= max(12.0, tolerance):
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+
+    refiner = OcrRegionRefiner(engine)
+    refined_tokens = list(tokens)
+    passes = 0
+    batches = 0
+    stats: dict[str, dict[str, Any]] = {}
+    for index, group in enumerate(groups, start=1):
+        box = BBox.union_all([line.bbox for line, _ in group]).expand(4.0).intersection(page_bbox)
+        if box is None or box.area <= 0:
+            continue
+        area_ratio = box.area / max(page_bbox.area, 1.0)
+        scales = (1.5, 2.0, 3.0) if area_ratio <= 0.12 else (1.5, 2.0)
+        request = RegionRefinementRequest(
+            bbox=box,
+            scale_factors=scales,
+            rotations=(0.0,),
+            quality_variants=True,
+            quality_policy=quality_policy,
+            goal=RegionRefinementGoal.TEXT,
+            page_rotation=page_rotation,
+        )
+        result = refiner.refine(page_image, page_index, page_bbox, request)
+        passes += result.ocr_passes
+        batches += result.ocr_batches
+        old_tokens = [token for token in refined_tokens if _line_in_box(token, box)]
+        new_tokens = list(result.tokens)
+        old_quality = assess_ocr_quality(old_tokens, thresholds=thresholds)
+        new_quality = assess_ocr_quality(new_tokens, thresholds=thresholds)
+        accepted = bool(new_tokens) and (
+            not old_tokens
+            or new_quality.score >= old_quality.score + 0.03
+            or (new_quality.sufficient and not old_quality.sufficient)
+        )
+        if accepted:
+            refined_tokens = _replace_tokens_in_box(refined_tokens, box, new_tokens)
+        stats[f"weak-region-{index}"] = {
+            "bbox": box,
+            "line_count": len(group),
+            "reasons": sorted({reason for _, reasons in group for reason in reasons}),
+            "attempts": len(result.attempts),
+            "ocr_passes": result.ocr_passes,
+            "ocr_batches": result.ocr_batches,
+            "selected_scale_factor": result.selected_scale_factor,
+            "old_score": old_quality.score,
+            "new_score": new_quality.score,
+            "accepted": accepted,
+        }
+    return _deduplicate_region_ocr_tokens(refined_tokens), passes, batches, stats
 
 
 def _suppress_figure_shape_hallucinations(

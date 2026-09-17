@@ -7,6 +7,15 @@ from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine, Wri
 from structured_pdf_text.text.normalize import normalize_text
 
 
+# Keep the sidebar heuristic centralized so its geometry and weight stay
+# auditable.  The relation is only considered when blocks overlap vertically
+# and are clearly lateral; vertical stacking remains the stronger signal.
+SIDEBAR_WIDTH_RATIO = 1.7
+SIDEBAR_WEIGHT = 10.0
+SIDEBAR_MIN_VERTICAL_OVERLAP = 0.35
+SIDEBAR_MAX_HORIZONTAL_OVERLAP = 0.20
+
+
 @dataclass(frozen=True, slots=True)
 class ReadingOrderDecision:
     region_order: tuple[str, ...]
@@ -257,13 +266,19 @@ def _region_pair_score(
         elif second.bbox.y0 >= first.bbox.y1 - tolerance:
             score += 30.0
     # A narrow block overlapping a wider body flow is most often a sidebar.
-    # Keep its content after the main flow while leaving equal-width columns
-    # to the lane splitter below.
-    if vertical_overlap >= 0.35 and horizontal_overlap < 0.20:
-        if first.bbox.width >= second.bbox.width * 1.7:
-            score -= 10.0
-        elif second.bbox.width >= first.bbox.width * 1.7:
-            score += 10.0
+    # Positive means ``first`` comes first, so a wide main block must be
+    # favored before a narrow lateral block regardless of input order.
+    if _is_sidebar_relation(
+        first,
+        second,
+        horizontal_overlap=horizontal_overlap,
+        vertical_overlap=vertical_overlap,
+        tolerance=tolerance,
+    ):
+        if first.bbox.width >= second.bbox.width * SIDEBAR_WIDTH_RATIO:
+            score += SIDEBAR_WEIGHT
+        elif second.bbox.width >= first.bbox.width * SIDEBAR_WIDTH_RATIO:
+            score -= SIDEBAR_WEIGHT
     if first.bbox.y1 <= second.bbox.y0 + tolerance and horizontal_overlap >= 0.15:
         score += 8.0
     elif second.bbox.y1 <= first.bbox.y0 + tolerance and horizontal_overlap >= 0.15:
@@ -287,6 +302,28 @@ def _region_pair_score(
         semantic_weight = min(3.0, abs(second_priority - first_priority) * 0.5)
         score += semantic_weight if first_priority < second_priority else -semantic_weight
     return score
+
+
+def _is_sidebar_relation(
+    first: LayoutRegion,
+    second: LayoutRegion,
+    *,
+    horizontal_overlap: float,
+    vertical_overlap: float,
+    tolerance: float,
+) -> bool:
+    """Require lateral overlap evidence before applying sidebar precedence."""
+    if vertical_overlap < SIDEBAR_MIN_VERTICAL_OVERLAP:
+        return False
+    if horizontal_overlap >= SIDEBAR_MAX_HORIZONTAL_OVERLAP:
+        return False
+    # A clear above/below relation must always dominate width heuristics.
+    if horizontal_overlap >= 0.15 and (
+        first.bbox.y1 <= second.bbox.y0 + tolerance
+        or second.bbox.y1 <= first.bbox.y0 + tolerance
+    ):
+        return False
+    return first.bbox.x1 <= second.bbox.x0 + tolerance or second.bbox.x1 <= first.bbox.x0 + tolerance
 
 
 def _native_order_consistency(regions: list[LayoutRegion]) -> float | None:
@@ -449,14 +486,14 @@ def _split_columns(lines: list[TextLine], region_width: float) -> list[list[Text
         nearest = min(range(len(column_edges)), key=lambda i: abs(line.bbox.x0 - column_edges[i]))
         columns[nearest].append(line)
 
-    # Filter empty slots and require at least 2 lines per column.
-    valid_columns = [
-        sorted(col, key=lambda line: (line.bbox.y0, line.bbox.x0))
-        for col in columns
-        if len(col) >= 2
-    ]
-    if len(valid_columns) < 2:
+    # A singleton cluster is not evidence of a real column, but its line is
+    # still content.  Keep it as an orphan and reassign it to the nearest
+    # validated lane instead of dropping it silently.
+    valid_indices = [index for index, column in enumerate(columns) if len(column) >= 2]
+    if len(valid_indices) < 2:
         return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
+
+    valid_columns = [columns[index] for index in valid_indices]
 
     # A short punctuation mark or an indented continuation is not a column.
     # Requiring a meaningful median line width on all sides keeps the split
@@ -468,7 +505,31 @@ def _split_columns(lines: list[TextLine], region_width: float) -> list[list[Text
     ):
         return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
 
+    for index, column in enumerate(columns):
+        if index in valid_indices:
+            continue
+        for line in column:
+            target_index = min(
+                valid_indices,
+                key=lambda candidate: abs(line.bbox.x0 - column_edges[candidate]),
+            )
+            columns[target_index].append(line)
+
+    valid_columns = [
+        sorted(columns[index], key=lambda line: (line.bbox.y0, line.bbox.x0))
+        for index in valid_indices
+    ]
+    if not _preserves_line_set(lines, valid_columns):
+        return [sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))]
+
     return valid_columns
+
+
+def _preserves_line_set(lines: list[TextLine], columns: list[list[TextLine]]) -> bool:
+    """Verify that a column split neither loses nor duplicates line objects."""
+    input_ids = [id(line) for line in lines]
+    output_ids = [id(line) for column in columns for line in column]
+    return len(output_ids) == len(input_ids) and sorted(output_ids) == sorted(input_ids)
 
 
 def _spans_lanes(line: TextLine, lines: list[TextLine], region_width: float) -> bool:

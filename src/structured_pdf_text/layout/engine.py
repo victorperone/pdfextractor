@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
 from statistics import median
 from typing import Any, Protocol
@@ -175,7 +176,9 @@ def _semantic_predictions(
         elif _is_decorative(line, page_bbox, typical_height):
             kind = RegionKind.DECORATIVE
             confidence = 0.84
-            label = "native_decorative_text"
+            label = "native_decorative_text:" + ",".join(
+                _decorative_reasons(line, page_bbox, typical_height)
+            )
         elif _is_caption(line, text, lower, page_bbox):
             kind = RegionKind.CAPTION
             confidence = 0.78
@@ -202,23 +205,60 @@ def _semantic_predictions(
 
 
 def _is_decorative(line: Any, page_bbox: BBox, typical_height: float) -> bool:
-    """Require multiple visual signals before hiding a native text line."""
+    """Require independent style and geometry signals before hiding text."""
+    return len(_decorative_reasons(line, page_bbox, typical_height)) >= 2
+
+
+def _decorative_reasons(line: Any, page_bbox: BBox, typical_height: float) -> tuple[str, ...]:
     tokens = [token for token in line.tokens if token.text.strip()]
     if not tokens:
-        return False
-    signals = 0
+        return ()
+    reasons: list[str] = []
     sizes = [token.font_size for token in tokens if token.font_size and token.font_size > 0]
-    if sizes and median(sizes) >= max(24.0, typical_height * 2.5):
-        signals += 1
-    angles = [token.bbox.height > token.bbox.width * 1.35 for token in tokens]
-    if sum(angles) / len(angles) >= 0.60:
-        signals += 1
-    light = [token.fill_color[3] < 210 for token in tokens if token.fill_color is not None]
-    if light and sum(light) / len(light) >= 0.70:
-        signals += 1
-    if line.bbox.width >= page_bbox.width * 0.45 and line.bbox.height >= typical_height * 1.8:
-        signals += 1
-    return signals >= 2 and line.bbox.y0 > page_bbox.y0 + page_bbox.height * 0.12
+    large_font = bool(sizes and median(sizes) >= max(24.0, typical_height * 2.5))
+    rotated = _line_is_rotated(line)
+    broad_span = line.bbox.width >= page_bbox.width * 0.45 and line.bbox.height >= typical_height * 1.8
+    colors = [token.fill_color for token in tokens if token.fill_color is not None]
+    opaque = [color[3] / 255.0 >= 0.82 for color in colors]
+    luminance = [
+        (0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]) / 255.0
+        for color in colors
+    ]
+    light = bool(luminance and sum(value >= 0.78 for value in luminance) / len(luminance) >= 0.70)
+    translucent = bool(opaque and sum(not value for value in opaque) / len(opaque) >= 0.70)
+
+    # A narrow glyph is not rotation evidence.  A rotated stamp or watermark
+    # must be backed by span/contrast evidence; a large ordinary title alone
+    # never becomes decorative.
+    if rotated:
+        reasons.append("rotated")
+    if light:
+        reasons.append("light_luminance")
+    if translucent:
+        reasons.append("low_opacity")
+    if large_font:
+        reasons.append("large_font")
+    if broad_span:
+        reasons.append("broad_span")
+    if line.bbox.y0 <= page_bbox.y0 + page_bbox.height * 0.12:
+        return ()
+    if not (
+        (rotated and (broad_span or light or translucent))
+        or (light and broad_span and (large_font or translucent))
+        or (large_font and light)
+    ):
+        return ()
+    return tuple(reasons)
+
+
+def _line_is_rotated(line: Any) -> bool:
+    baseline = getattr(line, "baseline", None)
+    angle = getattr(baseline, "angle", None)
+    if angle is None:
+        return False
+    normalized = float(angle) % math.pi
+    distance = min(normalized, math.pi - normalized)
+    return distance > 0.20
 
 
 def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> bool:
@@ -226,15 +266,29 @@ def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> b
         return False
     near_top = line.bbox.y0 <= page_bbox.y0 + page_bbox.height * 0.18
     centered = abs(line.bbox.cx - page_bbox.cx) <= page_bbox.width * 0.16
-    if not near_top and not centered:
+    style_score = _heading_style_score(line, typical_height)
+    if not near_top and not centered and style_score < 2:
         return False
-    if centered and not (text[0].isupper() or text[0].isdigit()):
-        return False
-    if line.bbox.height < max(12.0, typical_height * (1.35 if near_top else 1.55)):
+    if line.bbox.height < max(12.0, typical_height * (1.35 if near_top else 1.55)) and style_score < 2:
         return False
     if text.endswith((".", ";", ":")) and len(text) > 45:
         return False
     return True
+
+
+def _heading_style_score(line: Any, typical_height: float) -> int:
+    tokens = [token for token in line.tokens if token.text.strip()]
+    sizes = [token.font_size for token in tokens if token.font_size and token.font_size > 0]
+    size_ratio = median(sizes) / max(typical_height, 1.0) if sizes else 0.0
+    bold = any(
+        (token.font_weight is not None and token.font_weight >= 600)
+        or (token.font_name and "bold" in token.font_name.casefold())
+        for token in tokens
+    )
+    score = int(size_ratio >= 1.35) + int(bold)
+    if size_ratio >= 1.70:
+        score += 1
+    return score
 
 
 def _is_caption(line: Any, text: str, lower: str, page_bbox: BBox) -> bool:

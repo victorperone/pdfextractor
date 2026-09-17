@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Real
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +18,7 @@ from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.models import get_profile
 from structured_pdf_text.ocr.image_quality import profile_image
 from structured_pdf_text.ocr.quality import (
+    OcrCandidate,
     OcrQualityAssessment,
     assess_ocr_quality,
     raw_result_metrics,
@@ -30,6 +31,16 @@ class OcrImageVariant:
     name: str
     image: object
     family: str
+
+
+@dataclass(frozen=True, slots=True)
+class OcrOrientationContext:
+    angle: int
+    image: object
+    box_transform: Callable[[float, float, float, float, int, int], tuple[float, float, float, float]] | None
+    source_size: tuple[int, int]
+    oriented_size: tuple[int, int]
+    name: str
 
 
 def _local_model_root(
@@ -158,6 +169,13 @@ class PaddleOcrEngine:
         self.last_variant_scores: dict[str, float] = {}
         self.last_consensus_replacements = 0
         self.last_consensus_insertions = 0
+        self.last_orientation_selected = 0
+        self.last_orientation_attempts: list[str] = []
+        self.last_enhancement_orientation = 0
+        self.last_recovery_triggered = False
+        self.last_recovery_reasons: list[str] = []
+        self.last_early_stop = False
+        self.last_candidate_count = 0
 
     def recognize_page(
         self,
@@ -197,15 +215,7 @@ class PaddleOcrEngine:
     ) -> list[OcrToken]:
         if quality_variants is None:
             quality_variants = self.quality_variants
-        self.last_pass_count = 0
-        self.last_batch_count = 0
-        self.last_attempt_errors = []
-        self.last_variants_attempted = ["baseline"]
-        self.last_variants_succeeded = ["baseline"]
-        self.last_selected_variant = "baseline"
-        self.last_variant_scores = {}
-        self.last_consensus_replacements = 0
-        self.last_consensus_insertions = 0
+        self._reset_last_diagnostics()
         ocr = self._get_ocr()
         page_image, self.last_deskew_angle = _deskew_image(
             page_image,
@@ -224,8 +234,32 @@ class PaddleOcrEngine:
             ]
         else:
             rotation_candidates = _rotation_candidates(tokens, page_image, page_bbox)
-        candidates: list[tuple[list[OcrToken], Any, str]] = [(tokens, raw, "baseline")]
         original_size = _image_size(page_image)
+        orientation_candidates: list[tuple[OcrCandidate, OcrOrientationContext]] = []
+        baseline_context = OcrOrientationContext(
+            angle=0,
+            image=page_image,
+            box_transform=None,
+            source_size=original_size,
+            oriented_size=original_size,
+            name="baseline",
+        )
+        orientation_candidates.append(
+            (
+                _make_candidate(
+                    "baseline",
+                    tokens,
+                    raw,
+                    page_bbox,
+                    self.quality_thresholds,
+                    rotation=0,
+                    enhancement=None,
+                    orientation_incoherent=bool(rotation_candidates),
+                ),
+                baseline_context,
+            )
+        )
+        self.last_orientation_attempts = ["baseline"]
         for angle, transform in rotation_candidates:
             rotated = _rotate_image(page_image, angle)
             if rotated is None:
@@ -240,46 +274,81 @@ class PaddleOcrEngine:
                 box_transform=transform,
                 rotation=angle,
             )
-            candidates.append((rotated_tokens, rotated_raw, f"rotation-{angle}"))
+            orientation_name = f"rotation-{angle}"
+            orientation_candidates.append(
+                (
+                    _make_candidate(
+                        orientation_name,
+                        rotated_tokens,
+                        rotated_raw,
+                        page_bbox,
+                        self.quality_thresholds,
+                        rotation=angle,
+                        enhancement=None,
+                        orientation_incoherent=False,
+                    ),
+                    OcrOrientationContext(
+                        angle=angle,
+                        image=rotated,
+                        box_transform=transform,
+                        source_size=original_size,
+                        oriented_size=_image_size(rotated),
+                        name=orientation_name,
+                    ),
+                )
+            )
+            self.last_orientation_attempts.append(orientation_name)
 
         # Orientation is resolved before enhancement, keeping recovery bounded.
-        orientation_tokens, orientation_raw, orientation_name = max(
-            candidates,
-            key=lambda item: _candidate_quality(item[0], page_bbox),
+        orientation_candidate, orientation_context = max(
+            orientation_candidates,
+            key=lambda item: item[0].quality.score,
         )
-        candidates = [(orientation_tokens, orientation_raw, orientation_name)]
+        candidates: list[OcrCandidate] = [orientation_candidate]
+        self.last_orientation_selected = orientation_context.angle
+        self.last_enhancement_orientation = orientation_context.angle
         policy = quality_policy or self.quality_policy
         if policy is None:
             policy = "baseline" if quality_variants is False else "adaptive"
         policy = str(policy).lower()
-        baseline_quality = assess_ocr_quality(
-            orientation_tokens,
-            raw_metrics=raw_result_metrics(orientation_raw),
-            thresholds=self.quality_thresholds,
-            orientation_incoherent=bool(rotation_candidates and orientation_name == "baseline"),
-        )
+        baseline_quality = orientation_candidate.quality
         self.last_baseline_quality = baseline_quality
-        self.last_variant_scores[orientation_name] = baseline_quality.score
+        self.last_variant_scores[orientation_candidate.name] = baseline_quality.score
+        self.last_candidate_count = len(orientation_candidates)
         if policy != "baseline":
-            _, image_height = _image_size(page_image)
+            _, image_height = orientation_context.oriented_size
             page_height = page_bbox.height if page_bbox is not None else float(image_height)
             heights = [
                 token.bbox.height * image_height / max(page_height, 1.0)
-                for token in orientation_tokens
+                for token in orientation_candidate.tokens
                 if token.bbox.height > 0
             ]
-            visual = profile_image(page_image, heights)
+            visual = profile_image(orientation_context.image, heights)
             self.last_image_profile = visual
             if policy == "adaptive" and baseline_quality.sufficient and not (
-                visual.low_contrast or visual.likely_blurred_or_small or visual.likely_noisy
+                visual.available
+                and (visual.low_contrast or visual.likely_blurred_or_small or visual.likely_noisy)
             ):
                 self.last_quality = baseline_quality
-                return orientation_tokens
+                return orientation_candidate.tokens
+            if baseline_quality.recovery_recommended:
+                self.last_recovery_reasons.extend(baseline_quality.reasons)
+            if visual.available:
+                self.last_recovery_reasons.extend(
+                    name
+                    for name, enabled in (
+                        ("image_low_contrast", visual.low_contrast),
+                        ("image_blurred_or_small", visual.likely_blurred_or_small),
+                        ("image_noisy", visual.likely_noisy),
+                    )
+                    if enabled
+                )
             variants = _select_variants(
-                _enhancement_variants(page_image),
+                _enhancement_variants(orientation_context.image),
                 visual,
                 exhaustive=policy == "exhaustive",
             )
+            self.last_recovery_triggered = bool(variants)
             for start in range(0, len(variants), self.batch_size):
                 wave = variants[start : start + self.batch_size]
                 self.last_variants_attempted.extend(variant.name for variant in wave)
@@ -290,28 +359,63 @@ class PaddleOcrEngine:
                         continue
                     self.last_variants_succeeded.append(variant.name)
                     variant_tokens = _tokens_from_result(
-                        raw_variant, page_index, variant.image, page_bbox,
+                        raw_variant,
+                        page_index,
+                        variant.image,
+                        page_bbox,
+                        coordinate_size=orientation_context.source_size,
+                        box_transform=orientation_context.box_transform,
+                        rotation=orientation_context.angle,
                     )
-                    candidates.append((variant_tokens, raw_variant, variant.name))
-                    assessment = assess_ocr_quality(
+                    candidate = _make_candidate(
+                        variant.name,
                         variant_tokens,
-                        raw_metrics=raw_result_metrics(raw_variant),
-                        thresholds=self.quality_thresholds,
+                        raw_variant,
+                        page_bbox,
+                        self.quality_thresholds,
+                        rotation=orientation_context.angle,
+                        enhancement=variant.name,
                     )
-                    self.last_variant_scores[variant.name] = assessment.score
-                    wave_sufficient = wave_sufficient or assessment.sufficient
+                    candidates.append(candidate)
+                    self.last_variant_scores[variant.name] = candidate.quality.score
+                    wave_sufficient = wave_sufficient or candidate.quality.sufficient
                 if policy == "adaptive" and wave_sufficient:
+                    self.last_early_stop = True
                     break
-        best = _select_best_candidate([item[0] for item in candidates], page_bbox)
-        selected_item = max(candidates, key=lambda item: _candidate_quality(item[0], page_bbox))
-        self.last_selected_variant = selected_item[2]
-        self.last_quality = assess_ocr_quality(best, thresholds=self.quality_thresholds)
+        self.last_candidate_count = len(candidates)
+        selected_candidate = _select_best_candidate(candidates, page_bbox, self.quality_thresholds)
+        self.last_selected_variant = selected_candidate.name
+        self.last_quality = selected_candidate.quality
         merged, replacements, insertions = _spatial_consensus(
-            best, [item[0] for item in candidates],
+            selected_candidate,
+            candidates,
+            thresholds=self.quality_thresholds,
         )
         self.last_consensus_replacements = replacements
         self.last_consensus_insertions = insertions
         return merged
+
+    def _reset_last_diagnostics(self) -> None:
+        self.last_pass_count = 0
+        self.last_batch_count = 0
+        self.last_attempt_errors = []
+        self.last_deskew_angle = 0.0
+        self.last_quality = None
+        self.last_image_profile = None
+        self.last_baseline_quality = None
+        self.last_variants_attempted = ["baseline"]
+        self.last_variants_succeeded = ["baseline"]
+        self.last_selected_variant = "baseline"
+        self.last_variant_scores = {}
+        self.last_consensus_replacements = 0
+        self.last_consensus_insertions = 0
+        self.last_orientation_selected = 0
+        self.last_orientation_attempts = []
+        self.last_enhancement_orientation = 0
+        self.last_recovery_triggered = False
+        self.last_recovery_reasons = []
+        self.last_early_stop = False
+        self.last_candidate_count = 0
 
     def _predict_counted(self, ocr: Any, page_image: object) -> Any:
         self.last_pass_count += 1
@@ -659,19 +763,75 @@ def _ocr_quality(tokens: list[OcrToken]) -> float:
     return average + 0.05 * horizontal
 
 
+def _make_candidate(
+    name: str,
+    tokens: list[OcrToken],
+    raw: Any,
+    page_bbox: BBox | None,
+    thresholds: OcrQualityThresholds,
+    *,
+    rotation: int = 0,
+    enhancement: str | None = None,
+    orientation_incoherent: bool = False,
+) -> OcrCandidate:
+    raw_metrics = raw_result_metrics(raw)
+    assessment = assess_ocr_quality(
+        tokens,
+        raw_metrics=raw_metrics,
+        thresholds=thresholds,
+        orientation_incoherent=orientation_incoherent,
+    )
+    return OcrCandidate(
+        name=name,
+        tokens=tokens,
+        raw_metrics=raw_metrics,
+        quality=replace(
+            assessment,
+            score=_candidate_score_adjustment(tokens, page_bbox, assessment.score),
+        ),
+        rotation=rotation,
+        enhancement=enhancement,
+    )
+
+
 def _select_best_candidate(
-    candidates: list[list[OcrToken]], page_bbox: BBox | None = None,
-) -> list[OcrToken]:
+    candidates: list[OcrCandidate],
+    page_bbox: BBox | None = None,
+    thresholds: OcrQualityThresholds | None = None,
+) -> OcrCandidate:
     if not candidates:
-        return []
-    best = max(candidates, key=lambda candidate: _candidate_quality(candidate, page_bbox))
-    best_quality = _candidate_quality(best, page_bbox)
+        return OcrCandidate(
+            name="empty",
+            tokens=[],
+            raw_metrics=raw_result_metrics(None),
+            quality=assess_ocr_quality([], thresholds=thresholds),
+        )
+    best = max(candidates, key=lambda candidate: candidate.quality.score)
+    best_quality = best.quality.score
     # Preserve fuller detections when confidence is within normal OCR noise.
     for candidate in candidates:
-        if len(candidate) > len(best) and _candidate_quality(candidate, page_bbox) >= best_quality - 0.0025:
+        if len(candidate.tokens) > len(best.tokens) and candidate.quality.score >= best_quality - 0.0025:
             best = candidate
-            best_quality = _candidate_quality(candidate, page_bbox)
-    return _merge_compact_candidate_tokens(best, candidates)
+            best_quality = candidate.quality.score
+    merged = _merge_compact_candidate_tokens(
+        best.tokens,
+        [candidate.tokens for candidate in candidates],
+    )
+    if merged == best.tokens:
+        return best
+    assessment = assess_ocr_quality(
+        merged,
+        raw_metrics=best.raw_metrics,
+        thresholds=thresholds,
+    )
+    return replace(
+        best,
+        tokens=merged,
+        quality=replace(
+            assessment,
+            score=_candidate_score_adjustment(merged, page_bbox, assessment.score),
+        ),
+    )
 
 
 def _merge_compact_candidate_tokens(
@@ -760,7 +920,15 @@ def _remove_contained_fragments(tokens: list[OcrToken]) -> list[OcrToken]:
 
 def _candidate_quality(tokens: list[OcrToken], page_bbox: BBox | None) -> float:
     """Score OCR confidence together with generic page-edge coherence."""
-    score = assess_ocr_quality(tokens).score
+    return _candidate_score_adjustment(tokens, page_bbox, assess_ocr_quality(tokens).score)
+
+
+def _candidate_score_adjustment(
+    tokens: list[OcrToken],
+    page_bbox: BBox | None,
+    score: float,
+) -> float:
+    """Apply the same edge-coherence adjustment to diagnostics and selection."""
     if not tokens or page_bbox is None:
         return score
     try:
@@ -787,7 +955,7 @@ def _candidate_quality(tokens: list[OcrToken], page_bbox: BBox | None) -> float:
         score -= 0.15
     if misplaced_header:
         score -= 0.10
-    return score
+    return max(0.0, min(1.0, score))
 
 
 def _enhancement_variants(image: object) -> list[OcrImageVariant]:
@@ -853,39 +1021,85 @@ def _select_variants(
 
 
 def _spatial_consensus(
-    primary: list[OcrToken],
-    candidates: list[list[OcrToken]],
+    primary: OcrCandidate,
+    candidates: list[OcrCandidate],
+    *,
+    thresholds: OcrQualityThresholds | None = None,
 ) -> tuple[list[OcrToken], int, int]:
-    """Apply only local high-confidence alternate hypotheses."""
-    merged = list(primary)
+    """Apply true multi-candidate consensus plus conservative single overrides."""
+    merged = list(primary.tokens)
     replacements = 0
     insertions = 0
-    for candidate in candidates:
-        if candidate is primary:
-            continue
-        for alternate in candidate:
-            confidence = alternate.confidence or 0.0
+    alternate_candidates = [candidate for candidate in candidates if candidate.name != primary.name]
+    for index, current in enumerate(list(merged)):
+        hypotheses: list[OcrToken] = []
+        for candidate in alternate_candidates:
             overlaps = [
-                index for index, current in enumerate(merged)
-                if _candidate_token_overlap(current, alternate)
+                token for token in candidate.tokens
+                if _candidate_token_overlap(current, token)
             ]
             if overlaps:
-                index = max(overlaps, key=lambda item: merged[item].confidence or 0.0)
-                current = merged[index]
-                same = " ".join(current.text.strip().split()).casefold() == " ".join(alternate.text.strip().split()).casefold()
-                if same and confidence > (current.confidence or 0.0):
-                    merged[index] = alternate
-                elif confidence >= (current.confidence or 0.0) + 0.08:
-                    merged[index] = alternate
-                    replacements += 1
-            elif confidence >= 0.92:
-                merged.append(alternate)
-                insertions += 1
+                hypotheses.append(max(overlaps, key=lambda token: token.confidence or 0.0))
+        if not hypotheses:
+            continue
+        by_text: dict[str, list[OcrToken]] = {}
+        for token in hypotheses:
+            key = " ".join(token.text.strip().split()).casefold()
+            by_text.setdefault(key, []).append(token)
+        consensus = max(
+            by_text.values(),
+            key=lambda values: (len(values), max(token.confidence or 0.0 for token in values)),
+        )
+        best_alternate = max(consensus, key=lambda token: token.confidence or 0.0)
+        current_confidence = current.confidence or 0.0
+        alternate_confidence = best_alternate.confidence or 0.0
+        alternate_key = " ".join(best_alternate.text.strip().split()).casefold()
+        current_key = " ".join(current.text.strip().split()).casefold()
+        if len(consensus) >= 2 and alternate_confidence > current_confidence and alternate_key != current_key:
+            merged[index] = best_alternate
+            replacements += 1
+        elif (
+            len(consensus) == 1
+            and alternate_confidence >= current_confidence + 0.15
+            and current_confidence < 0.65
+            and _has_no_neighbor_conflict(merged, index, best_alternate)
+        ):
+            merged[index] = best_alternate
+            replacements += 1
+
+    insertion_groups: dict[tuple[int, int, str], list[OcrToken]] = {}
+    for candidate in alternate_candidates:
+        for token in candidate.tokens:
+            if any(_candidate_token_overlap(existing, token) for existing in merged):
+                continue
+            key = (
+                round(token.bbox.x0 / 4.0),
+                round(token.bbox.y0 / 4.0),
+                " ".join(token.text.split()).casefold(),
+            )
+            insertion_groups.setdefault(key, []).append(token)
+    for tokens in insertion_groups.values():
+        if len(tokens) >= 2:
+            merged.append(max(tokens, key=lambda token: token.confidence or 0.0))
+            insertions += 1
     return (
         _remove_contained_fragments(sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))),
         replacements,
         insertions,
     )
+
+
+def _has_no_neighbor_conflict(tokens: list[OcrToken], index: int, alternate: OcrToken) -> bool:
+    alternate_key = " ".join(alternate.text.split()).casefold()
+    for other_index, token in enumerate(tokens):
+        if other_index == index:
+            continue
+        if (
+            _candidate_token_overlap(token, alternate)
+            and " ".join(token.text.split()).casefold() != alternate_key
+        ):
+            return False
+    return True
 
 
 def _rotate_image(image: object, angle: int) -> object | None:

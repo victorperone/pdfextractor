@@ -75,7 +75,7 @@ def is_suspicious_token(token: OcrToken) -> bool:
     # lexical dictionary or domain-specific regular expression is used here.
     return (
         printable < 0.90
-        or control > 0.10
+        or control / max(len(chars), 1) > 0.10
         or (alnum == 0 and punctuation / len(chars) > 0.80 and len(chars) >= 4)
         or (repeated > 0.82 and len(chars) >= 5 and alnum == 0)
         or (len(chars) == 1 and token.bbox.area > 2500 and _confidence(token) < 0.70)
@@ -105,6 +105,11 @@ def assess_ocr_quality(
     total_chars = max(1, character_count)
     printable = sum(char.isprintable() for item in chars for char in item) / total_chars
     alphanumeric = sum(char.isalnum() for item in chars for char in item) / total_chars
+    control_ratio = sum(
+        unicodedata.category(char).startswith("C")
+        for item in chars
+        for char in item
+    ) / total_chars
     suspicious = sum(is_suspicious_token(token) for token in values) / max(1, token_count)
     horizontal = sum(token.bbox.width >= token.bbox.height * 1.15 for token in values) / max(1, token_count)
     metrics = raw_metrics or PaddleRawMetrics()
@@ -117,10 +122,16 @@ def assess_ocr_quality(
         reasons.append("weak_lower_quartile")
     if low_ratio > thresholds.max_low_confidence_char_ratio:
         reasons.append("low_confidence_characters")
+    if low_ratio >= thresholds.severe_low_confidence_char_ratio:
+        reasons.append("severely_low_confidence_characters")
     if printable < thresholds.minimum_printable_ratio:
         reasons.append("low_printable_ratio")
     if suspicious > 0.20:
         reasons.append("suspicious_tokens")
+    if control_ratio > 0.10:
+        reasons.append("control_characters")
+    if values and horizontal < thresholds.minimum_orientation_ratio:
+        reasons.append("orientation_ratio_below_threshold")
     if metrics.recognition_yield is not None and metrics.recognition_yield < 0.65:
         reasons.append("low_recognition_yield")
     if orientation_incoherent:
