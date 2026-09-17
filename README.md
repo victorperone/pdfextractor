@@ -230,6 +230,8 @@ pdftext extract documento.pdf --output json
 # OCR-assisted extraction (requires setup-models)
 pdftext extract documento.pdf --mode balanced --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-quality-policy adaptive
+pdftext extract documento.pdf --mode balanced --ocr-quality-policy baseline
+pdftext extract documento.pdf --mode balanced --ocr-quality-policy exhaustive
 pdftext extract documento.pdf --mode balanced --output json
 pdftext extract documento.pdf --mode ocr --output reading
 pdftext extract documento.pdf --best --output markdown -o output.md
@@ -249,7 +251,11 @@ pdftext setup-models --language pt
 pdftext models-status
 ```
 
-The `balanced` and `ocr` modes use the optional PaddleOCR adapter. On CPU/WSL
+`--mode balanced` and `--ocr-quality-policy` are independent choices: the
+quality policy selects the OCR path used by a mode, rather than being an
+alternative mode. `exhaustive` runs every eligible quality variant and emits
+an informational resource-use warning; it does not automatically reduce OCR
+quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter. On CPU/WSL
 the adapter disables MKL-DNN/OneDNN for compatibility. Models are loaded from
 explicit local paths; remote model-source checks are disabled at runtime.
 Model paths and behaviour can be overridden through `PaddleOcrEngine`

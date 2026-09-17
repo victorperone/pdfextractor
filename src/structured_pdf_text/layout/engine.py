@@ -8,6 +8,10 @@ from typing import Any, Protocol
 
 from structured_pdf_text.document import NativePageEvidence, RegionKind
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.layout.decorative import (
+    DecorativeRole,
+    cluster_decorative_lines,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +166,28 @@ def _semantic_predictions(
     heights = [line.bbox.height for line in candidates if line.bbox.height > 0]
     typical_height = median(heights) if heights else 10.0
     predictions: list[LayoutRegionPrediction] = []
+    decorative_clusters = cluster_decorative_lines(candidates, page_bbox)
+    decorative_line_ids = {
+        id(line)
+        for cluster in decorative_clusters
+        if cluster.role == DecorativeRole.DECORATIVE_WATERMARK
+        for line in cluster.lines
+    }
+    for index, cluster in enumerate(
+        cluster for cluster in decorative_clusters
+        if cluster.role == DecorativeRole.DECORATIVE_WATERMARK
+    ):
+        predictions.append(
+            LayoutRegionPrediction(
+                kind=RegionKind.DECORATIVE,
+                bbox=_clamp_bbox(cluster.bbox.expand(3.0), page_bbox),
+                confidence=cluster.confidence,
+                label="decorative_cluster:" + ",".join(cluster.reasons),
+            )
+        )
     for line in candidates:
+        if id(line) in decorative_line_ids:
+            continue
         text = " ".join(line.text.split())
         lower = text.casefold()
         kind: RegionKind | None = None
@@ -262,7 +287,9 @@ def _line_is_rotated(line: Any) -> bool:
 
 
 def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> bool:
-    if not text or len(text) > 140:
+    # Punctuation-only fragments are often rules, OCR residue, or decorative
+    # marks. They are never semantic headings regardless of their size.
+    if not text or not any(character.isalnum() for character in text) or len(text) > 140:
         return False
     near_top = line.bbox.y0 <= page_bbox.y0 + page_bbox.height * 0.18
     centered = abs(line.bbox.cx - page_bbox.cx) <= page_bbox.width * 0.16

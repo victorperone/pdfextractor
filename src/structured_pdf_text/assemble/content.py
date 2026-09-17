@@ -27,7 +27,7 @@ from structured_pdf_text.document import (
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.line_detector import lines_to_text
 from structured_pdf_text.text.normalize import normalize_reading_text
-from structured_pdf_text.text.lists import extract_list_items
+from structured_pdf_text.text.lists import segment_list_lines
 from structured_pdf_text.text.reading_order import (
     ReadingOrderDecision,
     native_order_consistency,
@@ -45,6 +45,11 @@ class PageContentAssemblyResult:
     table_fallbacks: int
     orphan_tables: int
     assembly_ms: float
+    list_segment_count: int = 0
+    list_item_count: int = 0
+    list_inferred_marker_count: int = 0
+    list_continuation_count: int = 0
+    list_unassigned_line_count: int = 0
 
 
 def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
@@ -66,6 +71,11 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     blocks: list[PageContentBlock] = []
     claimed_table_lines = 0
     table_fallbacks = 0
+    list_segment_count = 0
+    list_item_count = 0
+    list_inferred_marker_count = 0
+    list_continuation_count = 0
+    list_unassigned_line_count = 0
 
     # Diagnostic counters collected in the same pass that builds blocks, so
     # they reflect what was actually assembled rather than a parallel estimate.
@@ -97,6 +107,16 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         blocks.extend(region_blocks)
         claimed_table_lines += claimed
         table_fallbacks += fallbacks
+        if region.kind in {RegionKind.TEXT, RegionKind.LIST, RegionKind.TABLE}:
+            stats = segment_list_lines(
+                ordered_lines,
+                allow_single=region.kind == RegionKind.LIST,
+            )
+            list_segment_count += stats.list_segments
+            list_item_count += stats.list_item_count
+            list_inferred_marker_count += stats.inferred_marker_count
+            list_continuation_count += stats.continuation_count
+            list_unassigned_line_count += stats.unassigned_line_count
 
     reading_decision = ReadingOrderDecision(
         region_order=tuple(r.region_id for r in ordered_regions),
@@ -129,6 +149,11 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         table_fallbacks=table_fallbacks,
         orphan_tables=orphan_count,
         assembly_ms=assembly_ms,
+        list_segment_count=list_segment_count,
+        list_item_count=list_item_count,
+        list_inferred_marker_count=list_inferred_marker_count,
+        list_continuation_count=list_continuation_count,
+        list_unassigned_line_count=list_unassigned_line_count,
     )
 
 
@@ -254,7 +279,7 @@ def _build_region_blocks(
     usable_tables = [t for t in candidate_tables if _table_has_renderable_content(t)]
     if not usable_tables:
         fallback = kind == ContentKind.TABLE
-        blocks = _emit_prose_block(
+        blocks = _emit_prose_blocks(
             lines=ordered_lines,
             region=region,
             kind=ContentKind.TEXT if fallback else kind,
@@ -276,7 +301,7 @@ def _build_region_blocks(
             return
         prose_kind = ContentKind.TEXT if kind == ContentKind.TABLE else kind
         blocks.extend(
-            _emit_prose_block(
+            _emit_prose_blocks(
                 lines=prose_lines,
                 region=region,
                 kind=prose_kind,
@@ -337,7 +362,7 @@ def _table_fragment_sort_key(table: StructuredTable, page_index: int) -> tuple[f
     return (bbox.y0, bbox.x0) if bbox else (float("inf"), float("inf"))
 
 
-def _emit_prose_block(
+def _emit_prose_blocks(
     lines: list[TextLine],
     region: LayoutRegion,
     kind: ContentKind,
@@ -346,33 +371,48 @@ def _emit_prose_block(
 ) -> list[PageContentBlock]:
     if not lines:
         return []
-    list_items = extract_list_items(lines) if kind in {ContentKind.TEXT, ContentKind.LIST} else []
-    if list_items:
-        kind = ContentKind.LIST
-    text = _normalized_lines_text(lines)
-    if not text:
-        return []
-    bbox = BBox(
-        x0=min(l.bbox.x0 for l in lines),
-        y0=min(l.bbox.y0 for l in lines),
-        x1=max(l.bbox.x1 for l in lines),
-        y1=max(l.bbox.y1 for l in lines),
-    )
-    return [
-        PageContentBlock(
-            block_id=f"page-{page_index + 1}:region-{region.region_id}",
-            page_index=page_index,
-            kind=kind,
-            bbox=bbox,
-            order_index=0,  # reindexed by _reindex_blocks
-            text=text,
-            heading_level=region.heading_level if kind == ContentKind.TITLE else None,
-            source_region_ids=[region.region_id],
-            fallback_from_table=fallback_from_table,
-            list_items=list_items,
-            decorative=region.kind == RegionKind.DECORATIVE,
+    if kind in {ContentKind.TEXT, ContentKind.LIST}:
+        segmentation = segment_list_lines(lines, allow_single=kind == ContentKind.LIST)
+    else:
+        segmentation = None
+    source_segments = segmentation.segments if segmentation is not None else ()
+    if not source_segments:
+        from structured_pdf_text.text.lists import ListSegment
+        source_segments = (ListSegment(tuple(lines), (), False),)
+    blocks: list[PageContentBlock] = []
+    for segment in source_segments:
+        segment_lines = list(segment.lines)
+        text = _normalized_lines_text(segment_lines)
+        if not text:
+            continue
+        bbox = BBox(
+            x0=min(l.bbox.x0 for l in segment_lines),
+            y0=min(l.bbox.y0 for l in segment_lines),
+            x1=max(l.bbox.x1 for l in segment_lines),
+            y1=max(l.bbox.y1 for l in segment_lines),
         )
-    ]
+        block_kind = ContentKind.LIST if segment.is_list else kind
+        blocks.append(
+            PageContentBlock(
+                block_id=f"page-{page_index + 1}:region-{region.region_id}",
+                page_index=page_index,
+                kind=block_kind,
+                bbox=bbox,
+                order_index=0,  # reindexed by _reindex_blocks
+                text=text,
+                heading_level=region.heading_level if block_kind == ContentKind.TITLE else None,
+                source_region_ids=[region.region_id],
+                fallback_from_table=fallback_from_table,
+                list_items=list(segment.items),
+                decorative=region.kind == RegionKind.DECORATIVE,
+            )
+        )
+    return blocks
+
+
+def _emit_prose_block(*args, **kwargs) -> list[PageContentBlock]:
+    """Backward-compatible alias for integrations using the old helper."""
+    return _emit_prose_blocks(*args, **kwargs)
 
 
 def _emit_table_block(

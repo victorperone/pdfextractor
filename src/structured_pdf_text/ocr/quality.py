@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from structured_pdf_text.config import OcrQualityThresholds
-from structured_pdf_text.document import OcrToken
+from structured_pdf_text.document import OcrToken, TokenFlag
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +52,7 @@ class OcrCandidate:
     quality: OcrQualityAssessment
     rotation: int = 0
     enhancement: str | None = None
+    family: str = "unknown"
 
 
 def _text_chars(text: str) -> list[str]:
@@ -90,12 +91,23 @@ def assess_ocr_quality(
     orientation_incoherent: bool = False,
 ) -> OcrQualityAssessment:
     values = list(tokens)
+    # Reconstructed separators are useful in the output stream but are not
+    # recognition evidence. Counting them here makes an otherwise good line
+    # look less confident and can trigger needless targeted recovery.
+    metric_values = [
+        token
+        for token in values
+        if not (
+            TokenFlag.WHITESPACE_INFERRED in getattr(token, "flags", set())
+            and not token.text.strip()
+        )
+    ]
     thresholds = thresholds or OcrQualityThresholds()
-    token_count = len(values)
-    chars = [_text_chars(token.text) for token in values]
+    token_count = len(metric_values)
+    chars = [_text_chars(token.text) for token in metric_values]
     character_count = sum(len(item) for item in chars)
     weights = [max(1, sum(char.isalnum() for char in item)) for item in chars]
-    confidences = [_confidence(token) for token in values]
+    confidences = [_confidence(token) for token in metric_values]
     weighted_total = sum(confidence * weight for confidence, weight in zip(confidences, weights))
     char_weighted = weighted_total / sum(weights) if weights else 0.0
     median_conf = statistics.median(confidences) if confidences else 0.0
@@ -110,11 +122,11 @@ def assess_ocr_quality(
         for item in chars
         for char in item
     ) / total_chars
-    suspicious = sum(is_suspicious_token(token) for token in values) / max(1, token_count)
-    horizontal = sum(token.bbox.width >= token.bbox.height * 1.15 for token in values) / max(1, token_count)
+    suspicious = sum(is_suspicious_token(token) for token in metric_values) / max(1, token_count)
+    horizontal = sum(token.bbox.width >= token.bbox.height * 1.15 for token in metric_values) / max(1, token_count)
     metrics = raw_metrics or PaddleRawMetrics()
     reasons: list[str] = []
-    if not values:
+    if not metric_values:
         reasons.append("no_tokens")
     if char_weighted < thresholds.severe_mean_confidence:
         reasons.append("low_weighted_confidence")
@@ -130,13 +142,13 @@ def assess_ocr_quality(
         reasons.append("suspicious_tokens")
     if control_ratio > 0.10:
         reasons.append("control_characters")
-    if values and horizontal < thresholds.minimum_orientation_ratio:
+    if metric_values and horizontal < thresholds.minimum_orientation_ratio:
         reasons.append("orientation_ratio_below_threshold")
     if metrics.recognition_yield is not None and metrics.recognition_yield < 0.65:
         reasons.append("low_recognition_yield")
     if orientation_incoherent:
         reasons.append("orientation_incoherent")
-    sufficient = bool(values) and not reasons and char_weighted >= thresholds.strong_mean_confidence
+    sufficient = bool(metric_values) and not reasons and char_weighted >= thresholds.strong_mean_confidence
     if sufficient:
         score = min(1.0, char_weighted + 0.04 * printable + 0.02 * horizontal)
     else:

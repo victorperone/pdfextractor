@@ -93,6 +93,11 @@ def assemble_document(
                 "content_claimed_table_lines": result.claimed_table_lines,
                 "content_orphan_tables": result.orphan_tables,
                 "decorative_block_count": sum(1 for b in result.blocks if b.decorative),
+                "list_segment_count": result.list_segment_count,
+                "list_item_count": result.list_item_count,
+                "list_inferred_marker_count": result.list_inferred_marker_count,
+                "list_continuation_count": result.list_continuation_count,
+                "list_unassigned_line_count": result.list_unassigned_line_count,
                 "content_source_region_count": len(page.regions),
                 "content_assembly_ms": round(result.assembly_ms, 3),
                 "content_block_order": [

@@ -352,6 +352,7 @@ class StructuredListItem:
     bbox: BBox
     order_index: int
     confidence: float | None = None
+    marker_source: str = "observed"
 
 
 @dataclass(slots=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from statistics import median
 
 from structured_pdf_text.document import (
@@ -15,6 +16,16 @@ from structured_pdf_text.document import (
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.normalize import normalize_text
+
+
+@dataclass(frozen=True, slots=True)
+class GapObservation:
+    gap: float
+    normalized_gap: float
+    previous_char: NativeCharacter
+    current_char: NativeCharacter
+    same_font: bool
+    font_size_ratio: float | None
 
 
 def reconstruct_native_lines(characters: tuple[NativeCharacter, ...]) -> list[TextLine]:
@@ -272,6 +283,7 @@ def _chars_to_text_tokens(
                     previous.text,
                     char.text,
                 )
+                and not _compact_sequence_gap(characters, previous, char)
             ):
                 gap_box = _inferred_gap_bbox(
                     previous,
@@ -361,18 +373,68 @@ def _infer_gap_threshold(
     direction: WritingDirection,
     median_advance: float,
 ) -> float:
-    gaps = [
-        _character_axis_gap(previous, current, direction, reverse_axis=False)
-        for previous, current in zip(characters, characters[1:])
-        if not previous.text.isspace() and not current.text.isspace()
-    ]
-    positive = sorted(gap for gap in gaps if gap > 0)
-    if len(positive) < 2:
+    observations = _gap_observations(characters, direction, median_advance)
+    positive = sorted(observation.normalized_gap for observation in observations if observation.gap > 0)
+    if not positive:
         return max(2.5, median_advance * 0.85)
-    middle = median(positive)
-    mad = median([abs(gap - middle) for gap in positive])
-    threshold = middle + max(1.5, 2.5 * mad)
-    return max(2.5, min(median_advance * 2.0, threshold))
+    if len(positive) == 1:
+        return max(2.5, median_advance * 0.85)
+
+    # Look for a relative separation between two groups. Uniform tracking
+    # produces one group and must not become a space between every glyph.
+    threshold_normalized: float | None = None
+    if len(positive) >= 3:
+        gaps = [
+            (positive[index + 1] - positive[index]) / max(positive[index], 0.01)
+            for index in range(len(positive) - 1)
+        ]
+        split = max(range(len(gaps)), key=gaps.__getitem__)
+        left = positive[: split + 1]
+        right = positive[split + 1 :]
+        if left and right and gaps[split] >= 0.35 and len(left) >= 1 and len(right) >= 1:
+            threshold_normalized = (positive[split] + positive[split + 1]) / 2.0
+    if threshold_normalized is None:
+        middle = median(positive)
+        mad = median([abs(gap - middle) for gap in positive])
+        threshold_normalized = middle + max(0.20, 2.5 * mad / max(median(positive), 0.01))
+    return max(2.5, min(median_advance * 2.0, threshold_normalized * median_advance))
+
+
+def _gap_observations(
+    characters: list[NativeCharacter],
+    direction: WritingDirection,
+    median_advance: float,
+) -> list[GapObservation]:
+    font_sizes = [
+        char.font_size for char in characters
+        if char.font_size is not None and char.font_size > 0
+    ]
+    median_font_size = median(font_sizes) if font_sizes else None
+    observations: list[GapObservation] = []
+    for previous, current in zip(characters, characters[1:]):
+        if previous.text.isspace() or current.text.isspace():
+            continue
+        gap = _character_axis_gap(previous, current, direction, reverse_axis=False)
+        if gap <= 0:
+            continue
+        advance_basis = median_advance
+        if previous.font_size and current.font_size:
+            advance_basis = max(0.01, (previous.font_size + current.font_size) / 2.0)
+        normalized = gap / max(advance_basis, 0.01)
+        size_ratio = None
+        if previous.font_size and current.font_size:
+            size_ratio = min(previous.font_size, current.font_size) / max(previous.font_size, current.font_size)
+        observations.append(
+            GapObservation(
+                gap=gap,
+                normalized_gap=normalized,
+                previous_char=previous,
+                current_char=current,
+                same_font=bool(previous.font_name and current.font_name and previous.font_name == current.font_name),
+                font_size_ratio=size_ratio if median_font_size is not None else None,
+            )
+        )
+    return observations
 
 
 def _character_axis_gap(
@@ -514,7 +576,66 @@ def _typographically_attached(previous: str, current: str) -> bool:
     current = current.lstrip()
     if not previous or not current:
         return False
-    return current[0] in ",.;:!?%)]}" or previous[-1] in "([{"
+    return current[0] in ",.;:!?%)]}\"”’/$€£" or previous[-1] in "([{\"“‘/$€£-"
+
+
+def _compact_sequence_gap(
+    characters: list[NativeCharacter],
+    previous: NativeCharacter,
+    current: NativeCharacter,
+) -> bool:
+    """Protect generic compact identifiers from geometry-only word breaks."""
+    if previous.text.isdigit() and current.text.isdigit():
+        return True
+    compact_punctuation = set("/@:_-")
+    line_text = "".join(char.text for char in characters if not char.text.isspace())
+    if any(marker in line_text for marker in compact_punctuation) and (
+        previous.text.isalnum() or current.text.isalnum()
+    ):
+        # Explicit whitespace characters have already taken precedence and
+        # are represented as tokens, so this only protects geometry-inferred
+        # gaps inside a compact URL, e-mail, date, UUID, or code.
+        return True
+    return False
+
+
+def spacing_diagnostics(lines: list[TextLine]) -> dict[str, int]:
+    """Summarize explicit/inferred spacing and ordering decisions."""
+    explicit = 0
+    inferred = 0
+    native = 0
+    geometry = 0
+    bimodal = 0
+    unimodal = 0
+    fallback = 0
+    for line in lines:
+        line_inferred = False
+        for token in line.tokens:
+            if token.text.isspace():
+                if TokenFlag.WHITESPACE_INFERRED in token.flags:
+                    inferred += 1
+                    line_inferred = True
+                else:
+                    explicit += 1
+        if line_inferred:
+            bimodal += 1
+        elif line.text.strip():
+            unimodal += 1
+        if line.native_order_min is not None:
+            native += 1
+        else:
+            geometry += 1
+    # The line reconstruction path is intentionally conservative; expose the
+    # counters even when a line has no positive gaps for audit consumers.
+    return {
+        "explicit_whitespace_count": explicit,
+        "inferred_whitespace_count": inferred,
+        "gap_bimodal_lines": bimodal,
+        "gap_unimodal_lines": unimodal,
+        "gap_fallback_lines": fallback,
+        "native_order_used_lines": native,
+        "geometry_order_used_lines": geometry,
+    }
 
 
 def _orientation_bucket(character: NativeCharacter) -> str:

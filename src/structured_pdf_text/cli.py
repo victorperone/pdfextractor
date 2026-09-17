@@ -23,6 +23,24 @@ from .renderers.json import render_json
 from .renderers.markdown import render_markdown
 
 
+EXHAUSTIVE_OCR_WARNING = (
+    "WARNING: OCR quality policy 'exhaustive' runs all eligible OCR quality\n"
+    "variants and may substantially increase runtime and peak memory usage.\n"
+    "In internal reference benchmarks, workloads of this class have shown\n"
+    "costs on the order of ~50% more peak memory and ~4x wall-clock time\n"
+    "compared with a lighter OCR path. Actual impact depends on document\n"
+    "content, page size, OCR coverage, and enabled refinements. No automatic\n"
+    "quality reduction will be applied."
+)
+
+
+def _warn_if_exhaustive(policy: str, *, emitted: bool = False) -> bool:
+    if emitted or str(policy).lower() != OcrQualityPolicy.EXHAUSTIVE.value:
+        return emitted
+    print(EXHAUSTIVE_OCR_WARNING, file=sys.stderr)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pdftext")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -220,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
                 merge_cross_page_tables=args.merge_cross_page_tables,
                 num_threads=args.threads,
             )
+        _warn_if_exhaustive(args.ocr_quality_policy)
         if _mode_requires_ocr(config.mode):
             try:
                 validate_local_ocr_models(language=config.language)
@@ -275,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_quality_policy=args.ocr_quality_policy,
             page_indices=(args.page - 1,) if args.page is not None else None,
         )
+        _warn_if_exhaustive(args.ocr_quality_policy)
         if _mode_requires_ocr(config.mode):
             try:
                 validate_local_ocr_models(language=config.language)
@@ -359,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
             merge_cross_page_tables=args.merge_cross_page_tables,
             num_threads=args.threads,
         )
+        _warn_if_exhaustive(args.ocr_quality_policy)
         if args.workers < 1:
             print("--workers must be at least 1", file=sys.stderr)
             return 2

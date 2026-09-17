@@ -57,7 +57,7 @@ from .ocr.recovery import (
 from .ocr.quality import assess_ocr_quality
 from .tables.detector import detect_tables_native
 from .tables.visual import detect_visual_table
-from .text.line_detector import reconstruct_native_lines
+from .text.line_detector import reconstruct_native_lines, spacing_diagnostics
 from .geometry import BBox
 
 
@@ -388,7 +388,7 @@ class PdfTextExtractor:
 
                 if ocr_requested and self.ocr_engine is not None and ocr_image is not None:
                     figure_start = time.perf_counter()
-                    figure_refinements = _refine_wide_figure_ocr(
+                    figure_refinements = _refine_figure_ocr(
                         engine=self.ocr_engine,
                         page_image=ocr_image,
                         page=native_page,
@@ -452,6 +452,7 @@ class PdfTextExtractor:
                             quality_policy=effective_ocr_quality_policy(self.config).value,
                             thresholds=self.config.ocr_quality_thresholds,
                             page_rotation=native_page.objects.rotation,
+                            enforce_policy=True,
                         )
                     except FatalExtractionError:
                         raise
@@ -646,6 +647,7 @@ class PdfTextExtractor:
                     warnings=warnings,
                     facts={
                         "native_text_score": complexity.native_text_score,
+                        **spacing_diagnostics(native_lines),
                         "layout_regions": len(regions),
                         "layout_engine": type(self.layout_engine).__name__ if len(regions) > 0 else None,
                         "ocr_requested": ocr_requested,
@@ -893,12 +895,6 @@ def _recover_selected_regions(
     stats: dict[str, dict[str, Any]] = {}
     for region, result in zip(regions, results):
         region_tokens = list(result.tokens)
-        suppressed_tokens = 0
-        if region.kind == RegionKind.FIGURE:
-            region_tokens, suppressed_tokens = _suppress_figure_shape_hallucinations(
-                region_tokens,
-                region.bbox,
-            )
         region.ocr_tokens = region_tokens
         tokens.extend(region_tokens)
         passes += result.ocr_passes
@@ -908,7 +904,6 @@ def _recover_selected_regions(
         stats[region.region_id] = {
             "kind": region.kind.value,
             "tokens": len(region_tokens),
-            "suppressed_shape_tokens": suppressed_tokens,
             "attempts": len(result.attempts),
             "attempt_errors": len(all_errors),
             "ocr_failed": ocr_failed,
@@ -931,8 +926,14 @@ def _recover_weak_ocr_regions(
     quality_policy: str | None,
     thresholds: OcrQualityThresholds,
     page_rotation: int = 0,
+    enforce_policy: bool = False,
 ) -> tuple[list[OcrToken], int, int, dict[str, dict[str, Any]]]:
     """Refine only locally weak OCR lines after page candidate selection."""
+    # Baseline is intentionally a single normal OCR path plus any orientation
+    # needed for a valid reading. Targeted quality recovery belongs to
+    # adaptive/exhaustive and must not be smuggled into baseline by the API.
+    if enforce_policy and str(quality_policy or "").lower() == "baseline":
+        return tokens, 0, 0, {}
     if engine is None or not lines or page_bbox.area <= 0:
         return tokens, 0, 0, {}
     weak_lines: list[tuple[TextLine, tuple[str, ...]]] = []
@@ -1009,38 +1010,6 @@ def _recover_weak_ocr_regions(
             "accepted": accepted,
         }
     return _deduplicate_region_ocr_tokens(refined_tokens), passes, batches, stats
-
-
-def _suppress_figure_shape_hallucinations(
-    tokens: list[OcrToken],
-    region_bbox: BBox,
-) -> tuple[list[OcrToken], int]:
-    """Reject repeated large pictograms mistaken for one-character text.
-
-    Small digits and letters are intentionally retained because they are
-    common on chart axes. Suppression is activated only when at least three
-    unusually large, single-character hypotheses repeat inside one figure,
-    a pattern typical of diagram/image cells rather than textual labels.
-    """
-    minimum_height = max(24.0, region_bbox.height * 0.13)
-    suspicious = [
-        token
-        for token in tokens
-        if len("".join(character for character in token.text if character.isalnum())) == 1
-        and token.bbox.height >= minimum_height
-        and token.bbox.width / max(token.bbox.height, 1.0) >= 0.75
-    ]
-    if len(suspicious) < 3:
-        return tokens, 0
-    frequencies: dict[str, int] = {}
-    for token in suspicious:
-        key = "".join(character for character in token.text.casefold() if character.isalnum())
-        frequencies[key] = frequencies.get(key, 0) + 1
-    if max(frequencies.values(), default=0) < 3:
-        return tokens, 0
-    suspicious_ids = {id(token) for token in suspicious}
-    kept = [token for token in tokens if id(token) not in suspicious_ids]
-    return kept, len(tokens) - len(kept)
 
 
 def _deduplicate_region_ocr_tokens(tokens: list[OcrToken]) -> list[OcrToken]:
@@ -1353,7 +1322,7 @@ def _refine_visual_table_ocr(
     return refined_table, lines, unmatched, result.ocr_passes, result.ocr_batches
 
 
-def _refine_wide_figure_ocr(
+def _refine_figure_ocr(
     engine: Any,
     page_image: Any,
     page: Any,
@@ -1370,7 +1339,11 @@ def _refine_wide_figure_ocr(
         int,
     ]
 ]:
-    """OCR wide embedded figures in independent vertical panels."""
+    """OCR embedded figures as generic text-bearing image regions.
+
+    The extractor deliberately does not infer axes, labels, series, arrows, or
+    chart structure. Any text returned is preserved with its observed geometry.
+    """
     refinements: list[
         tuple[
             BBox,
@@ -1387,181 +1360,33 @@ def _refine_wide_figure_ocr(
         figure_bbox = image.bbox
         if figure_bbox is None or figure_bbox.height <= 0:
             continue
-        aspect = figure_bbox.width / figure_bbox.height
-        if aspect < 2.4:
+        result = refiner.refine(
+            page_image,
+            page_index,
+            page.bbox,
+            RegionRefinementRequest(
+                bbox=figure_bbox,
+                quality_variants=True,
+                quality_policy=getattr(engine, "quality_policy", "baseline"),
+                goal=RegionRefinementGoal.TEXT,
+            ),
+        )
+        figure_tokens = list(result.tokens)
+        if not figure_tokens:
             continue
-        panel_count = max(2, min(4, round(aspect)))
-        panel_tokens: list[OcrToken] = []
-        pass_count = 0
-        batch_count = 0
-        for panel in range(panel_count):
-            panel_bbox = BBox(
-                figure_bbox.x0 + figure_bbox.width * panel / panel_count,
-                figure_bbox.y0,
-                figure_bbox.x0 + figure_bbox.width * (panel + 1) / panel_count,
-                figure_bbox.y1,
-            )
-            result = refiner.refine(
-                page_image,
-                page_index,
-                page.bbox,
-                RegionRefinementRequest(bbox=panel_bbox),
-            )
-            tokens = list(result.tokens)
-            pass_count += result.ocr_passes
-            batch_count += result.ocr_batches
-            if not tokens:
-                continue
-            panel_tokens.extend(tokens)
-            title_bbox = BBox(
-                panel_bbox.x0,
-                figure_bbox.y0,
-                panel_bbox.x1,
-                figure_bbox.y0 + figure_bbox.height * 0.22,
-            )
-            title_result = refiner.refine(
-                page_image,
-                page_index,
-                page.bbox,
-                RegionRefinementRequest(
-                    bbox=title_bbox,
-                    scale_factors=(2.0,),
-                    goal=RegionRefinementGoal.TEXTUAL,
-                ),
-            )
-            pass_count += title_result.ocr_passes
-            batch_count += title_result.ocr_batches
-            title_tokens = list(title_result.tokens)
-            if title_tokens:
-                panel_tokens = [
-                    token
-                    for token in panel_tokens
-                    if not any(token.bbox.iou(title.bbox) >= 0.35 for title in title_tokens)
-                ]
-                panel_tokens.extend(title_tokens)
-            label_bbox = BBox(
-                panel_bbox.x0,
-                figure_bbox.y0 + figure_bbox.height * 0.68,
-                panel_bbox.x1,
-                figure_bbox.y1,
-            )
-            label_result = refiner.refine(
-                page_image,
-                page_index,
-                page.bbox,
-                RegionRefinementRequest(
-                    bbox=label_bbox,
-                    scale_factors=(2.0,),
-                ),
-            )
-            pass_count += label_result.ocr_passes
-            batch_count += label_result.ocr_batches
-            label_tokens = list(label_result.tokens)
-            if label_tokens:
-                # F18: arbitrary month normalization removed — let OCR output stand as-is.
-                panel_tokens = [
-                    token
-                    for token in panel_tokens
-                    if not any(token.bbox.iou(label.bbox) >= 0.35 for label in label_tokens)
-                ]
-                panel_tokens.extend(label_tokens)
-            numeric_bbox = BBox(
-                panel_bbox.x0 + panel_bbox.width * 0.20,
-                figure_bbox.y0 + figure_bbox.height * 0.20,
-                panel_bbox.x1,
-                figure_bbox.y0 + figure_bbox.height * 0.72,
-            )
-            numeric_result = refiner.refine(
-                page_image,
-                page_index,
-                page.bbox,
-                RegionRefinementRequest(
-                    bbox=numeric_bbox,
-                    scale_factors=(2.0,),
-                    goal=RegionRefinementGoal.NUMERIC,
-                ),
-            )
-            pass_count += numeric_result.ocr_passes
-            batch_count += numeric_result.ocr_batches
-            numeric_tokens = list(numeric_result.tokens)
-            if numeric_tokens:
-                panel_tokens = [
-                    token
-                    for token in panel_tokens
-                    if not any(token.bbox.iou(numeric.bbox) >= 0.35 for numeric in numeric_tokens)
-                ]
-                panel_tokens.extend(numeric_tokens)
-            axis_bbox = BBox(
-                panel_bbox.x0,
-                figure_bbox.y0 + figure_bbox.height * 0.22,
-                panel_bbox.x0 + panel_bbox.width * 0.20,
-                figure_bbox.y0 + figure_bbox.height * 0.82,
-            )
-            axis_numeric_bbox = BBox(
-                panel_bbox.x0,
-                figure_bbox.y0 + figure_bbox.height * 0.08,
-                panel_bbox.x0 + panel_bbox.width * 0.20,
-                figure_bbox.y0 + figure_bbox.height * 0.94,
-            )
-            axis_numeric_result = refiner.refine(
-                page_image,
-                page_index,
-                page.bbox,
-                RegionRefinementRequest(
-                    bbox=axis_numeric_bbox,
-                    scale_factors=(1.0, 1.5, 2.0, 3.0),
-                    goal=RegionRefinementGoal.NUMERIC,
-                ),
-            )
-            pass_count += axis_numeric_result.ocr_passes
-            batch_count += axis_numeric_result.ocr_batches
-            axis_numeric_tokens = list(axis_numeric_result.tokens)
-            if axis_numeric_tokens:
-                panel_tokens = [
-                    token
-                    for token in panel_tokens
-                    if not any(
-                        token.bbox.iou(axis_number.bbox) >= 0.35
-                        for axis_number in axis_numeric_tokens
-                    )
-                ]
-                panel_tokens.extend(axis_numeric_tokens)
-            axis_result = refiner.refine(
-                page_image,
-                page_index,
-                page.bbox,
-                RegionRefinementRequest(
-                    bbox=axis_bbox,
-                    rotations=(90.0, 270.0),
-                    goal=RegionRefinementGoal.TEXTUAL,
-                ),
-            )
-            pass_count += axis_result.ocr_passes
-            batch_count += axis_result.ocr_batches
-            axis_text = list(axis_result.tokens)
-            for axis_token in axis_text:
-                panel_tokens = [
-                    token
-                    for token in panel_tokens
-                    if not _line_in_box(token, axis_token.bbox)
-                ]
-            panel_tokens.extend(axis_text)
-        if not panel_tokens:
-            continue
-        # F18: A-D single-letter filter removed — all OCR tokens retained.
-        all_lines = reconstruct_ocr_lines(panel_tokens, page_index, page.bbox)
-        figure_fusion = fuse_native_and_ocr(native_lines, panel_tokens)
+        all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox)
+        figure_fusion = fuse_native_and_ocr(native_lines, figure_tokens)
         unmatched_tokens = list(figure_fusion.unmatched_ocr_tokens)
         unmatched_lines = reconstruct_ocr_lines(unmatched_tokens, page_index, page.bbox)
         refinements.append(
             (
                 figure_bbox,
                 all_lines,
-                panel_tokens,
+                figure_tokens,
                 unmatched_lines,
                 unmatched_tokens,
-                pass_count,
-                batch_count,
+                result.ocr_passes,
+                result.ocr_batches,
             )
         )
     return refinements
@@ -1575,32 +1400,6 @@ def _replace_lines_in_box(lines: list[TextLine], box: BBox, replacement: list[Te
 def _replace_tokens_in_box(tokens: list[OcrToken], box: BBox, replacement: list[OcrToken]) -> list[OcrToken]:
     outside = [token for token in tokens if not _line_in_box(token, box)]
     return outside + replacement
-
-
-def _normalize_chart_label(token: OcrToken) -> OcrToken:
-    """Repair an unambiguous truncated Portuguese month in chart labels."""
-    normalized = {"ju": "Jun", "jui": "Jun", "jur": "Jun", "jui n": "Jun"}.get(
-        " ".join(token.text.casefold().split())
-    )
-    if normalized is None:
-        return token
-    return OcrToken(
-        text=normalized,
-        bbox=token.bbox,
-        confidence=token.confidence,
-        language=token.language,
-        source=token.source,
-        rotation=token.rotation,
-    )
-
-
-def _keep_wide_figure_token(token: OcrToken) -> bool:
-    text = " ".join(token.text.casefold().split())
-    if len(text) != 1 or not text.isalpha():
-        return True
-    # Single letters are meaningful chart series labels in this corpus. Other
-    # isolated letters are recurrent OCR noise from axes and grid marks.
-    return text.upper() in {"A", "B", "C", "D"}
 
 
 def _crop_page_image(image: Any, page_bbox: BBox, region_bbox: BBox) -> Any:

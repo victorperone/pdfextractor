@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import difflib
 from dataclasses import dataclass, replace
 from numbers import Real
 from pathlib import Path
@@ -23,6 +24,7 @@ from structured_pdf_text.ocr.quality import (
     assess_ocr_quality,
     raw_result_metrics,
 )
+from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
 from structured_pdf_text.config import OcrQualityThresholds
 
 
@@ -255,6 +257,7 @@ class PaddleOcrEngine:
                     rotation=0,
                     enhancement=None,
                     orientation_incoherent=bool(rotation_candidates),
+                    family="baseline",
                 ),
                 baseline_context,
             )
@@ -285,6 +288,7 @@ class PaddleOcrEngine:
                         self.quality_thresholds,
                         rotation=angle,
                         enhancement=None,
+                        family="orientation",
                         orientation_incoherent=False,
                     ),
                     OcrOrientationContext(
@@ -375,6 +379,7 @@ class PaddleOcrEngine:
                         self.quality_thresholds,
                         rotation=orientation_context.angle,
                         enhancement=variant.name,
+                        family=variant.family,
                     )
                     candidates.append(candidate)
                     self.last_variant_scores[variant.name] = candidate.quality.score
@@ -773,6 +778,7 @@ def _make_candidate(
     rotation: int = 0,
     enhancement: str | None = None,
     orientation_incoherent: bool = False,
+    family: str = "unknown",
 ) -> OcrCandidate:
     raw_metrics = raw_result_metrics(raw)
     assessment = assess_ocr_quality(
@@ -791,6 +797,7 @@ def _make_candidate(
         ),
         rotation=rotation,
         enhancement=enhancement,
+        family=family,
     )
 
 
@@ -805,6 +812,7 @@ def _select_best_candidate(
             tokens=[],
             raw_metrics=raw_result_metrics(None),
             quality=assess_ocr_quality([], thresholds=thresholds),
+            family="empty",
         )
     best = max(candidates, key=lambda candidate: candidate.quality.score)
     best_quality = best.quality.score
@@ -1026,36 +1034,47 @@ def _spatial_consensus(
     *,
     thresholds: OcrQualityThresholds | None = None,
 ) -> tuple[list[OcrToken], int, int]:
-    """Apply true multi-candidate consensus plus conservative single overrides."""
-    merged = list(primary.tokens)
-    replacements = 0
+    """Fuse only hypotheses that were actually observed by OCR.
+
+    Consensus is computed first at line level and then at token level. Image
+    enhancements in the same family count as one source, so seven contrast
+    variants cannot outvote one independent baseline/sharpness hypothesis.
+    """
+    merged, replacements = _line_level_consensus(primary, candidates, page_bbox=None)
     insertions = 0
     alternate_candidates = [candidate for candidate in candidates if candidate.name != primary.name]
     for index, current in enumerate(list(merged)):
-        hypotheses: list[OcrToken] = []
+        hypotheses: list[tuple[OcrCandidate, OcrToken]] = []
         for candidate in alternate_candidates:
             overlaps = [
                 token for token in candidate.tokens
                 if _candidate_token_overlap(current, token)
             ]
             if overlaps:
-                hypotheses.append(max(overlaps, key=lambda token: token.confidence or 0.0))
+                hypotheses.append((candidate, max(overlaps, key=lambda token: token.confidence or 0.0)))
         if not hypotheses:
             continue
-        by_text: dict[str, list[OcrToken]] = {}
-        for token in hypotheses:
+        by_text: dict[str, list[tuple[OcrCandidate, OcrToken]]] = {}
+        for candidate, token in hypotheses:
             key = " ".join(token.text.strip().split()).casefold()
-            by_text.setdefault(key, []).append(token)
+            by_text.setdefault(key, []).append((candidate, token))
         consensus = max(
             by_text.values(),
-            key=lambda values: (len(values), max(token.confidence or 0.0 for token in values)),
+            key=lambda values: (
+                len({_candidate_family(candidate) for candidate, _ in values}),
+                sum(token.confidence or 0.0 for _, token in values) / len(values),
+            ),
         )
-        best_alternate = max(consensus, key=lambda token: token.confidence or 0.0)
+        best_candidate, best_alternate = max(
+            consensus,
+            key=lambda item: item[1].confidence or 0.0,
+        )
         current_confidence = current.confidence or 0.0
         alternate_confidence = best_alternate.confidence or 0.0
         alternate_key = " ".join(best_alternate.text.strip().split()).casefold()
         current_key = " ".join(current.text.strip().split()).casefold()
-        if len(consensus) >= 2 and alternate_confidence > current_confidence and alternate_key != current_key:
+        family_count = len({_candidate_family(candidate) for candidate, _ in consensus})
+        if family_count >= 2 and alternate_confidence > current_confidence and alternate_key != current_key:
             merged[index] = best_alternate
             replacements += 1
         elif (
@@ -1067,7 +1086,7 @@ def _spatial_consensus(
             merged[index] = best_alternate
             replacements += 1
 
-    insertion_groups: dict[tuple[int, int, str], list[OcrToken]] = {}
+    insertion_groups: dict[tuple[int, int, str], list[tuple[OcrCandidate, OcrToken]]] = {}
     for candidate in alternate_candidates:
         for token in candidate.tokens:
             if any(_candidate_token_overlap(existing, token) for existing in merged):
@@ -1077,16 +1096,95 @@ def _spatial_consensus(
                 round(token.bbox.y0 / 4.0),
                 " ".join(token.text.split()).casefold(),
             )
-            insertion_groups.setdefault(key, []).append(token)
+            insertion_groups.setdefault(key, []).append((candidate, token))
     for tokens in insertion_groups.values():
-        if len(tokens) >= 2:
-            merged.append(max(tokens, key=lambda token: token.confidence or 0.0))
+        if len({_candidate_family(candidate) for candidate, _ in tokens}) >= 2:
+            merged.append(max((token for _, token in tokens), key=lambda token: token.confidence or 0.0))
             insertions += 1
     return (
         _remove_contained_fragments(sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))),
         replacements,
         insertions,
     )
+
+
+def _candidate_family(candidate: OcrCandidate) -> str:
+    return candidate.family if candidate.family != "unknown" else candidate.name
+
+
+def _line_level_consensus(
+    primary: OcrCandidate,
+    candidates: list[OcrCandidate],
+    page_bbox: BBox | None,
+) -> tuple[list[OcrToken], int]:
+    """Replace a weak primary line only with an observed alternate line."""
+    try:
+        primary_lines = reconstruct_ocr_lines(primary.tokens, 0, page_bbox)
+    except (TypeError, ValueError):
+        return list(primary.tokens), 0
+    merged = list(primary.tokens)
+    replacements = 0
+    alternates = [candidate for candidate in candidates if candidate.name != primary.name]
+    for primary_line in primary_lines:
+        primary_text = " ".join(primary_line.text.split()).casefold()
+        if not primary_text:
+            continue
+        hypotheses: list[tuple[OcrCandidate, list[OcrToken], float]] = []
+        for candidate in alternates:
+            try:
+                candidate_lines = reconstruct_ocr_lines(candidate.tokens, 0, page_bbox)
+            except (TypeError, ValueError):
+                continue
+            for line in candidate_lines:
+                if _line_bbox_overlap(primary_line.bbox, line.bbox) < 0.25:
+                    continue
+                text = " ".join(line.text.split()).casefold()
+                similarity = difflib.SequenceMatcher(None, primary_text, text).ratio()
+                if similarity >= 0.45 and text != primary_text:
+                    observed = [token for token in candidate.tokens if _bbox_overlap(token.bbox, primary_line.bbox) >= 0.20]
+                    if observed:
+                        hypotheses.append((candidate, observed, similarity))
+        if not hypotheses:
+            continue
+        by_text: dict[str, list[tuple[OcrCandidate, list[OcrToken], float]]] = {}
+        for candidate, tokens, similarity in hypotheses:
+            text = " ".join(token.text for token in tokens).casefold()
+            by_text.setdefault(text, []).append((candidate, tokens, similarity))
+        group = max(
+            by_text.values(),
+            key=lambda values: (
+                len({_candidate_family(candidate) for candidate, _, _ in values}),
+                sum(candidate.quality.score for candidate, _, _ in values) / len(values),
+                max(similarity for _, _, similarity in values),
+            ),
+        )
+        if len({_candidate_family(candidate) for candidate, _, _ in group}) < 2:
+            continue
+        best_candidate, replacement_tokens, _ = max(
+            group,
+            key=lambda item: (item[0].quality.score, max(token.confidence or 0.0 for token in item[1])),
+        )
+        del best_candidate  # the source is retained by replacement_tokens
+        merged = [
+            token for token in merged
+            if _bbox_overlap(token.bbox, primary_line.bbox) < 0.20
+        ]
+        merged.extend(replacement_tokens)
+        replacements += 1
+    return sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0)), replacements
+
+
+def _bbox_overlap(first: BBox, second: BBox) -> float:
+    if first.area <= 0 or second.area <= 0:
+        return 0.0
+    return first.intersection(second).area / min(first.area, second.area) if first.intersection(second) else 0.0
+
+
+def _line_bbox_overlap(first: BBox, second: BBox) -> float:
+    if first.area <= 0 or second.area <= 0:
+        return 0.0
+    intersection = first.intersection(second)
+    return intersection.area / min(first.area, second.area) if intersection else 0.0
 
 
 def _has_no_neighbor_conflict(tokens: list[OcrToken], index: int, alternate: OcrToken) -> bool:
