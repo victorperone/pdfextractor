@@ -233,6 +233,215 @@ def test_repeated_detection_does_not_generalize_arbitrary_numeric_identifiers() 
     )
 
 
+def _block(
+    block_id: str,
+    line_ids: list[str],
+    lines: list[TextLine],
+    kind: ContentKind = ContentKind.TEXT,
+    page_index: int = 0,
+) -> "PageContentBlock":
+    from structured_pdf_text.document import PageContentBlock
+    from structured_pdf_text.text.normalize import normalize_reading_text
+
+    bboxes = [ln.bbox for ln in lines]
+    bbox = BBox.union_all(bboxes) if bboxes else BBox(0, 0, 1, 1)
+    text = "\n".join(
+        t for t in (normalize_reading_text(ln.text).strip() for ln in lines) if t
+    )
+    return PageContentBlock(
+        block_id=block_id,
+        page_index=page_index,
+        kind=kind,
+        bbox=bbox,
+        order_index=0,
+        text=text,
+        line_ids=list(line_ids),
+    )
+
+
+def _page_with_lines(*lines: TextLine, page_index: int = 0) -> StructuredPage:
+    """Page with a single TEXT region containing the given lines in order."""
+    region = LayoutRegion(
+        region_id="region-main",
+        kind=RegionKind.TEXT,
+        bbox=BBox(0, 0, 600, 800),
+        layout_confidence=1.0,
+        native_lines=list(lines),
+        ocr_tokens=[],
+        quality=RegionQuality(RegionDecision.KEEP_NATIVE),
+    )
+    return StructuredPage(
+        page_index=page_index,
+        bbox=BBox(0, 0, 600, 800),
+        regions=[region],
+        tables=[],
+        raw_text="",
+        reading_text="",
+        diagnostics=PageDiagnostics(
+            page_index=page_index,
+            strategy=PageStrategy.NATIVE,
+            reasons=[],
+            native_chars=0,
+            native_text_length=0,
+        ),
+    )
+
+
+# ── P0-1: exactly-once ownership ──────────────────────────────────────────────
+
+def test_duplicate_claim_single_line_resolves_to_one_owner() -> None:
+    """Two blocks claim the same line; second block is suppressed."""
+    ln = _line("conteúdo único", BBox(0, 10, 200, 25), "line-1")
+    page = _page_with_lines(ln)
+    block_a = _block("page-1:block-1", ["line-1"], [ln])
+    block_b = _block("page-1:block-2", ["line-1"], [ln])
+
+    blocks, summary, records = record_content_conservation(page, [block_a, block_b])
+
+    # line-1 must appear in exactly one non-suppressed block.
+    owners = [b for b in blocks if "line-1" in b.line_ids and not b.suppressed]
+    assert len(owners) == 1
+    assert owners[0].block_id == "page-1:block-1"
+
+    # No structural duplicates remain after resolution.
+    assert summary.duplicate_assignment_count == 0
+    assert summary.duplicate_claims_detected == 1
+    assert summary.duplicate_claims_resolved == 1
+
+
+def test_mixed_block_preserves_unique_lines_after_dedup() -> None:
+    """Block losing a duplicate still keeps its unique lines."""
+    ln1 = _line("compartilhada", BBox(0, 10, 200, 25), "line-1")
+    ln2 = _line("exclusiva do B", BBox(0, 30, 200, 45), "line-2")
+    page = _page_with_lines(ln1, ln2)
+    block_a = _block("page-1:block-1", ["line-1"], [ln1])
+    block_b = _block("page-1:block-2", ["line-1", "line-2"], [ln1, ln2])
+
+    blocks, summary, _ = record_content_conservation(page, [block_a, block_b])
+
+    # line-2 must survive in block_b.
+    rebuilt_b = next(b for b in blocks if b.block_id == "page-1:block-2")
+    assert "line-2" in rebuilt_b.line_ids
+    assert "line-1" not in rebuilt_b.line_ids
+    assert not rebuilt_b.suppressed
+    assert "exclusiva do B" in rebuilt_b.text
+
+    # line-1 stays only in block_a.
+    rebuilt_a = next(b for b in blocks if b.block_id == "page-1:block-1")
+    assert "line-1" in rebuilt_a.line_ids
+
+    assert summary.duplicate_assignment_count == 0
+    assert summary.duplicate_claims_detected == 1
+
+
+def test_table_block_wins_prose_conflict() -> None:
+    """A line owned by a TABLE block must not reappear in a prose block."""
+    from structured_pdf_text.document import PageContentBlock
+
+    ln = _line("dado da tabela", BBox(0, 10, 200, 25), "line-1")
+    page = _page_with_lines(ln)
+    table_block = PageContentBlock(
+        block_id="page-1:table-1",
+        page_index=0,
+        kind=ContentKind.TABLE,
+        bbox=ln.bbox,
+        order_index=0,
+        line_ids=["line-1"],
+    )
+    prose_block = _block("page-1:block-2", ["line-1"], [ln])
+
+    blocks, summary, records = record_content_conservation(page, [table_block, prose_block])
+
+    table_record = next(r for r in records if r.line_id == "line-1")
+    assert table_record.disposition.value == "table_owned"
+
+    prose = next(b for b in blocks if b.block_id == "page-1:block-2")
+    assert "line-1" not in prose.line_ids
+
+    assert summary.duplicate_assignment_count == 0
+
+
+def test_lane_ids_canonicalize_without_double_ownership() -> None:
+    """lane-1 and lane-2 sub-lines of line-5 must not each grant ownership."""
+    ln = _line("texto com lanes", BBox(0, 10, 200, 25), "line-5")
+    page = _page_with_lines(ln)
+    block_a = _block("page-1:block-1", ["line-5:lane-1"], [ln])
+    block_b = _block("page-1:block-2", ["line-5:lane-2"], [ln])
+
+    blocks, summary, _ = record_content_conservation(page, [block_a, block_b])
+
+    owners = [b for b in blocks if not b.suppressed and any("line-5" in lid for lid in b.line_ids)]
+    assert len(owners) == 1
+    assert summary.duplicate_claims_detected == 1
+    assert summary.duplicate_assignment_count == 0
+
+
+# ── P0-2: fallback at correct reading position ────────────────────────────────
+
+def test_fallback_inserted_between_surrounding_blocks() -> None:
+    """An unaccounted line must appear between the blocks that flank it."""
+    ln_a = _line("bloco A", BBox(0, 10, 200, 25), "line-a")
+    ln_u = _line("não reclamada", BBox(0, 30, 200, 45), "line-unaccounted")
+    ln_b = _line("bloco B", BBox(0, 50, 200, 65), "line-b")
+    page = _page_with_lines(ln_a, ln_u, ln_b)
+
+    block_a = _block("page-1:block-1", ["line-a"], [ln_a])
+    block_b = _block("page-1:block-2", ["line-b"], [ln_b])
+
+    blocks, summary, _ = record_content_conservation(page, [block_a, block_b])
+
+    ids = [b.block_id for b in blocks]
+    a_pos = ids.index("page-1:block-1")
+    b_pos = ids.index("page-1:block-2")
+    fallback_pos = next(i for i, b in enumerate(blocks) if "conservation-fallback" in b.block_id)
+
+    assert a_pos < fallback_pos < b_pos, (
+        f"Expected order A({a_pos}) < fallback({fallback_pos}) < B({b_pos})"
+    )
+    assert summary.fallback_lines == 1
+
+
+def test_fallback_after_all_blocks_when_line_is_last() -> None:
+    """A trailing unaccounted line is placed after all existing blocks."""
+    ln_a = _line("bloco A", BBox(0, 10, 200, 25), "line-a")
+    ln_u = _line("última linha", BBox(0, 50, 200, 65), "line-last")
+    page = _page_with_lines(ln_a, ln_u)
+    block_a = _block("page-1:block-1", ["line-a"], [ln_a])
+
+    blocks, _, _ = record_content_conservation(page, [block_a])
+
+    assert blocks[-1].block_id.endswith("conservation-fallback-1")
+    assert blocks[0].block_id == "page-1:block-1"
+
+
+# ── P0-3: truthful unaccounted_lines ──────────────────────────────────────────
+
+def test_unaccounted_lines_is_zero_when_all_lines_are_covered() -> None:
+    """After full fallback recovery, unaccounted_lines must be 0."""
+    ln = _line("texto completo", BBox(0, 10, 200, 25), "line-full")
+    page = _page_with_lines(ln)
+
+    _, summary, _ = record_content_conservation(page, [])
+
+    assert summary.unaccounted_lines == 0
+    assert summary.fallback_lines == 1
+
+
+def test_new_diagnostic_keys_are_present_in_facts() -> None:
+    """to_facts() must expose the two new duplicate-claims counters."""
+    ln = _line("qualquer coisa", BBox(0, 10, 200, 25), "line-x")
+    page = _page_with_lines(ln)
+    block = _block("page-1:block-1", ["line-x"], [ln])
+
+    _, summary, _ = record_content_conservation(page, [block])
+
+    facts = summary.to_facts()
+    assert "content_duplicate_claims_detected" in facts
+    assert "content_duplicate_claims_resolved" in facts
+    assert facts["content_duplicate_claims_detected"] == 0
+    assert facts["content_duplicate_claims_resolved"] == 0
+
+
 def test_explicit_page_numbering_is_still_normalized_for_repeated_furniture() -> None:
     pages = [
         _page(
