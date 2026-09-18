@@ -37,17 +37,21 @@ def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, li
 
 
 def repeated_line_keys(page: StructuredPage) -> dict[str, str]:
-    """Return normalized keys for candidate edge lines on one page.
+    """Return furniture signature keys for candidate edge lines on one page.
 
-    Each line maps only to its confirmed text/template signature.  Position is
-    evidence for confirmation, never an independent suppression key.
+    Keyed by the stable line identity (line_id or runtime object id) rather
+    than by normalized text.  Text-keyed dicts collide when the same string
+    appears at both the top and bottom of the same page (e.g. "CONFIDENTIAL"
+    as both a header and a footer), causing one mapping to silently overwrite
+    the other.  Identity-keyed dicts preserve both entries independently.
     """
     result: dict[str, str] = {}
     for kind, line in _candidate_lines(page):
         text = unicodedata.normalize("NFC", line.text.strip())
         key = _signature_key(kind, text)
         if key is not None:
-            result[text] = key
+            lid = line.line_id or f"line:{id(line)}"
+            result[lid] = key
     return result
 
 

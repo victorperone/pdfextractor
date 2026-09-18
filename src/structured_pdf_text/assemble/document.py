@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import dataclasses
 import time
-import unicodedata
 
 from structured_pdf_text.document import (
     ContentKind,
@@ -204,8 +203,8 @@ def _apply_repeated_suppression(
 
     for region in page.regions:
         for line in [*region.native_lines, *region.ocr_lines]:
-            text = unicodedata.normalize("NFC", line.text.strip())
-            key = line_keys.get(text)
+            line_id = line.line_id or f"line:{id(line)}"
+            key = line_keys.get(line_id)
 
             if key not in repeated_keys:
                 continue
@@ -219,7 +218,6 @@ def _apply_repeated_suppression(
             else:
                 continue
 
-            line_id = line.line_id or f"line:{id(line)}"
             previous = repeated_role_by_line_id.get(line_id)
 
             # If the same source line is ambiguously classified as two
