@@ -18,6 +18,7 @@ from structured_pdf_text.text.line_detector import (
     _is_ghost_punctuation_line,
     _mark_ghost_punctuation_candidates,
     _merge_script_lines,
+    _reconcile_with_textpage,
     reconstruct_native_lines,
 )
 
@@ -279,3 +280,81 @@ def test_body_line_merged_source_ids_empty_by_default() -> None:
     result = _merge_script_lines([body])
 
     assert result[0].merged_source_line_ids == ()
+
+
+# ── P1-3: textpage reconciliation order-aware ─────────────────────────────────
+
+def _recon_line(text: str, line_id: str) -> TextLine:
+    """Minimal TextLine for reconciliation tests."""
+    bbox = BBox(0.0, 0.0, len(text) * 8.0, 10.0)
+    token = TextToken(
+        text=text,
+        bbox=bbox,
+        sources=[EvidenceRef(SourceKind.NATIVE_PDF, 0, line_id)],
+        confidence=1.0,
+        normalized_text=normalize_text(text),
+    )
+    return TextLine(
+        tokens=[token],
+        bbox=bbox,
+        baseline=Baseline(y=10.0),
+        direction=WritingDirection.LEFT_TO_RIGHT,
+        native_order_min=0,
+        native_order_max=0,
+        line_id=line_id,
+    )
+
+
+def test_reconciliation_does_not_swap_consecutive_similar_ids() -> None:
+    """Lines like ABC-001 and ABC-002 must not swap due to a global score match."""
+    lines = [
+        _recon_line("ABC-001", "id-001"),
+        _recon_line("ABC-002", "id-002"),
+    ]
+    extracted = "ABC-001\nABC-002"
+
+    result = _reconcile_with_textpage(lines, extracted)
+
+    assert result[0].text == "ABC-001"
+    assert result[1].text == "ABC-002"
+
+
+def test_reconciliation_monotonic_second_occurrence_not_stolen() -> None:
+    """A repeated phrase in two positions keeps its local candidate, not the first."""
+    lines = [
+        _recon_line("Referência", "ref-1"),
+        _recon_line("Outro texto", "other"),
+        _recon_line("Referência", "ref-2"),
+    ]
+    extracted = "Referência\nOutro texto\nReferência"
+
+    result = _reconcile_with_textpage(lines, extracted)
+
+    texts = [ln.text for ln in result]
+    assert texts == ["Referência", "Outro texto", "Referência"]
+
+
+def test_reconciliation_spacing_recovery_still_works() -> None:
+    """Tracked text missing spaces is corrected by the textpage candidate.
+
+    When the native stream has no space between words (e.g. 'entradaFundos'),
+    _needs_textpage_spacing_recovery detects the lowercase→uppercase transition
+    and allows the textpage version ('entrada Fundos') to replace it.
+    """
+    tracked = _recon_line("entradaFundos", "tracked-line")
+    extracted = "entrada Fundos"
+
+    result = _reconcile_with_textpage([tracked], extracted)
+
+    assert result[0].text == "entrada Fundos"
+
+
+def test_reconciliation_does_not_replace_when_no_good_match() -> None:
+    """A native line with no high-similarity candidate keeps its original text."""
+    line = _recon_line("Conteúdo original", "orig")
+    extracted = "Completamente diferente"
+
+    result = _reconcile_with_textpage([line], extracted)
+
+    assert result[0].text == "Conteúdo original"
+    assert result[0].text_override is None

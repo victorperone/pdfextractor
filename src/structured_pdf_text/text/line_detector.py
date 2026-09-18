@@ -107,16 +107,25 @@ def lines_to_text(lines: list[TextLine]) -> str:
     return "\n".join(output).strip()
 
 
+_RECONCILE_WINDOW = 8  # max candidates ahead of cursor to consider per line
+
+
 def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list[TextLine]:
     """Recover spacing/ligature mappings when PDFium exposes better line text.
 
     PDFium's character stream may contain tracked glyphs or a lossy font
     mapping while its text-page extraction still has the semantic string. A
-    high-similarity, one-to-one match lets us retain native geometry and
-    evidence without hard-coded lexical corrections.
+    high-similarity match lets us retain native geometry and evidence without
+    hard-coded lexical corrections.
+
+    Matching is monotonic: the search cursor never moves backwards.  A local
+    window of _RECONCILE_WINDOW candidates is searched from the cursor forward.
+    This prevents similar lines in different regions (e.g. repeated IDs, near-
+    identical labels) from swapping with each other due to a better global score.
     """
     candidates = [line.strip() for line in extracted_text.replace("\r", "").split("\n") if line.strip()]
     available = set(range(len(candidates)))
+    cursor = 0  # monotonic lower bound — never decreases
     output: list[TextLine] = []
     for line in lines:
         compact = _compact(line.text)
@@ -125,7 +134,10 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
             continue
         best_index: int | None = None
         best_score = 0.0
-        for index in available:
+        search_end = min(cursor + _RECONCILE_WINDOW, len(candidates))
+        for index in range(cursor, search_end):
+            if index not in available:
+                continue
             candidate = candidates[index]
             score = SequenceMatcher(None, compact, _compact(candidate)).ratio()
             if _compact(candidate) == compact:
@@ -157,6 +169,7 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
                 )
             )
             available.remove(best_index)
+            cursor = best_index + 1
         else:
             output.append(line)
     return output
