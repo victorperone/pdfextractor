@@ -83,7 +83,7 @@ def reconstruct_native_lines(
     lines.sort(key=lambda line: (line.bbox.y0, line.bbox.x0))
     if extracted_text:
         lines = _reconcile_with_textpage(lines, extracted_text)
-    lines = [line for line in lines if not _is_ghost_punctuation_line(line)]
+    lines = _mark_ghost_punctuation_candidates(lines)
     lines = _merge_script_lines(lines)
     return lines
 
@@ -164,9 +164,26 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
 
 def _is_ghost_punctuation_line(line: TextLine) -> bool:
     text = line.text.strip()
-    if text not in {",", ".", "'", "’", "`", ":", ";"}:
+    if text not in {",", ".", "’", "’", "`", ":", ";"}:
         return False
     return line.bbox.width <= max(10.0, line.bbox.height * 1.8)
+
+
+def _mark_ghost_punctuation_candidates(lines: list[TextLine]) -> list[TextLine]:
+    """Mark ghost-punctuation candidates without filtering them.
+
+    A line that passes the ghost heuristic is flagged so that a later,
+    auditable step can decide suppression.  Removing content silently before
+    the Content Conservation Ledger is accounted violates the preservation
+    invariant; the flag makes the candidate visible to downstream consumers.
+    """
+    result: list[TextLine] = []
+    for line in lines:
+        if _is_ghost_punctuation_line(line) and not line.ghost_punctuation_candidate:
+            result.append(replace(line, ghost_punctuation_candidate=True))
+        else:
+            result.append(line)
+    return result
 
 
 _SUPERSCRIPTS = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")

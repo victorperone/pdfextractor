@@ -247,6 +247,7 @@ class TextLine:
     line_id: str | None = None
     text_override: str | None = None
     join_next_without_space: bool = False
+    ghost_punctuation_candidate: bool = False
 
     @property
     def text(self) -> str:
