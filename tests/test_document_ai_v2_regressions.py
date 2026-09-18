@@ -12,7 +12,12 @@ from structured_pdf_text.renderers.markdown import render_markdown
 CORPUS = Path(__file__).parents[1] / "corpus" / "Document_AI_V2.pdf"
 
 
-def _extract(page: int, *, tables: bool = False):
+def _extract(
+    page: int,
+    *,
+    tables: bool = False,
+    experimental_occlusion_redaction: bool = False,
+):
     if not CORPUS.exists():
         pytest.skip("Document_AI_V2.pdf is not present")
     return PdfTextExtractor(
@@ -20,15 +25,28 @@ def _extract(page: int, *, tables: bool = False):
             mode=ExtractionMode.NATIVE,
             page_indices=(page - 1,),
             enable_tables=tables,
+            enable_experimental_occlusion_redaction=(
+                experimental_occlusion_redaction
+            ),
         )
     ).extract(CORPUS).pages[0]
 
 
-def test_document_ai_v2_redacted_text_is_not_reconstructed():
-    page = _extract(39)
+def test_document_ai_v2_experimental_redaction_hides_occluded_text():
+    page = _extract(
+        39,
+        experimental_occlusion_redaction=True,
+    )
+
     assert "SEGREDO-ALFA-991" not in page.reading_text
     assert "000123-9" not in page.reading_text
     assert "SEGREDO-ALFA-991" not in page.raw_text
+    assert page.diagnostics.facts[
+        "experimental_occlusion_redaction_enabled"
+    ] is True
+    assert page.diagnostics.facts[
+        "textpage_reconciliation_disabled_for_redaction"
+    ] is True
     assert page.diagnostics.facts["redacted_native_characters"] > 0
 
 

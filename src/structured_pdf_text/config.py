@@ -49,6 +49,13 @@ class ExtractorConfig:
     enable_tables: bool = False
     merge_cross_page_tables: bool = False
     enable_complexity_render: bool = True
+
+    # Experimental safety feature. Disabled by default because visually
+    # occluded native text cannot yet be removed with sufficient guarantees
+    # across arbitrary PDF layouts such as dark banners, reversed text,
+    # highlighted cells, and other legitimate opaque backgrounds.
+    enable_experimental_occlusion_redaction: bool = False
+
     complexity_render_scale: float = 0.5
     ocr_render_scale: float = 2.0
     # OCR quality passes trade throughput and memory for recall. The default
@@ -110,6 +117,7 @@ def best_extraction_config(
         merge_cross_page_tables=True,
         preserve_headers_footers=preserve_headers,
         ocr_quality_variants=True,
+        enable_experimental_occlusion_redaction=False,
     )
 
 

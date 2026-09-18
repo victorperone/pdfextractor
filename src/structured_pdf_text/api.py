@@ -196,18 +196,53 @@ class PdfTextExtractor:
                 complexity = self.complexity_analyzer.analyze(native_page, rendered_page)
                 timings["complexity_ms"] = (time.perf_counter() - complexity_start) * 1000
                 visibility_start = time.perf_counter()
-                opaque_occlusion_boxes = detect_opaque_occlusion_boxes(native_page, rendered_page)
-                visible_characters, redacted_character_count = characters_occluded(
-                    native_page.characters,
-                    opaque_occlusion_boxes,
+
+                # Occlusion/redaction detection is intentionally experimental
+                # and disabled by default. A dark opaque region can be
+                # legitimate document design (for example reversed text,
+                # dark table cells, banners or labels), so it must not remove
+                # native characters unless explicitly enabled.
+                opaque_occlusion_boxes: list[BBox] = []
+                visible_characters = list(native_page.characters)
+                redacted_character_count = 0
+
+                if self.config.enable_experimental_occlusion_redaction:
+                    opaque_occlusion_boxes = detect_opaque_occlusion_boxes(
+                        native_page,
+                        rendered_page,
+                    )
+                    visible_characters, redacted_character_count = characters_occluded(
+                        native_page.characters,
+                        opaque_occlusion_boxes,
+                    )
+
+                timings["visibility_ms"] = (
+                    time.perf_counter() - visibility_start
+                ) * 1000
+
+                # The PDF textpage contains the original native text,
+                # including characters that experimental occlusion detection
+                # may just have removed. Never reconcile against that
+                # unfiltered textpage after any character was suppressed.
+                textpage_reconciliation_disabled_for_redaction = (
+                    self.config.enable_experimental_occlusion_redaction
+                    and redacted_character_count > 0
                 )
-                timings["visibility_ms"] = (time.perf_counter() - visibility_start) * 1000
+
+                textpage_for_reconciliation = (
+                    None
+                    if textpage_reconciliation_disabled_for_redaction
+                    else native_page.extracted_text
+                )
+
                 reconstruct_start = time.perf_counter()
                 native_lines = reconstruct_native_lines(
                     tuple(visible_characters),
-                    native_page.extracted_text,
+                    textpage_for_reconciliation,
                 )
-                timings["native_reconstruct_ms"] = (time.perf_counter() - reconstruct_start) * 1000
+                timings["native_reconstruct_ms"] = (
+                    time.perf_counter() - reconstruct_start
+                ) * 1000
 
                 # Layout and local quality evidence must exist before OCR is
                 # selected. This is the order defined by the MVP pipeline.
@@ -731,6 +766,12 @@ class PdfTextExtractor:
                         "native_text_score": complexity.native_text_score,
                         **spacing_diagnostics(native_lines),
                         "layout_regions": len(regions),
+                        "experimental_occlusion_redaction_enabled": (
+                            self.config.enable_experimental_occlusion_redaction
+                        ),
+                        "textpage_reconciliation_disabled_for_redaction": (
+                            textpage_reconciliation_disabled_for_redaction
+                        ),
                         "opaque_occlusion_boxes": [
                             _bbox_to_dict(box) for box in opaque_occlusion_boxes
                         ],
@@ -865,10 +906,10 @@ class PdfTextExtractor:
                         regions=regions,
                         tables=tables,
                         diagnostics=diagnostics,
-                        # Raw output is still the unstructured evidence view,
-                        # but it must obey rendered visibility: hidden text
-                        # layers and glyphs covered by opaque paths cannot be
-                        # exposed through a parallel serialization channel.
+                        # Raw output reflects the reconstructed native
+                        # evidence. Experimental visual occlusion filtering,
+                        # when enabled, has already been applied before
+                        # native_lines were built.
                         raw_text=lines_to_text(native_lines),
                         native_evidence=(
                             native_page if self.config.retain_native_evidence else None
