@@ -16,6 +16,7 @@ from structured_pdf_text.document import (
     TextToken,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.tables.text_join import join_table_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,7 +323,7 @@ def _join_original_tokens(tokens: list[TextToken], bbox: BBox) -> str:
         for token in tokens
         if bbox.x0 - 1.0 <= token.bbox.cx <= bbox.x1 + 1.0
     ]
-    return "".join(token.text for token in selected).strip()
+    return join_table_tokens(selected)
 
 
 def _infer_anchors(
@@ -388,7 +389,9 @@ def _build_table(
         for column in range(len(anchors)):
             cell_groups = sorted(by_column.get(column, []), key=lambda group: group.bbox.x0)
             tokens = [token for group in cell_groups for token in group.tokens]
-            text = " ".join(group.text for group in cell_groups).strip()
+            text = join_table_tokens(
+                [token for group in cell_groups for token in group.tokens]
+            )
             cells.append(
                 TableCell(
                     row=row_index,

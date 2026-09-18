@@ -93,7 +93,8 @@ def record_content_conservation(
 
     for block in blocks:
         disposition, reason = _block_disposition(block)
-        for line_id in block.line_ids:
+        block_line_ids = {_canonical_line_id(line_id) for line_id in block.line_ids}
+        for line_id in block_line_ids:
             if line_id not in accepted_map:
                 continue
             if line_id in records:
@@ -173,3 +174,9 @@ def _block_disposition(block: PageContentBlock) -> tuple[ContentDisposition, str
     if block.kind == ContentKind.FIGURE:
         return ContentDisposition.FIGURE_OWNED, "figure_block"
     return ContentDisposition.RENDERED, "content_block"
+
+
+def _canonical_line_id(line_id: str) -> str:
+    """Map lossless visual sub-lines back to their source native line."""
+    marker = ":lane-"
+    return line_id.split(marker, 1)[0] if marker in line_id else line_id

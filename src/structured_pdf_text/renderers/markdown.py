@@ -192,6 +192,9 @@ def _render_table(table: StructuredTable) -> str:
     if not table.cells or table.column_count <= 0:
         return ""
 
+    if any(cell.rowspan > 1 or cell.colspan > 1 for cell in table.cells):
+        return _render_spanned_table_html(table)
+
     row_count = max(
         table.row_count,
         max(cell.row for cell in table.cells) + 1,
@@ -213,10 +216,44 @@ def _render_table(table: StructuredTable) -> str:
     return "\n".join(output)
 
 
+def _render_spanned_table_html(table: StructuredTable) -> str:
+    """Render merged cells as HTML embedded in Markdown.
+
+    CommonMark tables cannot represent row/column spans. The structured JSON
+    already retains them; HTML keeps the same semantics in the human-facing
+    Markdown view without flattening headers into blank cells.
+    """
+    rows: list[list[str]] = [[] for _ in range(max(table.row_count, 1))]
+    for cell in sorted(table.cells, key=lambda item: (item.row, item.col)):
+        tag = "th" if cell.row == 0 else "td"
+        attrs: list[str] = []
+        if cell.rowspan > 1:
+            attrs.append(f'rowspan="{cell.rowspan}"')
+        if cell.colspan > 1:
+            attrs.append(f'colspan="{cell.colspan}"')
+        attribute_text = (" " + " ".join(attrs)) if attrs else ""
+        value = _escape_html(cell.text).replace("\n", "<br>")
+        rows[cell.row].append(f"<{tag}{attribute_text}>{value}</{tag}>")
+    body = "\n".join(
+        "  <tr>\n    " + "\n    ".join(cells) + "\n  </tr>"
+        for cells in rows if cells
+    )
+    return "<table>\n" + body + "\n</table>"
+
+
 def _escape_cell(value: str) -> str:
     return (
         value
         .replace("|", "\\|")
         .replace("\r\n", "<br>")
         .replace("\n", "<br>")
+    )
+
+
+def _escape_html(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
     )

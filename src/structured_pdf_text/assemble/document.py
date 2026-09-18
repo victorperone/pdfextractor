@@ -40,13 +40,7 @@ def assemble_document(
             tables,
             page_bboxes={page.page_index: page.bbox for page in pages},
             page_titles={
-                page.page_index: tuple(
-                    line.text
-                    for region in page.regions
-                    if region.kind == RegionKind.TITLE
-                    for line in region.native_lines
-                    if line.text.strip()
-                )
+                page.page_index: _page_continuation_titles(page)
                 for page in pages
             },
         )
@@ -169,6 +163,20 @@ def assemble_document(
             },
         ),
     )
+
+
+def _page_continuation_titles(page: StructuredPage) -> tuple[str, ...]:
+    """Collect title-like top-band text for cross-page decisions."""
+    top_limit = page.bbox.y0 + page.bbox.height * 0.22
+    candidates: list[str] = []
+    for region in page.regions:
+        for line in region.native_lines:
+            text = line.text.strip()
+            if not text or len(text) > 180:
+                continue
+            if region.kind == RegionKind.TITLE or line.bbox.y0 <= top_limit:
+                candidates.append(text)
+    return tuple(dict.fromkeys(candidates))
 
 
 def _apply_repeated_suppression(

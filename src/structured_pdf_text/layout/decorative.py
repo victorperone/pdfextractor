@@ -92,7 +92,10 @@ def cluster_decorative_lines(
                 ("fragmented_collinear", len(group) > 1),
             ) if enabled
         )
-        strong_count = sum((angled, light, translucent, broad, len(group) > 1))
+        # Fragmentation is supporting evidence only. A normal multi-column
+        # paragraph is naturally split into several collinear lines; treating
+        # that fact as an independent watermark signal misclassifies content.
+        strong_count = sum((angled, light, translucent, broad))
         if strong_count >= 2 and not _near_page_edge(bbox, page_bbox):
             role = DecorativeRole.DECORATIVE_WATERMARK
             confidence = min(0.99, 0.55 + strong_count * 0.09)

@@ -53,6 +53,7 @@ from structured_pdf_text.document import (
     TextLine,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.tables.text_join import join_table_tokens, recover_cell_text
 from structured_pdf_text.tables.cells import tokens_in_cell
 from structured_pdf_text.tables.relaxed import detect_relaxed_table
 from structured_pdf_text.tables.text_tracks import detect_borderless_table
@@ -122,6 +123,9 @@ def detect_tables_native(
         )
         if borderless is not None:
             tables.append(borderless)
+    for table in tables:
+        for cell in table.cells:
+            cell.text = recover_cell_text(cell.text, page.extracted_text)
     return tables
 
 
@@ -297,7 +301,7 @@ def _table_from_grid(
                     rowspan=rs,
                     colspan=cs,
                     bbox=bbox,
-                    text="".join(token.text for token in tokens).strip(),
+                    text=join_table_tokens(tokens),
                     tokens=tokens,
                     confidence=0.95 if tokens else 0.85,
                 )

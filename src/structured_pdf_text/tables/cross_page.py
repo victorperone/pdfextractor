@@ -247,12 +247,14 @@ def _continuation_decision(
         reasons.append("column_types_mismatch")
         score -= 0.5
 
-    if not both_boundaries and not marker:
-        # No direct boundary/marker evidence — apply a score penalty instead of
-        # a hard rejection. Tables with identical headers and matching column
-        # structure score well above the threshold despite the missing evidence.
+    if not marker:
+        # Matching headers and x-tracks are insufficient on their own: a
+        # document can contain several independent metadata tables on
+        # adjacent pages. Require explicit continuation language (or a table
+        # marker detected in the fragment) before merging.
         reasons.append("missing_boundary_or_marker_evidence")
         score -= 3.0
+        hard_rejection = True
     threshold = 7.0
     accepted = not hard_rejection and score >= threshold
     if not accepted and not hard_rejection:

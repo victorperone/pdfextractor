@@ -5,6 +5,7 @@ from typing import Any
 
 from structured_pdf_text.document import NativePageEvidence, StructuredTable, TableCell, TableFragment, TableMethod, TextToken
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.tables.text_join import join_table_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,20 +132,7 @@ def _contains_alphabetic_word(text: str) -> bool:
 
 def _join_cell_tokens(tokens: list[Any]) -> str:
     """Join OCR tokens while distinguishing word fragments from word gaps."""
-    output: list[str] = []
-    previous = None
-    for token in tokens:
-        text = str(token.text or "").strip()
-        if not text:
-            continue
-        if output and previous is not None:
-            gap = token.bbox.x0 - previous.bbox.x1
-            threshold = max(0.2, min(previous.bbox.height, token.bbox.height) * 0.05)
-            if gap > threshold and not output[-1].endswith((" ", "\n")):
-                output.append(" ")
-        output.append(text)
-        previous = token
-    return "".join(output).strip()
+    return join_table_tokens(tokens)
 
 
 def detect_visual_grid(image: Any) -> VisualGrid | None:

@@ -189,6 +189,25 @@ def test_table_rebuild_uses_cell_coordinates_over_input_line_order() -> None:
     ]
 
 
+def test_table_rebuild_reverses_upside_down_ocr_axes() -> None:
+    table = _table(reverse_rows=True, reverse_columns=True)
+    for cell in table.cells:
+        for token in cell.tokens:
+            token.rotation = 180
+    source_lines = [
+        _line(token)
+        for cell in reversed(table.cells)
+        for token in cell.tokens
+    ]
+
+    rebuilt = _rebuild_table_ocr_lines(table, source_lines, 0)
+
+    assert [line.text for line in rebuilt] == [
+        "r1c4 r1c3 r1c2 r1c1 r1c0",
+        "r0c4 r0c3 r0c2 r0c1 r0c0",
+    ]
+
+
 def test_invalid_table_is_rejected_with_non_fatal_warning() -> None:
     table = _table(reverse_rows=True)
     region = LayoutRegion(

@@ -90,6 +90,7 @@ def reconstruct_ocr_lines(
                     confidence=max(0.0, min(1.0, token.confidence if token.confidence is not None else 0.0)),
                     normalized_text=normalize_text(token.text),
                     provenance=token.provenance or _default_ocr_provenance(token),
+                    rotation=token.rotation,
                 )
             )
             previous = token

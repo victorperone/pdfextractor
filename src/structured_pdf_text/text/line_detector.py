@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
+from difflib import SequenceMatcher
 
 from structured_pdf_text.document import (
     Baseline,
@@ -28,7 +29,10 @@ class GapObservation:
     font_size_ratio: float | None
 
 
-def reconstruct_native_lines(characters: tuple[NativeCharacter, ...]) -> list[TextLine]:
+def reconstruct_native_lines(
+    characters: tuple[NativeCharacter, ...],
+    extracted_text: str | None = None,
+) -> list[TextLine]:
     """Reconstruct horizontal text lines from native PDF characters.
 
     This is intentionally conservative. It is not the final reading order engine;
@@ -77,6 +81,10 @@ def reconstruct_native_lines(characters: tuple[NativeCharacter, ...]) -> list[Te
     other_groups = _group_by_baseline(orientation_groups["other"])
     lines.extend(_line_from_chars(group, WritingDirection.UNKNOWN) for group in other_groups if group)
     lines.sort(key=lambda line: (line.bbox.y0, line.bbox.x0))
+    if extracted_text:
+        lines = _reconcile_with_textpage(lines, extracted_text)
+    lines = [line for line in lines if not _is_ghost_punctuation_line(line)]
+    lines = _merge_script_lines(lines)
     return lines
 
 
@@ -85,7 +93,140 @@ def lines_to_text(lines: list[TextLine]) -> str:
     # were stored as separate codepoints (e.g. 'e' + combining accent) compose
     # into their canonical forms (e.g. 'é') in the final output.
     from unicodedata import normalize as _nfc
-    return "\n".join(_nfc("NFC", line.text).rstrip() for line in lines).strip()
+    output: list[str] = []
+    previous_join = False
+    for line in lines:
+        text = _nfc("NFC", line.text).rstrip()
+        if not text:
+            continue
+        if output and previous_join:
+            output[-1] += text.lstrip()
+        else:
+            output.append(text)
+        previous_join = line.join_next_without_space
+    return "\n".join(output).strip()
+
+
+def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list[TextLine]:
+    """Recover spacing/ligature mappings when PDFium exposes better line text.
+
+    PDFium's character stream may contain tracked glyphs or a lossy font
+    mapping while its text-page extraction still has the semantic string. A
+    high-similarity, one-to-one match lets us retain native geometry and
+    evidence without hard-coded lexical corrections.
+    """
+    candidates = [line.strip() for line in extracted_text.replace("\r", "").split("\n") if line.strip()]
+    available = set(range(len(candidates)))
+    output: list[TextLine] = []
+    for line in lines:
+        compact = _compact(line.text)
+        if not compact:
+            output.append(line)
+            continue
+        best_index: int | None = None
+        best_score = 0.0
+        for index in available:
+            candidate = candidates[index]
+            score = SequenceMatcher(None, compact, _compact(candidate)).ratio()
+            if _compact(candidate) == compact:
+                score = 1.0
+            if score > best_score:
+                best_index, best_score = index, score
+        if (
+            best_index is not None
+            and best_score >= 0.92
+            and (
+                best_score < 1.0
+                or _needs_textpage_spacing_recovery(line.text)
+            )
+        ):
+            candidate = candidates[best_index]
+            output.append(
+                TextLine(
+                    tokens=line.tokens,
+                    bbox=line.bbox,
+                    baseline=line.baseline,
+                    direction=line.direction,
+                    native_order_min=line.native_order_min,
+                    native_order_max=line.native_order_max,
+                    gap_mode=line.gap_mode,
+                    order_mode=line.order_mode,
+                    line_id=line.line_id,
+                    text_override=candidate,
+                    join_next_without_space=line.join_next_without_space,
+                )
+            )
+            available.remove(best_index)
+        else:
+            output.append(line)
+    return output
+
+
+def _is_ghost_punctuation_line(line: TextLine) -> bool:
+    text = line.text.strip()
+    if text not in {",", ".", "'", "’", "`", ":", ";"}:
+        return False
+    return line.bbox.width <= max(10.0, line.bbox.height * 1.8)
+
+
+_SUPERSCRIPTS = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+_SUBSCRIPTS = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+
+
+def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
+    output = list(lines)
+    for candidate in list(lines):
+        text = candidate.text.strip()
+        if len(text) != 1 or text not in "0123456789+-=()":
+            continue
+        targets = [
+            line for line in output
+            if line is not candidate
+            and line.bbox.height >= candidate.bbox.height * 1.20
+            and line.bbox.x0 - candidate.bbox.width <= candidate.bbox.cx <= line.bbox.x1 + candidate.bbox.width
+            and candidate.bbox.overlap_ratio(line.bbox) >= 0.18
+        ]
+        if not targets:
+            continue
+        target = max(targets, key=lambda line: candidate.bbox.overlap_ratio(line.bbox))
+        subscript = candidate.bbox.cy > target.bbox.cy
+        script = text.translate(_SUBSCRIPTS if subscript else _SUPERSCRIPTS)
+        script_token = replace(candidate.tokens[0], text=script, normalized_text=script)
+        tokens = [
+            token for token in target.tokens
+            if not (
+                token.text.isspace()
+                and abs(token.bbox.cx - candidate.bbox.cx) <= max(5.0, candidate.bbox.width * 1.5)
+            )
+        ]
+        tokens.append(script_token)
+        tokens.sort(key=lambda token: (token.bbox.x0, token.bbox.y0))
+        merged = replace(
+            target,
+            tokens=tokens,
+            bbox=BBox.union_all([target.bbox, candidate.bbox]),
+            text_override=None,
+        )
+        output[output.index(target)] = merged
+        output.remove(candidate)
+    return sorted(output, key=lambda line: (line.bbox.y0, line.bbox.x0))
+
+
+def _compact(text: str) -> str:
+    return "".join(character.casefold() for character in text if character.isalnum())
+
+
+def _needs_textpage_spacing_recovery(text: str) -> bool:
+    compact = text.strip()
+    if not compact:
+        return False
+    spaces = sum(character.isspace() for character in compact)
+    if spaces / max(len(compact), 1) >= 0.18:
+        return True
+    return any(
+        previous.islower() and current.isupper()
+        for previous, current in zip(compact, compact[1:])
+    )
 
 
 def _is_visible_text_char(char: NativeCharacter) -> bool:
@@ -246,6 +387,10 @@ def _line_from_chars(
             f"{min(native_indices)}:{max(native_indices)}"
             if native_indices
             else None
+        ),
+        join_next_without_space=any(
+            bool(char.hyphen) or "\ufffe" in char.text
+            for char in characters
         ),
     )
 

@@ -63,7 +63,9 @@ from .tables.validation import (
     validate_table_geometry,
 )
 from .tables.text_tracks import assess_borderless_region
-from .text.line_detector import reconstruct_native_lines, spacing_diagnostics
+from .tables.text_join import join_table_tokens
+from .text.line_detector import lines_to_text, reconstruct_native_lines, spacing_diagnostics
+from .visibility import characters_occluded, detect_opaque_occlusion_boxes
 from .geometry import BBox
 
 
@@ -193,8 +195,18 @@ class PdfTextExtractor:
                 complexity_start = time.perf_counter()
                 complexity = self.complexity_analyzer.analyze(native_page, rendered_page)
                 timings["complexity_ms"] = (time.perf_counter() - complexity_start) * 1000
+                visibility_start = time.perf_counter()
+                opaque_occlusion_boxes = detect_opaque_occlusion_boxes(native_page, rendered_page)
+                visible_characters, redacted_character_count = characters_occluded(
+                    native_page.characters,
+                    opaque_occlusion_boxes,
+                )
+                timings["visibility_ms"] = (time.perf_counter() - visibility_start) * 1000
                 reconstruct_start = time.perf_counter()
-                native_lines = reconstruct_native_lines(native_page.characters)
+                native_lines = reconstruct_native_lines(
+                    tuple(visible_characters),
+                    native_page.extracted_text,
+                )
                 timings["native_reconstruct_ms"] = (time.perf_counter() - reconstruct_start) * 1000
 
                 # Layout and local quality evidence must exist before OCR is
@@ -719,6 +731,10 @@ class PdfTextExtractor:
                         "native_text_score": complexity.native_text_score,
                         **spacing_diagnostics(native_lines),
                         "layout_regions": len(regions),
+                        "opaque_occlusion_boxes": [
+                            _bbox_to_dict(box) for box in opaque_occlusion_boxes
+                        ],
+                        "redacted_native_characters": redacted_character_count,
                         "layout_engine": type(self.layout_engine).__name__ if len(regions) > 0 else None,
                         "ocr_requested": ocr_any_requested,
                         "ocr_outcome": ocr_outcome,
@@ -849,7 +865,11 @@ class PdfTextExtractor:
                         regions=regions,
                         tables=tables,
                         diagnostics=diagnostics,
-                        raw_text=native_page.extracted_text,
+                        # Raw output is still the unstructured evidence view,
+                        # but it must obey rendered visibility: hidden text
+                        # layers and glyphs covered by opaque paths cannot be
+                        # exposed through a parallel serialization channel.
+                        raw_text=lines_to_text(native_lines),
                         native_evidence=(
                             native_page if self.config.retain_native_evidence else None
                         ),
@@ -1468,6 +1488,7 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
     source_tokens = [token for line in lines for token in line.tokens]
     if not source_tokens:
         return lines
+    reverse_axes = _dominant_ocr_rotation(source_tokens) == 180
     cell_tokens: dict[tuple[int, int], list[TextToken]] = {}
     for cell in table.cells:
         if cell.bbox is None:
@@ -1483,8 +1504,22 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
         while selected and selected[-1].text.isspace():
             selected.pop()
         if selected:
-            cell.text = "".join(token.text for token in selected).strip()
+            cell.text = join_table_tokens(selected)
             cell_tokens[(cell.row, cell.col)] = selected
+
+    if reverse_axes and cell_tokens:
+        table_bbox = _table_cells_bbox(table)
+        if table_bbox is not None:
+            selected_by_cell = {
+                id(cell): cell_tokens.get((cell.row, cell.col), [])
+                for cell in table.cells
+            }
+            _reverse_table_axes(table, table_bbox)
+            cell_tokens = {
+                (cell.row, cell.col): selected_by_cell[id(cell)]
+                for cell in table.cells
+                if selected_by_cell.get(id(cell))
+            }
 
     if not cell_tokens:
         return lines
@@ -1535,6 +1570,39 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
             )
         )
     return rebuilt or lines
+
+
+def _dominant_ocr_rotation(tokens: list[TextToken]) -> int:
+    rotations = [token.rotation % 360 for token in tokens if token.rotation % 360 in {90, 180, 270}]
+    if not rotations:
+        return 0
+    rotation, count = max(
+        ((value, rotations.count(value)) for value in set(rotations)),
+        key=lambda item: item[1],
+    )
+    return rotation if count / len(rotations) >= 0.60 else 0
+
+
+def _table_cells_bbox(table: Any) -> BBox | None:
+    boxes = [cell.bbox for cell in getattr(table, "cells", ()) if cell.bbox is not None]
+    return BBox.union_all(boxes) if boxes else None
+
+
+def _reverse_table_axes(table: Any, table_bbox: BBox) -> None:
+    """Put cells from an upside-down OCR candidate back in visual order."""
+    last_row = max(0, int(table.row_count) - 1)
+    last_col = max(0, int(table.column_count) - 1)
+    for cell in table.cells:
+        old_bbox = cell.bbox
+        cell.row = last_row - cell.row - max(0, cell.rowspan - 1)
+        cell.col = last_col - cell.col - max(0, cell.colspan - 1)
+        if old_bbox is not None:
+            cell.bbox = BBox(
+                table_bbox.x0 + table_bbox.x1 - old_bbox.x1,
+                table_bbox.y0 + table_bbox.y1 - old_bbox.y1,
+                table_bbox.x0 + table_bbox.x1 - old_bbox.x0,
+                table_bbox.y0 + table_bbox.y1 - old_bbox.y0,
+            )
 
 
 def _merge_short_table_fragments(tokens: list[TextToken]) -> list[TextToken]:
@@ -1654,39 +1722,90 @@ def _refine_figure_ocr(
         figure_bbox = image.bbox
         if figure_bbox is None or figure_bbox.height <= 0:
             continue
-        result = refiner.refine(
-            page_image,
-            page_index,
-            page.bbox,
-            RegionRefinementRequest(
-                bbox=figure_bbox,
-                quality_variants=str(quality_policy).lower() != "baseline",
-                quality_policy=quality_policy,
-                goal=RegionRefinementGoal.TEXT,
-            ),
-        )
-        figure_tokens = [
-            replace(token, provenance="figure_ocr")
-            for token in result.tokens
-        ]
-        if not figure_tokens:
-            continue
-        all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox)
-        figure_fusion = fuse_native_and_ocr(native_lines, figure_tokens)
-        unmatched_tokens = list(figure_fusion.unmatched_ocr_tokens)
-        unmatched_lines = reconstruct_ocr_lines(unmatched_tokens, page_index, page.bbox)
-        refinements.append(
-            (
-                figure_bbox,
-                all_lines,
-                figure_tokens,
-                unmatched_lines,
-                unmatched_tokens,
-                result.ocr_passes,
-                result.ocr_batches,
+        for ocr_box in _subfigure_boxes(page_image, page.bbox, figure_bbox):
+            result = refiner.refine(
+                page_image,
+                page_index,
+                page.bbox,
+                RegionRefinementRequest(
+                    bbox=ocr_box,
+                    quality_variants=str(quality_policy).lower() != "baseline",
+                    quality_policy=quality_policy,
+                    goal=RegionRefinementGoal.TEXT,
+                ),
             )
-        )
+            figure_tokens = [
+                replace(token, provenance="figure_ocr")
+                for token in result.tokens
+            ]
+            if not figure_tokens:
+                continue
+            all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox)
+            figure_fusion = fuse_native_and_ocr(native_lines, figure_tokens)
+            unmatched_tokens = list(figure_fusion.unmatched_ocr_tokens)
+            unmatched_lines = reconstruct_ocr_lines(unmatched_tokens, page_index, page.bbox)
+            refinements.append(
+                (
+                    ocr_box,
+                    all_lines,
+                    figure_tokens,
+                    unmatched_lines,
+                    unmatched_tokens,
+                    result.ocr_passes,
+                    result.ocr_batches,
+                )
+            )
     return refinements
+
+
+def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox) -> list[BBox]:
+    """Find well-separated horizontal subfigures using rendered ink gaps."""
+    crop = _crop_page_image(image, page_bbox, figure_bbox)
+    width, height = _image_size(crop)
+    if width < 240 or height < 80 or figure_bbox.width / max(figure_bbox.height, 1.0) < 2.0:
+        return [figure_bbox]
+    try:
+        pixels = list(crop.convert("L").getdata())
+    except Exception:
+        return [figure_bbox]
+    occupied: list[bool] = []
+    for x in range(width):
+        dark = sum(
+            pixels[y * width + x] < 210
+            for y in range(height)
+        ) / max(height, 1)
+        occupied.append(dark > 0.025)
+    gaps: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, value in enumerate(occupied + [True]):
+        if not value and start is None:
+            start = index
+        elif value and start is not None:
+            if index - start >= max(8, int(width * 0.025)):
+                gaps.append((start, index))
+            start = None
+    if not gaps:
+        return [figure_bbox]
+    segments: list[tuple[int, int]] = []
+    left = 0
+    for gap_left, gap_right in gaps:
+        if gap_left - left >= int(width * 0.18):
+            segments.append((left, gap_left))
+        left = gap_right
+    if width - left >= int(width * 0.18):
+        segments.append((left, width))
+    if len(segments) < 2 or len(segments) > 4:
+        return [figure_bbox]
+    scale_x = figure_bbox.width / max(width, 1)
+    return [
+        BBox(
+            figure_bbox.x0 + left * scale_x,
+            figure_bbox.y0,
+            figure_bbox.x0 + right * scale_x,
+            figure_bbox.y1,
+        )
+        for left, right in segments
+    ]
 
 
 def _replace_lines_in_box(lines: list[TextLine], box: BBox, replacement: list[TextLine]) -> list[TextLine]:
@@ -1755,3 +1874,7 @@ def _layout_regions_if_requested(
             details=_process_memory_snapshot(),
         )
         return [f"Layout detection unavailable: {type(exc).__name__}: {exc}"]
+
+
+def _bbox_to_dict(box: BBox) -> dict[str, float]:
+    return {"x0": box.x0, "y0": box.y0, "x1": box.x1, "y1": box.y1}

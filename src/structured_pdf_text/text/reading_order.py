@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 
-from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine, WritingDirection
+from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine, TextToken, WritingDirection
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.normalize import normalize_text
 
@@ -120,7 +120,10 @@ def order_lines_in_region(
         RegionKind.LIST,
         RegionKind.CAPTION,
         RegionKind.UNKNOWN,
-    }:
+    } or (
+        region.kind == RegionKind.DECORATIVE
+        and not (region.semantic_role or "").startswith("decorative_watermark:")
+    ):
         lines, groups = _order_prose_lines(region.native_lines, region.bbox.width)
         return lines, groups
     if region.kind == RegionKind.FIGURE and region.ocr_lines:
@@ -154,7 +157,10 @@ def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], Rea
             RegionKind.LIST,
             RegionKind.CAPTION,
             RegionKind.UNKNOWN,
-        }:
+        } or (
+            region.kind == RegionKind.DECORATIVE
+            and not (region.semantic_role or "").startswith("decorative_watermark:")
+        ):
             prose_result = _order_prose_lines_with_decision(
                 region.native_lines,
                 region.bbox.x0,
@@ -455,6 +461,11 @@ def _is_sidebar_relation(
     tolerance: float,
 ) -> bool:
     """Require lateral overlap evidence before applying sidebar precedence."""
+    # Sibling nodes in diagrams/organograms often share a horizontal band but
+    # have different label widths. Width must not turn that row into a
+    # sidebar relation; their x order is the meaningful evidence.
+    if abs(first.bbox.cy - second.bbox.cy) <= max(first.bbox.height, second.bbox.height) * 1.5:
+        return False
     if vertical_overlap < SIDEBAR_MIN_VERTICAL_OVERLAP:
         return False
     if horizontal_overlap >= SIDEBAR_MAX_HORIZONTAL_OVERLAP:
@@ -595,7 +606,7 @@ def _order_prose_lines_with_decision(
         decision = ProseFlowDecision("FALLBACK", 0.0, 0.0, 1, 0, ("invalid_region_width",), fallback_used=True)
         return _ProseFlowResult(ordered, decision, 0)
     if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
-        ordered = tuple(lines)
+        ordered = tuple(sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0)))
         decision = ProseFlowDecision(
             "FALLBACK", 0.0, 0.0, 1, 0,
             ("canonical_rotated_coordinates",),
@@ -605,8 +616,25 @@ def _order_prose_lines_with_decision(
         return _ProseFlowResult(ordered, decision, 0)
 
     ordered = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    diagram = _order_diagram_lines(ordered, region_bbox)
+    if diagram is not None:
+        decision = ProseFlowDecision(
+            "DIAGRAM",
+            0.0,
+            0.0,
+            1,
+            0,
+            ("graph_label_order",),
+            flow_segment_count=1,
+            line_preservation_ok=_preserves_flat_line_set(lines, diagram),
+        )
+        return _ProseFlowResult(tuple(diagram), decision, 0)
     gutters = _detect_persistent_gutters(ordered, region_bbox)
     lanes = _build_reading_lanes(ordered, region_bbox, gutters)
+    if len(lanes) < 2:
+        inferred = _infer_recurrent_lanes(ordered, region_bbox)
+        if inferred is not None:
+            lanes, gutters = inferred
     form = _score_form_hypothesis(ordered, region_bbox, len(gutters))
     column = _score_column_hypothesis(ordered, region_bbox, gutters, lanes)
     margin = max(0.35, 0.12 * max(form.score, column.score, 1.0))
@@ -631,6 +659,7 @@ def _order_prose_lines_with_decision(
         spanning_count = 0
         segment_count = 1
         groups = 0
+    output = _order_stamp_fragments(output)
     preserved = _preserves_flat_line_set(lines, output)
     if not preserved:
         output = ordered
@@ -649,6 +678,136 @@ def _order_prose_lines_with_decision(
         line_preservation_ok=preserved,
     )
     return _ProseFlowResult(tuple(output), decision, groups)
+
+
+def _order_stamp_fragments(lines: list[TextLine]) -> list[TextLine]:
+    """Use x order for compact stamp fragments emitted on a skewed baseline."""
+    candidates = [
+        line for line in lines
+        if len(line.text.strip()) <= 10
+        and line.text.strip()
+        and all(not character.isalpha() or character.isupper() for character in line.text)
+    ]
+    if len(candidates) < 3:
+        return lines
+
+    # Headers and footer markers can also be short non-lowercase tokens. They
+    # must not enlarge the stamp bounding box and disable the correction for a
+    # nearby skewed stamp. Work on compact spatial components instead.
+    clusters: list[list[TextLine]] = []
+    for candidate in sorted(candidates, key=lambda item: (item.bbox.y0, item.bbox.x0)):
+        attached = None
+        for cluster in clusters:
+            cluster_x0 = min(item.bbox.x0 for item in cluster)
+            cluster_x1 = max(item.bbox.x1 for item in cluster)
+            cluster_y0 = min(item.bbox.y0 for item in cluster)
+            cluster_y1 = max(item.bbox.y1 for item in cluster)
+            if (
+                candidate.bbox.x0 <= cluster_x1 + 35.0
+                and candidate.bbox.x1 >= cluster_x0 - 35.0
+                and candidate.bbox.y0 <= cluster_y1 + 35.0
+                and candidate.bbox.y1 >= cluster_y0 - 35.0
+            ):
+                attached = cluster
+                break
+        if attached is None:
+            clusters.append([candidate])
+        else:
+            attached.append(candidate)
+
+    compact_clusters = [
+        cluster
+        for cluster in clusters
+        if len(cluster) >= 3
+        and max(item.bbox.x1 for item in cluster) - min(item.bbox.x0 for item in cluster) <= 110.0
+        and max(item.bbox.y1 for item in cluster) - min(item.bbox.y0 for item in cluster) <= 75.0
+    ]
+    if not compact_clusters:
+        return lines
+    selected = max(compact_clusters, key=len)
+    candidate_ids = {id(line) for line in selected}
+    rows: list[list[TextLine]] = []
+    centers: list[float] = []
+    for line in sorted(selected, key=lambda item: (item.bbox.cy, item.bbox.x0)):
+        index = min(range(len(centers)), key=lambda item: abs(centers[item] - line.bbox.cy), default=None)
+        if index is None or abs(centers[index] - line.bbox.cy) > max(5.0, line.bbox.height * 1.4):
+            rows.append([line])
+            centers.append(line.bbox.cy)
+        else:
+            rows[index].append(line)
+            centers[index] = median(item.bbox.cy for item in rows[index])
+    ordered_candidates = [line for row in rows for line in sorted(row, key=lambda item: item.bbox.x0)]
+    iterator = iter(ordered_candidates)
+    return [next(iterator) if id(line) in candidate_ids else line for line in lines]
+
+
+def _order_diagram_lines(
+    lines: list[TextLine],
+    region_bbox: BBox,
+) -> list[TextLine] | None:
+    """Order simple flowchart branches around explicit edge labels.
+
+    A flowchart's short ``sim``/``não`` labels are edge annotations, not body
+    paragraphs.  Put each branch label and its nearby node after the decision
+    node, then continue with the downstream horizontal path.  The heuristic
+    is deliberately gated by multiple labels and a wide, sparse region so it
+    does not affect ordinary prose containing those words.
+    """
+    if len(lines) < 5:
+        return None
+    content_bbox = BBox.union_all([line.bbox for line in lines])
+    if content_bbox.width < content_bbox.height * 1.0:
+        return None
+    labels = [
+        line for line in lines
+        if " ".join(line.text.split()).casefold() in {"sim", "não", "nao", "yes", "no"}
+    ]
+    if len(labels) < 2:
+        return None
+    scope_top = min(line.bbox.y0 for line in labels) - 90.0
+    scope_bottom = max(line.bbox.y1 for line in labels) + 90.0
+    scope = [line for line in lines if scope_top <= line.bbox.cy <= scope_bottom]
+    labels = [line for line in labels if line in scope]
+    non_labels = [line for line in scope if line not in labels]
+    if len(non_labels) < 3:
+        return None
+    question = next(
+        (line for line in non_labels if "?" in line.text),
+        min(non_labels, key=lambda line: (line.bbox.cy, line.bbox.x0)),
+    )
+    before = sorted(
+        [line for line in non_labels if line.bbox.x1 <= question.bbox.x0 + max(12.0, question.bbox.width * 0.25)],
+        key=lambda line: (line.bbox.cy, line.bbox.x0),
+    )
+    downstream = sorted(
+        [line for line in non_labels if line not in before and line is not question],
+        key=lambda line: (line.bbox.cy, line.bbox.x0),
+    )
+    if not before or not downstream:
+        return None
+    branch_order: list[TextLine] = []
+    for label in sorted(labels, key=lambda line: (line.bbox.cy, line.bbox.x0)):
+        branch_order.append(label)
+        candidates = [
+            line for line in downstream
+            if line not in branch_order
+            and abs(line.bbox.cx - label.bbox.cx) <= max(90.0, region_bbox.width * 0.20)
+            and ((label.bbox.cy > line.bbox.cy) or (label.bbox.cy < line.bbox.cy))
+        ]
+        if candidates:
+            target = min(candidates, key=lambda line: abs(line.bbox.cy - label.bbox.cy))
+            branch_order.append(target)
+    remainder = [line for line in downstream if line not in branch_order]
+    band = max(3.0, median(line.bbox.height for line in lines) * 1.5)
+    remainder.sort(key=lambda line: (round(line.bbox.cy / band), line.bbox.x0))
+    ordered_scope = [*before, question, *branch_order, *remainder]
+    outside = [line for line in lines if line not in scope]
+    output = [
+        *[line for line in outside if line.bbox.cy < scope_top],
+        *ordered_scope,
+        *[line for line in outside if line.bbox.cy >= scope_top],
+    ]
+    return output if _preserves_flat_line_set(lines, output) else None
 
 
 def _detect_persistent_gutters(
@@ -724,6 +883,57 @@ def _build_reading_lanes(
         if right > left:
             lanes.append(ReadingLane(left, right, lane_lines))
     return lanes
+
+
+def _infer_recurrent_lanes(
+    lines: list[TextLine],
+    region_bbox: BBox,
+) -> tuple[list[ReadingLane], list[tuple[float, float]]] | None:
+    """Infer columns from repeated line starts when a spanning baseline exists."""
+    candidates = [
+        line for line in lines
+        if line.bbox.width < region_bbox.width * 0.45
+        and line.bbox.height > 0
+    ]
+    if len(candidates) < 4:
+        return None
+    tolerance = max(6.0, region_bbox.width * 0.035)
+    clusters: list[list[TextLine]] = []
+    for line in sorted(candidates, key=lambda item: item.bbox.x0):
+        if not clusters or abs(line.bbox.x0 - median(item.bbox.x0 for item in clusters[-1])) > tolerance:
+            clusters.append([line])
+        else:
+            clusters[-1].append(line)
+    clusters = [cluster for cluster in clusters if len(cluster) >= 2]
+    if len(clusters) < 2:
+        return None
+    clusters.sort(key=lambda cluster: median(item.bbox.x0 for item in cluster))
+    lane_bounds: list[tuple[float, float]] = []
+    gutters: list[tuple[float, float]] = []
+    for index, cluster in enumerate(clusters):
+        left = median(item.bbox.x0 for item in cluster)
+        right = max(item.bbox.x1 for item in cluster)
+        if index + 1 < len(clusters):
+            next_left = median(item.bbox.x0 for item in clusters[index + 1])
+            gap_left = right
+            gap_right = next_left
+            if gap_right <= gap_left + max(3.0, region_bbox.width * 0.01):
+                return None
+            gutters.append((gap_left, gap_right))
+        lane_bounds.append((left, right))
+    edges = [region_bbox.x0]
+    for left, right in gutters:
+        edges.extend((left, right))
+    edges.append(region_bbox.x1)
+    lanes = [
+        ReadingLane(left, right, tuple(
+            line for line in lines if _line_lane_overlap(line, left, right) > 0.0
+        ))
+        for left, right in zip(edges[::2], edges[1::2])
+    ]
+    if len(lanes) < 2 or not all(len(lane.lines) >= 2 for lane in lanes):
+        return None
+    return lanes, gutters
 
 
 def _line_lane_overlap(line: TextLine, x0: float, x1: float) -> float:
@@ -819,8 +1029,21 @@ def _order_lane_segments(
         relevant = [index for index, overlap in enumerate(overlaps) if overlap >= 0.20]
         covered = sum(_axis_overlap(line.bbox.x0, line.bbox.x1, lane.x0, lane.x1) for lane in lanes)
         combined = sum(lane.x1 - lane.x0 for lane in lanes)
-        if len(relevant) >= 2 or covered / max(combined, 1.0) >= 0.70:
-            spanning.append(line)
+        if (
+            len(relevant) >= 2
+            or covered / max(combined, 1.0) >= 0.70
+            or line.bbox.width >= region_bbox.width * 0.45
+        ):
+            split = _split_line_by_lanes(line, lanes)
+            if len(split) >= 2:
+                for segment in split:
+                    segment_overlaps = [
+                        _line_lane_overlap(segment, lane.x0, lane.x1)
+                        for lane in lanes
+                    ]
+                    assignments[max(range(len(lanes)), key=lambda index: segment_overlaps[index])].append(segment)
+            else:
+                spanning.append(line)
         else:
             assignments[max(range(len(lanes)), key=lambda index: overlaps[index])].append(line)
 
@@ -860,7 +1083,63 @@ def _preserves_flat_line_set(
 ) -> bool:
     input_ids = [id(line) for line in lines]
     output_ids = [id(line) for line in output]
-    return len(output_ids) == len(input_ids) and sorted(output_ids) == sorted(input_ids)
+    if len(output_ids) == len(input_ids) and sorted(output_ids) == sorted(input_ids):
+        return True
+    input_tokens = {
+        id(token)
+        for line in lines
+        for token in line.tokens
+        if token.text and not token.text.isspace()
+    }
+    output_tokens = {
+        id(token)
+        for line in output
+        for token in line.tokens
+        if token.text and not token.text.isspace()
+    }
+    return bool(input_tokens) and input_tokens == output_tokens
+
+
+def _split_line_by_lanes(
+    line: TextLine,
+    lanes: list[ReadingLane],
+) -> list[TextLine]:
+    """Split a shared-baseline line when its tokens occupy several lanes."""
+    visible = [token for token in line.tokens if token.text and not token.text.isspace()]
+    if len(visible) < 2:
+        return []
+    groups: list[list[TextToken]] = [[visible[0]]]
+    gap_threshold = max(5.0, line.bbox.height * 1.5)
+    for previous, token in zip(visible, visible[1:]):
+        if token.bbox.x0 - previous.bbox.x1 > gap_threshold:
+            groups.append([])
+        groups[-1].append(token)
+    if len(groups) < 2 or len(groups) > max(len(lanes), 2):
+        return []
+    output: list[TextLine] = []
+    for lane_index, group in enumerate(groups):
+        token_ids = {id(token) for token in group}
+        group_bbox = BBox.union_all([token.bbox for token in group])
+        selected = [token for token in line.tokens if id(token) in token_ids]
+        selected = [
+            token for token in line.tokens
+            if id(token) in token_ids
+            or (
+                token.text.isspace()
+                and group_bbox.x0 <= token.bbox.cx <= group_bbox.x1
+            )
+        ]
+        bbox = group_bbox
+        output.append(
+            replace(
+                line,
+                tokens=selected,
+                bbox=bbox,
+                line_id=f"{line.line_id or 'line'}:lane-{lane_index}",
+                text_override=None,
+            )
+        )
+    return output
 
 
 def _split_columns(lines: list[TextLine], region_width: float) -> list[list[TextLine]]:

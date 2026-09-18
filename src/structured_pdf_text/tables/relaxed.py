@@ -17,6 +17,7 @@ from structured_pdf_text.document import (
     TextToken,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.tables.text_join import join_table_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +72,7 @@ def detect_relaxed_table(
                     rowspan=1,
                     colspan=1,
                     bbox=bbox,
-                    text="".join(token.text for token in tokens).strip(),
+                    text=join_table_tokens(tokens),
                     tokens=tokens,
                     confidence=0.62 if tokens else 0.45,
                 )

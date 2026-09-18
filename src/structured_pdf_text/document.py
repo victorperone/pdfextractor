@@ -218,6 +218,7 @@ class TextToken:
     stroke_color: tuple[int, int, int, int] | None = None
     text_render_mode: int | str | None = None
     provenance: str | None = None
+    rotation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,10 +245,12 @@ class TextLine:
     gap_mode: str = "fallback"
     order_mode: str = "geometry"
     line_id: str | None = None
+    text_override: str | None = None
+    join_next_without_space: bool = False
 
     @property
     def text(self) -> str:
-        return "".join(token.text for token in self.tokens)
+        return self.text_override if self.text_override is not None else "".join(token.text for token in self.tokens)
 
 
 @dataclass(slots=True)
@@ -361,6 +364,7 @@ class ContentDisposition(str, Enum):
     SUPPRESSED_DECORATIVE = "suppressed_decorative"
     DEDUPLICATED = "deduplicated"
     SUPPRESSED_POLICY = "suppressed_policy"
+    SUPPRESSED_REDACTED = "suppressed_redacted"
 
 
 @dataclass(slots=True)
