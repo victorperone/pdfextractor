@@ -421,7 +421,21 @@ class PaddleOcrEngine:
         )
         self.last_consensus_replacements = replacements
         self.last_consensus_insertions = insertions
-        self.last_fusion_replacements_accepted = replacements
+        self.last_fusion_replacements_attempted = (
+            selected_candidate.fusion_replacements_attempted
+        )
+        self.last_fusion_replacements_accepted = (
+            selected_candidate.fusion_replacements_accepted
+        )
+        self.last_fusion_replacements_rolled_back = (
+            selected_candidate.fusion_replacements_rolled_back
+        )
+        self.last_fusion_lost_clusters = (
+            selected_candidate.fusion_lost_clusters
+        )
+        self.last_fusion_duplicate_clusters = (
+            selected_candidate.fusion_duplicate_clusters
+        )
         return merged
 
     def _reset_last_diagnostics(self) -> None:
@@ -1154,7 +1168,6 @@ def _spatial_consensus(
         candidates,
         page_bbox=page_bbox,
     )
-    attempted = replacements
     insertions = 0
     alternate_candidates = [candidate for candidate in candidates if candidate.name != primary.name]
     for index, current in enumerate(list(merged)):
@@ -1239,6 +1252,10 @@ def _spatial_consensus(
             * _MIN_FUSION_AREA_RETENTION
         )
     )
+
+    # Capture every accepted replacement attempt before a possible rollback.
+    # This includes both line-level and token-level consensus replacements.
+    attempted = replacements
 
     rolled_back = 0
     if (

@@ -301,6 +301,8 @@ def test_spatial_consensus_rolls_back_large_area_loss() -> None:
     # replacement still contain exactly one reconstructed line. The much
     # smaller spatial footprint must therefore trigger the rollback.
     assert primary.fusion_lost_clusters == 0
+    assert primary.fusion_replacements_attempted >= 1
+    assert primary.fusion_replacements_accepted == 0
     assert primary.fusion_replacements_rolled_back >= 1
 
     assert replacements == 0
@@ -380,6 +382,81 @@ def test_spatial_consensus_accepts_modest_area_tightening() -> None:
     assert insertions == 0
     assert len(merged) == 1
     assert merged[0].text == alternate_token_b.text
+
+
+def test_engine_propagates_fusion_diagnostics(monkeypatch) -> None:
+    page_bbox = BBox(0, 0, 200, 100)
+    source_token = _ocr_token(
+        "texto",
+        0.90,
+        10,
+        10,
+    )
+
+    engine = PaddleOcrEngine(
+        quality_policy="baseline",
+    )
+
+    # Keep this test completely independent from the real PaddleOCR runtime.
+    monkeypatch.setattr(
+        engine,
+        "_get_ocr",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_predict_counted",
+        lambda ocr, image: None,
+    )
+    monkeypatch.setattr(
+        "structured_pdf_text.ocr.paddle._deskew_image",
+        lambda image, *args, **kwargs: (image, 0.0),
+    )
+    monkeypatch.setattr(
+        "structured_pdf_text.ocr.paddle._tokens_from_result",
+        lambda *args, **kwargs: [source_token],
+    )
+    monkeypatch.setattr(
+        "structured_pdf_text.ocr.paddle._rotation_candidates",
+        lambda *args, **kwargs: [],
+    )
+
+    def fake_spatial_consensus(
+        primary,
+        candidates,
+        *,
+        thresholds=None,
+        page_bbox=None,
+    ):
+        primary.fusion_replacements_attempted = 4
+        primary.fusion_replacements_accepted = 2
+        primary.fusion_replacements_rolled_back = 2
+        primary.fusion_lost_clusters = 1
+        primary.fusion_duplicate_clusters = 3
+        return list(primary.tokens), 2, 0
+
+    monkeypatch.setattr(
+        "structured_pdf_text.ocr.paddle._spatial_consensus",
+        fake_spatial_consensus,
+    )
+
+    result = engine.recognize_page(
+        Image.new("RGB", (200, 100), 255),
+        page_index=0,
+        page_bbox=page_bbox,
+        quality_policy="baseline",
+    )
+
+    assert result == [source_token]
+
+    assert engine.last_consensus_replacements == 2
+    assert engine.last_consensus_insertions == 0
+
+    assert engine.last_fusion_replacements_attempted == 4
+    assert engine.last_fusion_replacements_accepted == 2
+    assert engine.last_fusion_replacements_rolled_back == 2
+    assert engine.last_fusion_lost_clusters == 1
+    assert engine.last_fusion_duplicate_clusters == 3
 
 
 def test_compact_candidate_merge_removes_residual_fragments() -> None:
