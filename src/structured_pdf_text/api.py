@@ -1531,7 +1531,12 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
     source_tokens = [token for line in lines for token in line.tokens]
     if not source_tokens:
         return lines
-    reverse_axes = _dominant_ocr_rotation(source_tokens) == 180
+    # token.rotation is provenance metadata, not a command to mutate the table
+    # structure.  By the time tokens reach this function their bbox coordinates
+    # are already in canonical page space (box_transform was applied in
+    # paddle._tokens_from_result).  Applying _reverse_table_axes on top of
+    # already-canonical bboxes would produce a double-rotation.  Source geometry
+    # validated by _validate_detected_tables is the sole authority for cell order.
     cell_tokens: dict[tuple[int, int], list[TextToken]] = {}
     for cell in table.cells:
         if cell.bbox is None:
@@ -1549,20 +1554,6 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
         if selected:
             cell.text = join_table_tokens(selected)
             cell_tokens[(cell.row, cell.col)] = selected
-
-    if reverse_axes and cell_tokens:
-        table_bbox = _table_cells_bbox(table)
-        if table_bbox is not None:
-            selected_by_cell = {
-                id(cell): cell_tokens.get((cell.row, cell.col), [])
-                for cell in table.cells
-            }
-            _reverse_table_axes(table, table_bbox)
-            cell_tokens = {
-                (cell.row, cell.col): selected_by_cell[id(cell)]
-                for cell in table.cells
-                if selected_by_cell.get(id(cell))
-            }
 
     if not cell_tokens:
         return lines

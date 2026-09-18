@@ -189,8 +189,15 @@ def test_table_rebuild_uses_cell_coordinates_over_input_line_order() -> None:
     ]
 
 
-def test_table_rebuild_reverses_upside_down_ocr_axes() -> None:
-    table = _table(reverse_rows=True, reverse_columns=True)
+def test_rotation_metadata_does_not_reverse_canonical_table() -> None:
+    """rotation=180 on tokens with canonical bboxes must not invert the cell grid.
+
+    Tokens arrive with bboxes already in canonical page coordinates because
+    paddle._tokens_from_result applies box_transform (specifically
+    _half_turn_box_to_original) before emitting them.  token.rotation is
+    provenance metadata, not an instruction to re-apply an axis flip.
+    """
+    table = _table()  # normal table — rows and columns in canonical order
     for cell in table.cells:
         for token in cell.tokens:
             token.rotation = 180
@@ -202,10 +209,23 @@ def test_table_rebuild_reverses_upside_down_ocr_axes() -> None:
 
     rebuilt = _rebuild_table_ocr_lines(table, source_lines, 0)
 
-    assert [line.text for line in rebuilt] == [
-        "r1c4 r1c3 r1c2 r1c1 r1c0",
-        "r0c4 r0c3 r0c2 r0c1 r0c0",
+    # Output must follow cell.row / cell.col order, unchanged by rotation metadata.
+    assert [line.text.replace(" ", "") for line in rebuilt] == [
+        "r0c0r0c1r0c2r0c3r0c4",
+        "r1c0r1c1r1c2r1c3r1c4",
     ]
+
+
+def test_cell_grid_not_mutated_after_rebuild() -> None:
+    """_rebuild_table_ocr_lines must not mutate cell.row, cell.col, or cell.bbox."""
+    table = _table()
+    snapshot = [(c.row, c.col, c.bbox) for c in table.cells]
+    source_lines = [_line(token) for cell in table.cells for token in cell.tokens]
+
+    _rebuild_table_ocr_lines(table, source_lines, 0)
+
+    after = [(c.row, c.col, c.bbox) for c in table.cells]
+    assert after == snapshot
 
 
 def test_invalid_table_is_rejected_with_non_fatal_warning() -> None:
