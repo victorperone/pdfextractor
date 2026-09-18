@@ -178,3 +178,107 @@ def test_table_source_geometry_rejects_reversed_row_assignment() -> None:
     assert not result.valid
     assert result.source_row_assignment_monotonicity < 1.0
     assert "source_row_assignment_not_monotonic" in result.reasons
+
+
+def test_repeated_detection_does_not_generalize_arbitrary_numeric_identifiers() -> None:
+    pages = [
+        _page(
+            0,
+            [
+                _region(
+                    RegionKind.HEADER,
+                    "Invoice 12345",
+                    BBox(0, 0, 220, 20),
+                    "p0-header-id",
+                )
+            ],
+        ),
+        _page(
+            1,
+            [
+                _region(
+                    RegionKind.HEADER,
+                    "Invoice 98765",
+                    BBox(0, 0, 220, 20),
+                    "p1-header-id",
+                )
+            ],
+        ),
+    ]
+
+    document = assemble_document(
+        pages,
+        metadata=type(
+            "Metadata",
+            (),
+            {
+                "source_path": "test.pdf",
+                "page_count": 2,
+                "pdfium_version": None,
+            },
+        )(),
+        preserve_headers_footers=False,
+    )
+
+    # Stable position and style alone are not permission to suppress semantic
+    # content. The changing identifiers must remain part of the signature.
+    assert "Invoice 12345" in document.reading_text
+    assert "Invoice 98765" in document.reading_text
+
+    assert all(
+        page.diagnostics.facts[
+            "content_suppressed_repeated_header_lines"
+        ] == 0
+        for page in document.pages
+    )
+
+
+def test_explicit_page_numbering_is_still_normalized_for_repeated_furniture() -> None:
+    pages = [
+        _page(
+            0,
+            [
+                _region(
+                    RegionKind.FOOTER,
+                    "Relatório interno · Página 1 de 2",
+                    BBox(0, 775, 260, 795),
+                    "p0-footer-page",
+                )
+            ],
+        ),
+        _page(
+            1,
+            [
+                _region(
+                    RegionKind.FOOTER,
+                    "Relatório interno · Página 2 de 2",
+                    BBox(0, 775, 260, 795),
+                    "p1-footer-page",
+                )
+            ],
+        ),
+    ]
+
+    document = assemble_document(
+        pages,
+        metadata=type(
+            "Metadata",
+            (),
+            {
+                "source_path": "test.pdf",
+                "page_count": 2,
+                "pdfium_version": None,
+            },
+        )(),
+        preserve_headers_footers=False,
+    )
+
+    # Explicit page numbering remains a legitimate dynamic repeated template.
+    assert "Relatório interno" not in document.reading_text
+
+    assert all(
+        page.diagnostics.facts[
+            "content_suppressed_repeated_footer_lines"
+        ] == 1
+        for page in document.pages
+    )

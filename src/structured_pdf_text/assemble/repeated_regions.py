@@ -100,11 +100,36 @@ def _signature_key(kind: str, text: str) -> str | None:
     return f"{kind}:{signature}"
 
 
+_PAGE_NUMBER_PATTERNS = (
+    # Explicit "Página 2 de 10" / "Page 2 of 10".
+    r"\b(?:página|pagina|page)\s+\d+\s+(?:de|of)\s+\d+\b",
+    # Explicit "Página 2/10" / "Page 2 / 10".
+    r"\b(?:página|pagina|page)\s+\d+\s*/\s*\d+\b",
+    # Explicit standalone "Página 2" / "Page 2".
+    r"\b(?:página|pagina|page)\s+\d+\b",
+)
+
+
 def _normalize_signature(text: str) -> str:
+    """Normalize only explicit dynamic pagination in repeated furniture.
+
+    Arbitrary numbers are semantic content. Identifiers, account numbers,
+    dates, invoice numbers and similar values must therefore remain part of
+    the signature instead of being generalized merely because they occur in
+    a stable edge position.
+
+    Repeated page numbering is the intentionally narrow exception because its
+    changing numeric component is explicitly identified by a page label.
+    """
     value = text.casefold().strip()
-    value = re.sub(r"\b(?:página|pagina|page)\s+\d+\s+(?:de|of)\s+\d+\b", "", value)
-    value = re.sub(r"\b\d+\s*/\s*\d+\b", "", value)
-    value = re.sub(r"\d+", "<num>", value)
+
+    for pattern in _PAGE_NUMBER_PATTERNS:
+        value = re.sub(
+            pattern,
+            "<page-number>",
+            value,
+        )
+
     value = re.sub(r"\s+", " ", value)
     return value.strip(" -|·")
 
