@@ -102,6 +102,7 @@ def reconstruct_ocr_lines(
                 direction=WritingDirection.LEFT_TO_RIGHT if _line_angle(ordered) == 0.0 else WritingDirection.UNKNOWN,
                 native_order_min=None,
                 native_order_max=None,
+                line_id=_ocr_line_id(page_index, bbox, ordered),
             )
         )
     if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
@@ -115,6 +116,15 @@ def _default_ocr_provenance(token: OcrToken) -> str:
     if token.source == SourceKind.TABLE_MODEL:
         return "visual_table_refinement"
     return "baseline"
+
+
+def _ocr_line_id(page_index: int, bbox: BBox, tokens: list[OcrToken]) -> str:
+    """Build a deterministic identity for one OCR line geometry."""
+    text_key = " ".join(" ".join(token.text.split()) for token in tokens).strip()
+    return (
+        f"ocr:{page_index}:{bbox.x0:.3f}:{bbox.y0:.3f}:"
+        f"{bbox.x1:.3f}:{bbox.y1:.3f}:{text_key}"
+    )
 
 
 def _should_insert_space(

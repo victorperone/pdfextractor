@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil
 from statistics import median
 
@@ -30,6 +30,10 @@ class TextTrackAssessment:
     numeric_cell_ratio: float
     prose_score: float
     code_score: float = 0.0
+    prefix_candidate_count: int = 0
+    prefix_accepted_count: int = 0
+    prefix_rejected_count: int = 0
+    prefix_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,26 +214,83 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
     for run in runs:
         first_index = positions[id(run[0][0])]
         table_body_bbox = BBox.union_all([item[0].bbox for item in run])
+        body_rows = tuple(item[1] for item in run)
+        body_anchors = _infer_anchors(body_rows, region.bbox.width)
         prefix: list[tuple[TextLine, tuple[_CellGroup, ...]]] = []
+        prefix_candidate_count = 0
+        prefix_accepted_count = 0
+        prefix_rejected_count = 0
+        prefix_reasons: list[str] = []
         next_line = run[0][0]
         for line in reversed(lines[max(0, first_index - 2) : first_index]):
             text = line.text.strip()
             groups = _cell_groups(line, gap_threshold)
+            prefix_candidate_count += 1
             close = next_line.bbox.y0 - line.bbox.y1 <= max(18.0, typical_height * 2.4)
             horizontally_related = not (
                 line.bbox.x1 < table_body_bbox.x0 or line.bbox.x0 > table_body_bbox.x1
             )
             if not text or text.endswith((".", "!", "?", ";")) or not close or not horizontally_related:
+                prefix_rejected_count += 1
+                prefix_reasons.append("proximity_or_punctuation")
+                break
+            structural_reason = _prefix_structural_reason(
+                line,
+                groups,
+                table_body_bbox,
+                body_anchors,
+                region.bbox.width,
+            )
+            if structural_reason is not None:
+                prefix_rejected_count += 1
+                prefix_reasons.append(structural_reason)
                 break
             prefix.append((line, groups))
+            prefix_accepted_count += 1
             next_line = line
         enriched = list(reversed(prefix)) + run
         run_lines = tuple(item[0] for item in enriched)
         rows = tuple(item[1] for item in enriched)
         anchors = _infer_anchors(rows, region.bbox.width)
         assessment = classifier.assess(rows, anchors)
+        assessment = replace(
+            assessment,
+            prefix_candidate_count=prefix_candidate_count,
+            prefix_accepted_count=prefix_accepted_count,
+            prefix_rejected_count=prefix_rejected_count,
+            prefix_reasons=tuple(prefix_reasons),
+        )
         output.append(_Candidate(run_lines, rows, anchors, assessment))
     return output
+
+
+def _prefix_structural_reason(
+    line: TextLine,
+    groups: tuple[_CellGroup, ...],
+    table_body_bbox: BBox,
+    body_anchors: tuple[float, ...],
+    region_width: float,
+) -> str | None:
+    tolerance = max(4.0, region_width * 0.02)
+    aligned = bool(
+        body_anchors
+        and any(
+            abs(group.bbox.x0 - anchor) <= tolerance
+            for group in groups
+            for anchor in body_anchors
+        )
+    )
+    spanning = (
+        line.bbox.x0 <= table_body_bbox.x0 + tolerance
+        and line.bbox.x1 >= table_body_bbox.x1 - tolerance
+        and line.bbox.width >= table_body_bbox.width * 0.75
+    )
+    long_prose = len(line.text.split()) >= 8 or len(line.text) >= 60
+    if long_prose and not spanning and not aligned:
+        return "prose_prefix_without_track_alignment"
+    if not aligned and not spanning:
+        return "prefix_without_anchor_or_spanning_geometry"
+    return None
 
 
 def _cell_groups(line: TextLine, gap_threshold: float) -> tuple[_CellGroup, ...]:

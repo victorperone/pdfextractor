@@ -25,6 +25,7 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.assemble.conservation import line_identity
 from structured_pdf_text.text.line_detector import lines_to_text
 from structured_pdf_text.text.normalize import normalize_reading_text
 from structured_pdf_text.text.lists import segment_list_lines
@@ -312,6 +313,7 @@ def _build_region_blocks(
 
     # Track which table owns which line cluster.
     emitted_in_pass: set[str] = set()
+    table_blocks: dict[str, PageContentBlock] = {}
 
     for line in ordered_lines:
         owner = next(
@@ -329,9 +331,11 @@ def _build_region_blocks(
 
         if owner.table_id not in emitted_table_ids and owner.table_id not in emitted_in_pass:
             emitted_in_pass.add(owner.table_id)
-            blocks.append(
-                _emit_table_block(owner, page_index, region)
-            )
+            table_block = _emit_table_block(owner, page_index, region)
+            table_blocks[owner.table_id] = table_block
+            blocks.append(table_block)
+        if owner.table_id in table_blocks:
+            table_blocks[owner.table_id].line_ids.append(line_identity(line))
 
     # Emit remaining prose after the last table.
     flush_prose(pending_prose)
@@ -385,6 +389,7 @@ def _emit_prose_blocks(
         text = _normalized_lines_text(segment_lines)
         if not text:
             continue
+        decorative_suppressed = _decorative_suppression_confirmed(region)
         bbox = BBox(
             x0=min(l.bbox.x0 for l in segment_lines),
             y0=min(l.bbox.y0 for l in segment_lines),
@@ -405,6 +410,11 @@ def _emit_prose_blocks(
                 fallback_from_table=fallback_from_table,
                 list_items=list(segment.items),
                 decorative=region.kind == RegionKind.DECORATIVE,
+                line_ids=[line_identity(line) for line in segment_lines],
+                suppressed=decorative_suppressed,
+                suppression_reason=(
+                    "decorative" if decorative_suppressed else None
+                ),
             )
         )
     return blocks
@@ -431,6 +441,7 @@ def _emit_table_block(
         table_id=table.table_id,
         source_region_ids=[region.region_id],
         confidence=table.confidence,
+        line_ids=[],
     )
 
 
@@ -506,9 +517,7 @@ def _build_reading_text(blocks: list[PageContentBlock]) -> str:
     """
     parts: list[str] = []
     for block in sorted(blocks, key=lambda b: b.order_index):
-        if block.kind in (ContentKind.HEADER, ContentKind.FOOTER):
-            continue
-        if block.decorative:
+        if block.suppressed:
             continue
         if block.kind == ContentKind.TABLE:
             continue
@@ -517,3 +526,16 @@ def _build_reading_text(blocks: list[PageContentBlock]) -> str:
         if block.text:
             parts.append(block.text)
     return "\n\n".join(parts)
+
+
+def _decorative_suppression_confirmed(region: LayoutRegion) -> bool:
+    """Require watermark-specific visual evidence before hiding a region."""
+    role = region.semantic_role or ""
+    if not role.startswith("decorative_watermark:"):
+        return False
+    reasons = set(role.split(":", 1)[1].split(","))
+    return bool(
+        reasons.intersection(
+            {"unusual_angle", "light_luminance", "low_opacity", "large_font"}
+        )
+    )

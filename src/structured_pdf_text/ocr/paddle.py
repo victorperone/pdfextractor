@@ -21,6 +21,7 @@ from structured_pdf_text.ocr.image_quality import profile_image
 from structured_pdf_text.ocr.quality import (
     OcrCandidate,
     OcrQualityAssessment,
+    assess_ocr_coverage,
     assess_ocr_quality,
     raw_result_metrics,
 )
@@ -178,6 +179,12 @@ class PaddleOcrEngine:
         self.last_recovery_reasons: list[str] = []
         self.last_early_stop = False
         self.last_candidate_count = 0
+        self.last_candidate_metrics: dict[str, dict[str, float | int]] = {}
+        self.last_fusion_replacements_attempted = 0
+        self.last_fusion_replacements_accepted = 0
+        self.last_fusion_replacements_rolled_back = 0
+        self.last_fusion_lost_clusters = 0
+        self.last_fusion_duplicate_clusters = 0
 
     def recognize_page(
         self,
@@ -396,6 +403,13 @@ class PaddleOcrEngine:
                     self.last_early_stop = True
                     break
         self.last_candidate_count = len(candidates)
+        self.last_candidate_metrics = {
+            candidate.name: {
+                **_candidate_metrics_dict(_candidate_coverage(candidate, page_bbox)),
+                "quality_score": float(candidate.quality.score),
+            }
+            for candidate in candidates
+        }
         selected_candidate = _select_best_candidate(candidates, page_bbox, self.quality_thresholds)
         self.last_selected_variant = selected_candidate.name
         self.last_quality = selected_candidate.quality
@@ -406,6 +420,7 @@ class PaddleOcrEngine:
         )
         self.last_consensus_replacements = replacements
         self.last_consensus_insertions = insertions
+        self.last_fusion_replacements_accepted = replacements
         return merged
 
     def _reset_last_diagnostics(self) -> None:
@@ -429,6 +444,12 @@ class PaddleOcrEngine:
         self.last_recovery_reasons = []
         self.last_early_stop = False
         self.last_candidate_count = 0
+        self.last_candidate_metrics = {}
+        self.last_fusion_replacements_attempted = 0
+        self.last_fusion_replacements_accepted = 0
+        self.last_fusion_replacements_rolled_back = 0
+        self.last_fusion_lost_clusters = 0
+        self.last_fusion_duplicate_clusters = 0
 
     def _predict_counted(self, ocr: Any, page_image: object) -> Any:
         self.last_pass_count += 1
@@ -797,6 +818,7 @@ def _make_candidate(
         thresholds=thresholds,
         orientation_incoherent=orientation_incoherent,
     )
+    coverage = assess_ocr_coverage(tokens, page_bbox)
     return OcrCandidate(
         name=name,
         tokens=tokens,
@@ -808,6 +830,12 @@ def _make_candidate(
         rotation=rotation,
         enhancement=enhancement,
         family=family,
+        line_cluster_count=coverage.line_cluster_count,
+        text_area_coverage=coverage.text_area_coverage,
+        character_count=coverage.character_count,
+        token_count=coverage.token_count,
+        duplicate_ratio=coverage.duplicate_ratio,
+        spatial_coverage_score=coverage.spatial_coverage_score,
     )
 
 
@@ -824,13 +852,34 @@ def _select_best_candidate(
             quality=assess_ocr_quality([], thresholds=thresholds),
             family="empty",
         )
-    best = max(candidates, key=lambda candidate: candidate.quality.score)
-    best_quality = best.quality.score
-    # Preserve fuller detections when confidence is within normal OCR noise.
-    for candidate in candidates:
-        if len(candidate.tokens) > len(best.tokens) and candidate.quality.score >= best_quality - 0.0025:
-            best = candidate
-            best_quality = candidate.quality.score
+    metrics = {
+        id(candidate): _candidate_coverage(candidate, page_bbox)
+        for candidate in candidates
+    }
+    frontier = [
+        candidate
+        for candidate in candidates
+        if not any(
+            other is not candidate and _candidate_dominates(
+                metrics[id(other)], other.quality.score,
+                metrics[id(candidate)], candidate.quality.score,
+            )
+            for other in candidates
+        )
+    ] or list(candidates)
+    highest_quality = max(candidate.quality.score for candidate in frontier)
+    quality_eligible = [
+        candidate
+        for candidate in frontier
+        if candidate.quality.score >= highest_quality - 0.05
+    ]
+    best = max(
+        quality_eligible,
+        key=lambda candidate: (
+            _coverage_scalar(metrics[id(candidate)]),
+            candidate.quality.score,
+        ),
+    )
     merged = _merge_compact_candidate_tokens(
         best.tokens,
         [candidate.tokens for candidate in candidates],
@@ -849,7 +898,64 @@ def _select_best_candidate(
             assessment,
             score=_candidate_score_adjustment(merged, page_bbox, assessment.score),
         ),
+        **_coverage_fields(merged, page_bbox),
     )
+
+
+def _candidate_coverage(candidate: OcrCandidate, page_bbox: BBox | None):
+    if candidate.token_count or candidate.line_cluster_count or not candidate.tokens:
+        return candidate
+    metrics = assess_ocr_coverage(candidate.tokens, page_bbox)
+    return metrics
+
+
+def _coverage_fields(tokens: list[OcrToken], page_bbox: BBox | None) -> dict[str, object]:
+    metrics = assess_ocr_coverage(tokens, page_bbox)
+    return {
+        "line_cluster_count": metrics.line_cluster_count,
+        "text_area_coverage": metrics.text_area_coverage,
+        "character_count": metrics.character_count,
+        "token_count": metrics.token_count,
+        "duplicate_ratio": metrics.duplicate_ratio,
+        "spatial_coverage_score": metrics.spatial_coverage_score,
+    }
+
+
+def _candidate_metrics_dict(metrics: object) -> dict[str, float | int]:
+    return {
+        "line_cluster_count": int(getattr(metrics, "line_cluster_count", 0)),
+        "text_area_coverage": float(getattr(metrics, "text_area_coverage", 0.0)),
+        "character_count": int(getattr(metrics, "character_count", 0)),
+        "token_count": int(getattr(metrics, "token_count", 0)),
+        "duplicate_ratio": float(getattr(metrics, "duplicate_ratio", 0.0)),
+        "spatial_coverage_score": float(getattr(metrics, "spatial_coverage_score", 0.0)),
+    }
+
+
+def _coverage_scalar(metrics: object) -> float:
+    return (
+        float(getattr(metrics, "spatial_coverage_score", 0.0)) * 0.55
+        + min(1.0, float(getattr(metrics, "line_cluster_count", 0)) / 12.0) * 0.30
+        + min(1.0, float(getattr(metrics, "text_area_coverage", 0.0)) * 20.0) * 0.15
+        - float(getattr(metrics, "duplicate_ratio", 0.0)) * 0.25
+    )
+
+
+def _candidate_dominates(
+    first_metrics: object,
+    first_quality: float,
+    second_metrics: object,
+    second_quality: float,
+) -> bool:
+    first_coverage = _coverage_scalar(first_metrics)
+    second_coverage = _coverage_scalar(second_metrics)
+    quality_ok = first_quality >= second_quality - 0.02
+    coverage_ok = first_coverage >= second_coverage - 0.03
+    material = (
+        first_quality >= second_quality + 0.005
+        or first_coverage >= second_coverage + 0.01
+    )
+    return quality_ok and coverage_ok and material
 
 
 def _merge_compact_candidate_tokens(
@@ -946,33 +1052,13 @@ def _candidate_score_adjustment(
     page_bbox: BBox | None,
     score: float,
 ) -> float:
-    """Apply the same edge-coherence adjustment to diagnostics and selection."""
-    if not tokens or page_bbox is None:
-        return score
-    try:
-        from .reconstruct import reconstruct_ocr_lines
+    """Keep recognition quality lexical-agnostic.
 
-        lines = reconstruct_ocr_lines(tokens, 0, page_bbox)
-    except (ImportError, TypeError, ValueError):
-        return score
-    if len(lines) < 2:
-        return score
-    top_band = " ".join(line.text for line in lines[:2]).casefold()
-    bottom_band = " ".join(line.text for line in lines[-2:]).casefold()
-    header_markers = ("header", "cabeçalho")
-    footer_markers = ("footer", "rodapé", "rodape", "página ", "pagina ", "page ")
-    header_marker = any(marker in top_band for marker in header_markers)
-    footer_marker = any(marker in bottom_band for marker in footer_markers)
-    misplaced_footer = any(marker in top_band for marker in footer_markers)
-    misplaced_header = any(marker in bottom_band for marker in header_markers)
-    if header_marker:
-        score += 0.05
-    if footer_marker:
-        score += 0.10
-    if misplaced_footer:
-        score -= 0.15
-    if misplaced_header:
-        score -= 0.10
+    Completeness and spatial coherence are tracked as separate candidate
+    metrics.  Furniture words must never influence OCR arbitration because
+    they are document-language dependent and can reward misplaced content.
+    """
+    del tokens, page_bbox
     return max(0.0, min(1.0, score))
 
 
@@ -1050,7 +1136,9 @@ def _spatial_consensus(
     enhancements in the same family count as one source, so seven contrast
     variants cannot outvote one independent baseline/sharpness hypothesis.
     """
+    before_metrics = assess_ocr_coverage(primary.tokens, None)
     merged, replacements = _line_level_consensus(primary, candidates, page_bbox=None)
+    attempted = replacements
     insertions = 0
     alternate_candidates = [candidate for candidate in candidates if candidate.name != primary.name]
     for index, current in enumerate(list(merged)):
@@ -1112,11 +1200,37 @@ def _spatial_consensus(
             best_token = max((token for _, token in tokens), key=lambda token: token.confidence or 0.0)
             merged.append(_mark_consensus(best_token, "spatial_consensus"))
             insertions += 1
-    return (
-        _remove_contained_fragments(sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))),
-        replacements,
-        insertions,
+    merged = _remove_contained_fragments(
+        sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))
     )
+    after_metrics = assess_ocr_coverage(merged, None)
+    duplicate_clusters = _duplicate_cluster_count(merged)
+    lost_clusters = max(0, before_metrics.line_cluster_count - after_metrics.line_cluster_count)
+    rolled_back = 0
+    if lost_clusters > 0 or duplicate_clusters > 0:
+        merged = list(primary.tokens)
+        rolled_back = replacements + insertions
+        replacements = 0
+        insertions = 0
+    primary.fusion_replacements_attempted = attempted
+    primary.fusion_replacements_accepted = replacements
+    primary.fusion_replacements_rolled_back = rolled_back
+    primary.fusion_lost_clusters = lost_clusters
+    primary.fusion_duplicate_clusters = duplicate_clusters
+    return merged, replacements, insertions
+
+
+def _duplicate_cluster_count(tokens: list[OcrToken]) -> int:
+    count = 0
+    for index, first in enumerate(tokens):
+        for second in tokens[index + 1 :]:
+            if _candidate_token_overlap(first, second) and (
+                " ".join(first.text.split()).casefold()
+                != " ".join(second.text.split()).casefold()
+            ):
+                count += 1
+                break
+    return count
 
 
 def _candidate_family(candidate: OcrCandidate) -> str:

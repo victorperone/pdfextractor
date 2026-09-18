@@ -3,69 +3,44 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import defaultdict
-from statistics import median
 
 from structured_pdf_text.document import RegionKind, StructuredPage, TextLine
 
 
 def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, list[int]]:
-    """Find stable header/footer signatures without altering page content.
+    """Confirm repeated furniture using text, position and style evidence.
 
-    Two detection strategies are combined:
-    1. Text-based: same normalized text appears in edge positions on 2+ pages.
-    2. Positional: lines at the same y-band (top/bottom 15%) on 60%+ of pages,
-       regardless of text content. Catches varying headers like "GS2 P19 CONTROLE".
-
-    Page indexes in the result follow ``StructuredPage.page_index`` (zero-based).
+    Edge position is only a candidate signal.  A line is suppressible only
+    when its normalized template recurs on multiple pages and its geometry and
+    typography remain compatible.  Position-only matches are intentionally not
+    returned because unique body content often starts or ends in the same band.
     """
-    occurrences: dict[str, set[int]] = defaultdict(set)
+    observations: dict[str, list[tuple[int, str, TextLine, StructuredPage]]] = defaultdict(list)
     for page in pages:
-        seen_on_page: set[str] = set()
         for kind, line in _candidate_lines(page):
             key = _signature_key(kind, line.text)
-            if key is not None and key not in seen_on_page:
-                occurrences[key].add(page.page_index)
-                seen_on_page.add(key)
-    text_based = {
-        key: sorted(page_indexes)
-        for key, page_indexes in sorted(occurrences.items())
-        if len(page_indexes) >= 2
-    }
-    positional = _detect_positional_headers(pages)
-    combined = dict(text_based)
-    combined.update(positional)
-    return combined
+            if key is not None:
+                observations[key].append((page.page_index, kind, line, page))
 
-
-def _detect_positional_headers(pages: list[StructuredPage]) -> dict[str, list[int]]:
-    """Find y-position bands in header/footer zones repeated on 60%+ of pages.
-
-    Returns keys of the form ``pos:<kind>:<bucket>`` that match the keys emitted
-    by ``repeated_line_keys`` for lines in those bands.
-    """
-    if len(pages) < 3:
-        return {}
-    threshold = max(2, int(len(pages) * 0.60))
-    position_pages: dict[str, set[int]] = defaultdict(set)
-    for page in pages:
-        if page.bbox.height <= 0:
+    confirmed: dict[str, list[int]] = {}
+    for key, values in sorted(observations.items()):
+        by_page: dict[int, tuple[str, TextLine, StructuredPage]] = {}
+        for page_index, kind, line, page in values:
+            by_page.setdefault(page_index, (kind, line, page))
+        if len(by_page) < 2:
             continue
-        for kind, line in _candidate_lines(page):
-            bucket = _position_bucket(kind, line, page)
-            if bucket is not None:
-                position_pages[bucket].add(page.page_index)
-    return {
-        key: sorted(page_set)
-        for key, page_set in position_pages.items()
-        if len(page_set) >= threshold
-    }
+        selected = list(by_page.values())
+        if not _stable_edge_position(selected) or not _stable_style(selected):
+            continue
+        confirmed[key] = sorted(by_page)
+    return confirmed
 
 
 def repeated_line_keys(page: StructuredPage) -> dict[str, str]:
     """Return normalized keys for candidate edge lines on one page.
 
-    Each line's text maps to both its text-based key and positional key so that
-    ``_reading_page_text`` can filter lines that match either strategy.
+    Each line maps only to its confirmed text/template signature.  Position is
+    evidence for confirmation, never an independent suppression key.
     """
     result: dict[str, str] = {}
     for kind, line in _candidate_lines(page):
@@ -73,20 +48,7 @@ def repeated_line_keys(page: StructuredPage) -> dict[str, str]:
         key = _signature_key(kind, text)
         if key is not None:
             result[text] = key
-        pos_bucket = _position_bucket(kind, line, page)
-        if pos_bucket is not None:
-            result.setdefault(text, pos_bucket)
-            result[f"__pos__{text}"] = pos_bucket
     return result
-
-
-def _position_bucket(kind: str, line: TextLine, page: StructuredPage) -> str | None:
-    if page.bbox.height <= 0:
-        return None
-    # Use absolute y-position rounded to 5pt so headers at the same distance
-    # from the top/bottom are clustered regardless of varying page heights.
-    abs_y = round(line.bbox.cy / 5) * 5
-    return f"pos:{kind}:{abs_y}"
 
 
 def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
@@ -103,11 +65,11 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
     for region in page.regions:
         lines = region.native_lines
         all_lines.extend(lines)
-        if region.kind == RegionKind.HEADER:
+        if region.kind == RegionKind.HEADER or region.edge_role == "top_candidate":
             for line in lines:
                 candidates.append(("header", line))
                 explicit_ids.add(id(line))
-        elif region.kind == RegionKind.FOOTER:
+        elif region.kind == RegionKind.FOOTER or region.edge_role == "bottom_candidate":
             for line in lines:
                 candidates.append(("footer", line))
                 explicit_ids.add(id(line))
@@ -142,5 +104,41 @@ def _normalize_signature(text: str) -> str:
     value = text.casefold().strip()
     value = re.sub(r"\b(?:página|pagina|page)\s+\d+\s+(?:de|of)\s+\d+\b", "", value)
     value = re.sub(r"\b\d+\s*/\s*\d+\b", "", value)
+    value = re.sub(r"\d+", "<num>", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip(" -|·")
+
+
+def _stable_edge_position(
+    values: list[tuple[str, TextLine, StructuredPage]],
+) -> bool:
+    normalized = [
+        line.bbox.cy / max(page.bbox.height, 1.0)
+        for _, line, page in values
+    ]
+    if not normalized:
+        return False
+    return max(normalized) - min(normalized) <= 0.035
+
+
+def _stable_style(
+    values: list[tuple[str, TextLine, StructuredPage]],
+) -> bool:
+    sizes: list[float] = []
+    fonts: set[str] = set()
+    weights: list[int] = []
+    for _, line, _ in values:
+        for token in line.tokens:
+            if token.text.strip() and token.font_size and token.font_size > 0:
+                sizes.append(token.font_size)
+            if token.text.strip() and token.font_name:
+                fonts.add(token.font_name.casefold())
+            if token.text.strip() and token.font_weight is not None:
+                weights.append(token.font_weight)
+    if sizes and max(sizes) / max(min(sizes), 0.01) > 1.35:
+        return False
+    if len(fonts) > 1:
+        return False
+    if weights and max(weights) - min(weights) > 200:
+        return False
+    return True

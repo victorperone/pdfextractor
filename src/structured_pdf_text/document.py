@@ -243,6 +243,7 @@ class TextLine:
     native_order_max: int | None
     gap_mode: str = "fallback"
     order_mode: str = "geometry"
+    line_id: str | None = None
 
     @property
     def text(self) -> str:
@@ -268,6 +269,7 @@ class LayoutRegion:
     heading_level: int | None = None  # 1, 2 ou 3; None para regiões não-título
     ocr_lines: list[TextLine] = field(default_factory=list)
     semantic_role: str | None = None
+    edge_role: str | None = None
 
 
 @dataclass(slots=True)
@@ -350,6 +352,17 @@ class ContentKind(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ContentDisposition(str, Enum):
+    RENDERED = "rendered"
+    TABLE_OWNED = "table_owned"
+    FIGURE_OWNED = "figure_owned"
+    SUPPRESSED_REPEATED_HEADER = "suppressed_repeated_header"
+    SUPPRESSED_REPEATED_FOOTER = "suppressed_repeated_footer"
+    SUPPRESSED_DECORATIVE = "suppressed_decorative"
+    DEDUPLICATED = "deduplicated"
+    SUPPRESSED_POLICY = "suppressed_policy"
+
+
 @dataclass(slots=True)
 class StructuredListItem:
     marker: str
@@ -380,6 +393,9 @@ class PageContentBlock:
     list_items: list[StructuredListItem] = field(default_factory=list)
     # Compatibility-preserving view flag; raw/evidence remains available.
     decorative: bool = False
+    line_ids: list[str] = field(default_factory=list)
+    suppressed: bool = False
+    suppression_reason: str | None = None
 
 
 @dataclass(slots=True)

@@ -21,6 +21,7 @@ class LayoutRegionPrediction:
     confidence: float | None = None
     label: str | None = None
     semantic_role: str | None = None
+    edge_role: str | None = None
 
 
 class PageImage(Protocol):
@@ -68,6 +69,7 @@ class NativeHeuristicLayoutEngine:
                     _union_lines(header_lines, page_bbox),
                     confidence=0.82,
                     label="native_top_band",
+                    edge_role="top_candidate",
                 )
             )
         if footer_lines:
@@ -77,6 +79,7 @@ class NativeHeuristicLayoutEngine:
                     _union_lines(footer_lines, page_bbox),
                     confidence=0.82,
                     label="native_bottom_band",
+                    edge_role="bottom_candidate",
                 )
             )
 
@@ -194,6 +197,7 @@ def _semantic_predictions(
                 bbox=_clamp_bbox(cluster.bbox.expand(3.0), page_bbox),
                 confidence=cluster.confidence,
                 label="decorative_cluster:" + ",".join(cluster.reasons),
+                semantic_role="decorative_watermark:" + ",".join(cluster.reasons),
             )
         )
     for cluster in semantic_status_clusters:
@@ -444,6 +448,7 @@ def _normalize_predictions(
                 confidence=prediction.confidence,
                 label=prediction.label,
                 semantic_role=prediction.semantic_role,
+                edge_role=prediction.edge_role,
             )
         )
     return normalized

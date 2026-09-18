@@ -241,6 +241,12 @@ def _line_from_chars(
         native_order_max=max(native_indices) if native_indices else None,
         gap_mode=gap_mode,
         order_mode=order_mode,
+        line_id=(
+            f"native:{characters[0].page_index}:"
+            f"{min(native_indices)}:{max(native_indices)}"
+            if native_indices
+            else None
+        ),
     )
 
 

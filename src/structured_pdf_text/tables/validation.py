@@ -27,6 +27,9 @@ class TableGeometryValidation:
     column_monotonicity: float
     token_coverage: float
     empty_cell_ratio: float
+    source_row_assignment_monotonicity: float
+    source_column_assignment_monotonicity: float
+    source_assignment_conflicts: int
     reasons: tuple[str, ...]
 
 
@@ -51,6 +54,9 @@ class TableConstructionDiagnostics:
     column_count: int
     row_monotonic: bool
     column_monotonic: bool
+    source_row_assignment_monotonicity: float
+    source_column_assignment_monotonicity: float
+    source_assignment_conflicts: int
     cell_count: int
     token_coverage: float
     token_sources: tuple[str, ...]
@@ -112,6 +118,15 @@ def validate_table_geometry(
         reasons.append("unexpected_cell_overlap")
 
     source_tokens = _source_tokens(source_lines, candidate_bbox)
+    source_row_monotonicity, source_column_monotonicity, source_conflicts = (
+        _source_assignment_metrics(source_lines, cells, writing_direction, candidate_bbox)
+    )
+    if source_row_monotonicity < 1.0:
+        reasons.append("source_row_assignment_not_monotonic")
+    if source_column_monotonicity < 1.0:
+        reasons.append("source_column_assignment_not_monotonic")
+    if source_conflicts:
+        reasons.append("source_assignment_conflicts")
     if source_tokens:
         token_coverage = sum(
             any(
@@ -137,6 +152,9 @@ def validate_table_geometry(
         column_monotonicity=round(column_monotonicity, 6),
         token_coverage=round(token_coverage, 6),
         empty_cell_ratio=round(empty_cell_ratio, 6),
+        source_row_assignment_monotonicity=round(source_row_monotonicity, 6),
+        source_column_assignment_monotonicity=round(source_column_monotonicity, 6),
+        source_assignment_conflicts=source_conflicts,
         reasons=tuple(dict.fromkeys(reasons)),
     )
 
@@ -188,6 +206,9 @@ def build_table_construction_diagnostics(
         column_count=table.column_count,
         row_monotonic=validation.row_monotonicity == 1.0,
         column_monotonic=validation.column_monotonicity == 1.0,
+        source_row_assignment_monotonicity=validation.source_row_assignment_monotonicity,
+        source_column_assignment_monotonicity=validation.source_column_assignment_monotonicity,
+        source_assignment_conflicts=validation.source_assignment_conflicts,
         cell_count=len(table.cells),
         token_coverage=validation.token_coverage,
         token_sources=tuple(token_sources),
@@ -243,6 +264,113 @@ def _source_tokens(
         if candidate_bbox.x0 <= token.bbox.cx <= candidate_bbox.x1
         and candidate_bbox.y0 <= token.bbox.cy <= candidate_bbox.y1
     ]
+
+
+def _source_assignment_metrics(
+    source_lines: list[TextLine] | tuple[TextLine, ...],
+    cells: list,
+    writing_direction: WritingDirection,
+    candidate_bbox: BBox | None,
+) -> tuple[float, float, int]:
+    if not source_lines or not cells:
+        return 1.0, 1.0, 0
+    line_rows: list[tuple[float, int]] = []
+    column_conflicts = 0
+    assignment_conflicts = 0
+    for line in source_lines:
+        tokens = [token for token in line.tokens if token.text.strip()]
+        if candidate_bbox is not None:
+            tokens = [
+                token for token in tokens
+                if candidate_bbox.x0 <= token.bbox.cx <= candidate_bbox.x1
+                and candidate_bbox.y0 <= token.bbox.cy <= candidate_bbox.y1
+            ]
+        assignments = [(_cell_for_token(token, cells), token) for token in tokens]
+        assignments = [(cell, token) for cell, token in assignments if cell is not None]
+        if not assignments:
+            if tokens:
+                assignment_conflicts += len(tokens)
+            continue
+        row_values = [cell.row for cell, _ in assignments]
+        line_rows.append((line.bbox.cy, _median_int(row_values)))
+        ordered = sorted(
+            assignments,
+            key=lambda item: item[1].bbox.x0,
+            reverse=writing_direction == WritingDirection.RIGHT_TO_LEFT,
+        )
+        columns = [cell.col for cell, _ in ordered]
+        column_conflicts += sum(
+            first > second
+            for first, second in zip(columns, columns[1:])
+        )
+    line_rows.sort(key=lambda item: item[0])
+    row_values = [row for _, row in line_rows]
+    row_conflicts = sum(first > second for first, second in zip(row_values, row_values[1:]))
+    conflicts = row_conflicts + column_conflicts + assignment_conflicts
+    return (
+        _monotonicity(row_values),
+        _monotonicity_from_ordered_columns(source_lines, cells, writing_direction, candidate_bbox),
+        conflicts,
+    )
+
+
+def _monotonicity_from_ordered_columns(
+    source_lines: list[TextLine] | tuple[TextLine, ...],
+    cells: list,
+    writing_direction: WritingDirection,
+    candidate_bbox: BBox | None,
+) -> float:
+    total = 0
+    valid = 0
+    for line in source_lines:
+        tokens = [token for token in line.tokens if token.text.strip()]
+        if candidate_bbox is not None:
+            tokens = [
+                token for token in tokens
+                if candidate_bbox.x0 <= token.bbox.cx <= candidate_bbox.x1
+                and candidate_bbox.y0 <= token.bbox.cy <= candidate_bbox.y1
+            ]
+        assignments = [(_cell_for_token(token, cells), token) for token in tokens]
+        assignments = [(cell, token) for cell, token in assignments if cell is not None]
+        ordered = sorted(
+            assignments,
+            key=lambda item: item[1].bbox.x0,
+            reverse=writing_direction == WritingDirection.RIGHT_TO_LEFT,
+        )
+        columns = [cell.col for cell, _ in ordered]
+        if len(columns) < 2:
+            continue
+        total += len(columns) - 1
+        valid += sum(first <= second for first, second in zip(columns, columns[1:]))
+    return valid / total if total else 1.0
+
+
+def _cell_for_token(token: TextToken, cells: list):
+    containing = [
+        cell
+        for cell in cells
+        if cell.bbox is not None
+        and cell.bbox.x0 <= token.bbox.cx <= cell.bbox.x1
+        and cell.bbox.y0 <= token.bbox.cy <= cell.bbox.y1
+    ]
+    if containing:
+        return min(containing, key=lambda cell: cell.bbox.area)
+    overlaps = [
+        cell
+        for cell in cells
+        if cell.bbox is not None and cell.bbox.intersection(token.bbox) is not None
+    ]
+    if not overlaps:
+        return None
+    return max(
+        overlaps,
+        key=lambda cell: cell.bbox.intersection(token.bbox).area,
+    )
+
+
+def _median_int(values: list[int]) -> int:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
 
 
 def _has_unexpected_overlap(cells: list) -> bool:

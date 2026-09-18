@@ -49,10 +49,13 @@ def _render_content_block(
     *,
     preserve_hf: bool,
 ) -> str:
-    if block.decorative:
+    if block.suppressed:
         return ""
     if block.kind in (ContentKind.HEADER, ContentKind.FOOTER):
-        if not preserve_hf:
+        # Legacy blocks without line accounting predate document-level
+        # repeated-furniture confirmation. Keep their old flag behavior while
+        # canonical blocks rely exclusively on ``suppressed``.
+        if not preserve_hf and not block.line_ids:
             return ""
         return block.text
 
@@ -131,9 +134,6 @@ def _render_page_legacy(
             ).strip()
             if fallback:
                 page_parts.append(fallback)
-            continue
-
-        if not preserve_hf and region.kind in (RegionKind.HEADER, RegionKind.FOOTER):
             continue
 
         if region.kind == RegionKind.TITLE and region.heading_level is not None:

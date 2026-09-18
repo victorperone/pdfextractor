@@ -62,6 +62,7 @@ from .tables.validation import (
     build_table_construction_diagnostics,
     validate_table_geometry,
 )
+from .tables.text_tracks import assess_borderless_region
 from .text.line_detector import reconstruct_native_lines, spacing_diagnostics
 from .geometry import BBox
 
@@ -245,6 +246,7 @@ class PdfTextExtractor:
                 table_validation_facts: list[dict[str, Any]] = []
                 table_construction_facts: list[dict[str, Any]] = []
                 table_source_provenance: list[dict[str, Any]] = []
+                table_prefix_facts = _table_prefix_diagnostics(regions)
                 ocr_region_stats: dict[str, dict[str, Any]] = {}
                 ocr_targeted_stats: dict[str, dict[str, Any]] = {}
                 ocr_targeted_passes = 0
@@ -734,6 +736,24 @@ class PdfTextExtractor:
                         "ocr_variants_succeeded": list(getattr(ocr_diag_engine, "last_variants_succeeded", [])),
                         "ocr_variants_failed": list(ocr_attempt_errors),
                         "ocr_candidate_count": getattr(ocr_diag_engine, "last_candidate_count", 0),
+                        "ocr_candidate_metrics": dict(getattr(ocr_diag_engine, "last_candidate_metrics", {})),
+                        "ocr_candidate_quality": {
+                            name: float(candidate.get("quality_score", 0.0))
+                            for name, candidate in getattr(ocr_diag_engine, "last_candidate_metrics", {}).items()
+                        },
+                        "ocr_candidate_coverage": {
+                            name: float(candidate.get("spatial_coverage_score", 0.0))
+                            for name, candidate in getattr(ocr_diag_engine, "last_candidate_metrics", {}).items()
+                        },
+                        "ocr_candidate_line_clusters": {
+                            name: int(candidate.get("line_cluster_count", 0))
+                            for name, candidate in getattr(ocr_diag_engine, "last_candidate_metrics", {}).items()
+                        },
+                        "ocr_fusion_replacements_attempted": getattr(ocr_diag_engine, "last_fusion_replacements_attempted", 0),
+                        "ocr_fusion_replacements_accepted": getattr(ocr_diag_engine, "last_fusion_replacements_accepted", 0),
+                        "ocr_fusion_replacements_rolled_back": getattr(ocr_diag_engine, "last_fusion_replacements_rolled_back", 0),
+                        "ocr_fusion_lost_clusters": getattr(ocr_diag_engine, "last_fusion_lost_clusters", 0),
+                        "ocr_fusion_duplicate_clusters": getattr(ocr_diag_engine, "last_fusion_duplicate_clusters", 0),
                         "ocr_consensus_replacements": getattr(ocr_diag_engine, "last_consensus_replacements", 0),
                         "ocr_consensus_insertions": getattr(ocr_diag_engine, "last_consensus_insertions", 0),
                         "ocr_orientation_selected": getattr(ocr_diag_engine, "last_orientation_selected", None),
@@ -799,10 +819,23 @@ class PdfTextExtractor:
                         "table_geometry_valid": [item["valid"] for item in table_validation_facts],
                         "table_row_monotonicity": [item["row_monotonicity"] for item in table_validation_facts],
                         "table_column_monotonicity": [item["column_monotonicity"] for item in table_validation_facts],
+                        "table_source_row_monotonicity": [
+                            item["source_row_assignment_monotonicity"]
+                            for item in table_validation_facts
+                        ],
+                        "table_source_col_monotonicity": [
+                            item["source_column_assignment_monotonicity"]
+                            for item in table_validation_facts
+                        ],
+                        "table_source_assignment_conflicts": [
+                            item["source_assignment_conflicts"]
+                            for item in table_validation_facts
+                        ],
                         "table_cell_coverage": [item["token_coverage"] for item in table_validation_facts],
                         "table_token_coverage": [item["token_coverage"] for item in table_validation_facts],
                         "table_empty_cell_ratio": [item["empty_cell_ratio"] for item in table_validation_facts],
                         "table_source_provenance": table_source_provenance,
+                        **table_prefix_facts,
                         "table_construction_diagnostics": table_construction_facts,
                         "table_geometry_validation": table_validation_facts,
                         "timings_ms": timings,
@@ -1240,15 +1273,10 @@ def _append_hybrid_ocr_regions(
         existing.ocr_tokens = list(figure_tokens)
         remaining = [line for line in remaining if not _line_in_box(line, figure_bbox)]
 
-    edge_boxes = [
-        region.bbox
-        for region in regions
-        if region.kind in {RegionKind.HEADER, RegionKind.FOOTER}
-    ]
     remaining = [
         line
         for line in remaining
-        if not any(_line_in_box(line, box) for box in edge_boxes + table_boxes + figure_boxes)
+        if not any(_line_in_box(line, box) for box in table_boxes + figure_boxes)
     ]
     if remaining:
         supplemental = full_page_text_region(page_index, page_bbox, remaining, complexity)
@@ -1256,7 +1284,7 @@ def _append_hybrid_ocr_regions(
         supplemental.ocr_tokens = [
             token
             for token in unmatched_tokens
-            if not any(_line_in_box(token, box) for box in edge_boxes + table_boxes + figure_boxes)
+            if not any(_line_in_box(token, box) for box in table_boxes + figure_boxes)
         ]
         regions.append(supplemental)
 
@@ -1354,6 +1382,26 @@ def _validate_detected_tables(
         else:
             warnings.append("table_structure_uncertain")
     return valid_tables, validation_facts, construction_facts, provenance_facts
+
+
+def _table_prefix_diagnostics(regions: list[LayoutRegion]) -> dict[str, Any]:
+    assessments = [
+        assessment
+        for region in regions
+        if region.kind in {
+            RegionKind.TEXT,
+            RegionKind.LIST,
+            RegionKind.UNKNOWN,
+            RegionKind.TABLE,
+        }
+        for assessment in assess_borderless_region(region)
+    ]
+    return {
+        "table_prefix_candidate_count": sum(item.prefix_candidate_count for item in assessments),
+        "table_prefix_accepted_count": sum(item.prefix_accepted_count for item in assessments),
+        "table_prefix_rejected_count": sum(item.prefix_rejected_count for item in assessments),
+        "table_prefix_reasons": sorted({reason for item in assessments for reason in item.prefix_reasons}),
+    }
 
 
 def _source_lines_for_table(

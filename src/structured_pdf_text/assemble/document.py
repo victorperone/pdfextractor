@@ -16,6 +16,8 @@ from structured_pdf_text.document import (
     StructuredTable,
 )
 from structured_pdf_text.assemble.content import assemble_page_content
+from structured_pdf_text.assemble.content import _build_reading_text, _reindex_blocks
+from structured_pdf_text.assemble.conservation import record_content_conservation
 from structured_pdf_text.assemble.repeated_regions import detect_repeated_headers_footers, repeated_line_keys
 from structured_pdf_text.layout.heading import assign_heading_levels
 from structured_pdf_text.tables.cross_page import resolve_cross_page_tables_with_diagnostics
@@ -72,27 +74,36 @@ def assemble_document(
     assembled_pages: list[StructuredPage] = []
     for page in pages:
         result = assemble_page_content(page)
-
-        page_reading_text = _filter_reading_text(
-            result.reading_text,
+        blocks = list(result.blocks)
+        _apply_repeated_suppression(
+            blocks,
             page,
             repeated,
             preserve_headers_footers,
         )
+        blocks, conservation, _records = record_content_conservation(page, blocks)
+        blocks = _reindex_blocks(blocks)
+        if conservation.fallback_lines:
+            page.diagnostics.warnings.append(
+                f"unaccounted_content: {conservation.fallback_lines} line(s) recovered by text fallback"
+            )
+        if conservation.duplicate_assignment_count:
+            page.diagnostics.warnings.append(
+                "content_conservation_duplicate_assignment"
+            )
+        page_reading_text = _build_reading_text(blocks)
 
         page.diagnostics.facts.update(
             {
-                "content_block_count": len(result.blocks),
+                "content_block_count": len(blocks),
                 "content_text_block_count": sum(
-                    1 for b in result.blocks if b.kind not in (ContentKind.TABLE, ContentKind.FIGURE)
+                    1 for b in blocks if b.kind not in (ContentKind.TABLE, ContentKind.FIGURE)
                 ),
-                "content_table_block_count": sum(
-                    1 for b in result.blocks if b.kind == ContentKind.TABLE
-                ),
+                "content_table_block_count": sum(1 for b in blocks if b.kind == ContentKind.TABLE),
                 "content_table_fallbacks": result.table_fallbacks,
                 "content_claimed_table_lines": result.claimed_table_lines,
                 "content_orphan_tables": result.orphan_tables,
-                "decorative_block_count": sum(1 for b in result.blocks if b.decorative),
+                "decorative_block_count": sum(1 for b in blocks if b.decorative),
                 "list_segment_count": result.list_segment_count,
                 "list_item_count": result.list_item_count,
                 "list_inferred_marker_count": result.list_inferred_marker_count,
@@ -106,15 +117,16 @@ def assemble_document(
                         "kind": b.kind.value,
                         "table_id": b.table_id,
                     }
-                    for b in result.blocks
+                    for b in blocks
                 ],
+                **conservation.to_facts(),
             }
         )
 
         assembled_pages.append(
             dataclasses.replace(
                 page,
-                content_blocks=list(result.blocks),
+                content_blocks=blocks,
                 reading_text=page_reading_text,
             )
         )
@@ -159,23 +171,38 @@ def assemble_document(
     )
 
 
-def _filter_reading_text(
-    reading_text: str,
+def _apply_repeated_suppression(
+    blocks: list,
     page: StructuredPage,
     repeated: dict[str, list[int]],
     preserve_headers_footers: bool,
-) -> str:
-    """Remove repeated header/footer lines from the canonical reading text."""
-    if preserve_headers_footers or not reading_text or not repeated:
-        return reading_text
-    repeated_keys = set(repeated)
+) -> None:
+    """Mark only confirmed repeated furniture; never suppress by edge kind."""
+    if preserve_headers_footers or not repeated:
+        return
     line_keys = repeated_line_keys(page)
-    retained = []
-    for line in reading_text.splitlines():
-        stripped = unicodedata.normalize("NFC", line.strip())
-        text_key = line_keys.get(stripped)
-        pos_key = line_keys.get(f"__pos__{stripped}")
-        if text_key in repeated_keys or pos_key in repeated_keys:
+    repeated_keys = set(repeated)
+    line_ids_by_key: dict[str, set[str]] = {}
+    for region in page.regions:
+        for line in [*region.native_lines, *region.ocr_lines]:
+            text = unicodedata.normalize("NFC", line.text.strip())
+            key = line_keys.get(text)
+            if key in repeated_keys and page.page_index in repeated[key]:
+                line_ids_by_key.setdefault(key, set()).add(
+                    line.line_id or f"line:{id(line)}"
+                )
+    for block in blocks:
+        matching_keys = [
+            key
+            for key, line_ids in line_ids_by_key.items()
+            if set(block.line_ids).intersection(line_ids)
+        ]
+        if not matching_keys:
             continue
-        retained.append(line)
-    return "\n".join(retained).strip()
+        key = matching_keys[0]
+        if key.startswith("header:"):
+            block.suppressed = True
+            block.suppression_reason = "repeated_header"
+        elif key.startswith("footer:"):
+            block.suppressed = True
+            block.suppression_reason = "repeated_footer"

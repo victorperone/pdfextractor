@@ -48,6 +48,7 @@ def regions_from_predictions(
             ocr_tokens=[],
             quality=default_region_quality(complexity),
             semantic_role=prediction.semantic_role,
+            edge_role=prediction.edge_role,
         )
         for index, prediction in enumerate(predictions, start=1)
     ]

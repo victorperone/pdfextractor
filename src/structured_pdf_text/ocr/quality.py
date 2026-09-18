@@ -53,6 +53,102 @@ class OcrCandidate:
     rotation: int = 0
     enhancement: str | None = None
     family: str = "unknown"
+    line_cluster_count: int = 0
+    text_area_coverage: float = 0.0
+    character_count: int = 0
+    token_count: int = 0
+    duplicate_ratio: float = 0.0
+    spatial_coverage_score: float = 0.0
+    fusion_replacements_attempted: int = 0
+    fusion_replacements_accepted: int = 0
+    fusion_replacements_rolled_back: int = 0
+    fusion_lost_clusters: int = 0
+    fusion_duplicate_clusters: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OcrCoverageMetrics:
+    line_cluster_count: int
+    text_area_coverage: float
+    character_count: int
+    token_count: int
+    duplicate_ratio: float
+    spatial_coverage_score: float
+
+
+def assess_ocr_coverage(
+    tokens: Iterable[OcrToken],
+    page_bbox: Any | None = None,
+) -> OcrCoverageMetrics:
+    """Measure spatial completeness independently from recognition quality."""
+    values = [token for token in tokens if token.text.strip() and token.bbox.area > 0]
+    if not values:
+        return OcrCoverageMetrics(0, 0.0, 0, 0, 0.0, 0.0)
+    try:
+        from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+
+        line_count = len(reconstruct_ocr_lines(values, 0, page_bbox))
+    except (ImportError, TypeError, ValueError):
+        line_count = 0
+    boxes = [token.bbox for token in values]
+    covered_area = _union_area(boxes)
+    denominator = page_bbox.area if page_bbox is not None and page_bbox.area > 0 else _union_area(boxes)
+    duplicate_count = 0
+    for index, first in enumerate(values):
+        for second in values[index + 1 :]:
+            if first.bbox.iou(second.bbox) < 0.70:
+                continue
+            if " ".join(first.text.split()).casefold() == " ".join(second.text.split()).casefold():
+                duplicate_count += 1
+                break
+    character_count = sum(len(token.text) for token in values)
+    duplicate_ratio = duplicate_count / max(len(values), 1)
+    area_coverage = covered_area / max(denominator, 1.0)
+    # The score is intentionally monotonic in independent spatial evidence;
+    # selection compares it only alongside quality and line clusters.
+    spatial_score = min(
+        1.0,
+        0.55 * min(1.0, line_count / max(1.0, min(len(values), 12)))
+        + 0.45 * min(1.0, area_coverage * 20.0),
+    )
+    return OcrCoverageMetrics(
+        line_cluster_count=line_count,
+        text_area_coverage=round(area_coverage, 8),
+        character_count=character_count,
+        token_count=len(values),
+        duplicate_ratio=round(duplicate_ratio, 8),
+        spatial_coverage_score=round(spatial_score, 8),
+    )
+
+
+def _union_area(boxes: list[Any]) -> float:
+    """Compute rectangle union area with a small deterministic sweep."""
+    if not boxes:
+        return 0.0
+    x_edges = sorted({value for box in boxes for value in (box.x0, box.x1)})
+    area = 0.0
+    for left, right in zip(x_edges, x_edges[1:]):
+        if right <= left:
+            continue
+        spans = sorted(
+            (box.y0, box.y1)
+            for box in boxes
+            if box.x0 < right and box.x1 > left and box.y1 > box.y0
+        )
+        covered_y = 0.0
+        current_start = current_end = None
+        for start, end in spans:
+            if current_start is None:
+                current_start, current_end = start, end
+            elif start > current_end:
+                covered_y += current_end - current_start
+                current_start, current_end = start, end
+            else:
+                current_end = max(current_end, end)
+        if current_start is not None:
+            covered_y += current_end - current_start
+        area += (right - left) * covered_y
+    return area
 
 
 def _text_chars(text: str) -> list[str]:
