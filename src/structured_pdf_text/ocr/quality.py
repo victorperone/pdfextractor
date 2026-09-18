@@ -63,6 +63,9 @@ class OcrCandidate:
     fusion_replacements_accepted: int = 0
     fusion_replacements_rolled_back: int = 0
     fusion_lost_clusters: int = 0
+    fusion_conflict_clusters: int = 0
+    # Compatibility alias. Historically this field counted overlapping OCR
+    # tokens with different text, which is a conflict rather than a duplicate.
     fusion_duplicate_clusters: int = 0
 
 

@@ -29,6 +29,7 @@ from structured_pdf_text.ocr.paddle import (
     _half_turn_box_to_original,
     _merge_compact_candidate_tokens,
     _make_candidate,
+    _overlap_conflict_count,
     _select_best_candidate,
     _spatial_consensus,
 )
@@ -384,6 +385,38 @@ def test_spatial_consensus_accepts_modest_area_tightening() -> None:
     assert merged[0].text == alternate_token_b.text
 
 
+def test_overlap_conflict_count_distinguishes_conflicts_from_duplicates() -> None:
+    first = _ocr_token(
+        "RELATORIO",
+        0.90,
+        10,
+        10,
+    )
+    same_text = _ocr_token(
+        "RELATORIO",
+        0.95,
+        10,
+        10,
+    )
+    conflicting_text = _ocr_token(
+        "RELAT0RIO",
+        0.95,
+        10,
+        10,
+    )
+
+    # Equal text in the same spatial cluster is duplicate evidence, not a
+    # disagreement between OCR hypotheses.
+    assert _overlap_conflict_count(
+        [first, same_text]
+    ) == 0
+
+    # Different text occupying the same spatial cluster is a fusion conflict.
+    assert _overlap_conflict_count(
+        [first, conflicting_text]
+    ) == 1
+
+
 def test_engine_propagates_fusion_diagnostics(monkeypatch) -> None:
     page_bbox = BBox(0, 0, 200, 100)
     source_token = _ocr_token(
@@ -432,6 +465,7 @@ def test_engine_propagates_fusion_diagnostics(monkeypatch) -> None:
         primary.fusion_replacements_accepted = 2
         primary.fusion_replacements_rolled_back = 2
         primary.fusion_lost_clusters = 1
+        primary.fusion_conflict_clusters = 3
         primary.fusion_duplicate_clusters = 3
         return list(primary.tokens), 2, 0
 
@@ -456,6 +490,8 @@ def test_engine_propagates_fusion_diagnostics(monkeypatch) -> None:
     assert engine.last_fusion_replacements_accepted == 2
     assert engine.last_fusion_replacements_rolled_back == 2
     assert engine.last_fusion_lost_clusters == 1
+    assert engine.last_fusion_conflict_clusters == 3
+    # Historical alias remains synchronized.
     assert engine.last_fusion_duplicate_clusters == 3
 
 

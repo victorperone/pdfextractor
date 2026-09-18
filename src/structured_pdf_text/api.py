@@ -810,6 +810,8 @@ class PdfTextExtractor:
                         "ocr_fusion_replacements_accepted": getattr(ocr_diag_engine, "last_fusion_replacements_accepted", 0),
                         "ocr_fusion_replacements_rolled_back": getattr(ocr_diag_engine, "last_fusion_replacements_rolled_back", 0),
                         "ocr_fusion_lost_clusters": getattr(ocr_diag_engine, "last_fusion_lost_clusters", 0),
+                        "ocr_fusion_conflict_clusters": getattr(ocr_diag_engine, "last_fusion_conflict_clusters", 0),
+                        # Compatibility alias for the historical diagnostic name.
                         "ocr_fusion_duplicate_clusters": getattr(ocr_diag_engine, "last_fusion_duplicate_clusters", 0),
                         "ocr_consensus_replacements": getattr(ocr_diag_engine, "last_consensus_replacements", 0),
                         "ocr_consensus_insertions": getattr(ocr_diag_engine, "last_consensus_insertions", 0),

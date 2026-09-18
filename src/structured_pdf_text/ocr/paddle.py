@@ -184,6 +184,8 @@ class PaddleOcrEngine:
         self.last_fusion_replacements_accepted = 0
         self.last_fusion_replacements_rolled_back = 0
         self.last_fusion_lost_clusters = 0
+        self.last_fusion_conflict_clusters = 0
+        # Compatibility alias for callers using the historical name.
         self.last_fusion_duplicate_clusters = 0
 
     def recognize_page(
@@ -433,6 +435,9 @@ class PaddleOcrEngine:
         self.last_fusion_lost_clusters = (
             selected_candidate.fusion_lost_clusters
         )
+        self.last_fusion_conflict_clusters = (
+            selected_candidate.fusion_conflict_clusters
+        )
         self.last_fusion_duplicate_clusters = (
             selected_candidate.fusion_duplicate_clusters
         )
@@ -464,6 +469,8 @@ class PaddleOcrEngine:
         self.last_fusion_replacements_accepted = 0
         self.last_fusion_replacements_rolled_back = 0
         self.last_fusion_lost_clusters = 0
+        self.last_fusion_conflict_clusters = 0
+        # Compatibility alias for callers using the historical name.
         self.last_fusion_duplicate_clusters = 0
 
     def _predict_counted(self, ocr: Any, page_image: object) -> Any:
@@ -1236,7 +1243,7 @@ def _spatial_consensus(
         merged,
         page_bbox,
     )
-    duplicate_clusters = _duplicate_cluster_count(merged)
+    conflict_clusters = _overlap_conflict_count(merged)
     lost_clusters = max(
         0,
         before_metrics.line_cluster_count
@@ -1260,7 +1267,7 @@ def _spatial_consensus(
     rolled_back = 0
     if (
         lost_clusters > 0
-        or duplicate_clusters > 0
+        or conflict_clusters > 0
         or area_regressed
     ):
         merged = list(primary.tokens)
@@ -1271,11 +1278,19 @@ def _spatial_consensus(
     primary.fusion_replacements_accepted = replacements
     primary.fusion_replacements_rolled_back = rolled_back
     primary.fusion_lost_clusters = lost_clusters
-    primary.fusion_duplicate_clusters = duplicate_clusters
+    primary.fusion_conflict_clusters = conflict_clusters
+    # Keep the historical field synchronized as a compatibility alias.
+    primary.fusion_duplicate_clusters = conflict_clusters
     return merged, replacements, insertions
 
 
-def _duplicate_cluster_count(tokens: list[OcrToken]) -> int:
+def _overlap_conflict_count(tokens: list[OcrToken]) -> int:
+    """Count spatially overlapping OCR hypotheses with different text.
+
+    Equal-text overlaps are duplicates and are measured separately by OCR
+    coverage metrics. This guard specifically detects conflicting text that
+    survived candidate fusion in the same spatial cluster.
+    """
     count = 0
     for index, first in enumerate(tokens):
         for second in tokens[index + 1 :]:
