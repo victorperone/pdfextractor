@@ -218,11 +218,13 @@ def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
         ]
         tokens.append(script_token)
         tokens.sort(key=lambda token: (token.bbox.x0, token.bbox.y0))
+        candidate_id = candidate.line_id or f"line:{id(candidate)}"
         merged = replace(
             target,
             tokens=tokens,
             bbox=BBox.union_all([target.bbox, candidate.bbox]),
             text_override=None,
+            merged_source_line_ids=(*target.merged_source_line_ids, candidate_id),
         )
         output[output.index(target)] = merged
         output.remove(candidate)

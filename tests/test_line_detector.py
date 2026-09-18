@@ -17,6 +17,7 @@ from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.line_detector import (
     _is_ghost_punctuation_line,
     _mark_ghost_punctuation_candidates,
+    _merge_script_lines,
     reconstruct_native_lines,
 )
 
@@ -197,3 +198,84 @@ def test_is_ghost_punctuation_line_detects_narrow_comma() -> None:
 
     assert _is_ghost_punctuation_line(narrow) is True
     assert _is_ghost_punctuation_line(wide) is False
+
+
+# ── P1-2: script merge lineage ────────────────────────────────────────────────
+
+def _script_candidate(text: str, x: float, y: float, line_id: str) -> TextLine:
+    """Single-character line positioned for script-merge detection."""
+    bbox = BBox(x, y, x + 6.0, y + 6.0)
+    token = TextToken(
+        text=text,
+        bbox=bbox,
+        sources=[EvidenceRef(SourceKind.NATIVE_PDF, 0, f"script:{line_id}")],
+        confidence=1.0,
+        normalized_text=normalize_text(text),
+    )
+    return TextLine(
+        tokens=[token],
+        bbox=bbox,
+        baseline=Baseline(y=y + 6.0),
+        direction=WritingDirection.LEFT_TO_RIGHT,
+        native_order_min=0,
+        native_order_max=0,
+        line_id=line_id,
+    )
+
+
+def _body_line(text: str, x: float, y: float, line_id: str, height: float = 12.0) -> TextLine:
+    """Standard body line taller than a script candidate."""
+    bbox = BBox(x, y, x + len(text) * 8.0, y + height)
+    token = TextToken(
+        text=text,
+        bbox=bbox,
+        sources=[EvidenceRef(SourceKind.NATIVE_PDF, 0, f"body:{line_id}")],
+        confidence=1.0,
+        normalized_text=normalize_text(text),
+    )
+    return TextLine(
+        tokens=[token],
+        bbox=bbox,
+        baseline=Baseline(y=y + height),
+        direction=WritingDirection.LEFT_TO_RIGHT,
+        native_order_min=1,
+        native_order_max=1,
+        line_id=line_id,
+    )
+
+
+def test_script_merge_records_source_lineage() -> None:
+    """Consumed candidate line_id must appear in target.merged_source_line_ids."""
+    body = _body_line("E", x=0.0, y=0.0, line_id="body-line")
+    # '2' sits above the body line (subscript check: cy < body.cy → superscript)
+    exponent = _script_candidate("2", x=4.0, y=-4.0, line_id="exponent-line")
+
+    result = _merge_script_lines([body, exponent])
+
+    # The exponent must have been consumed into the body line.
+    surviving_ids = [ln.line_id for ln in result]
+    assert "exponent-line" not in surviving_ids
+
+    merged = next((ln for ln in result if ln.line_id == "body-line"), None)
+    assert merged is not None, "body line must survive as the merge target"
+    assert "exponent-line" in merged.merged_source_line_ids
+
+
+def test_no_merge_when_candidate_has_no_tall_neighbor() -> None:
+    """An isolated single-char line with no matching neighbor keeps its lineage clean."""
+    isolated = _script_candidate("2", x=0.0, y=0.0, line_id="isolated")
+
+    result = _merge_script_lines([isolated])
+
+    assert len(result) == 1
+    assert result[0].line_id == "isolated"
+    assert result[0].merged_source_line_ids == ()
+
+
+def test_body_line_merged_source_ids_empty_by_default() -> None:
+    """A line that consumes nothing has an empty merged_source_line_ids tuple."""
+    body = _body_line("texto", x=0.0, y=0.0, line_id="plain-body")
+
+    result = _merge_script_lines([body])
+
+    assert result[0].merged_source_line_ids == ()

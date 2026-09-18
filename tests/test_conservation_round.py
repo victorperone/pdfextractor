@@ -442,6 +442,53 @@ def test_new_diagnostic_keys_are_present_in_facts() -> None:
     assert facts["content_duplicate_claims_resolved"] == 0
 
 
+def test_script_merge_source_appears_deduplicated_in_ledger() -> None:
+    """A line consumed by _merge_script_lines appears as DEDUPLICATED in the ledger."""
+    from dataclasses import replace as dc_replace
+    from structured_pdf_text.document import ContentDisposition
+
+    # Two lines: body (owner) and a script source that was merged into it.
+    body_line = _line("E²", BBox(0, 0, 40, 12), "body-line")
+    script_source = _line("2", BBox(4, -4, 10, 2), "script-source")
+
+    # Simulate the result of _merge_script_lines: body now carries the source ID,
+    # and script_source no longer exists as a standalone accepted line.
+    merged_body = dc_replace(body_line, merged_source_line_ids=("script-source",))
+
+    # Only the merged body is accepted (script_source was removed from output).
+    region = LayoutRegion(
+        region_id="region-main",
+        kind=RegionKind.TEXT,
+        bbox=BBox(0, 0, 600, 800),
+        layout_confidence=1.0,
+        native_lines=[merged_body, script_source],
+        ocr_tokens=[],
+        quality=RegionQuality(RegionDecision.KEEP_NATIVE),
+    )
+    page = StructuredPage(
+        page_index=0,
+        bbox=BBox(0, 0, 600, 800),
+        regions=[region],
+        tables=[],
+        raw_text="",
+        reading_text="",
+        diagnostics=PageDiagnostics(
+            page_index=0,
+            strategy=PageStrategy.NATIVE,
+            reasons=[],
+            native_chars=0,
+            native_text_length=0,
+        ),
+    )
+    block = _block("page-1:block-1", ["body-line"], [merged_body])
+    _, _, records = record_content_conservation(page, [block])
+
+    record_map = {r.line_id: r for r in records}
+    assert "script-source" in record_map, "merged source must appear in ledger"
+    assert record_map["script-source"].disposition == ContentDisposition.DEDUPLICATED
+    assert record_map["script-source"].reason == "script_merge"
+
+
 def test_explicit_page_numbering_is_still_normalized_for_repeated_furniture() -> None:
     pages = [
         _page(

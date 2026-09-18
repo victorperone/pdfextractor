@@ -107,6 +107,14 @@ def record_content_conservation(
     # through (e.g. a block whose line_ids were not reachable via accepted_map).
     duplicate_assignment_count = 0
 
+    # Index lines that were consumed by _merge_script_lines so their source IDs
+    # can be registered as DEDUPLICATED once their owner line is known.
+    merged_sources: dict[str, str] = {}  # canonical source_id → owner line_identity
+    for _, line in accepted:
+        owner_id = line_identity(line)
+        for src_id in line.merged_source_line_ids:
+            merged_sources[_canonical_line_id(src_id)] = owner_id
+
     for block in blocks:
         disposition, reason = _block_disposition(block)
         block_line_ids = {_canonical_line_id(line_id) for line_id in block.line_ids}
@@ -121,6 +129,16 @@ def record_content_conservation(
                 disposition=disposition,
                 owner_id=block.block_id,
                 reason=reason,
+            )
+
+    # Register source lines consumed by script-merge as DEDUPLICATED.
+    for src_id, owner_line_id in merged_sources.items():
+        if src_id not in records and src_id in accepted_map:
+            records[src_id] = ContentDispositionRecord(
+                line_id=src_id,
+                disposition=ContentDisposition.DEDUPLICATED,
+                owner_id=owner_line_id,
+                reason="script_merge",
             )
 
     # ── Phase 3: unaccounted lines → positional fallbacks ────────────────────

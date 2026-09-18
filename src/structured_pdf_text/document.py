@@ -248,6 +248,7 @@ class TextLine:
     text_override: str | None = None
     join_next_without_space: bool = False
     ghost_punctuation_candidate: bool = False
+    merged_source_line_ids: tuple[str, ...] = ()
 
     @property
     def text(self) -> str:
