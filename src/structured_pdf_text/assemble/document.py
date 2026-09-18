@@ -185,32 +185,79 @@ def _apply_repeated_suppression(
     repeated: dict[str, list[int]],
     preserve_headers_footers: bool,
 ) -> None:
-    """Mark only confirmed repeated furniture; never suppress by edge kind."""
+    """Suppress only blocks wholly owned by confirmed repeated furniture.
+
+    A block may contain both an edge candidate and unique semantic content.
+    In that case the safe behaviour is to preserve the complete block rather
+    than allowing one repeated line to suppress unrelated lines.
+
+    Partial suppression can be introduced later only with explicit line-level
+    block splitting and conservation accounting.
+    """
     if preserve_headers_footers or not repeated:
         return
+
     line_keys = repeated_line_keys(page)
     repeated_keys = set(repeated)
-    line_ids_by_key: dict[str, set[str]] = {}
+
+    repeated_role_by_line_id: dict[str, str] = {}
+
     for region in page.regions:
         for line in [*region.native_lines, *region.ocr_lines]:
             text = unicodedata.normalize("NFC", line.text.strip())
             key = line_keys.get(text)
-            if key in repeated_keys and page.page_index in repeated[key]:
-                line_ids_by_key.setdefault(key, set()).add(
-                    line.line_id or f"line:{id(line)}"
-                )
+
+            if key not in repeated_keys:
+                continue
+            if page.page_index not in repeated[key]:
+                continue
+
+            if key.startswith("header:"):
+                reason = "repeated_header"
+            elif key.startswith("footer:"):
+                reason = "repeated_footer"
+            else:
+                continue
+
+            line_id = line.line_id or f"line:{id(line)}"
+            previous = repeated_role_by_line_id.get(line_id)
+
+            # If the same source line is ambiguously classified as two
+            # different furniture roles, preserving it is safer than
+            # suppressing it.
+            if previous is not None and previous != reason:
+                repeated_role_by_line_id[line_id] = "ambiguous"
+            else:
+                repeated_role_by_line_id[line_id] = reason
+
     for block in blocks:
-        matching_keys = [
-            key
-            for key, line_ids in line_ids_by_key.items()
-            if set(block.line_ids).intersection(line_ids)
-        ]
-        if not matching_keys:
+        block_line_ids = {
+            line_id
+            for line_id in block.line_ids
+            if line_id
+        }
+
+        if not block_line_ids:
             continue
-        key = matching_keys[0]
-        if key.startswith("header:"):
-            block.suppressed = True
-            block.suppression_reason = "repeated_header"
-        elif key.startswith("footer:"):
-            block.suppressed = True
-            block.suppression_reason = "repeated_footer"
+
+        roles = {
+            repeated_role_by_line_id.get(line_id)
+            for line_id in block_line_ids
+        }
+
+        # Every line owned by this block must be confirmed as repeated
+        # furniture. A partial match must never suppress unique content.
+        if None in roles:
+            continue
+
+        # Mixed or ambiguous header/footer ownership is also preserved.
+        if len(roles) != 1:
+            continue
+
+        reason = next(iter(roles))
+
+        if reason == "ambiguous":
+            continue
+
+        block.suppressed = True
+        block.suppression_reason = reason
