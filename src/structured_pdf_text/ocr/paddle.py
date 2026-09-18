@@ -417,6 +417,7 @@ class PaddleOcrEngine:
             selected_candidate,
             candidates,
             thresholds=self.quality_thresholds,
+            page_bbox=page_bbox,
         )
         self.last_consensus_replacements = replacements
         self.last_consensus_insertions = insertions
@@ -1124,20 +1125,35 @@ def _select_variants(
     return [variant for variant in variants if variant.family in families]
 
 
+_MIN_FUSION_AREA_RETENTION = 0.80
+
+
 def _spatial_consensus(
     primary: OcrCandidate,
     candidates: list[OcrCandidate],
     *,
     thresholds: OcrQualityThresholds | None = None,
+    page_bbox: BBox | None = None,
 ) -> tuple[list[OcrToken], int, int]:
     """Fuse only hypotheses that were actually observed by OCR.
 
     Consensus is computed first at line level and then at token level. Image
     enhancements in the same family count as one source, so seven contrast
     variants cannot outvote one independent baseline/sharpness hypothesis.
+
+    When page geometry is available, fusion must also conserve the spatial
+    evidence of the primary candidate. A materially smaller replacement is
+    rolled back even when it preserves the same number of line clusters.
     """
-    before_metrics = assess_ocr_coverage(primary.tokens, None)
-    merged, replacements = _line_level_consensus(primary, candidates, page_bbox=None)
+    before_metrics = assess_ocr_coverage(
+        primary.tokens,
+        page_bbox,
+    )
+    merged, replacements = _line_level_consensus(
+        primary,
+        candidates,
+        page_bbox=page_bbox,
+    )
     attempted = replacements
     insertions = 0
     alternate_candidates = [candidate for candidate in candidates if candidate.name != primary.name]
@@ -1203,11 +1219,33 @@ def _spatial_consensus(
     merged = _remove_contained_fragments(
         sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))
     )
-    after_metrics = assess_ocr_coverage(merged, None)
+    after_metrics = assess_ocr_coverage(
+        merged,
+        page_bbox,
+    )
     duplicate_clusters = _duplicate_cluster_count(merged)
-    lost_clusters = max(0, before_metrics.line_cluster_count - after_metrics.line_cluster_count)
+    lost_clusters = max(
+        0,
+        before_metrics.line_cluster_count
+        - after_metrics.line_cluster_count,
+    )
+
+    area_regressed = (
+        page_bbox is not None
+        and before_metrics.text_area_coverage > 0.0
+        and after_metrics.text_area_coverage
+        < (
+            before_metrics.text_area_coverage
+            * _MIN_FUSION_AREA_RETENTION
+        )
+    )
+
     rolled_back = 0
-    if lost_clusters > 0 or duplicate_clusters > 0:
+    if (
+        lost_clusters > 0
+        or duplicate_clusters > 0
+        or area_regressed
+    ):
         merged = list(primary.tokens)
         rolled_back = replacements + insertions
         replacements = 0

@@ -235,6 +235,153 @@ def test_single_alternate_large_delta_can_replace_a_very_weak_primary() -> None:
     assert merged[0].text == "alternate"
 
 
+def test_spatial_consensus_rolls_back_large_area_loss() -> None:
+    page = BBox(0, 0, 400, 100)
+    thresholds = OcrQualityThresholds()
+
+    primary_token = OcrToken(
+        text="relatorio completo 2026",
+        bbox=BBox(10, 10, 210, 20),
+        confidence=0.40,
+        language="pt",
+        source=SourceKind.OCR_PAGE,
+    )
+    alternate_token_a = OcrToken(
+        text="relatorio 2026",
+        bbox=BBox(10, 10, 90, 20),
+        confidence=0.92,
+        language="pt",
+        source=SourceKind.OCR_PAGE,
+    )
+    alternate_token_b = OcrToken(
+        text="relatorio 2026",
+        bbox=BBox(10, 10, 90, 20),
+        confidence=0.94,
+        language="pt",
+        source=SourceKind.OCR_PAGE,
+    )
+
+    primary = _make_candidate(
+        "primary",
+        [primary_token],
+        None,
+        page,
+        thresholds,
+        family="baseline",
+    )
+    alternate_a = _make_candidate(
+        "alternate-a",
+        [alternate_token_a],
+        None,
+        page,
+        thresholds,
+        family="contrast",
+    )
+    alternate_b = _make_candidate(
+        "alternate-b",
+        [alternate_token_b],
+        None,
+        page,
+        thresholds,
+        family="sharpness",
+    )
+
+    merged, replacements, insertions = _spatial_consensus(
+        primary,
+        [
+            primary,
+            alternate_a,
+            alternate_b,
+        ],
+        thresholds=thresholds,
+        page_bbox=page,
+    )
+
+    # Line count alone cannot detect this regression: both the primary and
+    # replacement still contain exactly one reconstructed line. The much
+    # smaller spatial footprint must therefore trigger the rollback.
+    assert primary.fusion_lost_clusters == 0
+    assert primary.fusion_replacements_rolled_back >= 1
+
+    assert replacements == 0
+    assert insertions == 0
+    assert len(merged) == 1
+    assert merged[0].text == primary_token.text
+    assert merged[0].bbox == primary_token.bbox
+
+
+def test_spatial_consensus_accepts_modest_area_tightening() -> None:
+    page = BBox(0, 0, 200, 100)
+    thresholds = OcrQualityThresholds()
+
+    primary_token = OcrToken(
+        text="relatorio completo 2026",
+        bbox=BBox(10, 10, 110, 20),
+        confidence=0.40,
+        language="pt",
+        source=SourceKind.OCR_PAGE,
+    )
+    alternate_token_a = OcrToken(
+        text="relatorio 2026",
+        bbox=BBox(10, 10, 100, 20),
+        confidence=0.92,
+        language="pt",
+        source=SourceKind.OCR_PAGE,
+    )
+    alternate_token_b = OcrToken(
+        text="relatorio 2026",
+        bbox=BBox(10, 10, 100, 20),
+        confidence=0.94,
+        language="pt",
+        source=SourceKind.OCR_PAGE,
+    )
+
+    primary = _make_candidate(
+        "primary",
+        [primary_token],
+        None,
+        page,
+        thresholds,
+        family="baseline",
+    )
+    alternate_a = _make_candidate(
+        "alternate-a",
+        [alternate_token_a],
+        None,
+        page,
+        thresholds,
+        family="contrast",
+    )
+    alternate_b = _make_candidate(
+        "alternate-b",
+        [alternate_token_b],
+        None,
+        page,
+        thresholds,
+        family="sharpness",
+    )
+
+    merged, replacements, insertions = _spatial_consensus(
+        primary,
+        [
+            primary,
+            alternate_a,
+            alternate_b,
+        ],
+        thresholds=thresholds,
+        page_bbox=page,
+    )
+
+    # A modest tightening of the OCR box is normal and must not cause an
+    # unnecessary rollback.
+    assert primary.fusion_replacements_rolled_back == 0
+
+    assert replacements == 1
+    assert insertions == 0
+    assert len(merged) == 1
+    assert merged[0].text == alternate_token_b.text
+
+
 def test_compact_candidate_merge_removes_residual_fragments() -> None:
     fragments = [
         _ocr_token("R$", 0.80, 10, 10),
