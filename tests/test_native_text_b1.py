@@ -59,7 +59,7 @@ def test_b1_matches_units_and_region_relationships_without_using_native_order():
     assert not any(f.category is B1Category.UNIT_MISSING for f in findings)
 
 
-def test_b1_preserves_duplicate_occurrences_and_flags_logical_order():
+def test_b1_preserves_duplicate_occurrences():
     reference = {
         "page": 1,
         "regions": [{"region_id": "R1"}],
@@ -69,15 +69,52 @@ def test_b1_preserves_duplicate_occurrences_and_flags_logical_order():
         ],
         "tables": [],
     }
-    # The observed sequence is intentionally reversed; association is still
-    # one-to-one by occurrence and the order mismatch is reported separately.
+    # Duplicate text remains one-to-one by occurrence.
     observed = _page([_region("observed", _line("repetido", "line-2", 0, 20), _line("repetido", "line-1", 0, 0))])
 
     summary, findings = audit_page_structure(reference, observed)
 
     assert summary.matched_units == 2
-    assert summary.categories[B1Category.READING_ORDER_MISMATCH.value] == 1
     assert not any(f.category is B1Category.UNIT_MISSING for f in findings)
+
+
+def test_b1_flags_logical_order_when_texts_are_geometrically_inverted():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            _unit("U1", "primeiro", "R1", 1, (0, 0, 80, 10)),
+            _unit("U2", "segundo", "R1", 2, (0, 20, 80, 30)),
+        ],
+        "tables": [],
+    }
+    observed = _page([_region(
+        "observed",
+        _line("segundo", "line-2", 0, 0),
+        _line("primeiro", "line-1", 0, 20),
+    )])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.categories[B1Category.READING_ORDER_MISMATCH.value] == 1
+    assert not any(finding.category is B1Category.UNIT_MISSING for finding in findings)
+
+
+def test_b1_separates_exact_text_relocated_from_text_missing():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "deslocado", "R1", 1, (0, 0, 80, 10))],
+        "tables": [],
+    }
+    observed = _page([_region("observed", _line("deslocado", "line-1", 0, 100))])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_GEOMETRY_MISMATCH.value] == 1
+    assert summary.categories.get(B1Category.UNIT_MISSING.value, 0) == 0
+    assert not summary.auditable
 
 
 def test_b1_classifies_complete_unit_split_across_adjacent_lines():

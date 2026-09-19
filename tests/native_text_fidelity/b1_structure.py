@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 class B1Category(str, Enum):
     UNIT_MATCHED = "unit_matched"
     UNIT_FRAGMENTED = "unit_fragmented"
+    UNIT_GEOMETRY_MISMATCH = "unit_geometry_mismatch"
     UNIT_MISSING = "unit_missing"
     REGION_FRAGMENTED = "region_fragmented"
     READING_ORDER_MISMATCH = "reading_order_mismatch"
@@ -62,6 +63,7 @@ class B1PageSummary:
             self.categories.get(category, 0)
             for category in (
                 B1Category.UNIT_MISSING.value,
+                B1Category.UNIT_GEOMETRY_MISMATCH.value,
                 B1Category.REGION_FRAGMENTED.value,
                 B1Category.READING_ORDER_MISMATCH.value,
                 B1Category.TABLE_MISSING.value,
@@ -111,6 +113,7 @@ class _ObservedLine:
     line: Any
     region_id: str
     order_index: int
+    region_kind: str = ""
 
 
 def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) -> tuple[B1PageSummary, tuple[B1Finding, ...]]:
@@ -154,7 +157,16 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
         chosen = candidates[0]
         used.add(chosen.order_index)
         matched[unit_id] = (chosen,)
-        findings.append(B1Finding(page, B1Category.UNIT_MATCHED, unit_id, observed_id=chosen.line.line_id, expected_text=expected, observed_text=chosen.line.text))
+        geometry_mismatch = _geometry_mismatch(expected_box, _line_box(chosen.line))
+        findings.append(B1Finding(
+            page,
+            B1Category.UNIT_GEOMETRY_MISMATCH if geometry_mismatch else B1Category.UNIT_MATCHED,
+            unit_id,
+            observed_id=chosen.line.line_id,
+            expected_text=expected,
+            observed_text=chosen.line.text,
+            reasons=("exact_text_associated_outside_expected_geometry",) if geometry_mismatch else (),
+        ))
 
     # A reference region is reconstructed only from the geometry of its units;
     # this avoids inventing a region bbox contract that the reference does not
@@ -258,12 +270,113 @@ def audit_document_structure(reference: Mapping[str, Any], observed_document: An
 
 def _observed_lines(page: Any) -> list[_ObservedLine]:
     result: list[_ObservedLine] = []
-    index = 0
     for region in getattr(page, "regions", []) or []:
+        kind = getattr(getattr(region, "kind", None), "value", str(getattr(region, "kind", "")))
         for line in [*getattr(region, "native_lines", []), *getattr(region, "ocr_lines", [])]:
-            result.append(_ObservedLine(line, str(getattr(region, "region_id", "")), index))
-            index += 1
-    return result
+            result.append(_ObservedLine(line, str(getattr(region, "region_id", "")), -1, kind))
+    ordered = _infer_observed_reading_order(result, page)
+    return [
+        _ObservedLine(item.line, item.region_id, index, item.region_kind)
+        for index, item in enumerate(ordered)
+    ]
+
+
+def _infer_observed_reading_order(items: Sequence[_ObservedLine], page: Any) -> list[_ObservedLine]:
+    """Infer order from observed geometry, not region/list/native insertion order."""
+
+    table_objects = [
+        table
+        for table in getattr(page, "tables", []) or []
+        if any(fragment.bbox is not None for fragment in getattr(table, "page_fragments", []))
+    ]
+    table_boxes = [
+        [fragment.bbox for fragment in getattr(table, "page_fragments", []) if fragment.bbox is not None]
+        for table in table_objects
+    ]
+    table_index_by_item: dict[int, int] = {}
+    table_cell_by_item: dict[int, tuple[int, int]] = {}
+    for item_index, item in enumerate(items):
+        for table_index, boxes in enumerate(table_boxes):
+            if any(_line_box_overlaps(item.line, box) for box in boxes):
+                table_index_by_item[item_index] = table_index
+                cells = [
+                    cell for cell in getattr(table_objects[table_index], "cells", [])
+                    if getattr(cell, "bbox", None) is not None
+                    and cell.bbox.x0 <= item.line.bbox.cx <= cell.bbox.x1
+                    and cell.bbox.y0 <= item.line.bbox.cy <= cell.bbox.y1
+                ]
+                if cells:
+                    cell = min(cells, key=lambda value: value.bbox.area)
+                    table_cell_by_item[item_index] = (int(cell.row), int(cell.col))
+                break
+
+    column_anchors = _column_anchors(
+        [
+            item.line
+            for index, item in enumerate(items)
+            if index not in table_index_by_item
+            and item.region_kind in {"text", "list", "unknown", ""}
+            and item.line.bbox.y0 >= 60.0
+            and item.line.bbox.y1 <= 800.0
+        ]
+    )
+    column_mode = len(column_anchors) >= 2
+
+    def key(index_and_item: tuple[int, _ObservedLine]) -> tuple[Any, ...]:
+        index, item = index_and_item
+        box = _line_box(item.line)
+        assert box is not None
+        x0, y0, _, _ = box
+        table_index = table_index_by_item.get(index)
+        if table_index is not None:
+            table_y = min(box.y0 for box in table_boxes[table_index])
+            cell = table_cell_by_item.get(index)
+            if cell is not None:
+                return (1, 100 + table_index, cell[0], cell[1], y0, x0)
+            return (1, 100 + table_index, table_y, y0, x0)
+        if y0 < 70.0:
+            return (0, y0, x0)
+        if item.region_kind in {"footer", "footnote", "caption"}:
+            return (2, y0, x0)
+        if item.region_kind == "marginalia":
+            return (0, 100.0 + x0, y0)
+        if column_mode:
+            lane = _nearest_column(x0, column_anchors)
+            return (1, 10 + lane, y0, x0)
+        return (1, 50, y0, x0)
+
+    return [item for _, item in sorted(enumerate(items), key=key)]
+
+
+def _column_anchors(lines: Sequence[Any]) -> tuple[float, ...]:
+    if len(lines) < 6:
+        return ()
+    values = sorted(float(line.bbox.x0) for line in lines)
+    clusters: list[list[float]] = []
+    for value in values:
+        if not clusters or value - clusters[-1][-1] > 15.0:
+            clusters.append([value])
+        else:
+            clusters[-1].append(value)
+    anchors = [sum(cluster) / len(cluster) for cluster in clusters if len(cluster) >= 3]
+    anchors = [value for value in anchors if all(abs(value - other) >= 40.0 for other in anchors if other != value)]
+    return tuple(anchors)
+
+
+def _nearest_column(value: float, anchors: Sequence[float]) -> int:
+    return min(range(len(anchors)), key=lambda index: abs(value - anchors[index]))
+
+
+def _line_box_overlaps(line: Any, box: Any) -> bool:
+    line_box = _line_box(line)
+    if line_box is None:
+        return False
+    return not (
+        line_box[2] < box.x0
+        or line_box[0] > box.x1
+        or line_box[3] < box.y0
+        or line_box[1] > box.y1
+    )
 
 
 def _reference_cell_shape(cells: Sequence[Mapping[str, Any]]) -> set[tuple[int, int, int, int]]:
@@ -337,6 +450,25 @@ def _boxes_overlap_with_tolerance(
         or observed[3] < expected[1] - tolerance
         or observed[1] > expected[3] + tolerance
     )
+
+
+def _geometry_mismatch(
+    expected: tuple[float, float, float, float] | None,
+    observed: tuple[float, float, float, float] | None,
+) -> bool:
+    if expected is None or observed is None:
+        return False
+    if not (
+        observed[2] < expected[0]
+        or observed[0] > expected[2]
+        or observed[3] < expected[1]
+        or observed[1] > expected[3]
+    ):
+        return False
+    scale = max(expected[2] - expected[0], expected[3] - expected[1], 1.0)
+    expected_center = ((expected[0] + expected[2]) / 2, (expected[1] + expected[3]) / 2)
+    observed_center = ((observed[0] + observed[2]) / 2, (observed[1] + observed[3]) / 2)
+    return math.hypot(expected_center[0] - observed_center[0], expected_center[1] - observed_center[1]) > max(12.0, scale * 0.5)
 
 
 def _normalized(value: str) -> str:

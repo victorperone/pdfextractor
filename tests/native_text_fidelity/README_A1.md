@@ -143,6 +143,11 @@ O resultado produz `b1_metadata.json`, `b1_summary.json` e
 `b1_findings.jsonl`. `table_missing` e `table_cell_mismatch` são achados
 estruturais; não são convertidos em perda de texto A1.
 
+Quando o texto exato existe, mas a ocorrência escolhida está distante da bbox
+de referência, o auditor registra `unit_geometry_mismatch`; isso não é contado
+como `unit_missing`, mas impede o gate estrutural. A associação continua por
+ocorrência e proximidade, sem aceitar a referência como saída do extrator.
+
 O detector de tabelas nativas aceita tanto segmentos finos quanto caminhos
 retangulares repetidos que representam contornos de células. Em tabelas
 borderless, linhas nativas com a mesma linha de base geométrica são agrupadas
