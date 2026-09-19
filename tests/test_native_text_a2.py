@@ -23,6 +23,7 @@ from structured_pdf_text.document import (
     TextToken,
     WritingDirection,
 )
+from structured_pdf_text.assemble.conservation import record_content_conservation
 from structured_pdf_text.geometry import BBox
 from a2_conservation import (
     ConservationCategory,
@@ -115,3 +116,28 @@ def test_a2_distinguishes_unaccounted_nonblank_content_from_blank_lines():
     assert not summary.auditable
     assert by_id["line-u"].category is ConservationCategory.UNACCOUNTED
     assert by_id["line-blank"].category is ConservationCategory.BLANK_NOT_ASSESSABLE
+
+
+def test_a2_reaudits_the_production_ledger_after_duplicate_resolution():
+    page = _page([_line("A", "line-a")])
+    blocks = [_block("first", ["line-a"]), _block("second", ["line-a"])]
+
+    resolved_blocks, production_summary, records = record_content_conservation(page, blocks)
+    audit_summary, findings = audit_page_conservation(page, resolved_blocks, records)
+
+    assert production_summary.duplicate_claims_detected == 1
+    assert production_summary.duplicate_claims_resolved == 1
+    assert audit_summary.auditable
+    assert audit_summary.visible_owned_once == 1
+    assert all(finding.category is not ConservationCategory.DUPLICATE_OWNER for finding in findings)
+
+
+def test_a2_reaudits_the_production_fallback_as_visible_ownership():
+    page = _page([_line("fallback", "line-u")])
+
+    fallback_blocks, production_summary, records = record_content_conservation(page, [])
+    audit_summary, findings = audit_page_conservation(page, fallback_blocks, records)
+
+    assert production_summary.fallback_lines == 1
+    assert audit_summary.auditable
+    assert findings[0].category is ConservationCategory.OWNED_ONCE
