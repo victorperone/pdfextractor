@@ -153,7 +153,9 @@ reconstrução conservadora por tokens nativos dentro da bbox de referência.
 Isso cobre pontuação emitida em linha separada, quebras de linha e células de
 tabela que compartilham uma linha com outro campo. O resultado é registrado
 como `unit_fragmented`, preservando o texto observado e sem relaxar a igualdade
-de conteúdo.
+de conteúdo. Quando dois campos compartilham a mesma linha, o consumo é
+controlado por índice de token; um campo não pode consumir novamente os tokens
+já associados a outro.
 
 O detector de tabelas nativas aceita tanto segmentos finos quanto caminhos
 retangulares repetidos que representam contornos de células. Em tabelas

@@ -186,6 +186,36 @@ def test_b1_reconstructs_table_tokens_in_horizontal_order_despite_baseline_varia
     assert fragmented.observed_text == "Equipamento auditável"
 
 
+def test_b1_allows_disjoint_units_to_share_one_observed_line():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            _unit("U1", "Equipamento auditável", "R1", 1, (0, 0, 100, 10)),
+            _unit("U2", "00007", "R1", 2, (100, 0, 125, 10)),
+        ],
+        "tables": [],
+    }
+    line = _line("Equipamento auditável 00007", "line-1", 0, 0)
+    line.bbox = BBox(0, 0, 140, 10)
+    line.tokens = [
+        SimpleNamespace(text="Equipamento", bbox=BBox(0, 6, 45, 10)),
+        SimpleNamespace(text=" auditável", bbox=BBox(45, 0, 95, 4)),
+        SimpleNamespace(text=" 00007", bbox=BBox(100, 6, 125, 10)),
+    ]
+    observed = _page([_region("observed", line)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 2
+    assert summary.categories[B1Category.UNIT_FRAGMENTED.value] == 2
+    assert summary.categories.get(B1Category.UNIT_MISSING.value, 0) == 0
+    assert [finding.observed_text for finding in findings if finding.category is B1Category.UNIT_FRAGMENTED] == [
+        "Equipamento auditável",
+        " 00007",
+    ]
+
+
 def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
     reference = {
         "page": 1,

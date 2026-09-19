@@ -116,6 +116,13 @@ class _ObservedLine:
     region_kind: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _FragmentedMatch:
+    lines: tuple[_ObservedLine, ...]
+    text: str
+    token_indexes: tuple[tuple[int, tuple[int, ...]], ...] = ()
+
+
 def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) -> tuple[B1PageSummary, tuple[B1Finding, ...]]:
     """Compare structural relationships without requiring source draw order."""
 
@@ -124,6 +131,7 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
     units = list(reference_page.get("units", []))
     findings: list[B1Finding] = []
     used: set[int] = set()
+    used_tokens: dict[int, set[int]] = {}
     matched: dict[str, tuple[_ObservedLine, ...]] = {}
 
     for unit in units:
@@ -132,23 +140,27 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
         candidates = [
             item for item in observed_lines
             if item.order_index not in used
+            and not used_tokens.get(item.order_index)
             and _normalized(item.line.text) == _normalized(expected)
         ]
         if not candidates:
-            fragmented = _find_fragmented_unit(unit, expected, observed_lines, used)
+            fragmented = _find_fragmented_unit(unit, expected, observed_lines, used, used_tokens)
             if fragmented:
-                fragmented_lines, fragmented_text = fragmented
-                for item in fragmented_lines:
-                    used.add(item.order_index)
-                matched[unit_id] = fragmented_lines
+                if fragmented.token_indexes:
+                    for order_index, token_indexes in fragmented.token_indexes:
+                        used_tokens.setdefault(order_index, set()).update(token_indexes)
+                else:
+                    for item in fragmented.lines:
+                        used.add(item.order_index)
+                matched[unit_id] = fragmented.lines
                 findings.append(B1Finding(
                     page,
                     B1Category.UNIT_FRAGMENTED,
                     unit_id,
-                    observed_id=",".join(str(item.line.line_id) for item in fragmented_lines),
+                    observed_id=",".join(str(item.line.line_id) for item in fragmented.lines),
                     expected_text=expected,
-                    observed_text=fragmented_text,
-                    reasons=(f"unit_reconstructed_from_{len(fragmented_lines)}_observed_lines",),
+                    observed_text=fragmented.text,
+                    reasons=(f"unit_reconstructed_from_{len(fragmented.lines)}_observed_lines",),
                 ))
                 continue
             findings.append(B1Finding(page, B1Category.UNIT_MISSING, unit_id, expected_text=expected, reasons=("no_unconsumed_exact_or_whitespace_equivalent_line",)))
@@ -403,15 +415,16 @@ def _find_fragmented_unit(
     expected: str,
     observed_lines: Sequence[_ObservedLine],
     used: set[int],
-) -> tuple[tuple[_ObservedLine, ...], str] | None:
+    used_tokens: Mapping[int, set[int]],
+) -> _FragmentedMatch | None:
     """Recover a reference unit split into adjacent observed lines.
 
     This is intentionally a conservative, geometry-bounded reconstruction:
-    only unused lines whose boxes overlap the reference unit are considered,
-    and the joined text must equal the reference text after whitespace
-    normalization.  It therefore distinguishes a complete one-to-many
-    extraction from a genuinely missing unit without accepting arbitrary page
-    substrings.
+    only unused lines (or unconsumed token subsets) whose boxes overlap the
+    reference unit are considered, and the joined text must equal the
+    reference text after whitespace normalization. It therefore distinguishes
+    a complete one-to-many extraction from a genuinely missing unit without
+    accepting arbitrary page substrings.
     """
 
     expected_box = _box(unit.get("bbox_top_origin_pt"))
@@ -420,15 +433,16 @@ def _find_fragmented_unit(
     candidates = [
         item for item in observed_lines
         if item.order_index not in used
+        and _has_available_tokens(item, used_tokens)
         and _normalized(item.line.text)
         and _boxes_overlap_with_tolerance(expected_box, _line_box(item.line))
     ]
     candidates.sort(key=lambda item: item.order_index)
     if len(candidates) < 2:
-        token_match = _reconstruct_from_tokens(expected, expected_box, candidates)
+        token_match = _reconstruct_from_tokens(expected, expected_box, candidates, used_tokens)
         return token_match
 
-    token_match = _reconstruct_from_tokens(expected, expected_box, candidates)
+    token_match = _reconstruct_from_tokens(expected, expected_box, candidates, used_tokens)
     if token_match is not None:
         return token_match
 
@@ -436,22 +450,35 @@ def _find_fragmented_unit(
     for start in range(len(candidates)):
         for end in range(start + 2, min(len(candidates), start + 8) + 1):
             window = tuple(candidates[start:end])
+            if any(item.order_index in used_tokens for item in window):
+                continue
             if _normalized(" ".join(item.line.text for item in window)) == normalized_expected:
-                return window, " ".join(item.line.text for item in window)
+                return _FragmentedMatch(window, " ".join(item.line.text for item in window))
     return None
+
+
+def _has_available_tokens(item: _ObservedLine, used_tokens: Mapping[int, set[int]]) -> bool:
+    consumed = used_tokens.get(item.order_index)
+    if not consumed:
+        return True
+    tokens = getattr(item.line, "tokens", []) or []
+    return any(index not in consumed for index, _ in enumerate(tokens))
 
 
 def _reconstruct_from_tokens(
     expected: str,
     expected_box: tuple[float, float, float, float],
     candidates: Sequence[_ObservedLine],
-) -> tuple[tuple[_ObservedLine, ...], str] | None:
-    selected_by_line: dict[int, list[Any]] = {}
+    used_tokens: Mapping[int, set[int]],
+) -> _FragmentedMatch | None:
+    selected_by_line: dict[int, list[tuple[int, Any]]] = {}
     line_by_order: dict[int, _ObservedLine] = {}
     x_tolerance = max(2.0, min(8.0, (expected_box[2] - expected_box[0]) * 0.04))
     y_tolerance = max(1.0, min(3.0, (expected_box[3] - expected_box[1]) * 0.25))
     for item in candidates:
-        for token in getattr(item.line, "tokens", []) or []:
+        for token_index, token in enumerate(getattr(item.line, "tokens", []) or []):
+            if token_index in used_tokens.get(item.order_index, set()):
+                continue
             bbox = getattr(token, "bbox", None)
             if bbox is None:
                 continue
@@ -459,7 +486,7 @@ def _reconstruct_from_tokens(
                 expected_box[0] - x_tolerance <= bbox.cx <= expected_box[2] + x_tolerance
                 and expected_box[1] - y_tolerance <= bbox.cy <= expected_box[3] + y_tolerance
             ):
-                selected_by_line.setdefault(item.order_index, []).append(token)
+                selected_by_line.setdefault(item.order_index, []).append((token_index, token))
                 line_by_order[item.order_index] = item
     if not selected_by_line:
         return None
@@ -491,7 +518,7 @@ def _reconstruct_from_tokens(
         row_tokens = [
             (line_by_order[order_index], token)
             for order_index in row
-            for token in selected_by_line[order_index]
+            for _, token in selected_by_line[order_index]
         ]
         flattened.extend(sorted(row_tokens, key=lambda value: value[1].bbox.x0))
     reconstructed = "".join(str(token.text) for _, token in flattened)
@@ -504,7 +531,11 @@ def _reconstruct_from_tokens(
             lines_list.append(item)
             seen.add(item.order_index)
     lines = tuple(lines_list)
-    return lines, reconstructed
+    token_indexes = tuple(
+        (order_index, tuple(token_index for token_index, _ in selected_by_line[order_index]))
+        for order_index in sorted(selected_by_line)
+    )
+    return _FragmentedMatch(lines, reconstructed, token_indexes)
 
 
 def _boxes_overlap_with_tolerance(
