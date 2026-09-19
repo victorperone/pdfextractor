@@ -349,6 +349,39 @@ def test_reconciliation_spacing_recovery_still_works() -> None:
     assert result[0].text == "entrada Fundos"
 
 
+def test_reconciliation_advances_past_exact_matches_before_spacing_recovery() -> None:
+    """Exact matches consume candidates so later lines remain in the local window."""
+    native_lines = [
+        _recon_line(f"Linha {index}", f"line-{index}")
+        for index in range(1, 9)
+    ]
+    native_lines.append(_recon_line("entradaFundos", "tracked-line"))
+    extracted = "\n".join(
+        [*(f"Linha {index}" for index in range(1, 9)), "entrada Fundos"]
+    )
+
+    result = _reconcile_with_textpage(native_lines, extracted)
+
+    assert result[8].text == "entrada Fundos"
+
+
+def test_reconciliation_advances_past_more_than_twelve_exact_matches() -> None:
+    """A correction remains reachable after a longer run of exact matches."""
+    exact_count = 13
+    native_lines = [
+        _recon_line(f"Item {index}", f"item-{index}")
+        for index in range(exact_count)
+    ]
+    native_lines.append(_recon_line("custoTotal", "tracked-total"))
+    extracted = "\n".join(
+        [*(f"Item {index}" for index in range(exact_count)), "custo Total"]
+    )
+
+    result = _reconcile_with_textpage(native_lines, extracted)
+
+    assert result[-1].text == "custo Total"
+
+
 def test_reconciliation_does_not_replace_when_no_good_match() -> None:
     """A native line with no high-similarity candidate keeps its original text."""
     line = _recon_line("Conteúdo original", "orig")

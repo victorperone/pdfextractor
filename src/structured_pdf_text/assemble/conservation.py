@@ -17,6 +17,7 @@ from structured_pdf_text.document import (
     TextLine,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.text.lists import segment_list_lines
 from structured_pdf_text.text.normalize import normalize_reading_text
 
 
@@ -349,9 +350,28 @@ def _resolve_duplicate_ownership(
                     ) if t
                 )
                 block.bbox = BBox.union_all([ln.bbox for ln in remaining_lines])
-                # list_items cannot be safely reconstructed without a line→item
-                # mapping; clear them to avoid stale references.
-                block.list_items = []
+                if block.kind == ContentKind.LIST:
+                    segmentation = segment_list_lines(
+                        remaining_lines,
+                        allow_single=True,
+                    )
+                    if (
+                        segmentation.segments
+                        and all(segment.is_list for segment in segmentation.segments)
+                        and any(segment.items for segment in segmentation.segments)
+                    ):
+                        block.list_items = [
+                            item
+                            for segment in segmentation.segments
+                            for item in segment.items
+                        ]
+                    else:
+                        # Preserve the text, but do not claim list structure
+                        # when the surviving lines are no longer a safe list.
+                        block.kind = ContentKind.TEXT
+                        block.list_items = []
+                else:
+                    block.list_items = []
         else:
             # Every line in this block was already owned elsewhere.
             block.line_ids = []
@@ -388,12 +408,12 @@ def _insert_fallbacks_at_position(
     preserves the reading order established by the assembler instead of
     appending fallbacks to the end of the page.
     """
-    def _block_max_accepted_idx(block: PageContentBlock) -> int:
+    def _block_max_accepted_idx(block: PageContentBlock) -> int | None:
         indices = [
             accepted_order.get(_canonical_line_id(lid), -1)
             for lid in block.line_ids
         ]
-        return max(indices) if indices else -1
+        return max(indices) if indices else None
 
     for fallback in fallback_blocks:
         fallback_lid = (
@@ -403,7 +423,8 @@ def _insert_fallbacks_at_position(
 
         insert_pos = 0
         for i, block in enumerate(blocks):
-            if _block_max_accepted_idx(block) < fallback_idx:
+            block_max_idx = _block_max_accepted_idx(block)
+            if block_max_idx is not None and block_max_idx < fallback_idx:
                 insert_pos = i + 1
 
         blocks.insert(insert_pos, fallback)

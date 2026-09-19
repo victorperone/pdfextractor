@@ -144,30 +144,30 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
                 score = 1.0
             if score > best_score:
                 best_index, best_score = index, score
-        if (
-            best_index is not None
-            and best_score >= 0.92
-            and (
+        if best_index is not None and best_score >= 0.92:
+            candidate = candidates[best_index]
+            should_replace = (
                 best_score < 1.0
                 or _needs_textpage_spacing_recovery(line.text)
             )
-        ):
-            candidate = candidates[best_index]
-            output.append(
-                TextLine(
-                    tokens=line.tokens,
-                    bbox=line.bbox,
-                    baseline=line.baseline,
-                    direction=line.direction,
-                    native_order_min=line.native_order_min,
-                    native_order_max=line.native_order_max,
-                    gap_mode=line.gap_mode,
-                    order_mode=line.order_mode,
-                    line_id=line.line_id,
-                    text_override=candidate,
-                    join_next_without_space=line.join_next_without_space,
+            if should_replace:
+                output.append(
+                    TextLine(
+                        tokens=line.tokens,
+                        bbox=line.bbox,
+                        baseline=line.baseline,
+                        direction=line.direction,
+                        native_order_min=line.native_order_min,
+                        native_order_max=line.native_order_max,
+                        gap_mode=line.gap_mode,
+                        order_mode=line.order_mode,
+                        line_id=line.line_id,
+                        text_override=candidate,
+                        join_next_without_space=line.join_next_without_space,
+                    )
                 )
-            )
+            else:
+                output.append(line)
             available.remove(best_index)
             cursor = best_index + 1
         else:

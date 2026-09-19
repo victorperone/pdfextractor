@@ -79,7 +79,20 @@ def assemble_document(
             blocks,
             canonical_line_order=result.canonical_line_order,
         )
+        old_block_ids = {id(block): block.block_id for block in blocks}
         blocks = _reindex_blocks(blocks)
+        owner_id_remap = {
+            old_block_ids[id(block)]: block.block_id
+            for block in blocks
+            if id(block) in old_block_ids
+        }
+        records = tuple(
+            dataclasses.replace(
+                record,
+                owner_id=owner_id_remap.get(record.owner_id, record.owner_id),
+            )
+            for record in records
+        )
         if conservation.fallback_lines:
             page.diagnostics.warnings.append(
                 f"unaccounted_content: {conservation.fallback_lines} line(s) recovered by text fallback"

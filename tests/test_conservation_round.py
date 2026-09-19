@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from structured_pdf_text.assemble.conservation import record_content_conservation
 from structured_pdf_text.assemble.document import assemble_document
 from structured_pdf_text.document import (
@@ -37,6 +39,7 @@ from structured_pdf_text.tables.validation import validate_table_geometry
 from structured_pdf_text.renderers.markdown import render_markdown
 from structured_pdf_text.assemble.content import assemble_page_content
 from structured_pdf_text.text.line_detector import reconstruct_native_lines
+from structured_pdf_text.text.lists import segment_list_lines
 
 
 def _line(text: str, bbox: BBox, line_id: str) -> TextLine:
@@ -611,6 +614,113 @@ def test_real_script_merge_source_is_audited_without_becoming_visible_or_fallbac
         for block in document.pages[0].content_blocks
         for line_id in block.line_ids
     ]
+
+
+def test_transformed_source_owner_id_points_to_final_reindexed_target(monkeypatch) -> None:
+    before = _line("antes", BBox(0, 0, 40, 12), "before-line")
+    target = _line("E²", BBox(0, 20, 40, 32), "target-line")
+    target.merged_source_line_ids = ("script-source",)
+    page = _page_with_lines(before, target)
+    target_block = _block("legacy-target", ["target-line"], [target])
+    fake_assembly = SimpleNamespace(
+        blocks=(target_block,),
+        canonical_line_order=("before-line", "target-line"),
+        table_fallbacks=0,
+        claimed_table_lines=0,
+        orphan_tables=0,
+        assembly_ms=0.0,
+        list_segment_count=0,
+        list_item_count=0,
+        list_inferred_marker_count=0,
+        list_continuation_count=0,
+        list_unassigned_line_count=0,
+    )
+    monkeypatch.setattr(
+        "structured_pdf_text.assemble.document.assemble_page_content",
+        lambda _page: fake_assembly,
+    )
+
+    document = assemble_document(
+        [page],
+        metadata=DocumentMetadata("test.pdf", 1, None),
+    )
+
+    final_page = document.pages[0]
+    transformed = final_page.diagnostics.facts["content_transformed_sources"]
+    source_fact = next(item for item in transformed if item["source_line_id"] == "script-source")
+    final_ids = {block.block_id for block in final_page.content_blocks}
+    assert source_fact["owner_id"] in final_ids
+    owner = next(block for block in final_page.content_blocks if block.block_id == source_fact["owner_id"])
+    assert source_fact["target_line_id"] in owner.line_ids
+    assert final_page.content_blocks[0].text == "antes"
+
+
+def test_fallback_ignores_unanchored_block_when_finding_canonical_position() -> None:
+    anchored_line = _line("âncora", BBox(0, 10, 50, 20), "anchored-line")
+    fallback_line = _line("recuperar", BBox(0, 30, 60, 40), "fallback-line")
+    page = _page_with_lines(anchored_line, fallback_line)
+    anchored_block = _block("page-1:anchored", ["anchored-line"], [anchored_line])
+    orphan_block = PageContentBlock(
+        block_id="page-1:orphan-table",
+        page_index=0,
+        kind=ContentKind.TABLE,
+        bbox=BBox(0, 45, 100, 70),
+        order_index=1,
+        table_id="orphan-table",
+        line_ids=[],
+    )
+
+    blocks, _, _ = record_content_conservation(
+        page,
+        [anchored_block, orphan_block],
+        canonical_line_order=("anchored-line", "fallback-line"),
+    )
+
+    assert [block.block_id for block in blocks] == [
+        "page-1:anchored",
+        "page-1:conservation-fallback-1",
+        "page-1:orphan-table",
+    ]
+
+
+def test_partial_list_deduplication_rebuilds_list_structure() -> None:
+    duplicate = _line("• duplicado", BBox(0, 10, 90, 20), "list-duplicate")
+    unique = _line("• item único", BBox(0, 25, 90, 35), "list-unique")
+    page = _page_with_lines(duplicate, unique)
+    list_segments = segment_list_lines([duplicate, unique], allow_single=True).segments
+    list_block = PageContentBlock(
+        block_id="page-1:list",
+        page_index=0,
+        kind=ContentKind.LIST,
+        bbox=BBox(0, 10, 90, 35),
+        order_index=1,
+        text="• duplicado\n• item único",
+        line_ids=["list-duplicate", "list-unique"],
+        list_items=[item for segment in list_segments for item in segment.items],
+    )
+    duplicate_block = _block("page-1:duplicate", ["list-duplicate"], [duplicate])
+
+    blocks, _, _ = record_content_conservation(page, [duplicate_block, list_block])
+
+    rebuilt = next(block for block in blocks if block.block_id == "page-1:list")
+    assert rebuilt.kind == ContentKind.LIST
+    assert [item.text for item in rebuilt.list_items] == ["item único"]
+    page.content_blocks = blocks
+    document = StructuredDocument(
+        pages=[page],
+        tables=[],
+        raw_text="",
+        reading_text="",
+        metadata=DocumentMetadata("test.pdf", 1, None),
+        diagnostics=DocumentDiagnostics(
+            status=ExtractionStatus.SUCCESS,
+            page_count=1,
+            native_pages=1,
+            mixed_pages=0,
+            ocr_pages=0,
+        ),
+    )
+    assert "• item único" in render_markdown(document)
 
 
 def test_fallback_uses_canonical_sidebar_order_not_region_storage_order() -> None:
