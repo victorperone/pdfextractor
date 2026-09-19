@@ -137,17 +137,18 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
         if not candidates:
             fragmented = _find_fragmented_unit(unit, expected, observed_lines, used)
             if fragmented:
-                for item in fragmented:
+                fragmented_lines, fragmented_text = fragmented
+                for item in fragmented_lines:
                     used.add(item.order_index)
-                matched[unit_id] = fragmented
+                matched[unit_id] = fragmented_lines
                 findings.append(B1Finding(
                     page,
                     B1Category.UNIT_FRAGMENTED,
                     unit_id,
-                    observed_id=",".join(str(item.line.line_id) for item in fragmented),
+                    observed_id=",".join(str(item.line.line_id) for item in fragmented_lines),
                     expected_text=expected,
-                    observed_text=" ".join(item.line.text for item in fragmented),
-                    reasons=(f"unit_reconstructed_from_{len(fragmented)}_observed_lines",),
+                    observed_text=fragmented_text,
+                    reasons=(f"unit_reconstructed_from_{len(fragmented_lines)}_observed_lines",),
                 ))
                 continue
             findings.append(B1Finding(page, B1Category.UNIT_MISSING, unit_id, expected_text=expected, reasons=("no_unconsumed_exact_or_whitespace_equivalent_line",)))
@@ -402,7 +403,7 @@ def _find_fragmented_unit(
     expected: str,
     observed_lines: Sequence[_ObservedLine],
     used: set[int],
-) -> tuple[_ObservedLine, ...] | None:
+) -> tuple[tuple[_ObservedLine, ...], str] | None:
     """Recover a reference unit split into adjacent observed lines.
 
     This is intentionally a conservative, geometry-bounded reconstruction:
@@ -424,15 +425,86 @@ def _find_fragmented_unit(
     ]
     candidates.sort(key=lambda item: item.order_index)
     if len(candidates) < 2:
-        return None
+        token_match = _reconstruct_from_tokens(expected, expected_box, candidates)
+        return token_match
+
+    token_match = _reconstruct_from_tokens(expected, expected_box, candidates)
+    if token_match is not None:
+        return token_match
 
     normalized_expected = _normalized(expected)
     for start in range(len(candidates)):
         for end in range(start + 2, min(len(candidates), start + 8) + 1):
             window = tuple(candidates[start:end])
             if _normalized(" ".join(item.line.text for item in window)) == normalized_expected:
-                return window
+                return window, " ".join(item.line.text for item in window)
     return None
+
+
+def _reconstruct_from_tokens(
+    expected: str,
+    expected_box: tuple[float, float, float, float],
+    candidates: Sequence[_ObservedLine],
+) -> tuple[tuple[_ObservedLine, ...], str] | None:
+    selected_by_line: dict[int, list[Any]] = {}
+    line_by_order: dict[int, _ObservedLine] = {}
+    x_tolerance = max(2.0, min(8.0, (expected_box[2] - expected_box[0]) * 0.04))
+    y_tolerance = max(1.0, min(3.0, (expected_box[3] - expected_box[1]) * 0.25))
+    for item in candidates:
+        for token in getattr(item.line, "tokens", []) or []:
+            bbox = getattr(token, "bbox", None)
+            if bbox is None:
+                continue
+            if (
+                expected_box[0] - x_tolerance <= bbox.cx <= expected_box[2] + x_tolerance
+                and expected_box[1] - y_tolerance <= bbox.cy <= expected_box[3] + y_tolerance
+            ):
+                selected_by_line.setdefault(item.order_index, []).append(token)
+                line_by_order[item.order_index] = item
+    if not selected_by_line:
+        return None
+
+    # Native token baselines can vary by several points within one visual
+    # line (ascenders, accents, and PDF font metrics are common causes).  The
+    # observed line already provides the reliable line grouping, so grouping
+    # again by token ``y`` can scramble otherwise valid text.  Keep observed
+    # line order between visual rows and sort tokens horizontally within each
+    # row.
+    line_orders = sorted(selected_by_line)
+    row_tolerance = max(2.0, min(6.0, (expected_box[3] - expected_box[1]) * 0.5))
+    rows: list[list[int]] = []
+    for order_index in line_orders:
+        line_box = _line_box(line_by_order[order_index].line)
+        assert line_box is not None
+        line_center_y = (line_box[1] + line_box[3]) / 2.0
+        if rows:
+            previous_box = _line_box(line_by_order[rows[-1][-1]].line)
+            assert previous_box is not None
+            previous_center_y = (previous_box[1] + previous_box[3]) / 2.0
+            if abs(line_center_y - previous_center_y) <= row_tolerance:
+                rows[-1].append(order_index)
+                continue
+        rows.append([order_index])
+
+    flattened: list[tuple[_ObservedLine, Any]] = []
+    for row in rows:
+        row_tokens = [
+            (line_by_order[order_index], token)
+            for order_index in row
+            for token in selected_by_line[order_index]
+        ]
+        flattened.extend(sorted(row_tokens, key=lambda value: value[1].bbox.x0))
+    reconstructed = "".join(str(token.text) for _, token in flattened)
+    if _normalized(reconstructed) != _normalized(expected):
+        return None
+    lines_list: list[_ObservedLine] = []
+    seen: set[int] = set()
+    for item, _ in flattened:
+        if item.order_index not in seen:
+            lines_list.append(item)
+            seen.add(item.order_index)
+    lines = tuple(lines_list)
+    return lines, reconstructed
 
 
 def _boxes_overlap_with_tolerance(

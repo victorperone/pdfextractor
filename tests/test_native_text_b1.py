@@ -140,6 +140,52 @@ def test_b1_classifies_complete_unit_split_across_adjacent_lines():
     assert fragmented.observed_text == "texto completo"
 
 
+def test_b1_reconstructs_punctuation_split_into_a_separate_native_line():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "ação, revisão", "R1", 1, (0, 0, 120, 10))],
+        "tables": [],
+    }
+    first = _line("ação revisão", "line-1", 0, 0)
+    punctuation = _line(",", "line-2", 25, 0)
+    first.tokens = [
+        SimpleNamespace(text="ação", bbox=BBox(0, 0, 20, 10)),
+        SimpleNamespace(text=" revisão", bbox=BBox(30, 0, 80, 10)),
+    ]
+    punctuation.tokens = [SimpleNamespace(text=",", bbox=BBox(20, 0, 25, 10))]
+    observed = _page([_region("observed", first, punctuation)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.categories[B1Category.UNIT_FRAGMENTED.value] == 1
+    fragmented = next(finding for finding in findings if finding.category is B1Category.UNIT_FRAGMENTED)
+    assert fragmented.observed_text == "ação, revisão"
+
+
+def test_b1_reconstructs_table_tokens_in_horizontal_order_despite_baseline_variation():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "Equipamento auditável", "R1", 1, (0, 0, 100, 10))],
+        "tables": [],
+    }
+    line = _line("Equipamento auditável 00007", "line-1", 0, 0)
+    line.tokens = [
+        SimpleNamespace(text="Equipamento", bbox=BBox(0, 6, 45, 10)),
+        SimpleNamespace(text=" auditável", bbox=BBox(45, 0, 95, 4)),
+        SimpleNamespace(text=" 00007", bbox=BBox(100, 6, 125, 10)),
+    ]
+    observed = _page([_region("observed", line)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_FRAGMENTED.value] == 1
+    fragmented = next(finding for finding in findings if finding.category is B1Category.UNIT_FRAGMENTED)
+    assert fragmented.observed_text == "Equipamento auditável"
+
+
 def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
     reference = {
         "page": 1,

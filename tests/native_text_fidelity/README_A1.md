@@ -148,6 +148,13 @@ de referência, o auditor registra `unit_geometry_mismatch`; isso não é contad
 como `unit_missing`, mas impede o gate estrutural. A associação continua por
 ocorrência e proximidade, sem aceitar a referência como saída do extrator.
 
+Quando uma unidade não existe como linha isolada, o auditor tenta uma
+reconstrução conservadora por tokens nativos dentro da bbox de referência.
+Isso cobre pontuação emitida em linha separada, quebras de linha e células de
+tabela que compartilham uma linha com outro campo. O resultado é registrado
+como `unit_fragmented`, preservando o texto observado e sem relaxar a igualdade
+de conteúdo.
+
 O detector de tabelas nativas aceita tanto segmentos finos quanto caminhos
 retangulares repetidos que representam contornos de células. Em tabelas
 borderless, linhas nativas com a mesma linha de base geométrica são agrupadas
