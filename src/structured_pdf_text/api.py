@@ -1534,8 +1534,8 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
     # token.rotation is provenance metadata, not a command to mutate the table
     # structure.  By the time tokens reach this function their bbox coordinates
     # are already in canonical page space (box_transform was applied in
-    # paddle._tokens_from_result).  Applying _reverse_table_axes on top of
-    # already-canonical bboxes would produce a double-rotation.  Source geometry
+    # paddle._tokens_from_result).  Applying any metadata-based axis reversal on
+    # top of already-canonical bboxes would produce a double-rotation.  Source geometry
     # validated by _validate_detected_tables is the sole authority for cell order.
     cell_tokens: dict[tuple[int, int], list[TextToken]] = {}
     for cell in table.cells:
@@ -1604,39 +1604,6 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
             )
         )
     return rebuilt or lines
-
-
-def _dominant_ocr_rotation(tokens: list[TextToken]) -> int:
-    rotations = [token.rotation % 360 for token in tokens if token.rotation % 360 in {90, 180, 270}]
-    if not rotations:
-        return 0
-    rotation, count = max(
-        ((value, rotations.count(value)) for value in set(rotations)),
-        key=lambda item: item[1],
-    )
-    return rotation if count / len(rotations) >= 0.60 else 0
-
-
-def _table_cells_bbox(table: Any) -> BBox | None:
-    boxes = [cell.bbox for cell in getattr(table, "cells", ()) if cell.bbox is not None]
-    return BBox.union_all(boxes) if boxes else None
-
-
-def _reverse_table_axes(table: Any, table_bbox: BBox) -> None:
-    """Put cells from an upside-down OCR candidate back in visual order."""
-    last_row = max(0, int(table.row_count) - 1)
-    last_col = max(0, int(table.column_count) - 1)
-    for cell in table.cells:
-        old_bbox = cell.bbox
-        cell.row = last_row - cell.row - max(0, cell.rowspan - 1)
-        cell.col = last_col - cell.col - max(0, cell.colspan - 1)
-        if old_bbox is not None:
-            cell.bbox = BBox(
-                table_bbox.x0 + table_bbox.x1 - old_bbox.x1,
-                table_bbox.y0 + table_bbox.y1 - old_bbox.y1,
-                table_bbox.x0 + table_bbox.x1 - old_bbox.x0,
-                table_bbox.y0 + table_bbox.y1 - old_bbox.y0,
-            )
 
 
 def _merge_short_table_fragments(tokens: list[TextToken]) -> list[TextToken]:

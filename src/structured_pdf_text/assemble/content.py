@@ -51,6 +51,7 @@ class PageContentAssemblyResult:
     list_inferred_marker_count: int = 0
     list_continuation_count: int = 0
     list_unassigned_line_count: int = 0
+    canonical_line_order: tuple[str, ...] = ()
 
 
 def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
@@ -77,6 +78,8 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     list_inferred_marker_count = 0
     list_continuation_count = 0
     list_unassigned_line_count = 0
+    canonical_line_order: list[str] = []
+    canonical_line_ids_seen: set[str] = set()
 
     # Diagnostic counters collected in the same pass that builds blocks, so
     # they reflect what was actually assembled rather than a parallel estimate.
@@ -106,6 +109,11 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
             ordered_lines=ordered_lines,
         )
         blocks.extend(region_blocks)
+        for line in ordered_lines:
+            line_id = line_identity(line)
+            if line_id not in canonical_line_ids_seen:
+                canonical_line_ids_seen.add(line_id)
+                canonical_line_order.append(line_id)
         claimed_table_lines += claimed
         table_fallbacks += fallbacks
         if region.kind in {RegionKind.TEXT, RegionKind.LIST, RegionKind.TABLE}:
@@ -155,6 +163,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         list_inferred_marker_count=list_inferred_marker_count,
         list_continuation_count=list_continuation_count,
         list_unassigned_line_count=list_unassigned_line_count,
+        canonical_line_order=tuple(canonical_line_order),
     )
 
 

@@ -5,16 +5,23 @@ from structured_pdf_text.assemble.document import assemble_document
 from structured_pdf_text.document import (
     Baseline,
     ContentKind,
+    ContentDisposition,
+    DocumentDiagnostics,
+    DocumentMetadata,
     EvidenceRef,
+    ExtractionStatus,
     LayoutRegion,
+    NativeCharacter,
     OcrToken,
     PageDiagnostics,
+    PageContentBlock,
     PageStrategy,
     RegionDecision,
     RegionKind,
     RegionQuality,
     SourceKind,
     StructuredPage,
+    StructuredDocument,
     StructuredTable,
     TableCell,
     TableFragment,
@@ -27,6 +34,9 @@ from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.paddle import _make_candidate, _select_best_candidate
 from structured_pdf_text.ocr.quality import OcrQualityThresholds
 from structured_pdf_text.tables.validation import validate_table_geometry
+from structured_pdf_text.renderers.markdown import render_markdown
+from structured_pdf_text.assemble.content import assemble_page_content
+from structured_pdf_text.text.line_detector import reconstruct_native_lines
 
 
 def _line(text: str, bbox: BBox, line_id: str) -> TextLine:
@@ -335,22 +345,32 @@ def test_mixed_block_preserves_unique_lines_after_dedup() -> None:
 
 
 def test_table_block_wins_prose_conflict() -> None:
-    """A line owned by a TABLE block must not reappear in a prose block."""
-    from structured_pdf_text.document import PageContentBlock
+    """A TABLE keeps ownership even when prose appears first."""
 
     ln = _line("dado da tabela", BBox(0, 10, 200, 25), "line-1")
     page = _page_with_lines(ln)
+    table = StructuredTable(
+        table_id="table-1",
+        page_fragments=[TableFragment(0, BBox(0, 10, 200, 25), 0, 0)],
+        cells=[TableCell(0, 0, 1, 1, ln.bbox, "dado da tabela", [], 1.0)],
+        column_count=1,
+        row_count=1,
+        confidence=1.0,
+        method=TableMethod.STRICT_GRID,
+    )
+    page.tables = [table]
     table_block = PageContentBlock(
         block_id="page-1:table-1",
         page_index=0,
         kind=ContentKind.TABLE,
         bbox=ln.bbox,
         order_index=0,
+        table_id="table-1",
         line_ids=["line-1"],
     )
     prose_block = _block("page-1:block-2", ["line-1"], [ln])
 
-    blocks, summary, records = record_content_conservation(page, [table_block, prose_block])
+    blocks, summary, records = record_content_conservation(page, [prose_block, table_block])
 
     table_record = next(r for r in records if r.line_id == "line-1")
     assert table_record.disposition.value == "table_owned"
@@ -359,6 +379,63 @@ def test_table_block_wins_prose_conflict() -> None:
     assert "line-1" not in prose.line_ids
 
     assert summary.duplicate_assignment_count == 0
+    assert summary.duplicate_claims_detected == summary.duplicate_claims_resolved == 1
+
+    page.content_blocks = blocks
+    document = StructuredDocument(
+        pages=[page],
+        tables=[table],
+        raw_text="",
+        reading_text="",
+        metadata=DocumentMetadata("test.pdf", 1, None),
+        diagnostics=DocumentDiagnostics(
+            status=ExtractionStatus.SUCCESS,
+            page_count=1,
+            native_pages=1,
+            mixed_pages=0,
+            ocr_pages=0,
+        ),
+    )
+    markdown = render_markdown(document)
+    assert markdown.count("dado da tabela") == 1
+
+
+def test_figure_block_wins_prose_conflict_without_markdown_duplication() -> None:
+    line = _line("rótulo da figura", BBox(20, 20, 160, 35), "figure-line")
+    page = _page_with_lines(line)
+    figure = PageContentBlock(
+        block_id="page-1:figure-1",
+        page_index=0,
+        kind=ContentKind.FIGURE,
+        bbox=line.bbox,
+        order_index=0,
+        text=line.text,
+        line_ids=[line.line_id or "figure-line"],
+    )
+    prose = _block("page-1:block-2", ["figure-line"], [line])
+
+    blocks, summary, records = record_content_conservation(page, [prose, figure])
+
+    assert next(r for r in records if r.line_id == "figure-line").disposition == ContentDisposition.FIGURE_OWNED
+    assert next(b for b in blocks if b.block_id == "page-1:block-2").line_ids == []
+    assert summary.duplicate_claims_detected == summary.duplicate_claims_resolved == 1
+
+    page.content_blocks = blocks
+    document = StructuredDocument(
+        pages=[page],
+        tables=[],
+        raw_text="",
+        reading_text="",
+        metadata=DocumentMetadata("test.pdf", 1, None),
+        diagnostics=DocumentDiagnostics(
+            status=ExtractionStatus.SUCCESS,
+            page_count=1,
+            native_pages=1,
+            mixed_pages=0,
+            ocr_pages=0,
+        ),
+    )
+    assert render_markdown(document).count("rótulo da figura") == 1
 
 
 def test_lane_ids_canonicalize_without_double_ownership() -> None:
@@ -445,8 +522,6 @@ def test_new_diagnostic_keys_are_present_in_facts() -> None:
 def test_script_merge_source_appears_deduplicated_in_ledger() -> None:
     """A line consumed by _merge_script_lines appears as DEDUPLICATED in the ledger."""
     from dataclasses import replace as dc_replace
-    from structured_pdf_text.document import ContentDisposition
-
     # Two lines: body (owner) and a script source that was merged into it.
     body_line = _line("E²", BBox(0, 0, 40, 12), "body-line")
     script_source = _line("2", BBox(4, -4, 10, 2), "script-source")
@@ -487,6 +562,80 @@ def test_script_merge_source_appears_deduplicated_in_ledger() -> None:
     assert "script-source" in record_map, "merged source must appear in ledger"
     assert record_map["script-source"].disposition == ContentDisposition.DEDUPLICATED
     assert record_map["script-source"].reason == "script_merge"
+    assert record_map["script-source"].target_line_id == "body-line"
+    assert record_map["script-source"].owner_id == "page-1:block-1"
+
+
+def test_real_script_merge_source_is_audited_without_becoming_visible_or_fallback() -> None:
+    characters = tuple(
+        NativeCharacter(
+            page_index=0,
+            char_index=index,
+            text=text,
+            unicode_codepoint=ord(text),
+            bbox=bbox,
+            font_size=10.0,
+        )
+        for index, (text, bbox) in enumerate(
+            (
+                ("E", BBox(0, 0, 8, 12)),
+                ("2", BBox(4, -4, 8, 2)),
+            )
+        )
+    )
+    merged_lines = reconstruct_native_lines(characters)
+    assert len(merged_lines) == 1
+    target_line_id = merged_lines[0].line_id
+    assert target_line_id is not None
+    source_line_id = "native:0:1:1"
+    assert source_line_id in merged_lines[0].merged_source_line_ids
+
+    page = _page(0, [_region(RegionKind.TEXT, merged_lines[0].text, merged_lines[0].bbox, target_line_id)])
+    page.regions[0].native_lines = merged_lines
+    document = assemble_document(
+        [page],
+        metadata=DocumentMetadata("test.pdf", 1, None),
+    )
+
+    transformed = document.pages[0].diagnostics.facts["content_transformed_sources"]
+    source_fact = next(item for item in transformed if item["source_line_id"] == source_line_id)
+    assert source_fact["target_line_id"] == target_line_id
+    assert source_fact["disposition"] == "deduplicated"
+    assert source_fact["reason"] == "script_merge"
+    assert source_fact["owner_id"] is not None
+    assert document.pages[0].diagnostics.facts["content_deduplicated_lines"] == 1
+    assert document.pages[0].diagnostics.facts["content_fallback_lines"] == 0
+    assert document.reading_text.count("E²") == 1
+    assert source_line_id not in [
+        line_id
+        for block in document.pages[0].content_blocks
+        for line_id in block.line_ids
+    ]
+
+
+def test_fallback_uses_canonical_sidebar_order_not_region_storage_order() -> None:
+    right_line = _line("direita", BBox(82, 20, 99, 30), "right-line")
+    left_early = _line("esquerda cedo", BBox(10, 20, 70, 30), "left-early")
+    left_late = _line("esquerda tarde", BBox(10, 40, 70, 50), "left-late")
+    right = _region(RegionKind.TEXT, right_line.text, BBox(82, 10, 100, 90), "right-line")
+    left = _region(RegionKind.TEXT, left_early.text, BBox(0, 0, 78, 100), "left-early")
+    left.native_lines = [left_late, left_early]
+    page = _page(0, [right, left])
+    assembly = assemble_page_content(page)
+    right_block = _block("page-1:right", ["right-line"], [right_line])
+
+    blocks, _, _ = record_content_conservation(
+        page,
+        [right_block],
+        canonical_line_order=assembly.canonical_line_order,
+    )
+
+    assert assembly.canonical_line_order == ("left-early", "left-late", "right-line")
+    assert [block.text for block in blocks] == [
+        "esquerda cedo",
+        "esquerda tarde",
+        "direita",
+    ]
 
 
 def test_explicit_page_numbering_is_still_normalized_for_repeated_furniture() -> None:

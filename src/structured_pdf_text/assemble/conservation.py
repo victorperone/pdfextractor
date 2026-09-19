@@ -6,6 +6,7 @@ that assembly failed to place in a block.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from structured_pdf_text.document import (
@@ -25,6 +26,21 @@ class ContentDispositionRecord:
     disposition: ContentDisposition
     owner_id: str | None
     reason: str
+    target_line_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TransformedContentSource:
+    """A source identity consumed by a visible line transformation.
+
+    Transformed sources are part of conservation accounting, but are not
+    visible lines and therefore must never participate in fallback creation.
+    """
+
+    source_line_id: str
+    target_line_id: str
+    disposition: ContentDisposition = ContentDisposition.DEDUPLICATED
+    reason: str = "script_merge"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +59,7 @@ class ContentConservationSummary:
     fallback_lines: int
     duplicate_claims_detected: int = 0
     duplicate_claims_resolved: int = 0
+    transformed_source_lines: int = 0
 
     def to_facts(self) -> dict[str, int]:
         return {
@@ -60,6 +77,7 @@ class ContentConservationSummary:
             "content_fallback_lines": self.fallback_lines,
             "content_duplicate_claims_detected": self.duplicate_claims_detected,
             "content_duplicate_claims_resolved": self.duplicate_claims_resolved,
+            "content_transformed_source_lines": self.transformed_source_lines,
         }
 
 
@@ -72,33 +90,94 @@ def line_identity(line: TextLine, *, fallback_namespace: str = "line") -> str:
 
 def accepted_page_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
     """Collect unique native/OCR lines accepted into the page IR."""
-    output: list[tuple[str, TextLine]] = []
+    all_lines: list[tuple[str, TextLine]] = []
     seen: set[str] = set()
     for region in page.regions:
         for line in [*region.native_lines, *region.ocr_lines]:
-            identity = line_identity(line)
+            identity = _canonical_line_id(line_identity(line))
             if identity in seen:
                 continue
             seen.add(identity)
-            output.append((identity, line))
-    return output
+            all_lines.append((identity, line))
+
+    transformed_ids = {
+        source.source_line_id
+        for source in _transformed_content_sources_from_lines(
+            line for _, line in all_lines
+        )
+    }
+    return [
+        (line_id, line)
+        for line_id, line in all_lines
+        if line_id not in transformed_ids
+    ]
+
+
+def _transformed_content_sources_from_lines(
+    lines: Iterable[TextLine],
+) -> tuple[TransformedContentSource, ...]:
+    """Collect transformed source identities without materializing lines."""
+    sources: dict[str, TransformedContentSource] = {}
+    for line in lines:
+        target_line_id = _canonical_line_id(line_identity(line))
+        for source_id in line.merged_source_line_ids:
+            source_line_id = _canonical_line_id(source_id)
+            if source_line_id == target_line_id:
+                continue
+            sources.setdefault(
+                source_line_id,
+                TransformedContentSource(
+                    source_line_id=source_line_id,
+                    target_line_id=target_line_id,
+                ),
+            )
+    return tuple(sources.values())
+
+
+def transformed_content_sources(page: StructuredPage) -> tuple[TransformedContentSource, ...]:
+    """Return non-renderable source identities consumed by line transforms."""
+    lines = (
+        line
+        for region in page.regions
+        for line in [*region.native_lines, *region.ocr_lines]
+    )
+    return _transformed_content_sources_from_lines(lines)
 
 
 def record_content_conservation(
     page: StructuredPage,
     blocks: list[PageContentBlock],
+    canonical_line_order: tuple[str, ...] | None = None,
 ) -> tuple[list[PageContentBlock], ContentConservationSummary, tuple[ContentDispositionRecord, ...]]:
     """Account for every accepted line and add safe text fallbacks if needed."""
     accepted = accepted_page_lines(page)
-    accepted_map = dict(accepted)
-
-    # Position of each canonical line_id in reading order (for fallback placement).
-    accepted_order: dict[str, int] = {
-        _canonical_line_id(lid): idx for idx, (lid, _) in enumerate(accepted)
+    accepted_map = {
+        _canonical_line_id(line_id): line
+        for line_id, line in accepted
     }
+    transformed_sources = transformed_content_sources(page)
+
+    # The canonical assembler owns this sequence. Conservation must consume it
+    # rather than independently re-running geometry or reading-order logic.
+    order_source = canonical_line_order or tuple(line_id for line_id, _ in accepted)
+    accepted_order: dict[str, int] = {}
+    for line_id in order_source:
+        canonical = _canonical_line_id(line_id)
+        if canonical in accepted_map and canonical not in accepted_order:
+            accepted_order[canonical] = len(accepted_order)
+    # Keep direct callers safe when a custom order omits an accepted line. The
+    # omitted identities are appended deterministically, never geometrically
+    # re-sorted, and remain eligible for fallback.
+    for line_id, _ in accepted:
+        canonical = _canonical_line_id(line_id)
+        accepted_order.setdefault(canonical, len(accepted_order))
 
     # ── Phase 1: enforce exactly-once ownership ───────────────────────────────
-    claims_detected, claims_resolved = _resolve_duplicate_ownership(blocks, accepted_map)
+    claims_detected, claims_resolved = _resolve_duplicate_ownership(
+        blocks,
+        accepted_map,
+        accepted_order,
+    )
 
     # ── Phase 2: build ledger records ─────────────────────────────────────────
     records: dict[str, ContentDispositionRecord] = {}
@@ -106,14 +185,6 @@ def record_content_conservation(
     # is kept for diagnostic truthfulness in case a pathological input slips
     # through (e.g. a block whose line_ids were not reachable via accepted_map).
     duplicate_assignment_count = 0
-
-    # Index lines that were consumed by _merge_script_lines so their source IDs
-    # can be registered as DEDUPLICATED once their owner line is known.
-    merged_sources: dict[str, str] = {}  # canonical source_id → owner line_identity
-    for _, line in accepted:
-        owner_id = line_identity(line)
-        for src_id in line.merged_source_line_ids:
-            merged_sources[_canonical_line_id(src_id)] = owner_id
 
     for block in blocks:
         disposition, reason = _block_disposition(block)
@@ -131,22 +202,15 @@ def record_content_conservation(
                 reason=reason,
             )
 
-    # Register source lines consumed by script-merge as DEDUPLICATED.
-    for src_id, owner_line_id in merged_sources.items():
-        if src_id not in records and src_id in accepted_map:
-            records[src_id] = ContentDispositionRecord(
-                line_id=src_id,
-                disposition=ContentDisposition.DEDUPLICATED,
-                owner_id=owner_line_id,
-                reason="script_merge",
-            )
-
     # ── Phase 3: unaccounted lines → positional fallbacks ────────────────────
-    unaccounted = [
-        (line_id, line)
-        for line_id, line in accepted
-        if line_id not in records and line.text.strip()
-    ]
+    unaccounted = sorted(
+        (
+            (line_id, line)
+            for line_id, line in accepted
+            if line_id not in records and line.text.strip()
+        ),
+        key=lambda item: accepted_order.get(item[0], len(accepted_order)),
+    )
     fallback_blocks: list[PageContentBlock] = []
     for index, (line_id, line) in enumerate(unaccounted, start=1):
         text = normalize_reading_text(line.text).strip()
@@ -170,6 +234,19 @@ def record_content_conservation(
             reason="unaccounted_content_fallback",
         )
 
+    # Register transformed sources only after visible ownership/fallback is
+    # final, so their records can point to both target_line_id and final block.
+    for source in transformed_sources:
+        target_record = records.get(source.target_line_id)
+        owner_id = target_record.owner_id if target_record is not None else None
+        records[source.source_line_id] = ContentDispositionRecord(
+            line_id=source.source_line_id,
+            disposition=source.disposition,
+            owner_id=owner_id,
+            reason=source.reason,
+            target_line_id=source.target_line_id,
+        )
+
     # Insert fallbacks at the correct reading-order position instead of appending.
     if fallback_blocks:
         _insert_fallbacks_at_position(blocks, fallback_blocks, accepted_order)
@@ -187,7 +264,7 @@ def record_content_conservation(
     for record in records.values():
         counts[record.disposition] += 1
     summary = ContentConservationSummary(
-        accepted_lines=len(accepted),
+        accepted_lines=len(accepted) + len(transformed_sources),
         rendered_lines=counts[ContentDisposition.RENDERED],
         table_owned_lines=counts[ContentDisposition.TABLE_OWNED],
         figure_owned_lines=counts[ContentDisposition.FIGURE_OWNED],
@@ -201,6 +278,7 @@ def record_content_conservation(
         fallback_lines=len(fallback_blocks),
         duplicate_claims_detected=claims_detected,
         duplicate_claims_resolved=claims_resolved,
+        transformed_source_lines=len(transformed_sources),
     )
     return blocks, summary, tuple(records.values())
 
@@ -208,24 +286,38 @@ def record_content_conservation(
 def _resolve_duplicate_ownership(
     blocks: list[PageContentBlock],
     accepted_map: dict[str, TextLine],
+    accepted_order: dict[str, int],
 ) -> tuple[int, int]:
     """Remove duplicate line claims from losing blocks, rebuilding their content.
 
-    First-claim-wins: whichever block is encountered first in the list keeps
-    the line.  Subsequent claimants have the line stripped from their line_ids
-    and their text/bbox recomputed from the remaining lines.  A block that
-    loses all its lines is suppressed rather than deleted so that block-level
-    diagnostics remain accurate.
+    Claimants are ranked by semantic ownership. Tables and OCR-bearing figures
+    own physical content before prose; generic table fallbacks are weakest.
+    Canonical line order is only a tie-breaker between equivalent claimants.
+    Losing claimants have the line stripped from their line_ids and their
+    text/bbox recomputed. A block that loses all its lines is suppressed rather
+    than deleted so that block-level diagnostics remain accurate.
 
     Returns (claims_detected, claims_resolved).
     """
-    # First pass: assign canonical ownership (first block wins).
-    first_owner: dict[str, str] = {}  # canonical_line_id → block_id
-    for block in blocks:
+    # First pass: collect claimants and choose the semantic owner explicitly.
+    claimants: dict[str, list[tuple[int, int, int, PageContentBlock]]] = {}
+    for block_index, block in enumerate(blocks):
         for lid in block.line_ids:
             canonical = _canonical_line_id(lid)
-            if canonical in accepted_map and canonical not in first_owner:
-                first_owner[canonical] = block.block_id
+            if canonical not in accepted_map:
+                continue
+            claimants.setdefault(canonical, []).append(
+                (
+                    _ownership_priority(block),
+                    -accepted_order.get(canonical, len(accepted_order)),
+                    -block_index,
+                    block,
+                )
+            )
+
+    owner_by_line: dict[str, str] = {}
+    for canonical, candidates in claimants.items():
+        owner_by_line[canonical] = max(candidates, key=lambda item: item[:3])[3].block_id
 
     # Second pass: strip duplicate claims and rebuild affected blocks.
     claims_detected = 0
@@ -234,7 +326,7 @@ def _resolve_duplicate_ownership(
         losing_lids = [
             lid for lid in block.line_ids
             if _canonical_line_id(lid) in accepted_map
-            and first_owner.get(_canonical_line_id(lid)) != block.block_id
+            and owner_by_line.get(_canonical_line_id(lid)) != block.block_id
         ]
         if not losing_lids:
             continue
@@ -269,6 +361,19 @@ def _resolve_duplicate_ownership(
         claims_resolved += len(losing_lids)
 
     return claims_detected, claims_resolved
+
+
+def _ownership_priority(block: PageContentBlock) -> int:
+    """Rank semantic claimants before considering their arrival order."""
+    if block.kind == ContentKind.TABLE:
+        return 300
+    if block.kind == ContentKind.FIGURE:
+        return 250
+    if block.suppressed:
+        return 50
+    if block.fallback_from_table:
+        return 100
+    return 200
 
 
 def _insert_fallbacks_at_position(

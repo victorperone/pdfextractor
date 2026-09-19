@@ -74,7 +74,11 @@ def assemble_document(
             repeated,
             preserve_headers_footers,
         )
-        blocks, conservation, _records = record_content_conservation(page, blocks)
+        blocks, conservation, records = record_content_conservation(
+            page,
+            blocks,
+            canonical_line_order=result.canonical_line_order,
+        )
         blocks = _reindex_blocks(blocks)
         if conservation.fallback_lines:
             page.diagnostics.warnings.append(
@@ -104,6 +108,17 @@ def assemble_document(
                 "list_unassigned_line_count": result.list_unassigned_line_count,
                 "content_source_region_count": len(page.regions),
                 "content_assembly_ms": round(result.assembly_ms, 3),
+                "content_transformed_sources": [
+                    {
+                        "source_line_id": record.line_id,
+                        "target_line_id": record.target_line_id,
+                        "owner_id": record.owner_id,
+                        "disposition": record.disposition.value,
+                        "reason": record.reason,
+                    }
+                    for record in records
+                    if record.reason == "script_merge"
+                ],
                 "content_block_order": [
                     {
                         "id": b.block_id,
