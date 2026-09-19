@@ -638,6 +638,32 @@ def test_fallback_uses_canonical_sidebar_order_not_region_storage_order() -> Non
     ]
 
 
+def test_fallback_respects_canonical_position_around_spanning_block() -> None:
+    spanning_line = _line("faixa", BBox(0, 40, 100, 50), "spanning-line")
+    left_line = _line("coluna esquerda", BBox(0, 70, 45, 80), "left-line")
+    right_line = _line("coluna direita", BBox(55, 70, 100, 80), "right-line")
+    right = _region(RegionKind.TEXT, right_line.text, BBox(55, 65, 100, 100), "right-line")
+    left = _region(RegionKind.TEXT, left_line.text, BBox(0, 65, 45, 100), "left-line")
+    spanning = _region(RegionKind.TEXT, spanning_line.text, BBox(0, 30, 100, 60), "spanning-line")
+    page = _page(0, [right, spanning, left])
+    assembly = assemble_page_content(page)
+
+    spanning_block = _block("page-1:spanning", ["spanning-line"], [spanning_line])
+    right_block = _block("page-1:right", ["right-line"], [right_line])
+    blocks, _, _ = record_content_conservation(
+        page,
+        [spanning_block, right_block],
+        canonical_line_order=assembly.canonical_line_order,
+    )
+
+    assert assembly.canonical_line_order == ("spanning-line", "left-line", "right-line")
+    assert [block.text for block in blocks] == [
+        "faixa",
+        "coluna esquerda",
+        "coluna direita",
+    ]
+
+
 def test_explicit_page_numbering_is_still_normalized_for_repeated_furniture() -> None:
     pages = [
         _page(
