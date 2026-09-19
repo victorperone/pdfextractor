@@ -143,6 +143,15 @@ O resultado produz `b1_metadata.json`, `b1_summary.json` e
 `b1_findings.jsonl`. `table_missing` e `table_cell_mismatch` são achados
 estruturais; não são convertidos em perda de texto A1.
 
+Quando uma região de referência é coberta por regiões observadas de tipos
+semânticos diferentes (por exemplo, `title` e `text`), o resultado é registrado
+como `region_partitioned`. A partição continua visível na auditoria e preserva
+os IDs e tipos observados, mas não é confundida com um split estrutural de
+regiões do mesmo tipo, que permanece `region_fragmented` e bloqueia o gate B1.
+Na montagem das regiões, caixas fortemente aninhadas do mesmo tipo e com o
+mesmo papel semântico são coalescidas; caixas adjacentes ou com papéis
+semânticos diferentes continuam independentes.
+
 Quando o texto exato existe, mas a ocorrência escolhida está distante da bbox
 de referência, o auditor registra `unit_geometry_mismatch`; isso não é contado
 como `unit_missing`, mas impede o gate estrutural. A associação continua por
@@ -156,6 +165,11 @@ como `unit_fragmented`, preservando o texto observado e sem relaxar a igualdade
 de conteúdo. Quando dois campos compartilham a mesma linha, o consumo é
 controlado por índice de token; um campo não pode consumir novamente os tokens
 já associados a outro.
+
+Substituições exclusivamente compatíveis de ligaturas (`ﬁ`, `ﬂ`, `ﬀ`) são
+registradas como `unit_unicode_substitution`. Essa categoria preserva a
+diferença observada e não trata a unidade como texto exato; a normalização não
+é aplicada a identificadores, números ou pontuação.
 
 O detector de tabelas nativas aceita tanto segmentos finos quanto caminhos
 retangulares repetidos que representam contornos de células. Em tabelas

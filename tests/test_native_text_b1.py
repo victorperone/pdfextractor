@@ -23,8 +23,8 @@ def _page(regions, tables=()):
     return SimpleNamespace(page_index=0, regions=regions, tables=list(tables))
 
 
-def _region(region_id: str, *lines):
-    return SimpleNamespace(region_id=region_id, native_lines=list(lines), ocr_lines=[])
+def _region(region_id: str, *lines, kind=""):
+    return SimpleNamespace(region_id=region_id, kind=kind, native_lines=list(lines), ocr_lines=[])
 
 
 def _unit(unit_id: str, text: str, region_id: str, order: int, bbox):
@@ -216,6 +216,69 @@ def test_b1_allows_disjoint_units_to_share_one_observed_line():
     ]
 
 
+def test_b1_accepts_geometry_bounded_spacing_loss_as_fragmented():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "RÓTULO 019 • LEITURA INVERTIDA", "R1", 1, (0, 0, 180, 10))],
+        "tables": [],
+    }
+    line = _line("RÓTULO019 • LEITURAINVERTIDA", "line-1", 0, 0)
+    line.bbox = BBox(0, 0, 180, 10)
+    line.tokens = [SimpleNamespace(text=line.text, bbox=BBox(0, 0, 180, 10))]
+    observed = _page([_region("observed", line)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_FRAGMENTED.value] == 1
+    assert findings[0].observed_text == "RÓTULO019 • LEITURAINVERTIDA"
+
+
+def test_b1_reconstructs_right_to_left_tokens_in_native_direction():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "RÓTULO 019 • LEITURA INVERTIDA", "R1", 1, (0, 0, 180, 10))],
+        "tables": [],
+    }
+    observed_text = "RÓTULO019 • LEITURAINVERTIDA"
+    line = _line(observed_text, "line-1", 0, 0)
+    line.bbox = BBox(0, 0, 180, 10)
+    line.direction = SimpleNamespace(value="right_to_left")
+    line.tokens = [
+        SimpleNamespace(text=character, bbox=BBox(170 - index * 5, 0, 174 - index * 5, 10))
+        for index, character in enumerate(observed_text)
+    ]
+    observed = _page([_region("observed", line)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_FRAGMENTED.value] == 1
+    assert findings[0].observed_text == observed_text
+
+
+def test_b1_classifies_compatibility_ligature_without_hiding_it_as_exact():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "Ligatura: ﬁ", "R1", 1, (0, 0, 100, 10))],
+        "tables": [],
+    }
+    line = _line("Ligatura: fi", "line-1", 0, 0)
+    line.tokens = [SimpleNamespace(text=line.text, bbox=BBox(0, 0, 100, 10))]
+    observed = _page([_region("observed", line)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_UNICODE_SUBSTITUTION.value] == 1
+    assert summary.categories.get(B1Category.UNIT_MISSING.value, 0) == 0
+    assert summary.auditable
+    assert findings[0].observed_text == "Ligatura: fi"
+
+
 def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
     reference = {
         "page": 1,
@@ -246,6 +309,31 @@ def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
     assert B1Category.REGION_FRAGMENTED in categories
     assert B1Category.TABLE_CELL_MISMATCH in categories
     assert not summary.auditable
+
+
+def test_b1_distinguishes_semantic_region_partition_from_same_kind_fragmentation():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            _unit("U1", "título", "R1", 1, (0, 0, 80, 10)),
+            _unit("U2", "corpo", "R1", 2, (0, 20, 80, 30)),
+        ],
+        "tables": [],
+    }
+    observed = _page([
+        _region("observed-title", _line("título", "line-1", 0, 0), kind="title"),
+        _region("observed-text", _line("corpo", "line-2", 0, 20), kind="text"),
+    ])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.categories[B1Category.REGION_PARTITIONED.value] == 1
+    assert summary.categories.get(B1Category.REGION_FRAGMENTED.value, 0) == 0
+    assert summary.auditable
+    partition = next(finding for finding in findings if finding.category is B1Category.REGION_PARTITIONED)
+    assert partition.observed_id == "observed-text,observed-title"
+    assert "observed_region_kinds=text,title" in partition.reasons
 
 
 def test_b1_normalizes_row_coordinates_for_continued_table_fragments():

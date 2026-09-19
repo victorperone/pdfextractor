@@ -8,15 +8,17 @@ from enum import Enum
 import math
 import re
 import unicodedata
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 class B1Category(str, Enum):
     UNIT_MATCHED = "unit_matched"
     UNIT_FRAGMENTED = "unit_fragmented"
+    UNIT_UNICODE_SUBSTITUTION = "unit_unicode_substitution"
     UNIT_GEOMETRY_MISMATCH = "unit_geometry_mismatch"
     UNIT_MISSING = "unit_missing"
     REGION_FRAGMENTED = "region_fragmented"
+    REGION_PARTITIONED = "region_partitioned"
     READING_ORDER_MISMATCH = "reading_order_mismatch"
     TABLE_MATCHED = "table_matched"
     TABLE_MISSING = "table_missing"
@@ -163,6 +165,34 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
                     reasons=(f"unit_reconstructed_from_{len(fragmented.lines)}_observed_lines",),
                 ))
                 continue
+            unicode_match = None
+            if _contains_compatibility_ligature(expected):
+                unicode_match = _find_fragmented_unit(
+                    unit,
+                    expected,
+                    observed_lines,
+                    used,
+                    used_tokens,
+                    normalizer=_nfkc_normalized,
+                )
+            if unicode_match:
+                if unicode_match.token_indexes:
+                    for order_index, token_indexes in unicode_match.token_indexes:
+                        used_tokens.setdefault(order_index, set()).update(token_indexes)
+                else:
+                    for item in unicode_match.lines:
+                        used.add(item.order_index)
+                matched[unit_id] = unicode_match.lines
+                findings.append(B1Finding(
+                    page,
+                    B1Category.UNIT_UNICODE_SUBSTITUTION,
+                    unit_id,
+                    observed_id=",".join(str(item.line.line_id) for item in unicode_match.lines),
+                    expected_text=expected,
+                    observed_text=unicode_match.text,
+                    reasons=("compatibility_ligature_normalization_only",),
+                ))
+                continue
             findings.append(B1Finding(page, B1Category.UNIT_MISSING, unit_id, expected_text=expected, reasons=("no_unconsumed_exact_or_whitespace_equivalent_line",)))
             continue
         expected_box = _box(unit.get("bbox_top_origin_pt"))
@@ -195,7 +225,36 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
             for observed_region_id in {item.region_id for item in matched[unit["unit_id"]]}
         }
         if len(observed_region_ids) > 1:
-            findings.append(B1Finding(page, B1Category.REGION_FRAGMENTED, region_id, reasons=("reference_region_maps_to_multiple_observed_regions",)))
+            observed_regions = [
+                region
+                for region in getattr(observed_page, "regions", []) or []
+                if str(getattr(region, "region_id", "")) in observed_region_ids
+            ]
+            observed_kinds = tuple(sorted({
+                _region_kind(region)
+                for region in observed_regions
+            }))
+            observed_roles = tuple(sorted({
+                str(getattr(region, "semantic_role", "") or "")
+                for region in observed_regions
+            }))
+            category = (
+                B1Category.REGION_PARTITIONED
+                if len(observed_kinds) > 1
+                or len(observed_roles) > 1 and any(observed_roles)
+                else B1Category.REGION_FRAGMENTED
+            )
+            findings.append(B1Finding(
+                page,
+                category,
+                region_id,
+                observed_id=",".join(sorted(observed_region_ids)),
+                reasons=(
+                    "reference_region_maps_to_multiple_observed_regions",
+                    f"observed_region_kinds={','.join(observed_kinds) or 'unknown'}",
+                    f"observed_region_roles={','.join(observed_roles) or 'none'}",
+                ),
+            ))
         elif not observed_region_ids and region_units:
             findings.append(B1Finding(page, B1Category.NOT_ASSESSABLE, region_id, reasons=("region_has_no_matched_text_unit",)))
 
@@ -284,7 +343,7 @@ def audit_document_structure(reference: Mapping[str, Any], observed_document: An
 def _observed_lines(page: Any) -> list[_ObservedLine]:
     result: list[_ObservedLine] = []
     for region in getattr(page, "regions", []) or []:
-        kind = getattr(getattr(region, "kind", None), "value", str(getattr(region, "kind", "")))
+        kind = _region_kind(region)
         for line in [*getattr(region, "native_lines", []), *getattr(region, "ocr_lines", [])]:
             result.append(_ObservedLine(line, str(getattr(region, "region_id", "")), -1, kind))
     ordered = _infer_observed_reading_order(result, page)
@@ -292,6 +351,11 @@ def _observed_lines(page: Any) -> list[_ObservedLine]:
         _ObservedLine(item.line, item.region_id, index, item.region_kind)
         for index, item in enumerate(ordered)
     ]
+
+
+def _region_kind(region: Any) -> str:
+    value = getattr(region, "kind", "")
+    return str(getattr(value, "value", value) or "")
 
 
 def _infer_observed_reading_order(items: Sequence[_ObservedLine], page: Any) -> list[_ObservedLine]:
@@ -416,6 +480,8 @@ def _find_fragmented_unit(
     observed_lines: Sequence[_ObservedLine],
     used: set[int],
     used_tokens: Mapping[int, set[int]],
+    *,
+    normalizer: Callable[[str], str] | None = None,
 ) -> _FragmentedMatch | None:
     """Recover a reference unit split into adjacent observed lines.
 
@@ -430,6 +496,7 @@ def _find_fragmented_unit(
     expected_box = _box(unit.get("bbox_top_origin_pt"))
     if expected_box is None:
         return None
+    normalizer = normalizer or _normalized
     candidates = [
         item for item in observed_lines
         if item.order_index not in used
@@ -438,21 +505,24 @@ def _find_fragmented_unit(
         and _boxes_overlap_with_tolerance(expected_box, _line_box(item.line))
     ]
     candidates.sort(key=lambda item: item.order_index)
+    for item in candidates:
+        if normalizer(item.line.text) == normalizer(expected):
+            return _FragmentedMatch((item,), item.line.text)
     if len(candidates) < 2:
-        token_match = _reconstruct_from_tokens(expected, expected_box, candidates, used_tokens)
+        token_match = _reconstruct_from_tokens(expected, expected_box, candidates, used_tokens, normalizer=normalizer)
         return token_match
 
-    token_match = _reconstruct_from_tokens(expected, expected_box, candidates, used_tokens)
+    token_match = _reconstruct_from_tokens(expected, expected_box, candidates, used_tokens, normalizer=normalizer)
     if token_match is not None:
         return token_match
 
-    normalized_expected = _normalized(expected)
+    normalized_expected = normalizer(expected)
     for start in range(len(candidates)):
         for end in range(start + 2, min(len(candidates), start + 8) + 1):
             window = tuple(candidates[start:end])
             if any(item.order_index in used_tokens for item in window):
                 continue
-            if _normalized(" ".join(item.line.text for item in window)) == normalized_expected:
+            if normalizer(" ".join(item.line.text for item in window)) == normalized_expected:
                 return _FragmentedMatch(window, " ".join(item.line.text for item in window))
     return None
 
@@ -470,7 +540,10 @@ def _reconstruct_from_tokens(
     expected_box: tuple[float, float, float, float],
     candidates: Sequence[_ObservedLine],
     used_tokens: Mapping[int, set[int]],
+    *,
+    normalizer: Callable[[str], str] | None = None,
 ) -> _FragmentedMatch | None:
+    normalizer = normalizer or _normalized
     selected_by_line: dict[int, list[tuple[int, Any]]] = {}
     line_by_order: dict[int, _ObservedLine] = {}
     x_tolerance = max(2.0, min(8.0, (expected_box[2] - expected_box[0]) * 0.04))
@@ -520,9 +593,12 @@ def _reconstruct_from_tokens(
             for order_index in row
             for _, token in selected_by_line[order_index]
         ]
-        flattened.extend(sorted(row_tokens, key=lambda value: value[1].bbox.x0))
+        flattened.extend(sorted(row_tokens, key=_token_horizontal_order))
     reconstructed = "".join(str(token.text) for _, token in flattened)
-    if _normalized(reconstructed) != _normalized(expected):
+    if (
+        normalizer(reconstructed) != normalizer(expected)
+        and _without_whitespace(reconstructed) != _without_whitespace(expected)
+    ):
         return None
     lines_list: list[_ObservedLine] = []
     seen: set[int] = set()
@@ -536,6 +612,16 @@ def _reconstruct_from_tokens(
         for order_index in sorted(selected_by_line)
     )
     return _FragmentedMatch(lines, reconstructed, token_indexes)
+
+
+def _without_whitespace(value: str) -> str:
+    return "".join(character for character in value if not character.isspace())
+
+
+def _token_horizontal_order(value: tuple[_ObservedLine, Any]) -> float:
+    item, token = value
+    direction = getattr(getattr(item.line, "direction", None), "value", getattr(item.line, "direction", ""))
+    return -token.bbox.x0 if direction == "right_to_left" else token.bbox.x0
 
 
 def _boxes_overlap_with_tolerance(
@@ -577,6 +663,14 @@ def _geometry_mismatch(
 def _normalized(value: str) -> str:
     value = unicodedata.normalize("NFC", value.replace("\r\n", "\n").replace("\r", "\n"))
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _nfkc_normalized(value: str) -> str:
+    return _normalized(unicodedata.normalize("NFKC", value))
+
+
+def _contains_compatibility_ligature(value: str) -> bool:
+    return any(character in "ﬀﬁﬂﬃﬄﬅﬆ" for character in value)
 
 
 def _box(value: Any) -> tuple[float, float, float, float] | None:

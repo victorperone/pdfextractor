@@ -17,6 +17,7 @@ from structured_pdf_text.layout.assign import (
     _MIN_LINE_REGION_COVERAGE,
     assign_lines_to_regions,
 )
+from structured_pdf_text.layout.regions import _coalesce_nested_regions
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +157,19 @@ def test_no_regions_returns_empty() -> None:
     line = _line("text", _bbox(10, 10, 90, 30))
     result = assign_lines_to_regions([line], [])
     assert result == []
+
+
+def test_nested_same_kind_regions_are_coalesced_without_merging_semantic_roles() -> None:
+    broad = _region(RegionKind.TITLE, _bbox(0, 0, 200, 40), region_id="broad")
+    nested = _region(RegionKind.TITLE, _bbox(40, 10, 100, 30), region_id="nested")
+    broad.native_lines.append(_line("broad", _bbox(0, 0, 50, 10)))
+    nested.native_lines.append(_line("nested", _bbox(40, 10, 100, 20)))
+
+    result = _coalesce_nested_regions([broad, nested])
+
+    assert [region.region_id for region in result] == ["broad"]
+    assert {line.text for line in result[0].native_lines} == {"broad", "nested"}
+
+    nested.semantic_role = "semantic_status"
+    result = _coalesce_nested_regions([broad, nested])
+    assert [region.region_id for region in result] == ["broad", "nested"]

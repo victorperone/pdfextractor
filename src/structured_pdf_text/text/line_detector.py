@@ -148,7 +148,7 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
             candidate = candidates[best_index]
             should_replace = (
                 best_score < 1.0
-                or _needs_textpage_spacing_recovery(line.text)
+                or _needs_textpage_spacing_recovery(line.text, candidate)
             )
             if should_replace:
                 output.append(
@@ -213,6 +213,14 @@ def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
             line for line in output
             if line is not candidate
             and line.bbox.height >= candidate.bbox.height * 1.20
+            # A normal baseline punctuation glyph (for example the hyphen in
+            # ``2 - controles``) can be emitted as a tiny separate line. It
+            # must remain independent; script merging is only valid when the
+            # candidate actually extends above or below the target line box.
+            and (
+                candidate.bbox.y0 < line.bbox.y0
+                or candidate.bbox.y1 > line.bbox.y1
+            )
             and line.bbox.x0 - candidate.bbox.width <= candidate.bbox.cx <= line.bbox.x1 + candidate.bbox.width
             and candidate.bbox.overlap_ratio(line.bbox) >= 0.18
         ]
@@ -248,13 +256,17 @@ def _compact(text: str) -> str:
     return "".join(character.casefold() for character in text if character.isalnum())
 
 
-def _needs_textpage_spacing_recovery(text: str) -> bool:
+def _needs_textpage_spacing_recovery(text: str, candidate: str | None = None) -> bool:
     compact = text.strip()
     if not compact:
         return False
     spaces = sum(character.isspace() for character in compact)
     if spaces / max(len(compact), 1) >= 0.18:
         return True
+    if candidate is not None:
+        candidate_spaces = sum(character.isspace() for character in candidate.strip())
+        if candidate_spaces > spaces:
+            return True
     return any(
         previous.islower() and current.isupper()
         for previous, current in zip(compact, compact[1:])
