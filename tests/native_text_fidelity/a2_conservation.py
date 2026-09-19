@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
 
-from structured_pdf_text.document import ContentDisposition, PageContentBlock, StructuredPage
+from structured_pdf_text.document import (
+    ContentDisposition,
+    PageContentBlock,
+    StructuredDocument,
+    StructuredPage,
+)
 
 
 class ConservationCategory(str, Enum):
@@ -21,6 +26,7 @@ class ConservationCategory(str, Enum):
     EXPLICITLY_SUPPRESSED = "explicitly_suppressed"
     TRANSFORMED_SOURCE = "transformed_source"
     BLANK_NOT_ASSESSABLE = "blank_not_assessable"
+    DUPLICATE_CLAIM = "duplicate_claim"
     DUPLICATE_OWNER = "duplicate_owner"
     UNACCOUNTED = "unaccounted"
     ORPHAN_CLAIM = "orphan_claim"
@@ -38,6 +44,18 @@ class ConservationFinding:
     text: str = ""
     reasons: tuple[str, ...] = ()
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page_index": self.page_index,
+            "line_id": self.line_id,
+            "category": self.category.value,
+            "owner_ids": list(self.owner_ids),
+            "disposition": self.disposition,
+            "target_line_id": self.target_line_id,
+            "text": self.text,
+            "reasons": list(self.reasons),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class ConservationAuditSummary:
@@ -47,6 +65,7 @@ class ConservationAuditSummary:
     explicitly_suppressed: int
     transformed_sources: int
     blank_not_assessable: int
+    duplicate_claims: int
     duplicate_owners: int
     unaccounted: int
     orphan_claims: int
@@ -57,6 +76,7 @@ class ConservationAuditSummary:
         return not any(
             (
                 self.duplicate_owners,
+                self.duplicate_claims,
                 self.unaccounted,
                 self.orphan_claims,
                 self.ledger_owner_mismatches,
@@ -71,10 +91,32 @@ class ConservationAuditSummary:
             "explicitly_suppressed": self.explicitly_suppressed,
             "transformed_sources": self.transformed_sources,
             "blank_not_assessable": self.blank_not_assessable,
+            "duplicate_claims": self.duplicate_claims,
             "duplicate_owners": self.duplicate_owners,
             "unaccounted": self.unaccounted,
             "orphan_claims": self.orphan_claims,
             "ledger_owner_mismatches": self.ledger_owner_mismatches,
+            "auditable": self.auditable,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ConservationDocumentSummary:
+    page_count: int
+    accepted_lines: int
+    category_counts: Mapping[str, int]
+    page_summaries: tuple[ConservationAuditSummary, ...]
+
+    @property
+    def auditable(self) -> bool:
+        return all(summary.auditable for summary in self.page_summaries)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page_count": self.page_count,
+            "accepted_lines": self.accepted_lines,
+            "category_counts": dict(sorted(self.category_counts.items())),
+            "pages": [summary.to_dict() for summary in self.page_summaries],
             "auditable": self.auditable,
         }
 
@@ -107,11 +149,15 @@ def audit_page_conservation(
 
     records = {_field(record, "line_id"): record for record in ledger_records}
     claims: dict[str, list[PageContentBlock]] = {}
+    claim_counts: dict[str, Counter[str]] = {}
     findings: list[ConservationFinding] = []
     for block in block_list:
         for raw_id in block.line_ids:
             line_id = _canonical(raw_id)
-            claims.setdefault(line_id, []).append(block)
+            counts_for_line = claim_counts.setdefault(line_id, Counter())
+            if counts_for_line[block.block_id] == 0:
+                claims.setdefault(line_id, []).append(block)
+            counts_for_line[block.block_id] += 1
 
     for line_id, (raw_id, line) in accepted.items():
         # A transformed source is accounted for through its target and its
@@ -157,6 +203,21 @@ def audit_page_conservation(
                 reasons,
             )
         )
+        for block_id, claim_count in claim_counts.get(line_id, {}).items():
+            if claim_count <= 1:
+                continue
+            findings.append(
+                ConservationFinding(
+                    page.page_index,
+                    line_id,
+                    ConservationCategory.DUPLICATE_CLAIM,
+                    (block_id,),
+                    disposition,
+                    _field(record, "target_line_id") if record is not None else None,
+                    line.text,
+                    (f"same_block_claimed_line_{claim_count}_times",),
+                )
+            )
 
     for source_id, (target_id, reason) in transformed.items():
         record = records.get(source_id)
@@ -202,12 +263,54 @@ def audit_page_conservation(
         explicitly_suppressed=counts[ConservationCategory.EXPLICITLY_SUPPRESSED],
         transformed_sources=counts[ConservationCategory.TRANSFORMED_SOURCE],
         blank_not_assessable=counts[ConservationCategory.BLANK_NOT_ASSESSABLE],
+        duplicate_claims=counts[ConservationCategory.DUPLICATE_CLAIM],
         duplicate_owners=counts[ConservationCategory.DUPLICATE_OWNER],
         unaccounted=counts[ConservationCategory.UNACCOUNTED],
         orphan_claims=counts[ConservationCategory.ORPHAN_CLAIM],
         ledger_owner_mismatches=counts[ConservationCategory.LEDGER_OWNER_MISMATCH],
     )
     return summary, tuple(findings)
+
+
+def audit_document_conservation(
+    document: StructuredDocument,
+) -> tuple[ConservationDocumentSummary, tuple[ConservationFinding, ...]]:
+    """Aggregate the independent conservation audit across document pages.
+
+    The assembler exposes transformed-source facts in page diagnostics after
+    block reindexing.  They are adapted here to the same record shape accepted
+    by :func:`audit_page_conservation`; no production decision is rerun.
+    """
+
+    page_summaries: list[ConservationAuditSummary] = []
+    all_findings: list[ConservationFinding] = []
+    counts: Counter[str] = Counter()
+    for page in document.pages:
+        transformed_records = []
+        for item in page.diagnostics.facts.get("content_transformed_sources", []):
+            transformed_records.append(
+                {
+                    "line_id": item.get("source_line_id"),
+                    "target_line_id": item.get("target_line_id"),
+                    "owner_id": item.get("owner_id"),
+                    "disposition": item.get("disposition"),
+                }
+            )
+        summary, findings = audit_page_conservation(
+            page,
+            page.content_blocks,
+            transformed_records,
+        )
+        page_summaries.append(summary)
+        all_findings.extend(findings)
+        counts.update(finding.category.value for finding in findings)
+    document_summary = ConservationDocumentSummary(
+        page_count=len(document.pages),
+        accepted_lines=sum(summary.accepted_lines for summary in page_summaries),
+        category_counts=dict(counts),
+        page_summaries=tuple(page_summaries),
+    )
+    return document_summary, tuple(all_findings)
 
 
 def _canonical(line_id: str) -> str:

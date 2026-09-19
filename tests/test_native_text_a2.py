@@ -19,6 +19,10 @@ from structured_pdf_text.document import (
     RegionQuality,
     SourceKind,
     StructuredPage,
+    StructuredDocument,
+    DocumentDiagnostics,
+    DocumentMetadata,
+    ExtractionStatus,
     TextLine,
     TextToken,
     WritingDirection,
@@ -28,6 +32,7 @@ from structured_pdf_text.geometry import BBox
 from a2_conservation import (
     ConservationCategory,
     audit_page_conservation,
+    audit_document_conservation,
 )
 
 
@@ -89,6 +94,18 @@ def test_a2_reports_duplicate_visible_owners_and_orphan_claims():
     assert ConservationCategory.ORPHAN_CLAIM in categories
 
 
+def test_a2_distinguishes_repeated_claim_inside_one_block_from_two_owners():
+    page = _page([_line("A", "line-a")])
+    block = _block("block-a", ["line-a", "line-a"])
+
+    summary, findings = audit_page_conservation(page, [block])
+
+    assert not summary.auditable
+    assert summary.duplicate_claims == 1
+    assert summary.duplicate_owners == 0
+    assert any(finding.category is ConservationCategory.DUPLICATE_CLAIM for finding in findings)
+
+
 def test_a2_requires_suppression_and_transformation_to_be_explicit():
     source = _line("2", "source-line", y=5)
     target = _line("E²", "target-line", y=10, merged=("source-line",))
@@ -132,6 +149,21 @@ def test_a2_reaudits_the_production_ledger_after_duplicate_resolution():
     assert all(finding.category is not ConservationCategory.DUPLICATE_OWNER for finding in findings)
 
 
+def test_production_ledger_rebuilds_a_block_with_repeated_line_claims():
+    page = _page([_line("A", "line-a")])
+    block = _block("block-a", ["line-a", "line-a"])
+
+    resolved_blocks, production_summary, records = record_content_conservation(page, [block])
+    audit_summary, findings = audit_page_conservation(page, resolved_blocks, records)
+
+    assert production_summary.duplicate_claims_detected == 1
+    assert production_summary.duplicate_claims_resolved == 1
+    assert resolved_blocks[0].line_ids == ["line-a"]
+    assert resolved_blocks[0].text == "A"
+    assert audit_summary.auditable
+    assert not any(finding.category is ConservationCategory.DUPLICATE_CLAIM for finding in findings)
+
+
 def test_a2_reaudits_the_production_fallback_as_visible_ownership():
     page = _page([_line("fallback", "line-u")])
 
@@ -141,3 +173,25 @@ def test_a2_reaudits_the_production_fallback_as_visible_ownership():
     assert production_summary.fallback_lines == 1
     assert audit_summary.auditable
     assert findings[0].category is ConservationCategory.OWNED_ONCE
+
+
+def test_a2_aggregates_all_pages_and_serializes_findings():
+    page_a = _page([_line("A", "line-a")])
+    page_a.content_blocks = [_block("block-a", ["line-a"])]
+    page_b = _page([_line("B", "line-b")])
+    page_b.page_index = 1
+    page_b.content_blocks = [_block("block-b", ["line-b"])]
+    document = StructuredDocument(
+        pages=[page_a, page_b], tables=[], raw_text="", reading_text="",
+        metadata=DocumentMetadata("test.pdf", 2, None),
+        diagnostics=DocumentDiagnostics(ExtractionStatus.SUCCESS, 2, 2, 0, 0),
+    )
+
+    summary, findings = audit_document_conservation(document)
+
+    assert summary.auditable
+    assert summary.page_count == 2
+    assert summary.accepted_lines == 2
+    assert summary.category_counts == {"owned_once": 2}
+    assert all(set(finding.to_dict()) >= {"page_index", "line_id", "category"} for finding in findings)
+    assert summary.to_dict()["auditable"] is True

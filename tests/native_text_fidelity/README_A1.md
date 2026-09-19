@@ -107,4 +107,19 @@ supressões explícitas, fontes transformadas (`DEDUPLICATED`), reivindicações
 órfãs, conteúdo não contabilizado e linhas em branco não avaliáveis. Os testes
 em `test_native_text_a2.py` cobrem esses eventos sem depender do corpus PDF.
 O ledger de produção continua sendo o mecanismo que decide/reconstrói blocos;
-este módulo verifica se sua saída é auditável.
+este módulo verifica se sua saída é auditável. `audit_document_conservation`
+agrega páginas já montadas e consome os fatos de fontes transformadas expostos
+em `PageDiagnostics`, permitindo uma verificação documental sem rerodar
+decisões do assembler.
+
+Para executar a auditoria sobre a saída montada do extrator, sem OCR, layout
+ou tabelas:
+
+```bash
+python tests/native_text_fidelity/a2_evaluate.py \
+  tests/corpus/native_text_stress/Document_Text_Stress_V1.pdf \
+  --output /tmp/pdfextractor-a2
+```
+
+O comando produz `a2_metadata.json`, `a2_summary.json` e
+`a2_findings.jsonl` fora do Git.
