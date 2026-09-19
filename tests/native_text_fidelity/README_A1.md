@@ -161,3 +161,7 @@ borderless, linhas nativas com a mesma linha de base geométrica são agrupadas
 antes da inferência das trilhas. Fragmentos de tabelas continuadas têm seus
 índices de linha normalizados apenas para a forma relativa da página; isso não
 altera a evidência nem a montagem de produção.
+
+Na reconstrução nativa horizontal, a linha é ancorada pela borda inferior das
+caixas dos glifos. Assim, ascendentes, acentos e descendentes permanecem na
+mesma linha visual sem perder a separação geométrica entre colunas.

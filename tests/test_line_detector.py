@@ -16,11 +16,19 @@ from structured_pdf_text.text.normalize import normalize_text
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.line_detector import (
     _is_ghost_punctuation_line,
+    _line_center,
     _mark_ghost_punctuation_candidates,
     _merge_script_lines,
     _reconcile_with_textpage,
     reconstruct_native_lines,
 )
+
+
+def test_line_center_uses_shared_baseline_for_different_glyph_heights() -> None:
+    normal = _char(index=0, text="a", bbox=BBox(0.0, 5.0, 5.0, 10.0), angle=0.0)
+    ascender = _char(index=1, text="i", bbox=BBox(6.0, 2.0, 8.0, 10.0), angle=0.0)
+
+    assert _line_center(normal, median_height=5.0) == _line_center(ascender, median_height=5.0)
 
 
 def _char(

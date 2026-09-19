@@ -356,18 +356,12 @@ def _split_groups_by_column_gap(
 
 
 def _line_center(char: NativeCharacter, median_height: float) -> float:
-    if (
-        char.bbox.height < median_height * 0.25
-        or (
-            char.text in "_,.;"
-            and char.bbox.height < median_height * 0.70
-        )
-    ):
-        # Baseline glyphs such as underscores, periods and hyphens may have a
-        # very short box whose geometric center falls below the surrounding
-        # letters. Anchor them using the shared baseline instead.
-        return char.bbox.y1 - median_height / 2.0
-    return char.bbox.cy
+    # Glyphs from the same visual line do not share the same vertical center:
+    # ascenders, accents and descenders change the top/bottom of each box.
+    # The lower edge is the stable baseline signal for the horizontal line
+    # detector. Using the center split one line into several groups when, for
+    # example, ``i`` and accented characters were taller than lowercase glyphs.
+    return char.bbox.y1 - median_height / 2.0
 
 
 def _line_from_chars(
