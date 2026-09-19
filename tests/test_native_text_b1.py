@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import sys
+from types import SimpleNamespace
+from pathlib import Path
+
+from structured_pdf_text.geometry import BBox
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "native_text_fidelity"))
+
+from b1_structure import (
+    B1Category,
+    audit_document_structure,
+    audit_page_structure,
+)
+
+
+def _line(text: str, line_id: str, x: float, y: float):
+    return SimpleNamespace(text=text, line_id=line_id, bbox=BBox(x, y, x + 80, y + 10))
+
+
+def _page(regions, tables=()):
+    return SimpleNamespace(page_index=0, regions=regions, tables=list(tables))
+
+
+def _region(region_id: str, *lines):
+    return SimpleNamespace(region_id=region_id, native_lines=list(lines), ocr_lines=[])
+
+
+def _unit(unit_id: str, text: str, region_id: str, order: int, bbox):
+    return {
+        "unit_id": unit_id,
+        "exact_text": text,
+        "region_id": region_id,
+        "logical_reading_order": order,
+        "bbox_top_origin_pt": list(bbox),
+    }
+
+
+def test_b1_matches_units_and_region_relationships_without_using_native_order():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}, {"region_id": "R2"}],
+        "units": [
+            _unit("U1", "primeiro", "R1", 1, (0, 0, 80, 10)),
+            _unit("U2", "segundo", "R2", 2, (0, 20, 80, 30)),
+        ],
+        "tables": [],
+    }
+    observed = _page([
+        _region("observed-a", _line("primeiro", "line-1", 0, 0)),
+        _region("observed-b", _line("segundo", "line-2", 0, 20)),
+    ])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 2
+    assert summary.auditable
+    assert not any(f.category is B1Category.UNIT_MISSING for f in findings)
+
+
+def test_b1_preserves_duplicate_occurrences_and_flags_logical_order():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            _unit("U1", "repetido", "R1", 1, (0, 0, 80, 10)),
+            _unit("U2", "repetido", "R1", 2, (0, 20, 80, 30)),
+        ],
+        "tables": [],
+    }
+    # The observed sequence is intentionally reversed; association is still
+    # one-to-one by occurrence and the order mismatch is reported separately.
+    observed = _page([_region("observed", _line("repetido", "line-2", 0, 20), _line("repetido", "line-1", 0, 0))])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 2
+    assert summary.categories[B1Category.READING_ORDER_MISMATCH.value] == 1
+    assert not any(f.category is B1Category.UNIT_MISSING for f in findings)
+
+
+def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            _unit("U1", "linha", "R1", 1, (0, 0, 80, 10)),
+            _unit("U2", "linha", "R1", 2, (0, 0, 80, 10)),
+        ],
+        "tables": [{
+            "table_id": "T1", "n_columns": 2,
+            "cells": [
+                {"row_index": 0, "column_index": 0, "rowspan": 1, "colspan": 2},
+            ],
+        }],
+    }
+    observed_table = SimpleNamespace(
+        table_id="observed-T1", column_count=2,
+        cells=[SimpleNamespace(row=0, col=0, rowspan=1, colspan=1)],
+    )
+    observed = _page([
+        _region("observed-a", _line("linha", "line-1", 0, 0)),
+        _region("observed-b", _line("linha", "line-2", 0, 0)),
+    ], [observed_table])
+
+    summary, findings = audit_page_structure(reference, observed)
+    categories = [finding.category for finding in findings]
+
+    assert B1Category.REGION_FRAGMENTED in categories
+    assert B1Category.TABLE_CELL_MISMATCH in categories
+    assert not summary.auditable
+
+
+def test_b1_aggregates_missing_pages_and_serializes_document_summary():
+    reference = {"pages": [{"page": 1, "regions": [], "units": [], "tables": []}, {"page": 2, "regions": [], "units": [{"unit_id": "U2", "exact_text": "x"}], "tables": []}]}
+    observed = SimpleNamespace(pages=[SimpleNamespace(page_index=0, regions=[], tables=[])])
+
+    summary, findings = audit_document_structure(reference, observed)
+
+    assert summary.page_count == 2
+    assert summary.matched_units == 0
+    assert summary.categories["unit_missing"] == 1
+    assert summary.to_dict()["auditable"] is False
+    assert findings[0].to_dict()["category"] == "unit_missing"

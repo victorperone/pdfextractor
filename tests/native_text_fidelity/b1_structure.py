@@ -1,0 +1,286 @@
+"""Independent structural audit for the B1 region/table/reading-order gate."""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from enum import Enum
+import math
+import re
+import unicodedata
+from typing import Any, Mapping, Sequence
+
+
+class B1Category(str, Enum):
+    UNIT_MATCHED = "unit_matched"
+    UNIT_MISSING = "unit_missing"
+    REGION_FRAGMENTED = "region_fragmented"
+    READING_ORDER_MISMATCH = "reading_order_mismatch"
+    TABLE_MATCHED = "table_matched"
+    TABLE_MISSING = "table_missing"
+    TABLE_CELL_MISMATCH = "table_cell_mismatch"
+    NOT_ASSESSABLE = "not_assessable"
+
+
+@dataclass(frozen=True, slots=True)
+class B1Finding:
+    page: int
+    category: B1Category
+    reference_id: str | None = None
+    observed_id: str | None = None
+    expected_text: str | None = None
+    observed_text: str | None = None
+    reasons: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page": self.page,
+            "category": self.category.value,
+            "reference_id": self.reference_id,
+            "observed_id": self.observed_id,
+            "expected_text": self.expected_text,
+            "observed_text": self.observed_text,
+            "reasons": list(self.reasons),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class B1PageSummary:
+    page: int
+    reference_units: int
+    matched_units: int
+    reference_regions: int
+    observed_regions: int
+    reference_tables: int
+    observed_tables: int
+    categories: Mapping[str, int]
+
+    @property
+    def auditable(self) -> bool:
+        return not any(
+            self.categories.get(category, 0)
+            for category in (
+                B1Category.UNIT_MISSING.value,
+                B1Category.REGION_FRAGMENTED.value,
+                B1Category.READING_ORDER_MISMATCH.value,
+                B1Category.TABLE_MISSING.value,
+                B1Category.TABLE_CELL_MISMATCH.value,
+            )
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page": self.page,
+            "reference_units": self.reference_units,
+            "matched_units": self.matched_units,
+            "reference_regions": self.reference_regions,
+            "observed_regions": self.observed_regions,
+            "reference_tables": self.reference_tables,
+            "observed_tables": self.observed_tables,
+            "categories": dict(sorted(self.categories.items())),
+            "auditable": self.auditable,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class B1DocumentSummary:
+    page_count: int
+    reference_units: int
+    matched_units: int
+    categories: Mapping[str, int]
+    pages: tuple[B1PageSummary, ...]
+
+    @property
+    def auditable(self) -> bool:
+        return all(page.auditable for page in self.pages)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page_count": self.page_count,
+            "reference_units": self.reference_units,
+            "matched_units": self.matched_units,
+            "categories": dict(sorted(self.categories.items())),
+            "pages": [page.to_dict() for page in self.pages],
+            "auditable": self.auditable,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservedLine:
+    line: Any
+    region_id: str
+    order_index: int
+
+
+def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) -> tuple[B1PageSummary, tuple[B1Finding, ...]]:
+    """Compare structural relationships without requiring source draw order."""
+
+    page = int(reference_page["page"])
+    observed_lines = _observed_lines(observed_page)
+    units = list(reference_page.get("units", []))
+    findings: list[B1Finding] = []
+    used: set[int] = set()
+    matched: dict[str, _ObservedLine] = {}
+
+    for unit in units:
+        unit_id = str(unit.get("unit_id", ""))
+        expected = str(unit.get("exact_text", ""))
+        candidates = [
+            item for item in observed_lines
+            if item.order_index not in used
+            and _normalized(item.line.text) == _normalized(expected)
+        ]
+        if not candidates:
+            findings.append(B1Finding(page, B1Category.UNIT_MISSING, unit_id, expected_text=expected, reasons=("no_unconsumed_exact_or_whitespace_equivalent_line",)))
+            continue
+        expected_box = _box(unit.get("bbox_top_origin_pt"))
+        candidates.sort(key=lambda item: _distance_score(expected_box, _line_box(item.line)))
+        chosen = candidates[0]
+        used.add(chosen.order_index)
+        matched[unit_id] = chosen
+        findings.append(B1Finding(page, B1Category.UNIT_MATCHED, unit_id, observed_id=chosen.line.line_id, expected_text=expected, observed_text=chosen.line.text))
+
+    # A reference region is reconstructed only from the geometry of its units;
+    # this avoids inventing a region bbox contract that the reference does not
+    # provide.  Splitting a region across output regions remains visible.
+    expected_region_units: dict[str, list[Mapping[str, Any]]] = {}
+    for unit in units:
+        expected_region_units.setdefault(str(unit.get("region_id", "")), []).append(unit)
+    for region_id, region_units in expected_region_units.items():
+        observed_region_ids = {
+            matched[unit["unit_id"]].region_id
+            for unit in region_units
+            if unit.get("unit_id") in matched
+        }
+        if len(observed_region_ids) > 1:
+            findings.append(B1Finding(page, B1Category.REGION_FRAGMENTED, region_id, reasons=("reference_region_maps_to_multiple_observed_regions",)))
+        elif not observed_region_ids and region_units:
+            findings.append(B1Finding(page, B1Category.NOT_ASSESSABLE, region_id, reasons=("region_has_no_matched_text_unit",)))
+
+    # Check logical order only among units successfully associated by text and
+    # geometry.  source_draw_order/native char order is deliberately ignored.
+    ordered_units = sorted(
+        (
+            unit for unit in units
+            if unit.get("unit_id") in matched
+            and unit.get("role") not in {"repeated_header", "repeated_footer"}
+        ),
+        key=lambda unit: int(unit.get("logical_reading_order", 0)),
+    )
+    observed_indexes = [matched[unit["unit_id"]].order_index for unit in ordered_units]
+    if any(left > right for left, right in zip(observed_indexes, observed_indexes[1:])):
+        findings.append(B1Finding(page, B1Category.READING_ORDER_MISMATCH, reasons=("observed_region_line_order_is_not_reference_logical_order",)))
+
+    reference_tables = list(reference_page.get("tables", []))
+    observed_tables = list(getattr(observed_page, "tables", []) or [])
+    for index, reference_table in enumerate(reference_tables):
+        if index >= len(observed_tables):
+            findings.append(B1Finding(page, B1Category.TABLE_MISSING, str(reference_table.get("table_id", "")), reasons=("no_observed_table_at_reference_ordinal",)))
+            continue
+        observed_table = observed_tables[index]
+        expected_cells = {
+            (int(cell["row_index"]), int(cell["column_index"]), int(cell["rowspan"]), int(cell["colspan"]))
+            for cell in reference_table.get("cells", [])
+        }
+        observed_cells = {
+            (int(cell.row), int(cell.col), int(cell.rowspan), int(cell.colspan))
+            for cell in getattr(observed_table, "cells", [])
+        }
+        if expected_cells != observed_cells or int(reference_table.get("n_columns", 0)) != int(getattr(observed_table, "column_count", 0)):
+            findings.append(B1Finding(page, B1Category.TABLE_CELL_MISMATCH, str(reference_table.get("table_id", "")), observed_id=str(getattr(observed_table, "table_id", "")), reasons=(f"expected_cells={len(expected_cells)}", f"observed_cells={len(observed_cells)}")))
+        else:
+            findings.append(B1Finding(page, B1Category.TABLE_MATCHED, str(reference_table.get("table_id", "")), observed_id=str(getattr(observed_table, "table_id", ""))))
+    if len(observed_tables) > len(reference_tables):
+        for table in observed_tables[len(reference_tables):]:
+            findings.append(B1Finding(page, B1Category.NOT_ASSESSABLE, observed_id=str(getattr(table, "table_id", "")), reasons=("observed_extra_table_has_no_reference_ordinal",)))
+
+    counts = Counter(finding.category.value for finding in findings)
+    summary = B1PageSummary(
+        page=page,
+        reference_units=len(units),
+        matched_units=len(matched),
+        reference_regions=len(reference_page.get("regions", [])),
+        observed_regions=len(getattr(observed_page, "regions", []) or []),
+        reference_tables=len(reference_tables),
+        observed_tables=len(observed_tables),
+        categories=dict(counts),
+    )
+    return summary, tuple(findings)
+
+
+def audit_document_structure(reference: Mapping[str, Any], observed_document: Any) -> tuple[B1DocumentSummary, tuple[B1Finding, ...]]:
+    pages = list(reference.get("pages", []))
+    observed_by_page = {int(page.page_index) + 1: page for page in observed_document.pages}
+    page_summaries: list[B1PageSummary] = []
+    findings: list[B1Finding] = []
+    counts: Counter[str] = Counter()
+    for reference_page in pages:
+        observed_page = observed_by_page.get(int(reference_page["page"]))
+        if observed_page is None:
+            summary = B1PageSummary(
+                int(reference_page["page"]), len(reference_page.get("units", [])), 0,
+                len(reference_page.get("regions", [])), 0,
+                len(reference_page.get("tables", [])), 0,
+                {B1Category.UNIT_MISSING.value: len(reference_page.get("units", []))},
+            )
+            page_summaries.append(summary)
+            finding = B1Finding(int(reference_page["page"]), B1Category.UNIT_MISSING, reasons=("observed_page_missing",))
+            findings.append(finding)
+            counts[finding.category.value] += 1
+            continue
+        summary, page_findings = audit_page_structure(reference_page, observed_page)
+        page_summaries.append(summary)
+        findings.extend(page_findings)
+        counts.update(finding.category.value for finding in page_findings)
+    document_summary = B1DocumentSummary(
+        page_count=len(pages),
+        reference_units=sum(summary.reference_units for summary in page_summaries),
+        matched_units=sum(summary.matched_units for summary in page_summaries),
+        categories=dict(counts),
+        pages=tuple(page_summaries),
+    )
+    return document_summary, tuple(findings)
+
+
+def _observed_lines(page: Any) -> list[_ObservedLine]:
+    result: list[_ObservedLine] = []
+    index = 0
+    for region in getattr(page, "regions", []) or []:
+        for line in [*getattr(region, "native_lines", []), *getattr(region, "ocr_lines", [])]:
+            result.append(_ObservedLine(line, str(getattr(region, "region_id", "")), index))
+            index += 1
+    return result
+
+
+def _normalized(value: str) -> str:
+    value = unicodedata.normalize("NFC", value.replace("\r\n", "\n").replace("\r", "\n"))
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _box(value: Any) -> tuple[float, float, float, float] | None:
+    if value is None:
+        return None
+    values = [value.get(key) for key in ("x0", "y0", "x1", "y1")] if isinstance(value, Mapping) else list(value)
+    if len(values) != 4:
+        return None
+    try:
+        box = tuple(float(item) for item in values)
+    except (TypeError, ValueError):
+        return None
+    return box if all(math.isfinite(item) for item in box) and box[2] > box[0] and box[3] > box[1] else None
+
+
+def _line_box(line: Any) -> tuple[float, float, float, float] | None:
+    bbox = getattr(line, "bbox", None)
+    if bbox is None:
+        return None
+    return (float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1))
+
+
+def _distance_score(expected: tuple[float, float, float, float] | None, observed: tuple[float, float, float, float] | None) -> float:
+    if expected is None or observed is None:
+        return 1_000_000.0
+    ex = (expected[0] + expected[2]) / 2, (expected[1] + expected[3]) / 2
+    ox = (observed[0] + observed[2]) / 2, (observed[1] + observed[3]) / 2
+    scale = max(1.0, expected[2] - expected[0], expected[3] - expected[1])
+    return math.hypot(ex[0] - ox[0], ex[1] - ox[1]) / scale

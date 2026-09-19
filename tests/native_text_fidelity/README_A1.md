@@ -123,3 +123,22 @@ python tests/native_text_fidelity/a2_evaluate.py \
 
 O comando produz `a2_metadata.json`, `a2_summary.json` e
 `a2_findings.jsonl` fora do Git.
+
+## B1 — auditoria estrutural
+
+O auditor B1 compara unidades por ocorrência, verifica se regiões de referência
+foram fragmentadas, avalia a monotonicidade da ordem lógica e confere a forma
+de células (`row`, `col`, `rowspan`, `colspan`) sem confundir `source_draw_order`
+com reading order. Cabeçalhos e rodapés repetidos ficam fora da comparação de
+ordem de conteúdo, pois são furniture explícito da página. Para executar no corpus:
+
+```bash
+python tests/native_text_fidelity/b1_evaluate.py \
+  tests/corpus/native_text_stress/Document_Text_Stress_V1.pdf \
+  tests/corpus/native_text_stress/Document_Text_Stress_V1.reference.json \
+  --output /tmp/pdfextractor-b1
+```
+
+O resultado produz `b1_metadata.json`, `b1_summary.json` e
+`b1_findings.jsonl`. `table_missing` e `table_cell_mismatch` são achados
+estruturais; não são convertidos em perda de texto A1.
