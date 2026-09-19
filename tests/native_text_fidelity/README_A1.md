@@ -142,3 +142,10 @@ python tests/native_text_fidelity/b1_evaluate.py \
 O resultado produz `b1_metadata.json`, `b1_summary.json` e
 `b1_findings.jsonl`. `table_missing` e `table_cell_mismatch` são achados
 estruturais; não são convertidos em perda de texto A1.
+
+O detector de tabelas nativas aceita tanto segmentos finos quanto caminhos
+retangulares repetidos que representam contornos de células. Em tabelas
+borderless, linhas nativas com a mesma linha de base geométrica são agrupadas
+antes da inferência das trilhas. Fragmentos de tabelas continuadas têm seus
+índices de linha normalizados apenas para a forma relativa da página; isso não
+altera a evidência nem a montagem de produção.

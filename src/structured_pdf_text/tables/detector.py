@@ -65,6 +65,7 @@ class _Grid:
     y_edges: tuple[float, ...]
     bbox: BBox
     coherence: float
+    rectangular_cells: tuple[tuple[int, int, int, int], ...] = ()
 
 
 def detect_tables_native(
@@ -147,6 +148,8 @@ def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
         [min(path.width, path.height) for path in paths if min(path.width, path.height) > 0]
         or [2.0]
     )
+    if median_stroke > 8.0:
+        return _detect_rectangular_grid(paths, limit)
     thickness = max(4.0, median_stroke * 2.5)
     # Candidate horizontal lines: thin, wide enough to span most of the limit.
     horizontal = [
@@ -155,7 +158,7 @@ def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
         if path.height <= thickness and path.width >= max(40.0, limit.width * 0.45)
     ]
     if not horizontal:
-        return None
+        return _detect_rectangular_grid(paths, limit)
     # Derive grid height for vertical line filtering. Using all horizontal
     # lines inflates the estimate when header/footer rules are present. Instead
     # use any short-height vertical line candidates (height >= 30 pt) to anchor
@@ -184,13 +187,13 @@ def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
     x_edges = _cluster_edges([path.cx for path in vertical], tolerance=max(2.0, thickness))
     y_edges = _cluster_edges([path.cy for path in horizontal], tolerance=max(2.0, thickness))
     if len(x_edges) < 2 or len(y_edges) < 2:
-        return None
+        return _detect_rectangular_grid(paths, limit)
     x0 = min(path.x0 for path in horizontal + vertical)
     y0 = min(path.y0 for path in horizontal + vertical)
     x1 = max(path.x1 for path in horizontal + vertical)
     y1 = max(path.y1 for path in horizontal + vertical)
     if x1 <= x0 or y1 <= y0:
-        return None
+        return _detect_rectangular_grid(paths, limit)
     table_width = x1 - x0
     table_height = y1 - y0
     # Coherence: each horizontal line should span the full table width, and
@@ -204,13 +207,81 @@ def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
         vertical_coverage = 0.70
     coherence = min(1.0, max(0.0, (horizontal_coverage + vertical_coverage) / 2.0))
     if coherence < 0.65:
-        return None
+        return _detect_rectangular_grid(paths, limit)
     return _Grid(
         x_edges=tuple(x_edges),
         y_edges=tuple(y_edges),
         bbox=BBox(x0, y0, x1, y1),
         coherence=coherence,
     )
+
+
+def _detect_rectangular_grid(paths: list[BBox], limit: BBox) -> _Grid | None:
+    """Infer a grid from repeated rectangular cell outlines.
+
+    Some producers draw each cell as a filled/stroked rectangle rather than
+    emitting thin horizontal and vertical path segments.  PDFium exposes the
+    rectangle bounds in that case, so the edge coordinates still provide a
+    reliable grid signal even though the segment-based detector cannot use
+    them directly.
+
+    The occupancy requirement is deliberately strict enough to avoid treating
+    a handful of unrelated rectangles as a table.  Merged cells are accepted
+    because one rectangle may span more than one adjacent edge pair.
+    """
+
+    if len(paths) < 4:
+        return None
+    tolerance = 2.5
+    x_edges = _cluster_edges(
+        [value for path in paths for value in (path.x0, path.x1)],
+        tolerance=tolerance,
+    )
+    y_edges = _cluster_edges(
+        [value for path in paths for value in (path.y0, path.y1)],
+        tolerance=tolerance,
+    )
+    if len(x_edges) < 3 or len(y_edges) < 3:
+        return None
+
+    cells: set[tuple[int, int, int, int]] = set()
+    for path in paths:
+        left = _nearest_edge(path.x0, x_edges, tolerance)
+        right = _nearest_edge(path.x1, x_edges, tolerance)
+        top = _nearest_edge(path.y0, y_edges, tolerance)
+        bottom = _nearest_edge(path.y1, y_edges, tolerance)
+        if None in {left, right, top, bottom}:
+            continue
+        assert left is not None and right is not None
+        assert top is not None and bottom is not None
+        if right > left and bottom > top:
+            cells.add((top, left, bottom, right))
+
+    possible_cells = max((len(x_edges) - 1) * (len(y_edges) - 1), 1)
+    occupancy = len(cells) / possible_cells
+    if len(cells) < 4 or occupancy < 0.55:
+        return None
+
+    x0 = min(path.x0 for path in paths)
+    y0 = min(path.y0 for path in paths)
+    x1 = max(path.x1 for path in paths)
+    y1 = max(path.y1 for path in paths)
+    if not (x0 < x1 and y0 < y1):
+        return None
+    if not BBox(x0, y0, x1, y1).overlap_ratio(limit) > 0.50:
+        return None
+    return _Grid(
+        x_edges=tuple(x_edges),
+        y_edges=tuple(y_edges),
+        bbox=BBox(x0, y0, x1, y1),
+        coherence=min(1.0, 0.65 + 0.35 * occupancy),
+        rectangular_cells=tuple(sorted(cells)),
+    )
+
+
+def _nearest_edge(value: float, edges: list[float], tolerance: float) -> int | None:
+    index = min(range(len(edges)), key=lambda item: abs(edges[item] - value))
+    return index if abs(edges[index] - value) <= tolerance else None
 
 
 def _table_from_grid(
@@ -243,43 +314,52 @@ def _table_from_grid(
     n_cols = len(grid.x_edges) - 1
 
     # Detect span extents for each grid cell. A cell is "covered" when it falls
-    # inside the bounding box of a previously computed merged cell.
+    # inside the bounding box of a previously computed merged cell. Rectangular
+    # path producers already expose these spans directly; use them instead of
+    # treating every thick rectangle as a segment crossing all rows/columns.
     covered: set[tuple[int, int]] = set()
     span_map: dict[tuple[int, int], tuple[int, int]] = {}  # (row,col) -> (rs, cs)
 
-    for row in range(n_rows):
-        for col in range(n_cols):
-            if (row, col) in covered:
-                continue
-            # Colspan: extend right while the internal vertical separator at the
-            # next x_edge is absent for this row band.
-            cs = 1
-            while col + cs < n_cols:
-                x_inner = grid.x_edges[col + cs]
-                if _segment_exists_at_x(
-                    region_path_bboxes, x_inner,
-                    grid.y_edges[row], grid.y_edges[row + 1],
-                    thickness,
-                ):
-                    break
-                cs += 1
-            # Rowspan: extend down while the internal horizontal separator at the
-            # next y_edge is absent for this (possibly merged) column band.
-            rs = 1
-            while row + rs < n_rows:
-                y_inner = grid.y_edges[row + rs]
-                if _segment_exists_at_y(
-                    region_path_bboxes, y_inner,
-                    grid.x_edges[col], grid.x_edges[col + cs],
-                    thickness,
-                ):
-                    break
-                rs += 1
-            span_map[(row, col)] = (rs, cs)
-            for r in range(row, row + rs):
-                for c in range(col, col + cs):
-                    if r != row or c != col:
-                        covered.add((r, c))
+    if grid.rectangular_cells:
+        for row, col, row_end, col_end in grid.rectangular_cells:
+            if 0 <= row < n_rows and 0 <= col < n_cols and row_end <= n_rows and col_end <= n_cols:
+                span_map[(row, col)] = (row_end - row, col_end - col)
+    else:
+        for row in range(n_rows):
+            for col in range(n_cols):
+                if (row, col) in covered:
+                    continue
+                # Colspan: extend right while the internal vertical separator at the
+                # next x_edge is absent for this row band.
+                cs = 1
+                while col + cs < n_cols:
+                    x_inner = grid.x_edges[col + cs]
+                    if _segment_exists_at_x(
+                        region_path_bboxes, x_inner,
+                        grid.y_edges[row], grid.y_edges[row + 1],
+                        thickness,
+                    ):
+                        break
+                    cs += 1
+                # Rowspan: extend down while the internal horizontal separator at the
+                # next y_edge is absent for this (possibly merged) column band.
+                rs = 1
+                while row + rs < n_rows:
+                    y_inner = grid.y_edges[row + rs]
+                    if _segment_exists_at_y(
+                        region_path_bboxes, y_inner,
+                        grid.x_edges[col], grid.x_edges[col + cs],
+                        thickness,
+                    ):
+                        break
+                    rs += 1
+                span_map[(row, col)] = (rs, cs)
+
+    for (row, col), (rs, cs) in span_map.items():
+        for r in range(row, row + rs):
+            for c in range(col, col + cs):
+                if r != row or c != col:
+                    covered.add((r, c))
 
     cells: list[TableCell] = []
     for row in range(n_rows):

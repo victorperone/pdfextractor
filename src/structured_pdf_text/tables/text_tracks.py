@@ -186,6 +186,7 @@ def detect_borderless_table(
 
 def _candidates(region: LayoutRegion) -> list[_Candidate]:
     lines = sorted(region.native_lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    lines = _merge_same_baseline_lines(lines)
     if len(lines) < 3:
         return []
     heights = [line.bbox.height for line in lines if line.bbox.height > 0]
@@ -265,6 +266,57 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
     return output
 
 
+def _merge_same_baseline_lines(lines: list[TextLine]) -> list[TextLine]:
+    """Rebuild geometric rows when each borderless cell became a line.
+
+    Native line reconstruction can legitimately return one line per cell when
+    columns have slightly different glyph metrics.  Borderless-table analysis
+    needs the row relationship, so combine only lines with nearly identical
+    vertical centers; ordinary paragraph lines remain separate because their
+    baseline gap is materially larger.
+    """
+
+    if len(lines) < 2:
+        return lines
+    heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.45)
+    rows: list[list[TextLine]] = []
+    for line in lines:
+        if rows and abs(line.bbox.cy - rows[-1][-1].bbox.cy) <= tolerance:
+            rows[-1].append(line)
+        else:
+            rows.append([line])
+
+    merged: list[TextLine] = []
+    for row in rows:
+        if len(row) == 1:
+            merged.append(row[0])
+            continue
+        tokens = [token for line in row for token in line.tokens]
+        tokens.sort(key=lambda token: (token.bbox.x0, token.bbox.y0))
+        merged.append(
+            TextLine(
+                tokens=tokens,
+                bbox=BBox.union_all([line.bbox for line in row]),
+                baseline=row[0].baseline,
+                direction=row[0].direction,
+                native_order_min=min(
+                    (line.native_order_min for line in row if line.native_order_min is not None),
+                    default=None,
+                ),
+                native_order_max=max(
+                    (line.native_order_max for line in row if line.native_order_max is not None),
+                    default=None,
+                ),
+                gap_mode="geometry",
+                order_mode="geometry",
+                line_id="|".join(line.line_id for line in row if line.line_id),
+                merged_source_line_ids=tuple(line.line_id for line in row if line.line_id),
+            )
+        )
+    return merged
+
+
 def _prefix_structural_reason(
     line: TextLine,
     groups: tuple[_CellGroup, ...],
@@ -286,6 +338,8 @@ def _prefix_structural_reason(
         and line.bbox.x1 >= table_body_bbox.x1 - tolerance
         and line.bbox.width >= table_body_bbox.width * 0.75
     )
+    if len(groups) < 2 and not spanning:
+        return "prefix_without_multi_track_or_spanning_geometry"
     long_prose = len(line.text.split()) >= 8 or len(line.text) >= 60
     if long_prose and not spanning and not aligned:
         return "prose_prefix_without_track_alignment"

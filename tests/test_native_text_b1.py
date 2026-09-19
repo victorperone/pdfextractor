@@ -80,6 +80,29 @@ def test_b1_preserves_duplicate_occurrences_and_flags_logical_order():
     assert not any(f.category is B1Category.UNIT_MISSING for f in findings)
 
 
+def test_b1_classifies_complete_unit_split_across_adjacent_lines():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "texto completo", "R1", 1, (0, 0, 160, 20))],
+        "tables": [],
+    }
+    observed = _page([_region(
+        "observed",
+        _line("texto", "line-1", 0, 0),
+        _line("completo", "line-2", 0, 10),
+    )])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_FRAGMENTED.value] == 1
+    assert summary.auditable
+    fragmented = next(finding for finding in findings if finding.category is B1Category.UNIT_FRAGMENTED)
+    assert fragmented.observed_id == "line-1,line-2"
+    assert fragmented.observed_text == "texto completo"
+
+
 def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
     reference = {
         "page": 1,
@@ -110,6 +133,38 @@ def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
     assert B1Category.REGION_FRAGMENTED in categories
     assert B1Category.TABLE_CELL_MISMATCH in categories
     assert not summary.auditable
+
+
+def test_b1_normalizes_row_coordinates_for_continued_table_fragments():
+    reference = {
+        "page": 1,
+        "regions": [],
+        "units": [],
+        "tables": [{
+            "table_id": "continued",
+            "n_columns": 2,
+            "cells": [
+                {"row_index": 13, "column_index": 0, "rowspan": 1, "colspan": 1},
+                {"row_index": 13, "column_index": 1, "rowspan": 1, "colspan": 1},
+                {"row_index": 14, "column_index": 0, "rowspan": 1, "colspan": 1},
+                {"row_index": 14, "column_index": 1, "rowspan": 1, "colspan": 1},
+            ],
+        }],
+    }
+    observed_table = SimpleNamespace(
+        table_id="observed", column_count=2,
+        cells=[
+            SimpleNamespace(row=0, col=0, rowspan=1, colspan=1),
+            SimpleNamespace(row=0, col=1, rowspan=1, colspan=1),
+            SimpleNamespace(row=1, col=0, rowspan=1, colspan=1),
+            SimpleNamespace(row=1, col=1, rowspan=1, colspan=1),
+        ],
+    )
+
+    summary, findings = audit_page_structure(reference, _page([], [observed_table]))
+
+    assert summary.categories[B1Category.TABLE_MATCHED.value] == 1
+    assert not any(finding.category is B1Category.TABLE_CELL_MISMATCH for finding in findings)
 
 
 def test_b1_aggregates_missing_pages_and_serializes_document_summary():

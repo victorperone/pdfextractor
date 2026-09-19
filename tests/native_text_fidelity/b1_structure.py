@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 class B1Category(str, Enum):
     UNIT_MATCHED = "unit_matched"
+    UNIT_FRAGMENTED = "unit_fragmented"
     UNIT_MISSING = "unit_missing"
     REGION_FRAGMENTED = "region_fragmented"
     READING_ORDER_MISMATCH = "reading_order_mismatch"
@@ -120,7 +121,7 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
     units = list(reference_page.get("units", []))
     findings: list[B1Finding] = []
     used: set[int] = set()
-    matched: dict[str, _ObservedLine] = {}
+    matched: dict[str, tuple[_ObservedLine, ...]] = {}
 
     for unit in units:
         unit_id = str(unit.get("unit_id", ""))
@@ -131,13 +132,28 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
             and _normalized(item.line.text) == _normalized(expected)
         ]
         if not candidates:
+            fragmented = _find_fragmented_unit(unit, expected, observed_lines, used)
+            if fragmented:
+                for item in fragmented:
+                    used.add(item.order_index)
+                matched[unit_id] = fragmented
+                findings.append(B1Finding(
+                    page,
+                    B1Category.UNIT_FRAGMENTED,
+                    unit_id,
+                    observed_id=",".join(str(item.line.line_id) for item in fragmented),
+                    expected_text=expected,
+                    observed_text=" ".join(item.line.text for item in fragmented),
+                    reasons=(f"unit_reconstructed_from_{len(fragmented)}_observed_lines",),
+                ))
+                continue
             findings.append(B1Finding(page, B1Category.UNIT_MISSING, unit_id, expected_text=expected, reasons=("no_unconsumed_exact_or_whitespace_equivalent_line",)))
             continue
         expected_box = _box(unit.get("bbox_top_origin_pt"))
         candidates.sort(key=lambda item: _distance_score(expected_box, _line_box(item.line)))
         chosen = candidates[0]
         used.add(chosen.order_index)
-        matched[unit_id] = chosen
+        matched[unit_id] = (chosen,)
         findings.append(B1Finding(page, B1Category.UNIT_MATCHED, unit_id, observed_id=chosen.line.line_id, expected_text=expected, observed_text=chosen.line.text))
 
     # A reference region is reconstructed only from the geometry of its units;
@@ -148,9 +164,10 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
         expected_region_units.setdefault(str(unit.get("region_id", "")), []).append(unit)
     for region_id, region_units in expected_region_units.items():
         observed_region_ids = {
-            matched[unit["unit_id"]].region_id
+            observed_region_id
             for unit in region_units
             if unit.get("unit_id") in matched
+            for observed_region_id in {item.region_id for item in matched[unit["unit_id"]]}
         }
         if len(observed_region_ids) > 1:
             findings.append(B1Finding(page, B1Category.REGION_FRAGMENTED, region_id, reasons=("reference_region_maps_to_multiple_observed_regions",)))
@@ -167,7 +184,7 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
         ),
         key=lambda unit: int(unit.get("logical_reading_order", 0)),
     )
-    observed_indexes = [matched[unit["unit_id"]].order_index for unit in ordered_units]
+    observed_indexes = [min(item.order_index for item in matched[unit["unit_id"]]) for unit in ordered_units]
     if any(left > right for left, right in zip(observed_indexes, observed_indexes[1:])):
         findings.append(B1Finding(page, B1Category.READING_ORDER_MISMATCH, reasons=("observed_region_line_order_is_not_reference_logical_order",)))
 
@@ -178,10 +195,7 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
             findings.append(B1Finding(page, B1Category.TABLE_MISSING, str(reference_table.get("table_id", "")), reasons=("no_observed_table_at_reference_ordinal",)))
             continue
         observed_table = observed_tables[index]
-        expected_cells = {
-            (int(cell["row_index"]), int(cell["column_index"]), int(cell["rowspan"]), int(cell["colspan"]))
-            for cell in reference_table.get("cells", [])
-        }
+        expected_cells = _reference_cell_shape(reference_table.get("cells", []))
         observed_cells = {
             (int(cell.row), int(cell.col), int(cell.rowspan), int(cell.colspan))
             for cell in getattr(observed_table, "cells", [])
@@ -250,6 +264,79 @@ def _observed_lines(page: Any) -> list[_ObservedLine]:
             result.append(_ObservedLine(line, str(getattr(region, "region_id", "")), index))
             index += 1
     return result
+
+
+def _reference_cell_shape(cells: Sequence[Mapping[str, Any]]) -> set[tuple[int, int, int, int]]:
+    """Normalize continued-table row coordinates to the current page fragment."""
+
+    if not cells:
+        return set()
+    row_indexes = sorted({int(cell["row_index"]) for cell in cells})
+    row_map = {row_index: ordinal for ordinal, row_index in enumerate(row_indexes)}
+    return {
+        (
+            row_map[int(cell["row_index"])],
+            int(cell["column_index"]),
+            int(cell["rowspan"]),
+            int(cell["colspan"]),
+        )
+        for cell in cells
+    }
+
+
+def _find_fragmented_unit(
+    unit: Mapping[str, Any],
+    expected: str,
+    observed_lines: Sequence[_ObservedLine],
+    used: set[int],
+) -> tuple[_ObservedLine, ...] | None:
+    """Recover a reference unit split into adjacent observed lines.
+
+    This is intentionally a conservative, geometry-bounded reconstruction:
+    only unused lines whose boxes overlap the reference unit are considered,
+    and the joined text must equal the reference text after whitespace
+    normalization.  It therefore distinguishes a complete one-to-many
+    extraction from a genuinely missing unit without accepting arbitrary page
+    substrings.
+    """
+
+    expected_box = _box(unit.get("bbox_top_origin_pt"))
+    if expected_box is None:
+        return None
+    candidates = [
+        item for item in observed_lines
+        if item.order_index not in used
+        and _normalized(item.line.text)
+        and _boxes_overlap_with_tolerance(expected_box, _line_box(item.line))
+    ]
+    candidates.sort(key=lambda item: item.order_index)
+    if len(candidates) < 2:
+        return None
+
+    normalized_expected = _normalized(expected)
+    for start in range(len(candidates)):
+        for end in range(start + 2, min(len(candidates), start + 8) + 1):
+            window = tuple(candidates[start:end])
+            if _normalized(" ".join(item.line.text for item in window)) == normalized_expected:
+                return window
+    return None
+
+
+def _boxes_overlap_with_tolerance(
+    expected: tuple[float, float, float, float],
+    observed: tuple[float, float, float, float] | None,
+) -> bool:
+    if observed is None:
+        return False
+    width = expected[2] - expected[0]
+    height = expected[3] - expected[1]
+    tolerance = max(2.0, min(12.0, max(width, height) * 0.1))
+    return not (
+        observed[2] < expected[0] - tolerance
+        or observed[0] > expected[2] + tolerance
+        or observed[3] < expected[1] - tolerance
+        or observed[1] > expected[3] + tolerance
+    )
 
 
 def _normalized(value: str) -> str:
