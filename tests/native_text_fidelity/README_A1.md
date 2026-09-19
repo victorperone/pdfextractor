@@ -98,3 +98,13 @@ gerador represente a tinta real, nem aprova 100% de texto/tabelas. `get_text_ran
 e `get_text_bounded` seriam visões da mesma biblioteca e não são tratados como
 fontes independentes. OCR, rasterização, assembler, conservação, ordem lógica
 e estrutura de tabela ficam para etapas posteriores.
+
+## A2 — auditoria de conservação IR
+
+O primeiro incremento A2 está em `a2_conservation.py`. Ele é um avaliador
+independente e não altera os blocos: confere ownership exatamente uma vez,
+supressões explícitas, fontes transformadas (`DEDUPLICATED`), reivindicações
+órfãs, conteúdo não contabilizado e linhas em branco não avaliáveis. Os testes
+em `test_native_text_a2.py` cobrem esses eventos sem depender do corpus PDF.
+O ledger de produção continua sendo o mecanismo que decide/reconstrói blocos;
+este módulo verifica se sua saída é auditável.
