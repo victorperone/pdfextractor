@@ -12,7 +12,11 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.text.reading_order import order_region_lines
+from structured_pdf_text.text.reading_order import (
+    ReadingLane,
+    _order_lane_segments,
+    order_region_lines,
+)
 
 
 def _line(text: str, x: float, y: float, width: float) -> TextLine:
@@ -82,6 +86,25 @@ def test_spanning_line_stays_between_column_segments() -> None:
     ordered, decision = order_region_lines([_region(RegionKind.TEXT, "body", BBox(0, 0, 200, 70), lines)])
     assert [line.text for line in ordered] == ["A1", "A2", "B1", "B2", "QUOTE", "A3", "B3"]
     assert decision.spanning_band_count == 1
+
+
+def test_wide_line_inside_asymmetric_lane_is_not_spanning() -> None:
+    lines = [
+        _line("A1", 0, 0, 30), _line("B1", 110, 0, 100),
+        _line("A2", 0, 20, 30), _line("B2", 110, 20, 100),
+        _line("A3", 0, 40, 30), _line("B3", 110, 40, 100),
+    ]
+    ordered, spanning_count, _ = _order_lane_segments(
+        lines,
+        [
+            ReadingLane(0, 40, tuple(lines[::2])),
+            ReadingLane(100, 220, tuple(lines[1::2])),
+        ],
+        BBox(0, 0, 220, 50),
+    )
+
+    assert [line.text for line in ordered] == ["A1", "A2", "A3", "B1", "B2", "B3"]
+    assert spanning_count == 0
 
 
 def test_figure_caption_edges_are_geometric() -> None:

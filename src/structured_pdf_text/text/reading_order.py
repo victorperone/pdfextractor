@@ -1027,13 +1027,13 @@ def _order_lane_segments(
     for line in lines:
         overlaps = [_line_lane_overlap(line, lane.x0, lane.x1) for lane in lanes]
         relevant = [index for index, overlap in enumerate(overlaps) if overlap >= 0.20]
-        covered = sum(_axis_overlap(line.bbox.x0, line.bbox.x1, lane.x0, lane.x1) for lane in lanes)
-        combined = sum(lane.x1 - lane.x0 for lane in lanes)
-        if (
-            len(relevant) >= 2
-            or covered / max(combined, 1.0) >= 0.70
-            or line.bbox.width >= region_bbox.width * 0.45
-        ):
+        crosses_gutter = any(
+            line.bbox.x0 < left_lane.x1
+            and line.bbox.x1 > right_lane.x0
+            and right_lane.x0 > left_lane.x1
+            for left_lane, right_lane in zip(lanes, lanes[1:])
+        )
+        if len(relevant) >= 2 and crosses_gutter:
             split = _split_line_by_lanes(line, lanes)
             if len(split) >= 2:
                 for segment in split:
