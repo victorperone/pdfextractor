@@ -142,7 +142,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         tables=physical_tables,
         emitted_table_ids=emitted_table_ids,
     )
-    blocks.extend(orphan_blocks)
+    blocks = _merge_orphan_blocks(blocks, orphan_blocks)
 
     blocks = _reindex_blocks(blocks)
 
@@ -488,11 +488,63 @@ def _insert_orphan_tables(
 def _order_content_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
     """Sort blocks by geometric position (y0, then x0).
 
-    Used only to order orphan tables among themselves before appending them at
-    the end of the page. The main block list preserves the order produced by
-    order_regions() / order_lines_in_region() and must not be re-sorted here.
+    Used only to order orphan tables among themselves before anchoring them in
+    the main block list. The main block list preserves the order produced by
+    order_regions() / order_lines_in_region() and must not be globally sorted.
     """
     return sorted(blocks, key=lambda b: (b.bbox.y0, b.bbox.x0))
+
+
+def _merge_orphan_blocks(
+    blocks: list[PageContentBlock],
+    orphan_blocks: list[PageContentBlock],
+) -> list[PageContentBlock]:
+    """Anchor orphan tables near the existing block with closest geometry.
+
+    An orphan table has no intersecting layout region, so it cannot participate
+    in the region reading-order graph. Insert it relative to the nearest known
+    block instead of blindly appending it. This preserves the established
+    graph order while recovering the common title/table/prose sequence.
+    """
+    merged = list(blocks)
+    for orphan in orphan_blocks:
+        if not merged:
+            merged.append(orphan)
+            continue
+        anchor_index = min(
+            range(len(merged)),
+            key=lambda index: _orphan_anchor_key(orphan, merged[index]),
+        )
+        anchor = merged[anchor_index]
+        if _comes_before(orphan, anchor):
+            merged.insert(anchor_index, orphan)
+        else:
+            merged.insert(anchor_index + 1, orphan)
+    return merged
+
+
+def _orphan_anchor_key(
+    orphan: PageContentBlock,
+    candidate: PageContentBlock,
+) -> tuple[int, float, float]:
+    """Prefer a block in the same horizontal band, then geometric distance."""
+    horizontal_overlap = max(
+        0.0,
+        min(orphan.bbox.x1, candidate.bbox.x1)
+        - max(orphan.bbox.x0, candidate.bbox.x0),
+    )
+    vertical_distance = abs(orphan.bbox.cy - candidate.bbox.cy)
+    horizontal_distance = abs(orphan.bbox.cx - candidate.bbox.cx)
+    return (
+        0 if horizontal_overlap > 0 else 1,
+        vertical_distance + 0.25 * horizontal_distance,
+        horizontal_distance,
+    )
+
+
+def _comes_before(first: PageContentBlock, second: PageContentBlock) -> bool:
+    """Return the stable top-origin position of one block relative to another."""
+    return (first.bbox.cy, first.bbox.cx) < (second.bbox.cy, second.bbox.cx)
 
 
 def _reindex_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
@@ -501,12 +553,8 @@ def _reindex_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
     The incoming order is the reading order established by order_regions() and
     order_lines_in_region(). Sorting globally by (y0, x0) here would undo the
     sophisticated graph-based reading order for multi-column and mixed layouts.
-    Orphan tables are already sorted among themselves by _insert_orphan_tables()
-    and appended at the end; they do not justify reordering all other blocks.
-
-    TODO: orphan tables are currently appended after all region blocks. A future
-    improvement should anchor each orphan table at its correct reading position
-    using geometric proximity to a known region.
+    Orphan tables were anchored relative to that order before this final index
+    assignment.
     """
     result: list[PageContentBlock] = []
     for i, block in enumerate(blocks):

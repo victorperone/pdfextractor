@@ -338,6 +338,40 @@ def test_title_before_table_order() -> None:
     assert title_idx < table_idx, "TITLE must come before TABLE"
 
 
+def test_orphan_table_is_anchored_between_title_and_prose() -> None:
+    """A table outside all regions keeps its physical position in the stream."""
+    title_bbox = _bbox(0, 0, 200, 30)
+    table_bbox = _bbox(0, 50, 200, 110)
+    prose_bbox = _bbox(0, 140, 200, 170)
+
+    title = _region(
+        RegionKind.TITLE,
+        title_bbox,
+        [_line("Título", title_bbox)],
+        region_id="title",
+        heading_level=1,
+    )
+    prose = _region(
+        RegionKind.TEXT,
+        prose_bbox,
+        [_line("Texto depois", prose_bbox)],
+        region_id="prose",
+    )
+    table = _table(
+        "orphan-table",
+        0,
+        table_bbox,
+        [_cell(0, 0, "Dado", _bbox(10, 60, 190, 100))],
+        col_count=1,
+    )
+
+    result = assemble_page_content(_page([title, prose], [table]))
+    kinds = [block.kind for block in result.blocks]
+
+    assert kinds == [ContentKind.TITLE, ContentKind.TABLE, ContentKind.TEXT]
+    assert result.orphan_tables == 1
+
+
 # ---------------------------------------------------------------------------
 # Section 24.6: TABLE region with no table at all → fallback
 # ---------------------------------------------------------------------------
