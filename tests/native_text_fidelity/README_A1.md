@@ -154,6 +154,23 @@ regiões do mesmo tipo, que permanece `region_fragmented` e bloqueia o gate B1.
 Na montagem das regiões, caixas fortemente aninhadas do mesmo tipo e com o
 mesmo papel semântico são coalescidas; caixas adjacentes ou com papéis
 semânticos diferentes continuam independentes.
+
+## C1 — auditoria das renderizações finais
+
+`c1_render_audit.py` verifica as duas renderizações sem alterar o pipeline de
+produção. A saída JSON precisa ser estruturalmente igual a
+`StructuredDocument.to_dict()`. A saída Markdown é conferida por seção de
+página e por fragmentos renderizáveis dos blocos não suprimidos; o auditor não
+reimplementa decisões de layout.
+
+```bash
+python tests/native_text_fidelity/c1_render_audit.py \
+  tests/corpus/native_text_stress/Document_Text_Stress_V1.pdf \
+  --output /tmp/pdfextractor-c1
+```
+
+O comando produz `c1_metadata.json`, `c1_summary.json`, `c1_findings.jsonl`,
+`c1_rendered.json`, `c1_rendered.md` e `c1_report.md` fora do Git.
 Na ordem global, unidades `edge_*`, `rotation_*`, `vertical_*` e unidades de
 célula/cabeçalho de tabela não são comparadas como linhas corridas: bordas e
 rótulos têm fluxo geométrico próprio, enquanto tabelas são avaliadas pela
