@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 from structured_pdf_text.document import (
@@ -364,6 +365,29 @@ def test_reconciliation_spacing_recovery_still_works() -> None:
     result = _reconcile_with_textpage([tracked], extracted)
 
     assert result[0].text == "entrada Fundos"
+
+
+def test_reconciliation_uses_native_order_for_rotated_lines() -> None:
+    body = replace(
+        _recon_line("Corpo horizontal", "body"),
+        native_order_min=20,
+        native_order_max=35,
+    )
+    rotated = replace(
+        _recon_line("RÓTULO019 • LEITURA INVERTIDA", "rotated"),
+        native_order_min=1,
+        native_order_max=19,
+    )
+
+    result = _reconcile_with_textpage(
+        [body, rotated],
+        "RÓTULO 019 • LEITURA INVERTIDA\nCorpo horizontal",
+    )
+
+    assert [line.text for line in result] == [
+        "Corpo horizontal",
+        "RÓTULO 019 • LEITURA INVERTIDA",
+    ]
 
 
 def test_reconciliation_recovers_spaces_between_uppercase_words() -> None:

@@ -127,11 +127,21 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
     candidates = [line.strip() for line in extracted_text.replace("\r", "").split("\n") if line.strip()]
     available = set(range(len(candidates)))
     cursor = 0  # monotonic lower bound — never decreases
-    output: list[TextLine] = []
-    for line in lines:
+    output: list[TextLine | None] = [None] * len(lines)
+    processing_order = sorted(
+        enumerate(lines),
+        key=lambda item: (
+            item[1].native_order_min is None,
+            item[1].native_order_min
+            if item[1].native_order_min is not None
+            else item[0],
+            item[0],
+        ),
+    )
+    for line_index, line in processing_order:
         compact = _compact(line.text)
         if not compact:
-            output.append(line)
+            output[line_index] = line
             continue
         best_index: int | None = None
         best_score = 0.0
@@ -152,28 +162,26 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
                 or _needs_textpage_spacing_recovery(line.text, candidate)
             )
             if should_replace:
-                output.append(
-                    TextLine(
-                        tokens=line.tokens,
-                        bbox=line.bbox,
-                        baseline=line.baseline,
-                        direction=line.direction,
-                        native_order_min=line.native_order_min,
-                        native_order_max=line.native_order_max,
-                        gap_mode=line.gap_mode,
-                        order_mode=line.order_mode,
-                        line_id=line.line_id,
-                        text_override=candidate,
-                        join_next_without_space=line.join_next_without_space,
-                    )
+                output[line_index] = TextLine(
+                    tokens=line.tokens,
+                    bbox=line.bbox,
+                    baseline=line.baseline,
+                    direction=line.direction,
+                    native_order_min=line.native_order_min,
+                    native_order_max=line.native_order_max,
+                    gap_mode=line.gap_mode,
+                    order_mode=line.order_mode,
+                    line_id=line.line_id,
+                    text_override=candidate,
+                    join_next_without_space=line.join_next_without_space,
                 )
             else:
-                output.append(line)
+                output[line_index] = line
             available.remove(best_index)
             cursor = best_index + 1
         else:
-            output.append(line)
-    return output
+            output[line_index] = line
+    return [line for line in output if line is not None]
 
 
 def _is_ghost_punctuation_line(line: TextLine) -> bool:
