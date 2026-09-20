@@ -577,6 +577,27 @@ def test_same_line_identity_in_overlapping_regions_is_rendered_once() -> None:
     assert result.reading_decision.deduplicated_lines == 1
 
 
+def test_distinct_same_text_native_occurrences_are_preserved() -> None:
+    first = replace(
+        _line("texto repetido", _bbox(0, 20, 100, 35)),
+        line_id="native:0:10:22",
+    )
+    second = replace(
+        _line("texto repetido", _bbox(140, 20, 240, 35)),
+        line_id="native:0:40:52",
+    )
+    region = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 240, 50),
+        [first, second],
+    )
+
+    result = assemble_page_content(_page([region], []))
+
+    assert result.reading_text.count("texto repetido") == 2
+    assert result.deduplicated_lines == 0
+
+
 def test_assemble_page_keeps_column_diagnostics_without_table_filter() -> None:
     lines = [
         _line("A1", _bbox(0, 0, 80, 10)),
