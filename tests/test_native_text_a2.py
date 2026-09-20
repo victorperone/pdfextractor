@@ -34,6 +34,7 @@ from a2_conservation import (
     audit_page_conservation,
     audit_document_conservation,
 )
+from a2_evaluate import render_report
 
 
 def _line(text: str, line_id: str, y: float = 10.0, merged=()) -> TextLine:
@@ -195,3 +196,20 @@ def test_a2_aggregates_all_pages_and_serializes_findings():
     assert summary.category_counts == {"owned_once": 2}
     assert all(set(finding.to_dict()) >= {"page_index", "line_id", "category"} for finding in findings)
     assert summary.to_dict()["auditable"] is True
+
+
+def test_a2_markdown_report_matches_machine_summary():
+    page = _page([_line("A", "line-a"), _line("   ", "line-blank", y=30)])
+    page.content_blocks = [_block("block-a", ["line-a"])]
+    document = StructuredDocument(
+        pages=[page], tables=[], raw_text="", reading_text="",
+        metadata=DocumentMetadata("test.pdf", 1, None),
+        diagnostics=DocumentDiagnostics(ExtractionStatus.SUCCESS, 1, 1, 0, 0),
+    )
+
+    summary, findings = audit_document_conservation(document)
+    report = render_report(summary, findings)
+
+    assert "`auditable`: **true**" in report
+    assert "| `owned_once` | 1 |" in report
+    assert "| `blank_not_assessable` | 1 |" in report

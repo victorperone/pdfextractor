@@ -121,8 +121,9 @@ python tests/native_text_fidelity/a2_evaluate.py \
   --output /tmp/pdfextractor-a2
 ```
 
-O comando produz `a2_metadata.json`, `a2_summary.json` e
-`a2_findings.jsonl` fora do Git.
+O comando produz `a2_metadata.json`, `a2_summary.json`, `a2_findings.jsonl` e
+`a2_report.md` fora do Git. O JSON é a fonte para automação; o Markdown
+resume o gate e as categorias para revisão humana.
 
 ## B1 — auditoria estrutural
 
