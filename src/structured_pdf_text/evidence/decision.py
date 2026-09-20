@@ -179,6 +179,17 @@ def _assess_one_region(
         reasons.extend(("native_text_missing", "visible_ink_present"))
         return RegionQuality(RegionDecision.OCR_REGION, reasons, 0.78)
 
+    if text and ink_ratio is not None and not visible:
+        # A native layer can be intentionally invisible or sit outside the
+        # visible artwork. Preserve that evidence, but do not ask OCR to
+        # hallucinate recovery from a region with no visible ink.
+        reasons.extend(("native_text_not_visible", "preserve_native_evidence"))
+        return RegionQuality(
+            RegionDecision.KEEP_NATIVE,
+            reasons,
+            min(0.55, page_complexity.native_text_score),
+        )
+
     damaged_layer = bool(
         {
             ComplexityReason.GARBLED_UNICODE,

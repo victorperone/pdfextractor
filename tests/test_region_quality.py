@@ -87,3 +87,23 @@ def test_region_union_area_is_clipped_to_page_bounds():
 
     assert plan.bad_area_ratio == 0.25
     assert plan.promote_page_ocr is False
+
+
+def test_native_text_without_visible_ink_is_preserved_without_ocr():
+    page_bbox = BBox(0, 0, 100, 100)
+    region = _region("native-only", page_bbox, "camada nativa")
+    blank_image = [[255 for _ in range(10)] for _ in range(10)]
+
+    plan = assess_region_recovery(
+        [region],
+        _native_page_complexity(),
+        page_image=blank_image,
+        page_bbox=page_bbox,
+    )
+
+    assert region.quality.decision is RegionDecision.KEEP_NATIVE
+    assert region.quality.reasons == [
+        "native_text_not_visible",
+        "preserve_native_evidence",
+    ]
+    assert plan.region_ids == ()
