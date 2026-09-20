@@ -139,9 +139,11 @@ python tests/native_text_fidelity/b1_evaluate.py \
   --output /tmp/pdfextractor-b1
 ```
 
-O resultado produz `b1_metadata.json`, `b1_summary.json` e
-`b1_findings.jsonl`. `table_missing` e `table_cell_mismatch` são achados
-estruturais; não são convertidos em perda de texto A1.
+O resultado produz `b1_metadata.json`, `b1_summary.json`, `b1_findings.jsonl`
+e `b1_report.md`. O relatório separa texto presente porém fora da geometria,
+ausência textual ainda não resolvida e partições semânticas não bloqueantes.
+`table_missing` e `table_cell_mismatch` são achados estruturais; não são
+convertidos em perda de texto A1.
 
 Quando uma região de referência é coberta por regiões observadas de tipos
 semânticos diferentes (por exemplo, `title` e `text`), o resultado é registrado

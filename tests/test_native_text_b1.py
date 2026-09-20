@@ -8,6 +8,7 @@ from structured_pdf_text.geometry import BBox
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "native_text_fidelity"))
 
+from b1_evaluate import render_report
 from b1_structure import (
     B1Category,
     audit_document_structure,
@@ -57,6 +58,28 @@ def test_b1_matches_units_and_region_relationships_without_using_native_order():
     assert summary.matched_units == 2
     assert summary.auditable
     assert not any(f.category is B1Category.UNIT_MISSING for f in findings)
+
+
+def test_b1_report_separates_geometry_absence_and_partition_diagnostics():
+    reference = {
+        "pages": [{
+            "page": 1,
+            "family": "synthetic",
+            "regions": [{"region_id": "R1"}],
+            "units": [_unit("U1", "deslocado", "R1", 1, (0, 0, 80, 10))],
+            "tables": [],
+        }],
+    }
+    summary, findings = audit_document_structure(
+        reference,
+        SimpleNamespace(pages=[_page([_region("observed", _line("deslocado", "line-1", 0, 100))])]),
+    )
+
+    report = render_report(reference, summary, findings)
+
+    assert "text_present_geometry_inconsistent" in report
+    assert "unresolved_text_absence" in report
+    assert "synthetic" in report
 
 
 def test_b1_preserves_duplicate_occurrences():
