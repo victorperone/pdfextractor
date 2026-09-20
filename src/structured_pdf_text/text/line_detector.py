@@ -392,7 +392,14 @@ def _merge_baseline_components(
                 right_center = median(
                     [_line_center(item, median_height) for item in right]
                 )
-                if abs(left_center - right_center) > tolerance:
+                if (
+                    abs(left_center - right_center) > tolerance
+                    and not _inline_symbol_component_can_join(
+                        left,
+                        right,
+                        median_height,
+                    )
+                ):
                     continue
                 right_bbox = BBox.union_all([item.bbox for item in right])
                 if left_bbox.x1 < right_bbox.x0:
@@ -410,6 +417,55 @@ def _merge_baseline_components(
             if changed:
                 break
     return result
+
+
+def _inline_symbol_component_can_join(
+    first: list[NativeCharacter],
+    second: list[NativeCharacter],
+    median_height: float,
+) -> bool:
+    """Join a compact symbol run contained in a larger visual line.
+
+    PDFium can expose a run of punctuation/symbol glyphs with a slightly
+    different baseline from the surrounding text.  If that run is contained
+    in the larger component and overlaps it vertically, its geometry is
+    stronger evidence of one line than the baseline delta alone.  The rule is
+    intentionally restricted to symbol-only components so separate prose
+    lines, digits and legitimate small text remain independent.
+    """
+    smaller, larger = (
+        (first, second) if len(first) <= len(second) else (second, first)
+    )
+    visible = [character for character in smaller if not character.text.isspace()]
+    if not visible or len(smaller) > 8 or len(smaller) > max(8, len(larger) // 3):
+        return False
+    if not all(
+        unicodedata.category(character.text[0]).startswith(("P", "S"))
+        for character in visible
+        if character.text
+    ):
+        return False
+
+    smaller_bbox = BBox.union_all([character.bbox for character in smaller])
+    larger_bbox = BBox.union_all([character.bbox for character in larger])
+    vertical_overlap = min(smaller_bbox.y1, larger_bbox.y1) - max(
+        smaller_bbox.y0,
+        larger_bbox.y0,
+    )
+    if vertical_overlap <= 0.0:
+        return False
+    if vertical_overlap / max(min(smaller_bbox.height, larger_bbox.height), 0.01) < 0.35:
+        return False
+    containment_tolerance = max(2.0, median_height * 0.35)
+    if smaller_bbox.x0 < larger_bbox.x0 - containment_tolerance:
+        return False
+    if smaller_bbox.x1 > larger_bbox.x1 + containment_tolerance:
+        return False
+    center_delta = abs(
+        median(_line_center(character, median_height) for character in first)
+        - median(_line_center(character, median_height) for character in second)
+    )
+    return center_delta <= max(4.0, median_height * 0.75)
 
 
 def _merge_inline_attached_groups(

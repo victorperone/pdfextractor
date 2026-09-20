@@ -279,6 +279,37 @@ def test_inline_descenders_and_superscripts_join_their_line() -> None:
     assert [line.text for line in lines] == ["repetição²x"]
 
 
+def test_compact_symbol_component_inside_line_is_rejoined() -> None:
+    characters = tuple(
+        [
+            NativeCharacter(
+                page_index=0,
+                char_index=index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(index * 8.0, 0.0, index * 8.0 + 6.0, 10.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("abcdefghijklmno")
+        ]
+        + [
+            NativeCharacter(
+                page_index=0,
+                char_index=15 + index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(80.0 + index * 7.0, 2.0, 85.0 + index * 7.0, 4.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("=-_`\"")
+        ]
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ['abcdefghijklmno=-_`"']
+
+
 def test_column_gap_split_uses_relative_geometry() -> None:
     from structured_pdf_text.document import NativeCharacter
 
