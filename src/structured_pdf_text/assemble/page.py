@@ -7,6 +7,7 @@ from structured_pdf_text.document import (
     StructuredPage,
     StructuredTable,
 )
+from structured_pdf_text.assemble.content import prose_flow_lines_by_region
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.line_detector import lines_to_text
 from structured_pdf_text.text.reading_order import order_region_lines
@@ -28,7 +29,11 @@ def assemble_page(
     raw_text is finalised here because it represents the unprocessed evidence
     layer and does not depend on heading or repetition analysis.
     """
-    reading_lines, reading_decision = order_region_lines(regions)
+    flow_lines_by_region = prose_flow_lines_by_region(regions, tables, page_index)
+    reading_lines, reading_decision = order_region_lines(
+        regions,
+        flow_lines_by_region=flow_lines_by_region,
+    )
 
     # F02: raw_text must include OCR-recovered content. For scan pages
     # (native layer empty) the ordered lines already contain OCR text; use

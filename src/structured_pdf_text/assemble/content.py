@@ -68,6 +68,11 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     consistency = native_order_consistency(page.regions)
 
     physical_tables = _physical_tables_for_page(page)
+    flow_lines_by_region = prose_flow_lines_by_region(
+        page.regions,
+        physical_tables,
+        page.page_index,
+    )
     emitted_table_ids: set[str] = set()
 
     blocks: list[PageContentBlock] = []
@@ -92,7 +97,10 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     # step should be reintroduced here rather than counted hypothetically.
 
     for region in ordered_regions:
-        ordered_lines, groups = order_lines_in_region(region)
+        ordered_lines, groups = order_lines_in_region(
+            region,
+            flow_lines=flow_lines_by_region.get(region.region_id),
+        )
         diag_column_groups += groups
         diag_rotated_lines += sum(
             1 for line in ordered_lines
@@ -178,6 +186,36 @@ def _physical_tables_for_page(page: StructuredPage) -> list[StructuredTable]:
         for table in page.tables
         if any(f.page_index == page.page_index for f in table.page_fragments)
     ]
+
+
+def prose_flow_lines_by_region(
+    regions: list[LayoutRegion],
+    tables: list[StructuredTable],
+    page_index: int,
+) -> dict[str, list[TextLine]]:
+    """Return each region's lines after removing lines owned by valid tables.
+
+    The returned lists are used only for prose-flow hypotheses.  Callers still
+    order and assemble the complete region line set, so table lines remain
+    available for table emission and conservation accounting.
+    """
+    table_owned_ids = {
+        id(line)
+        for region in regions
+        for line in region.native_lines
+        if any(_line_claimed_by_table(line, table, page_index) for table in tables)
+    }
+    result: dict[str, list[TextLine]] = {}
+    for region in regions:
+        if region.kind == RegionKind.TABLE:
+            continue
+        flow_lines = [
+            line for line in region.native_lines
+            if id(line) not in table_owned_ids
+        ]
+        if len(flow_lines) != len(region.native_lines):
+            result[region.region_id] = flow_lines
+    return result
 
 
 def _table_fragment_bbox(table: StructuredTable, page_index: int) -> BBox | None:

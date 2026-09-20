@@ -13,6 +13,7 @@ from structured_pdf_text.assemble.content import (
     PageContentAssemblyResult,
     _table_has_renderable_content,
     assemble_page_content,
+    prose_flow_lines_by_region,
 )
 from structured_pdf_text.document import (
     ComplexityReason,
@@ -34,6 +35,7 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.text.reading_order import order_region_lines
 
 
 # ---------------------------------------------------------------------------
@@ -550,3 +552,51 @@ def test_reading_order_preserved_two_column_layout() -> None:
         f"Left column must precede right column entirely. "
         f"Got order: {texts}"
     )
+
+
+def test_table_lines_do_not_drive_mixed_prose_to_form_flow() -> None:
+    """Table-owned parallel lines must not determine the prose hypothesis."""
+    prose_lines: list[TextLine] = []
+    table_lines: list[TextLine] = []
+    cells: list[TableCell] = []
+    for index in range(6):
+        prose_lines.extend(
+            (
+                _line(f"A{index}", _bbox(0, index * 30, 50, index * 30 + 10)),
+                _line(f"B{index}", _bbox(90, index * 30, 135, index * 30 + 10)),
+            )
+        )
+    for index in range(20):
+        y0 = 180 + index * 8
+        left_bbox = _bbox(0, y0, 25, y0 + 10)
+        right_bbox = _bbox(35, y0, 60, y0 + 10)
+        table_lines.extend((_line(f"K{index}", left_bbox), _line(f"V{index}", right_bbox)))
+        cells.extend(
+            (
+                _cell(index, 0, "K", left_bbox),
+                _cell(index, 1, "V", right_bbox),
+            )
+        )
+
+    region = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 220, 500),
+        [*prose_lines, *table_lines],
+        region_id="mixed",
+    )
+    table = _table(
+        "mixed-table",
+        0,
+        _bbox(0, 180, 60, 340),
+        cells,
+        col_count=2,
+        row_count=20,
+    )
+    flow_lines = prose_flow_lines_by_region([region], [table], 0)
+
+    _, without_table_ownership = order_region_lines([region])
+    _, with_table_ownership = order_region_lines([region], flow_lines)
+
+    assert without_table_ownership.flow_mode == "FORM"
+    assert with_table_ownership.flow_mode == "MULTI_COLUMN"
+    assert with_table_ownership.line_preservation_ok
