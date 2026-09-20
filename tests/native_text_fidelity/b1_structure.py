@@ -8,7 +8,10 @@ from enum import Enum
 import math
 import re
 import unicodedata
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
+
+from structured_pdf_text.geometry import BBox
 
 
 class B1Category(str, Enum):
@@ -135,6 +138,8 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
     used: set[int] = set()
     used_tokens: dict[int, set[int]] = {}
     matched: dict[str, tuple[_ObservedLine, ...]] = {}
+    matched_boxes: dict[str, tuple[tuple[float, float, float, float], ...]] = {}
+    geometry_mismatched_units: set[str] = set()
 
     for unit in units:
         unit_id = str(unit.get("unit_id", ""))
@@ -155,6 +160,7 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
                     for item in fragmented.lines:
                         used.add(item.order_index)
                 matched[unit_id] = fragmented.lines
+                matched_boxes[unit_id] = _fragmented_match_boxes(fragmented)
                 findings.append(B1Finding(
                     page,
                     B1Category.UNIT_FRAGMENTED,
@@ -183,6 +189,7 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
                     for item in unicode_match.lines:
                         used.add(item.order_index)
                 matched[unit_id] = unicode_match.lines
+                matched_boxes[unit_id] = _fragmented_match_boxes(unicode_match)
                 findings.append(B1Finding(
                     page,
                     B1Category.UNIT_UNICODE_SUBSTITUTION,
@@ -200,7 +207,12 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
         chosen = candidates[0]
         used.add(chosen.order_index)
         matched[unit_id] = (chosen,)
+        chosen_box = _line_box(chosen.line)
+        if chosen_box is not None:
+            matched_boxes[unit_id] = (chosen_box,)
         geometry_mismatch = _geometry_mismatch(expected_box, _line_box(chosen.line))
+        if geometry_mismatch:
+            geometry_mismatched_units.add(unit_id)
         findings.append(B1Finding(
             page,
             B1Category.UNIT_GEOMETRY_MISMATCH if geometry_mismatch else B1Category.UNIT_MATCHED,
@@ -264,13 +276,34 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
         (
             unit for unit in units
             if unit.get("unit_id") in matched
-            and unit.get("role") not in {"repeated_header", "repeated_footer"}
+            and unit.get("unit_id") not in geometry_mismatched_units
+            and _is_order_assessable_unit(unit)
         ),
         key=lambda unit: int(unit.get("logical_reading_order", 0)),
     )
-    observed_indexes = [min(item.order_index for item in matched[unit["unit_id"]]) for unit in ordered_units]
+    order_items: list[_ObservedLine] = []
+    order_lines: dict[str, Any] = {}
+    for unit in ordered_units:
+        unit_id = str(unit["unit_id"])
+        boxes = matched_boxes.get(unit_id)
+        if not boxes:
+            continue
+        proxy = _proxy_line(_union_boxes(boxes))
+        order_lines[unit_id] = proxy
+        first_line = matched[unit_id][0]
+        order_items.append(_ObservedLine(proxy, first_line.region_id, 0, first_line.region_kind))
+    ordered_observed = _infer_observed_reading_order(order_items, observed_page)
+    observed_rank = {id(item.line): index for index, item in enumerate(ordered_observed)}
+    observed_indexes = [
+        observed_rank[id(order_lines[str(unit["unit_id"])] )]
+        for unit in ordered_units
+        if str(unit["unit_id"]) in order_lines
+    ]
     if any(left > right for left, right in zip(observed_indexes, observed_indexes[1:])):
-        findings.append(B1Finding(page, B1Category.READING_ORDER_MISMATCH, reasons=("observed_region_line_order_is_not_reference_logical_order",)))
+        reasons = ["observed_region_line_order_is_not_reference_logical_order"]
+        if geometry_mismatched_units:
+            reasons.append(f"excluded_geometry_mismatch_units={len(geometry_mismatched_units)}")
+        findings.append(B1Finding(page, B1Category.READING_ORDER_MISMATCH, reasons=tuple(reasons)))
 
     reference_tables = list(reference_page.get("tables", []))
     observed_tables = list(getattr(observed_page, "tables", []) or [])
@@ -356,6 +389,18 @@ def _observed_lines(page: Any) -> list[_ObservedLine]:
 def _region_kind(region: Any) -> str:
     value = getattr(region, "kind", "")
     return str(getattr(value, "value", value) or "")
+
+
+def _is_order_assessable_unit(unit: Mapping[str, Any]) -> bool:
+    role = str(unit.get("role", "") or "")
+    if role in {
+        "repeated_header",
+        "repeated_footer",
+        "table_cell",
+        "table_header",
+    }:
+        return False
+    return not role.startswith(("edge_", "rotation_", "vertical_"))
 
 
 def _infer_observed_reading_order(items: Sequence[_ObservedLine], page: Any) -> list[_ObservedLine]:
@@ -533,6 +578,49 @@ def _has_available_tokens(item: _ObservedLine, used_tokens: Mapping[int, set[int
         return True
     tokens = getattr(item.line, "tokens", []) or []
     return any(index not in consumed for index, _ in enumerate(tokens))
+
+
+def _fragmented_match_boxes(match: _FragmentedMatch) -> tuple[tuple[float, float, float, float], ...]:
+    """Return the boxes actually consumed by a fragmented match."""
+    if not match.token_indexes:
+        return tuple(
+            box
+            for item in match.lines
+            if (box := _line_box(item.line)) is not None
+        )
+    by_order = {item.order_index: item for item in match.lines}
+    boxes: list[tuple[float, float, float, float]] = []
+    for order_index, token_indexes in match.token_indexes:
+        item = by_order.get(order_index)
+        if item is None:
+            continue
+        tokens = getattr(item.line, "tokens", []) or []
+        for token_index in token_indexes:
+            if token_index >= len(tokens):
+                continue
+            bbox = getattr(tokens[token_index], "bbox", None)
+            if bbox is not None:
+                boxes.append((float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1)))
+    if boxes:
+        return tuple(boxes)
+    return tuple(
+        box
+        for item in match.lines
+        if (box := _line_box(item.line)) is not None
+    )
+
+
+def _union_boxes(boxes: Sequence[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
+    return (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+
+
+def _proxy_line(box: tuple[float, float, float, float]) -> Any:
+    return SimpleNamespace(bbox=BBox(*box), line_id=None, text="", tokens=[])
 
 
 def _reconstruct_from_tokens(

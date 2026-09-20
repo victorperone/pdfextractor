@@ -151,6 +151,10 @@ regiões do mesmo tipo, que permanece `region_fragmented` e bloqueia o gate B1.
 Na montagem das regiões, caixas fortemente aninhadas do mesmo tipo e com o
 mesmo papel semântico são coalescidas; caixas adjacentes ou com papéis
 semânticos diferentes continuam independentes.
+Na ordem global, unidades `edge_*`, `rotation_*`, `vertical_*` e unidades de
+célula/cabeçalho de tabela não são comparadas como linhas corridas: bordas e
+rótulos têm fluxo geométrico próprio, enquanto tabelas são avaliadas pela
+forma das células e pela associação de conteúdo.
 
 Quando o texto exato existe, mas a ocorrência escolhida está distante da bbox
 de referência, o auditor registra `unit_geometry_mismatch`; isso não é contado
@@ -181,3 +185,7 @@ altera a evidência nem a montagem de produção.
 Na reconstrução nativa horizontal, a linha é ancorada pela borda inferior das
 caixas dos glifos. Assim, ascendentes, acentos e descendentes permanecem na
 mesma linha visual sem perder a separação geométrica entre colunas.
+Na verificação de ordem, uma unidade reconstruída a partir de uma linha que
+mistura colunas usa as caixas dos tokens consumidos, e não a caixa ampla da
+linha nativa; isso evita atribuir à coluna errada uma ocorrência que foi
+associada corretamente por geometria de tokens.

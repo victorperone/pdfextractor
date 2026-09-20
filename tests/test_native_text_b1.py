@@ -117,6 +117,54 @@ def test_b1_separates_exact_text_relocated_from_text_missing():
     assert not summary.auditable
 
 
+def test_b1_does_not_reuse_geometry_mismatch_as_reading_order_evidence():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            _unit("U1", "deslocado", "R1", 1, (0, 0, 80, 10)),
+            _unit("U2", "segundo", "R1", 2, (0, 20, 80, 30)),
+        ],
+        "tables": [],
+    }
+    observed = _page([_region(
+        "observed",
+        _line("segundo", "line-2", 0, 20),
+        _line("deslocado", "line-1", 0, 100),
+    )])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.categories[B1Category.UNIT_GEOMETRY_MISMATCH.value] == 1
+    assert summary.categories.get(B1Category.READING_ORDER_MISMATCH.value, 0) == 0
+    assert not summary.auditable
+
+
+def test_b1_keeps_non_flow_roles_out_of_global_line_order():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            {**_unit("U1", "borda", "R1", 1, (0, 100, 80, 110)), "role": "edge_top"},
+            _unit("U2", "corpo", "R1", 2, (0, 20, 80, 30)),
+            {**_unit("U3", "célula", "R1", 3, (0, 40, 80, 50)), "role": "table_cell"},
+        ],
+        "tables": [],
+    }
+    observed = _page([_region(
+        "observed",
+        _line("corpo", "line-2", 0, 20),
+        _line("célula", "line-3", 0, 40),
+        _line("borda", "line-1", 0, 100),
+    )])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 3
+    assert summary.categories.get(B1Category.READING_ORDER_MISMATCH.value, 0) == 0
+    assert summary.auditable
+
+
 def test_b1_classifies_complete_unit_split_across_adjacent_lines():
     reference = {
         "page": 1,
@@ -184,6 +232,46 @@ def test_b1_reconstructs_table_tokens_in_horizontal_order_despite_baseline_varia
     assert summary.categories[B1Category.UNIT_FRAGMENTED.value] == 1
     fragmented = next(finding for finding in findings if finding.category is B1Category.UNIT_FRAGMENTED)
     assert fragmented.observed_text == "Equipamento auditável"
+
+
+def test_b1_orders_fragmented_units_by_consumed_token_geometry():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [
+            _unit("U1", "vinculados", "R1", 1, (100, 80, 150, 90)),
+            _unit("U2", "COLUNA 2", "R1", 2, (100, 100, 150, 110)),
+        ],
+        "tables": [],
+    }
+    first = _line("vinculados", "line-first", 100, 80)
+    expected_text = "COLUNA 2"
+    wide = _line("prefix " + expected_text, "line-wide", 0, 100)
+    wide.bbox = BBox(0, 100, 200, 110)
+    wide.tokens = [
+        *[
+            SimpleNamespace(text=character, bbox=BBox(index * 5, 100, index * 5 + 4, 110))
+            for index, character in enumerate("prefix ")
+        ],
+        *[
+            SimpleNamespace(text=character, bbox=BBox(100 + index * 5, 100, 104 + index * 5, 110))
+            for index, character in enumerate(expected_text)
+        ],
+    ]
+    fillers = [
+        _line(f"left-{index}", f"left-{index}", 0, 200 + index * 12)
+        for index in range(3)
+    ] + [
+        _line(f"right-{index}", f"right-{index}", 100, 200 + index * 12)
+        for index in range(3)
+    ]
+    observed = _page([_region("observed", wide, first, *fillers)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 2
+    assert summary.categories.get(B1Category.READING_ORDER_MISMATCH.value, 0) == 0
+    assert all(finding.category is not B1Category.UNIT_MISSING for finding in findings)
 
 
 def test_b1_allows_disjoint_units_to_share_one_observed_line():
