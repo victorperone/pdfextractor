@@ -46,6 +46,7 @@ class PageContentAssemblyResult:
     table_fallbacks: int
     orphan_tables: int
     assembly_ms: float
+    deduplicated_lines: int = 0
     list_segment_count: int = 0
     list_item_count: int = 0
     list_inferred_marker_count: int = 0
@@ -83,6 +84,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     list_inferred_marker_count = 0
     list_continuation_count = 0
     list_unassigned_line_count = 0
+    deduplicated_lines = 0
     canonical_line_order: list[str] = []
     canonical_line_ids_seen: set[str] = set()
 
@@ -91,16 +93,24 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     diag_column_groups = 0
     diag_rotated_lines = 0
     diag_table_regions = 0
-    # deduplicated_lines remains 0: the canonical assembler processes each
-    # region independently and does not run cross-region deduplication. If
-    # real-document validation shows duplicate lines between regions, that
-    # step should be reintroduced here rather than counted hypothetically.
+    # Exact line identities are deduplicated at the assembly boundary when
+    # overlapping regions expose the same native occurrence more than once.
 
     for region in ordered_regions:
         ordered_lines, groups = order_lines_in_region(
             region,
             flow_lines=flow_lines_by_region.get(region.region_id),
         )
+        unique_ordered_lines: list[TextLine] = []
+        for line in ordered_lines:
+            line_id = line_identity(line)
+            if line_id in canonical_line_ids_seen:
+                deduplicated_lines += 1
+                continue
+            canonical_line_ids_seen.add(line_id)
+            canonical_line_order.append(line_id)
+            unique_ordered_lines.append(line)
+        ordered_lines = unique_ordered_lines
         diag_column_groups += groups
         diag_rotated_lines += sum(
             1 for line in ordered_lines
@@ -117,11 +127,6 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
             ordered_lines=ordered_lines,
         )
         blocks.extend(region_blocks)
-        for line in ordered_lines:
-            line_id = line_identity(line)
-            if line_id not in canonical_line_ids_seen:
-                canonical_line_ids_seen.add(line_id)
-                canonical_line_order.append(line_id)
         claimed_table_lines += claimed
         table_fallbacks += fallbacks
         if region.kind in {RegionKind.TEXT, RegionKind.LIST, RegionKind.TABLE}:
@@ -142,7 +147,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         table_regions=diag_table_regions,
         native_order_consistency=consistency,
         region_edges=region_edges,
-        deduplicated_lines=0,
+        deduplicated_lines=deduplicated_lines,
     )
 
     orphan_blocks, orphan_count = _insert_orphan_tables(
@@ -166,6 +171,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         table_fallbacks=table_fallbacks,
         orphan_tables=orphan_count,
         assembly_ms=assembly_ms,
+        deduplicated_lines=deduplicated_lines,
         list_segment_count=list_segment_count,
         list_item_count=list_item_count,
         list_inferred_marker_count=list_inferred_marker_count,

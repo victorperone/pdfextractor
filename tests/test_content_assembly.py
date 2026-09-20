@@ -554,6 +554,28 @@ def test_reading_order_preserved_two_column_layout() -> None:
     )
 
 
+def test_same_line_identity_in_overlapping_regions_is_rendered_once() -> None:
+    shared_line = _line("ocorrência única", _bbox(0, 20, 100, 35))
+    first = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 120, 50),
+        [shared_line],
+        region_id="first",
+    )
+    second = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 120, 50),
+        [shared_line],
+        region_id="second",
+    )
+
+    result = assemble_page_content(_page([first, second], []))
+
+    assert result.reading_text.count("ocorrência única") == 1
+    assert result.deduplicated_lines == 1
+    assert result.reading_decision.deduplicated_lines == 1
+
+
 def test_table_lines_do_not_drive_mixed_prose_to_form_flow() -> None:
     """Table-owned parallel lines must not determine the prose hypothesis."""
     prose_lines: list[TextLine] = []

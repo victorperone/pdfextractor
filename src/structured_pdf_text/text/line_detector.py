@@ -333,6 +333,7 @@ def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCha
             groups[best_index].append(char)
             group_centers[best_index] = median([_line_center(item, median_height) for item in groups[best_index]])
     groups = _merge_baseline_components(groups, tolerance, median_height)
+    groups = _merge_inline_attached_components(groups, median_height)
     groups = _merge_inline_attached_groups(groups, median_height)
     return _split_groups_by_column_gap(groups)
 
@@ -440,6 +441,61 @@ def _merge_inline_attached_groups(
     return result
 
 
+def _merge_inline_attached_components(
+    groups: list[list[NativeCharacter]],
+    median_height: float,
+) -> list[list[NativeCharacter]]:
+    """Attach small glyph components that overlap an established text line.
+
+    Descenders and superscripts can have a different box height and therefore
+    a displaced baseline center.  When such a component is horizontally
+    adjacent to, or lies inside, a larger line component and its boxes overlap
+    vertically, the geometry is stronger evidence than the center alone.
+    The small-component guard prevents two ordinary lines from being merged.
+    """
+    result = [list(group) for group in groups]
+    max_center_delta = max(4.0, median_height * 0.75)
+    changed = True
+    while changed:
+        changed = False
+        for left_index, left in enumerate(result):
+            for right_index in range(left_index + 1, len(result)):
+                right = result[right_index]
+                if min(len(left), len(right)) > 2:
+                    continue
+                left_bbox = BBox.union_all([item.bbox for item in left])
+                right_bbox = BBox.union_all([item.bbox for item in right])
+                vertical_overlap = min(left_bbox.y1, right_bbox.y1) - max(
+                    left_bbox.y0, right_bbox.y0
+                )
+                minimum_height = min(left_bbox.height, right_bbox.height)
+                if vertical_overlap <= 0.0 or vertical_overlap / max(minimum_height, 0.01) < 0.35:
+                    continue
+                left_center = median(
+                    [_line_center(item, median_height) for item in left]
+                )
+                right_center = median(
+                    [_line_center(item, median_height) for item in right]
+                )
+                if abs(left_center - right_center) > max_center_delta:
+                    continue
+                if left_bbox.x1 < right_bbox.x0:
+                    horizontal_gap = right_bbox.x0 - left_bbox.x1
+                elif right_bbox.x1 < left_bbox.x0:
+                    horizontal_gap = left_bbox.x0 - right_bbox.x1
+                else:
+                    horizontal_gap = 0.0
+                if horizontal_gap > max(4.0, median_height * 0.85):
+                    continue
+                left.extend(right)
+                del result[right_index]
+                changed = True
+                break
+            if changed:
+                break
+    return result
+
+
 def _is_inline_mark(character: NativeCharacter) -> bool:
     text = character.text
     return bool(text) and (
@@ -492,7 +548,17 @@ def _split_groups_by_column_gap(
         # conservative boundary protects tracked headings whose inter-glyph
         # spacing is intentionally large; ordinary word separation is handled
         # later by _infer_gap_threshold.
-        gap_threshold = max(20.0, median_width * 4.0)
+        positive_gaps = [
+            curr.bbox.x0 - prev.bbox.x1
+            for prev, curr in zip(sorted_by_x, sorted_by_x[1:])
+            if curr.bbox.x0 - prev.bbox.x1 > 0.0
+        ]
+        typical_gap = median(positive_gaps) if positive_gaps else 0.0
+        gap_threshold = max(
+            8.0,
+            median_width * 3.5,
+            typical_gap * 3.0,
+        )
         current: list[NativeCharacter] = [sorted_by_x[0]]
         for prev, curr in zip(sorted_by_x, sorted_by_x[1:]):
             horizontal_gap = curr.bbox.x0 - prev.bbox.x1

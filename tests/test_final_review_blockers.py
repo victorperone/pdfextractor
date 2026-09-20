@@ -245,3 +245,58 @@ def test_baseline_grouping_keeps_sidebar_word_together() -> None:
     lines = reconstruct_native_lines(characters)
 
     assert [line.text for line in lines] == ["main", "para"]
+
+
+def test_inline_descenders_and_superscripts_join_their_line() -> None:
+    from structured_pdf_text.document import NativeCharacter
+
+    def char(index: int, text: str, x: float, y0: float, y1: float) -> NativeCharacter:
+        return NativeCharacter(
+            page_index=0,
+            char_index=index,
+            text=text,
+            unicode_codepoint=ord(text),
+            bbox=BBox(x, y0, x + 4.0, y1),
+            font_size=10.0,
+        )
+
+    characters = (
+        char(0, "r", 0.0, 0.0, 10.0),
+        char(1, "e", 5.0, 0.0, 10.0),
+        char(2, "p", 10.0, 2.0, 13.0),
+        char(3, "e", 15.0, 0.0, 10.0),
+        char(4, "t", 20.0, 0.0, 10.0),
+        char(5, "i", 25.0, 0.0, 10.0),
+        char(6, "ç", 30.0, 2.0, 13.0),
+        char(7, "ã", 35.0, 0.0, 10.0),
+        char(8, "o", 40.0, 0.0, 10.0),
+        char(9, "²", 45.0, -1.0, 4.0),
+        char(10, "x", 50.0, 0.0, 10.0),
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["repetição²x"]
+
+
+def test_column_gap_split_uses_relative_geometry() -> None:
+    from structured_pdf_text.document import NativeCharacter
+
+    def char(index: int, text: str, x: float) -> NativeCharacter:
+        return NativeCharacter(
+            page_index=0,
+            char_index=index,
+            text=text,
+            unicode_codepoint=ord(text),
+            bbox=BBox(x, 0.0, x + 3.0, 10.0),
+            font_size=10.0,
+        )
+
+    characters = tuple(
+        [char(index, text, index * 4.0) for index, text in enumerate("left")]
+        + [char(index + 10, text, 36.0 + index * 4.0) for index, text in enumerate("right")]
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["left", "right"]
