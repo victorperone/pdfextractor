@@ -216,3 +216,32 @@ def test_spacing_diagnostics_marks_explicit_whitespace_separately() -> None:
 
     assert diagnostics["gap_explicit_lines"] == 1
     assert lines[0].gap_mode == "explicit"
+
+
+def test_baseline_grouping_keeps_sidebar_word_together() -> None:
+    from structured_pdf_text.document import NativeCharacter
+
+    def char(index: int, text: str, x: float, y0: float, y1: float) -> NativeCharacter:
+        return NativeCharacter(
+            page_index=0,
+            char_index=index,
+            text=text,
+            unicode_codepoint=ord(text),
+            bbox=BBox(x, y0, x + 5.0, y1),
+            font_size=10.0,
+        )
+
+    characters = (
+        char(0, "m", 0, 0, 10),
+        char(1, "a", 6, 0, 10),
+        char(2, "i", 12, 0, 10),
+        char(3, "n", 18, 0, 10),
+        char(4, "p", 100, 2, 13),
+        char(5, "a", 106, 2, 12),
+        char(6, "r", 112, 2, 12),
+        char(7, "a", 118, 2, 12),
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["main", "para"]

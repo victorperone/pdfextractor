@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from dataclasses import dataclass, replace
 from statistics import median
 from difflib import SequenceMatcher
@@ -318,6 +319,10 @@ def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCha
         best_delta = float("inf")
         for idx, center_y in enumerate(group_centers):
             delta = abs(char_center - center_y)
+            if delta <= tolerance and not _baseline_group_is_horizontally_connected(
+                groups[idx], char, median_height
+            ):
+                continue
             if delta < best_delta:
                 best_delta = delta
                 best_index = idx
@@ -327,7 +332,140 @@ def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCha
         else:
             groups[best_index].append(char)
             group_centers[best_index] = median([_line_center(item, median_height) for item in groups[best_index]])
+    groups = _merge_baseline_components(groups, tolerance, median_height)
+    groups = _merge_inline_attached_groups(groups, median_height)
     return _split_groups_by_column_gap(groups)
+
+
+def _baseline_group_is_horizontally_connected(
+    group: list[NativeCharacter],
+    character: NativeCharacter,
+    median_height: float,
+) -> bool:
+    """Prevent nearby baselines in separate columns from becoming one line.
+
+    Baseline proximity alone is insufficient when a sidebar is vertically
+    offset by a few points. Characters from one inline run remain connected
+    through normal word/glyph gaps; a distant column does not. Large gaps are
+    still split later by ``_split_groups_by_column_gap``.
+    """
+    if not group:
+        return False
+    group_x0 = min(item.bbox.x0 for item in group)
+    group_x1 = max(item.bbox.x1 for item in group)
+    if character.bbox.x1 < group_x0:
+        horizontal_gap = group_x0 - character.bbox.x1
+    elif character.bbox.x0 > group_x1:
+        horizontal_gap = character.bbox.x0 - group_x1
+    else:
+        horizontal_gap = 0.0
+    return horizontal_gap <= max(20.0, median_height * 4.0)
+
+
+def _merge_baseline_components(
+    groups: list[list[NativeCharacter]],
+    tolerance: float,
+    median_height: float,
+) -> list[list[NativeCharacter]]:
+    """Rejoin adjacent components that belong to the same baseline.
+
+    The incremental baseline assignment above intentionally keeps distant
+    columns apart.  It can nevertheless create two components for one line
+    when glyph metrics move the running center slightly.  Reconcile those
+    components using both baseline proximity and their actual horizontal
+    distance; this is order-independent and cannot bridge a normal column
+    gutter.
+    """
+    result = [list(group) for group in groups]
+    join_distance = max(20.0, median_height * 4.0)
+    changed = True
+    while changed:
+        changed = False
+        for left_index, left in enumerate(result):
+            left_center = median(
+                [_line_center(item, median_height) for item in left]
+            )
+            left_bbox = BBox.union_all([item.bbox for item in left])
+            for right_index in range(left_index + 1, len(result)):
+                right = result[right_index]
+                right_center = median(
+                    [_line_center(item, median_height) for item in right]
+                )
+                if abs(left_center - right_center) > tolerance:
+                    continue
+                right_bbox = BBox.union_all([item.bbox for item in right])
+                if left_bbox.x1 < right_bbox.x0:
+                    horizontal_gap = right_bbox.x0 - left_bbox.x1
+                elif right_bbox.x1 < left_bbox.x0:
+                    horizontal_gap = left_bbox.x0 - right_bbox.x1
+                else:
+                    horizontal_gap = 0.0
+                if horizontal_gap > join_distance:
+                    continue
+                left.extend(right)
+                del result[right_index]
+                changed = True
+                break
+            if changed:
+                break
+    return result
+
+
+def _merge_inline_attached_groups(
+    groups: list[list[NativeCharacter]],
+    median_height: float,
+) -> list[list[NativeCharacter]]:
+    """Attach inline punctuation/marks split by their smaller glyph boxes."""
+    result = [list(group) for group in groups]
+    for candidate in list(result):
+        if len(candidate) != 1 or not _is_inline_mark(candidate[0]):
+            continue
+        character = candidate[0]
+        targets = [group for group in result if group is not candidate]
+        compatible = [
+            group
+            for group in targets
+            if _inline_mark_is_attached(character, group, median_height)
+        ]
+        if not compatible:
+            continue
+        target = min(
+            compatible,
+            key=lambda group: min(
+                abs(character.bbox.cx - item.bbox.cx) for item in group
+            ),
+        )
+        target.append(character)
+        result.remove(candidate)
+    return result
+
+
+def _is_inline_mark(character: NativeCharacter) -> bool:
+    text = character.text
+    return bool(text) and (
+        text.isspace()
+        or unicodedata.category(text[0]).startswith(("M", "P"))
+    )
+
+
+def _inline_mark_is_attached(
+    character: NativeCharacter,
+    group: list[NativeCharacter],
+    median_height: float,
+) -> bool:
+    group_bbox = BBox.union_all([item.bbox for item in group])
+    horizontal_gap = 0.0
+    if character.bbox.x1 < group_bbox.x0:
+        horizontal_gap = group_bbox.x0 - character.bbox.x1
+    elif character.bbox.x0 > group_bbox.x1:
+        horizontal_gap = character.bbox.x0 - group_bbox.x1
+    vertical_overlap = min(character.bbox.y1, group_bbox.y1) - max(
+        character.bbox.y0, group_bbox.y0
+    )
+    return (
+        horizontal_gap <= max(6.0, median_height * 1.5)
+        and vertical_overlap > 0.0
+    )
 
 
 def _split_groups_by_column_gap(
