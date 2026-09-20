@@ -15,6 +15,7 @@ from structured_pdf_text.assemble.content import (
     assemble_page_content,
     prose_flow_lines_by_region,
 )
+from structured_pdf_text.assemble.page import assemble_page
 from structured_pdf_text.document import (
     ComplexityReason,
     ContentKind,
@@ -574,6 +575,29 @@ def test_same_line_identity_in_overlapping_regions_is_rendered_once() -> None:
     assert result.reading_text.count("ocorrência única") == 1
     assert result.deduplicated_lines == 1
     assert result.reading_decision.deduplicated_lines == 1
+
+
+def test_assemble_page_keeps_column_diagnostics_without_table_filter() -> None:
+    lines = [
+        _line("A1", _bbox(0, 0, 80, 10)),
+        _line("B1", _bbox(120, 0, 200, 10)),
+        _line("A2", _bbox(0, 20, 80, 30)),
+        _line("B2", _bbox(120, 20, 200, 30)),
+        _line("A3", _bbox(0, 40, 80, 50)),
+        _line("B3", _bbox(120, 40, 200, 50)),
+    ]
+    region = _region(RegionKind.TEXT, _bbox(0, 0, 200, 60), lines)
+    diagnostics = PageDiagnostics(
+        page_index=0,
+        strategy=PageStrategy.NATIVE,
+        reasons=[],
+        native_chars=0,
+        native_text_length=0,
+    )
+
+    page = assemble_page(0, _bbox(0, 0, 200, 60), [region], [], diagnostics, "")
+
+    assert page.diagnostics.facts["reading_flow_mode"] == "MULTI_COLUMN"
 
 
 def test_table_lines_do_not_drive_mixed_prose_to_form_flow() -> None:
