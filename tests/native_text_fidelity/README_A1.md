@@ -191,3 +191,11 @@ Na verificação de ordem, uma unidade reconstruída a partir de uma linha que
 mistura colunas usa as caixas dos tokens consumidos, e não a caixa ampla da
 linha nativa; isso evita atribuir à coluna errada uma ocorrência que foi
 associada corretamente por geometria de tokens.
+Na auditoria B1, quando a linha possui tokens nativos, o texto dos tokens é a
+fonte comparada; `text_override` da linha fica como fallback somente quando não
+há tokens. Isso mantém visível uma divergência entre o agrupamento de linha e
+a evidência textual nativa.
+Quando o agrupamento preserva uma forma compatível de ligatura, mas os tokens
+nativos colapsam glifos sobrepostos, o caso é registrado como
+`unit_tokenization_variant`; ele não é contado como texto exato nem como perda
+do PDFium.

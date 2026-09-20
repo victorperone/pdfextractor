@@ -56,6 +56,11 @@ def render_report(
             "nenhuma ocorrência exata, equivalente por whitespace ou reconstrução por tokens foi encontrada dentro da tolerância",
         ),
         (
+            B1Category.UNIT_TOKENIZATION_VARIANT.value,
+            "compatibility_ligature_tokenization_variant",
+            "a linha preserva a variante compatível no agrupamento, mas os tokens nativos colapsam glifos sobrepostos; não é match exato",
+        ),
+        (
             B1Category.REGION_PARTITIONED.value,
             "semantic_partition_nonblocking",
             "uma região de referência foi distribuída entre papéis/tipos semânticos observados diferentes",

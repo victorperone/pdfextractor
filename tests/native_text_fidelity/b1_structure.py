@@ -18,6 +18,7 @@ class B1Category(str, Enum):
     UNIT_MATCHED = "unit_matched"
     UNIT_FRAGMENTED = "unit_fragmented"
     UNIT_UNICODE_SUBSTITUTION = "unit_unicode_substitution"
+    UNIT_TOKENIZATION_VARIANT = "unit_tokenization_variant"
     UNIT_GEOMETRY_MISMATCH = "unit_geometry_mismatch"
     UNIT_MISSING = "unit_missing"
     REGION_FRAGMENTED = "region_fragmented"
@@ -148,9 +149,14 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
             item for item in observed_lines
             if item.order_index not in used
             and not used_tokens.get(item.order_index)
-            and _normalized(item.line.text) == _normalized(expected)
+            and _normalized(_observed_line_text(item)) == _normalized(expected)
         ]
-        if not candidates:
+        expected_box = _box(unit.get("bbox_top_origin_pt"))
+        try_fragmented = not candidates or (
+            expected_box is not None
+            and all(_geometry_mismatch(expected_box, _line_box(item.line)) for item in candidates)
+        )
+        if try_fragmented:
             fragmented = _find_fragmented_unit(unit, expected, observed_lines, used, used_tokens)
             if fragmented:
                 if fragmented.token_indexes:
@@ -169,6 +175,31 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
                     expected_text=expected,
                     observed_text=fragmented.text,
                     reasons=(f"unit_reconstructed_from_{len(fragmented.lines)}_observed_lines",),
+                ))
+                continue
+        if not candidates:
+            tokenization_variant = None
+            if _contains_compatibility_ligature(expected):
+                tokenization_variant = _find_tokenization_variant(
+                    unit,
+                    expected,
+                    observed_lines,
+                    used,
+                    used_tokens,
+                )
+            if tokenization_variant:
+                for item in tokenization_variant.lines:
+                    used.add(item.order_index)
+                matched[unit_id] = tokenization_variant.lines
+                matched_boxes[unit_id] = _fragmented_match_boxes(tokenization_variant)
+                findings.append(B1Finding(
+                    page,
+                    B1Category.UNIT_TOKENIZATION_VARIANT,
+                    unit_id,
+                    observed_id=",".join(str(item.line.line_id) for item in tokenization_variant.lines),
+                    expected_text=expected,
+                    observed_text=tokenization_variant.text,
+                    reasons=("compatibility_ligature_line_override_matches_but_native_tokens_collapse_overlaid_glyph",),
                 ))
                 continue
             unicode_match = None
@@ -202,7 +233,6 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
                 continue
             findings.append(B1Finding(page, B1Category.UNIT_MISSING, unit_id, expected_text=expected, reasons=("no_unconsumed_exact_or_whitespace_equivalent_line",)))
             continue
-        expected_box = _box(unit.get("bbox_top_origin_pt"))
         candidates.sort(key=lambda item: _distance_score(expected_box, _line_box(item.line)))
         chosen = candidates[0]
         used.add(chosen.order_index)
@@ -219,7 +249,7 @@ def audit_page_structure(reference_page: Mapping[str, Any], observed_page: Any) 
             unit_id,
             observed_id=chosen.line.line_id,
             expected_text=expected,
-            observed_text=chosen.line.text,
+                    observed_text=_observed_line_text(chosen),
             reasons=("exact_text_associated_outside_expected_geometry",) if geometry_mismatch else (),
         ))
 
@@ -551,8 +581,9 @@ def _find_fragmented_unit(
     ]
     candidates.sort(key=lambda item: item.order_index)
     for item in candidates:
-        if normalizer(item.line.text) == normalizer(expected):
-            return _FragmentedMatch((item,), item.line.text)
+        observed = _observed_line_text(item)
+        if normalizer(observed) == normalizer(expected):
+            return _FragmentedMatch((item,), observed)
     if len(candidates) < 2:
         token_match = _reconstruct_from_tokens(expected, expected_box, candidates, used_tokens, normalizer=normalizer)
         return token_match
@@ -567,8 +598,34 @@ def _find_fragmented_unit(
             window = tuple(candidates[start:end])
             if any(item.order_index in used_tokens for item in window):
                 continue
-            if normalizer(" ".join(item.line.text for item in window)) == normalized_expected:
-                return _FragmentedMatch(window, " ".join(item.line.text for item in window))
+            observed = " ".join(_observed_line_text(item) for item in window)
+            if normalizer(observed) == normalized_expected:
+                return _FragmentedMatch(window, observed)
+    return None
+
+
+def _find_tokenization_variant(
+    unit: Mapping[str, Any],
+    expected: str,
+    observed_lines: Sequence[_ObservedLine],
+    used: set[int],
+    used_tokens: Mapping[int, set[int]],
+) -> _FragmentedMatch | None:
+    expected_box = _box(unit.get("bbox_top_origin_pt"))
+    if expected_box is None:
+        return None
+    for item in observed_lines:
+        if item.order_index in used or not _has_available_tokens(item, used_tokens):
+            continue
+        if not _boxes_overlap_with_tolerance(expected_box, _line_box(item.line)):
+            continue
+        line_text = str(getattr(item.line, "text", ""))
+        token_text = _observed_line_text(item)
+        if (
+            line_text != token_text
+            and _nfkc_normalized(line_text) == _nfkc_normalized(expected)
+        ):
+            return _FragmentedMatch((item,), token_text)
     return None
 
 
@@ -578,6 +635,13 @@ def _has_available_tokens(item: _ObservedLine, used_tokens: Mapping[int, set[int
         return True
     tokens = getattr(item.line, "tokens", []) or []
     return any(index not in consumed for index, _ in enumerate(tokens))
+
+
+def _observed_line_text(item: _ObservedLine) -> str:
+    tokens = getattr(item.line, "tokens", []) or []
+    if tokens:
+        return "".join(str(token.text) for token in tokens)
+    return str(getattr(item.line, "text", ""))
 
 
 def _fragmented_match_boxes(match: _FragmentedMatch) -> tuple[tuple[float, float, float, float], ...]:

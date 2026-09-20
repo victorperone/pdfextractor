@@ -257,6 +257,27 @@ def test_b1_reconstructs_table_tokens_in_horizontal_order_despite_baseline_varia
     assert fragmented.observed_text == "Equipamento auditável"
 
 
+def test_b1_prefers_native_tokens_over_inconsistent_line_text_override():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "COLUNA 2, BLOCO 7", "R1", 1, (0, 0, 120, 10))],
+        "tables": [],
+    }
+    line = _line("COLUNA 2, BLOCO 1", "line-1", 0, 0)
+    line.tokens = [
+        SimpleNamespace(text=character, bbox=BBox(index * 5, 0, index * 5 + 4, 10))
+        for index, character in enumerate("COLUNA 2, BLOCO 7")
+    ]
+    observed = _page([_region("observed", line)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_MATCHED.value] == 1
+    assert findings[0].observed_text == "COLUNA 2, BLOCO 7"
+
+
 def test_b1_orders_fragmented_units_by_consumed_token_geometry():
     reference = {
         "page": 1,
@@ -388,6 +409,26 @@ def test_b1_classifies_compatibility_ligature_without_hiding_it_as_exact():
     assert summary.categories.get(B1Category.UNIT_MISSING.value, 0) == 0
     assert summary.auditable
     assert findings[0].observed_text == "Ligatura: fi"
+
+
+def test_b1_classifies_ligature_tokenization_variant_separately_from_unicode_match():
+    reference = {
+        "page": 1,
+        "regions": [{"region_id": "R1"}],
+        "units": [_unit("U1", "Ligatura: ﬀ", "R1", 1, (0, 0, 100, 10))],
+        "tables": [],
+    }
+    line = _line("Ligatura: ff", "line-1", 0, 0)
+    line.tokens = [SimpleNamespace(text="Ligatura: f", bbox=BBox(0, 0, 100, 10))]
+    observed = _page([_region("observed", line)])
+
+    summary, findings = audit_page_structure(reference, observed)
+
+    assert summary.matched_units == 1
+    assert summary.categories[B1Category.UNIT_TOKENIZATION_VARIANT.value] == 1
+    assert summary.categories.get(B1Category.UNIT_UNICODE_SUBSTITUTION.value, 0) == 0
+    assert summary.auditable
+    assert findings[0].observed_text == "Ligatura: f"
 
 
 def test_b1_distinguishes_region_fragmentation_and_table_cell_shape():
