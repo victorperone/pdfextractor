@@ -1244,7 +1244,13 @@ def _selected_page_indices(page_indices: tuple[int, ...] | None, page_count: int
 
 
 def _is_raster_primary_candidate(complexity: Any) -> bool:
-    """Prefer visible OCR over a short layer on an almost-raster page."""
+    """Prefer visible OCR over a short layer on an almost-raster page.
+
+    The native-length bound is the quality gate here. Requiring the generic
+    ``SPARSE_TEXT`` reason as well created a dead interval: that reason is
+    emitted below 80 characters while this promotion intentionally allows up
+    to 200 characters of native residue on a raster-dominant page.
+    """
     facts = complexity.facts
     image_coverage = float(facts.get("image_coverage") or 0.0)
     largest_image = float(facts.get("largest_image_coverage") or 0.0)
@@ -1253,7 +1259,6 @@ def _is_raster_primary_candidate(complexity: Any) -> bool:
         image_coverage >= 0.75
         and largest_image >= 0.75
         and native_length <= 200
-        and ComplexityReason.SPARSE_TEXT in complexity.reasons
     )
 
 
