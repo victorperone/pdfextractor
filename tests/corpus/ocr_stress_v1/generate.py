@@ -227,7 +227,8 @@ def _raster_image(
         top += font_size * 1.45
     if table is not None:
         x, y, table_width = 28.0, max(32.0, top + 12.0), width - 56.0
-        row_height = max(24.0, font_size * 2.25)
+        has_multiline_cell = any("\n" in value for row in table for value in row)
+        row_height = max(24.0, font_size * (3.4 if has_multiline_cell else 2.25))
         columns = max(len(row) for row in table)
         col_width = table_width / columns
         local.setStrokeColor(HexColor("#30465f"))
@@ -247,15 +248,16 @@ def _raster_image(
                     stroke=1,
                     fill=0,
                 )
-                _draw_text(
-                    local,
-                    value,
-                    x + column_index * col_width + 5,
-                    row_top + 7,
-                    page_height=height,
-                    size=font_size,
-                    font="Helvetica-Bold" if row_index == 0 else "Helvetica",
-                )
+                for line_index, line in enumerate(value.splitlines() or [""]):
+                    _draw_text(
+                        local,
+                        line,
+                        x + column_index * col_width + 5,
+                        row_top + 7 + line_index * font_size * 1.1,
+                        page_height=height,
+                        size=font_size,
+                        font="Helvetica-Bold" if row_index == 0 else "Helvetica",
+                    )
     local.save()
     document = pdfium.PdfDocument(source.getvalue())
     bitmap = document[0].render(scale=1.5)
@@ -576,9 +578,18 @@ def _draw_page(pdf: canvas.Canvas, meta: dict) -> None:
         raster_pages = {27, 28, 29, 30, 32, 35, 38, 39, 40}
         if page in raster_pages:
             rows = [["Campo", "Valor", "Status", "Nota"], ["A", "123,45", "OK", "Fictício"], ["B", "67,89", "OK", "Controle"], ["C", "90,12", "REVISAR", "V1"]]
+            if page == 30:
+                rows = [
+                    ["Campo", "Valor", "Status", "Nota"],
+                    ["A", "123,45\nmensal", "OK", "Fictício\ncontrole"],
+                    ["B", "67,89\nestimado", "OK", "Controle\ninterno"],
+                    ["C", "90,12\nrevisado", "REVISAR", "V1\natenção"],
+                ]
             mode = "clean" if page not in {29, 35} else ("low_resolution" if page == 29 else "contrast")
             image = _raster_image([f"{_marker(page)} — TABELA RASTER"], width, height, font_size=11, mode=mode, table=rows, seed=page)
             _add_raster_region(pdf, meta, image, 0, 0, width, height, page_height=height, region_id=f"P{page:02d}-R01", kind="table", quality=mode)
+            if page == 30:
+                meta["notes"].append("células raster com conteúdo multilinha intencional")
         else:
             meta["has_native_text_layer"] = True
             _header(pdf, meta, title, page_height=height)

@@ -6,7 +6,7 @@
   "page_count": 60,
   "source_page_count": 60,
   "pdf_file": "Document_OCR_Stress_V1.pdf",
-  "pdf_sha256": "f335b2ab558f2c640c0247ddede2c8e5be0b310bbe52639e3fda40fa64117db1",
+  "pdf_sha256": "3752b1f1fc8d86fa1430a720e772fa6a2d015d72c435cde895d6c037ef73287a",
   "generator": "tests/corpus/ocr_stress_v1/generate.py",
   "dependencies": [
     "reportlab",
@@ -1168,7 +1168,9 @@
       "figures": [],
       "tables": [],
       "continuation": null,
-      "notes": [],
+      "notes": [
+        "células raster com conteúdo multilinha intencional"
+      ],
       "expected_indicators": [
         "OCRS-P30-CONTROL"
       ],

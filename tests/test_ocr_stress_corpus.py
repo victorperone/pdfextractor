@@ -117,6 +117,19 @@ def test_continuous_figure_uses_one_source_with_distinct_crops(tmp_path: Path) -
     assert second["raster_regions"][0]["source_crop"] == "right"
 
 
+def test_page_30_declares_multiline_raster_cells(tmp_path: Path) -> None:
+    generator = _generator_module()
+    _, manifest_path = generator.generate(
+        tmp_path / "30",
+        pages=[30],
+        manifest_path=tmp_path / "30.json",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    page = manifest["pages"][0]
+    assert page["scenario"] == "tabela raster com células multilinha"
+    assert "células raster com conteúdo multilinha intencional" in page["notes"]
+
+
 def test_manifest_declares_valid_local_codes_and_no_external_assets() -> None:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     qr_pages = [
