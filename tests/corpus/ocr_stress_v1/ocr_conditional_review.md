@@ -131,3 +131,31 @@ Este é o ponto de parada do ciclo: não foi feita alteração em `src/` e nenhu
 teste de produção foi criado para mascarar a limitação do reconhecedor. Os
 artefatos completos estão em `/tmp/ocr-stress-audit/p28*`, `/tmp/ocr-stress-audit/p29*`
 e `/tmp/ocr-stress-audit/p29-inspect-*`.
+
+## Correção autorizada: células raster multilinha
+
+Com autorização específica, a etapa seguinte alterou somente
+`tables/text_tracks.py`. A detecção agora agrupa uma linha que sobrepõe
+verticalmente a linha anterior e ocupa um subconjunto dos mesmos tracks de
+coluna; a serialização ordena os grupos por `y` dentro de cada célula e une o
+conteúdo com espaço. Linhas normais com separação vertical continuam sendo
+linhas distintas.
+
+Validações da correção:
+
+- teste unitário: `test_borderless_detector_keeps_wrapped_cell_lines_in_one_row`;
+- página 30 baseline antes/depois: de 7 linhas físicas/linhas extras para 4
+  linhas lógicas e 16 células;
+- saída Markdown final preserva `123,45 mensal`, `67,89 estimado`,
+  `90,12 revisado`, `Fictício controle`, `Controle interno` e `V1 atenção`;
+- páginas 27–29 repetidas sem erros; páginas 27 e 28 mantiveram os valores
+  anteriores e a página 29 manteve o conteúdo residual já diagnosticado;
+- controles 1, 2, 13, 14, 19 e 24 repetidos sem erro, duplicação ou alteração
+  de texto nativo;
+- `python3 -m compileall -q src tests`, `pytest -q` e `git diff --check`
+  aprovados.
+
+Não houve alteração no modo `native`, no OCR regional, no modelo, na resolução,
+no runtime ou no ledger. O próximo risco residual é a qualidade de
+reconhecimento da página 29 (`Ficticio` sem acento), que não foi corrigida por
+esta mudança estrutural.

@@ -215,9 +215,16 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
     positions = {id(line): index for index, line in enumerate(lines)}
     for run in runs:
         first_index = positions[id(run[0][0])]
-        table_body_bbox = BBox.union_all([item[0].bbox for item in run])
+        body_lines = tuple(item[0] for item in run)
         body_rows = tuple(item[1] for item in run)
         body_anchors = _infer_anchors(body_rows, region.bbox.width)
+        body_lines, body_rows = _merge_multiline_rows(
+            body_lines,
+            body_rows,
+            body_anchors,
+            typical_height=typical_height,
+        )
+        table_body_bbox = BBox.union_all([line.bbox for line in body_lines])
         prefix: list[tuple[TextLine, tuple[_CellGroup, ...]]] = []
         prefix_candidate_count = 0
         prefix_accepted_count = 0
@@ -250,7 +257,7 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
             prefix.append((line, groups))
             prefix_accepted_count += 1
             next_line = line
-        enriched = list(reversed(prefix)) + run
+        enriched = list(reversed(prefix)) + list(zip(body_lines, body_rows))
         run_lines = tuple(item[0] for item in enriched)
         rows = tuple(item[1] for item in enriched)
         anchors = _infer_anchors(rows, region.bbox.width)
@@ -264,6 +271,112 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
         )
         output.append(_Candidate(run_lines, rows, anchors, assessment))
     return output
+
+
+def _merge_multiline_rows(
+    lines: tuple[TextLine, ...],
+    rows: tuple[tuple[_CellGroup, ...], ...],
+    anchors: tuple[float, ...],
+    *,
+    typical_height: float,
+) -> tuple[tuple[TextLine, ...], tuple[tuple[_CellGroup, ...], ...]]:
+    """Join physically separate continuation lines into logical table rows.
+
+    OCR commonly emits a second line for a wrapped cell.  It is a continuation
+    when it overlaps the previous line vertically and its occupied x tracks
+    are a subset of the previous row's tracks.  A normal next row has a clear
+    vertical gap, so it remains a separate table row.
+    """
+    if len(lines) < 2 or len(lines) != len(rows) or len(anchors) < 2:
+        return lines, rows
+
+    merged_lines: list[TextLine] = []
+    merged_rows: list[tuple[_CellGroup, ...]] = []
+    for line, groups in zip(lines, rows):
+        if merged_lines and _is_multiline_continuation(
+            line,
+            groups,
+            merged_lines[-1],
+            merged_rows[-1],
+            anchors,
+            typical_height=typical_height,
+        ):
+            merged_lines[-1] = _merge_table_lines(merged_lines[-1], line)
+            merged_rows[-1] = _merge_cell_groups(merged_rows[-1], groups)
+            continue
+        merged_lines.append(line)
+        merged_rows.append(groups)
+    return tuple(merged_lines), tuple(merged_rows)
+
+
+def _is_multiline_continuation(
+    line: TextLine,
+    groups: tuple[_CellGroup, ...],
+    previous_line: TextLine,
+    previous_groups: tuple[_CellGroup, ...],
+    anchors: tuple[float, ...],
+    *,
+    typical_height: float,
+) -> bool:
+    if not groups or not previous_groups:
+        return False
+    vertical_gap = line.bbox.y0 - previous_line.bbox.y1
+    if vertical_gap > max(2.0, typical_height * 0.35):
+        return False
+    previous_columns = {
+        column for column, _ in _assign_groups(previous_groups, anchors)
+    }
+    current_columns = {
+        column for column, _ in _assign_groups(groups, anchors)
+    }
+    return bool(current_columns) and current_columns <= previous_columns
+
+
+def _merge_table_lines(first: TextLine, second: TextLine) -> TextLine:
+    tokens = sorted(
+        [*first.tokens, *second.tokens],
+        key=lambda token: (token.bbox.y0, token.bbox.x0),
+    )
+    line_ids = tuple(
+        line_id
+        for line_id in (
+            *first.merged_source_line_ids,
+            first.line_id,
+            *second.merged_source_line_ids,
+            second.line_id,
+        )
+        if line_id
+    )
+    return TextLine(
+        tokens=tokens,
+        bbox=BBox.union_all([first.bbox, second.bbox]),
+        baseline=first.baseline,
+        direction=first.direction,
+        native_order_min=min(
+            (value for value in (first.native_order_min, second.native_order_min) if value is not None),
+            default=None,
+        ),
+        native_order_max=max(
+            (value for value in (first.native_order_max, second.native_order_max) if value is not None),
+            default=None,
+        ),
+        gap_mode="geometry",
+        order_mode="geometry",
+        line_id="|".join(line_ids),
+        merged_source_line_ids=line_ids,
+    )
+
+
+def _merge_cell_groups(
+    first: tuple[_CellGroup, ...],
+    second: tuple[_CellGroup, ...],
+) -> tuple[_CellGroup, ...]:
+    return tuple(
+        sorted(
+            (*first, *second),
+            key=lambda group: (group.bbox.y0, group.bbox.x0),
+        )
+    )
 
 
 def _merge_same_baseline_lines(lines: list[TextLine]) -> list[TextLine]:
@@ -441,10 +554,15 @@ def _build_table(
         for column, group in assigned:
             by_column.setdefault(column, []).append(group)
         for column in range(len(anchors)):
-            cell_groups = sorted(by_column.get(column, []), key=lambda group: group.bbox.x0)
+            cell_groups = sorted(
+                by_column.get(column, []),
+                key=lambda group: (group.bbox.y0, group.bbox.x0),
+            )
             tokens = [token for group in cell_groups for token in group.tokens]
-            text = join_table_tokens(
-                [token for group in cell_groups for token in group.tokens]
+            text = " ".join(
+                group.text.strip()
+                for group in cell_groups
+                if group.text.strip()
             )
             cells.append(
                 TableCell(
