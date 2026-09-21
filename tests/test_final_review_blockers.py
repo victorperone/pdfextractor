@@ -310,6 +310,76 @@ def test_compact_symbol_component_inside_line_is_rejoined() -> None:
     assert [line.text for line in lines] == ['abcdefghijklmno=-_`"']
 
 
+def test_ordinal_symbol_component_inside_line_is_rejoined() -> None:
+    characters = tuple(
+        [
+            NativeCharacter(
+                page_index=0,
+                char_index=index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(index * 8.0, 0.0, index * 8.0 + 6.0, 10.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("valor")
+        ]
+        + [
+            NativeCharacter(
+                page_index=0,
+                char_index=5 + index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(40.0 + index * 7.0, 4.5, 45.0 + index * 7.0, 6.5),
+                font_size=10.0,
+            )
+            for index, character in enumerate("¹²³ºª°")
+        ]
+        + [
+            NativeCharacter(
+                page_index=0,
+                char_index=11 + index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(85.0 + index * 8.0, 0.0, 91.0 + index * 8.0, 10.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("texto")
+        ]
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["valor¹²³ºª° texto"]
+
+
+def test_zero_height_leading_space_stays_with_adjacent_native_line() -> None:
+    characters = (
+        NativeCharacter(
+            page_index=0,
+            char_index=0,
+            text=" ",
+            unicode_codepoint=ord(" "),
+            bbox=BBox(0.0, 9.4, 4.4, 9.4),
+            font_size=8.0,
+        ),
+        *(
+            NativeCharacter(
+                page_index=0,
+                char_index=index + 1,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(18.0 + index * 5.0, 0.0, 22.0 + index * 5.0, 7.0),
+                font_size=8.0,
+            )
+            for index, character in enumerate("return value")
+        ),
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == [" return value"]
+
+
 def test_column_gap_split_uses_relative_geometry() -> None:
     from structured_pdf_text.document import NativeCharacter
 

@@ -315,7 +315,10 @@ def _remove_near_duplicates(characters: list[NativeCharacter]) -> list[NativeCha
 
 
 def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCharacter]]:
-    heights = [char.bbox.height for char in characters if char.bbox.height > 0]
+    # PDFium represents explicit spaces as almost-zero-height glyph boxes.
+    # They are useful evidence for text/indentation, but must not dominate the
+    # scale used to compare ordinary glyph baselines.
+    heights = [char.bbox.height for char in characters if char.bbox.height > 0.25]
     median_height = median(heights) if heights else 8.0
     tolerance = max(1.5, median_height * 0.55)
 
@@ -343,7 +346,11 @@ def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCha
     groups = _merge_baseline_components(groups, tolerance, median_height)
     groups = _merge_inline_attached_components(groups, median_height)
     groups = _merge_inline_attached_groups(groups, median_height)
-    return _split_groups_by_column_gap(groups)
+    groups = _split_groups_by_column_gap(groups)
+    # A zero-height explicit space can be split from its host by the column
+    # gap pass. Reconcile it once more after that pass, using native adjacency
+    # and local geometry so it cannot bridge an unrelated column.
+    return _merge_inline_attached_groups(groups, median_height)
 
 
 def _baseline_group_is_horizontally_connected(
@@ -432,14 +439,14 @@ def _inline_symbol_component_can_join(
     second: list[NativeCharacter],
     median_height: float,
 ) -> bool:
-    """Join a compact symbol run contained in a larger visual line.
+    """Join a compact inline run contained in a larger visual line.
 
-    PDFium can expose a run of punctuation/symbol glyphs with a slightly
-    different baseline from the surrounding text.  If that run is contained
-    in the larger component and overlaps it vertically, its geometry is
-    stronger evidence of one line than the baseline delta alone.  The rule is
-    intentionally restricted to symbol-only components so separate prose
-    lines, digits and legitimate small text remain independent.
+    PDFium can expose punctuation, superscripts, or small ordinal glyphs with
+    a slightly different baseline from the surrounding text. If that run is
+    contained in the larger component and overlaps it vertically, its
+    geometry is stronger evidence of one line than the baseline delta alone.
+    Ordinary letters remain excluded; the small-letter exception is limited
+    to glyphs whose height confirms the same compact inline role.
     """
     smaller, larger = (
         (first, second) if len(first) <= len(second) else (second, first)
@@ -448,7 +455,13 @@ def _inline_symbol_component_can_join(
     if not visible or len(smaller) > 8 or len(smaller) > max(8, len(larger) // 3):
         return False
     if not all(
-        unicodedata.category(character.text[0]).startswith(("P", "S"))
+        (
+            unicodedata.category(character.text[0]).startswith(("N", "P", "S"))
+            or (
+                unicodedata.category(character.text[0]).startswith("L")
+                and character.bbox.height < median_height * 0.75
+            )
+        )
         for character in visible
         if character.text
     ):
@@ -579,13 +592,31 @@ def _inline_mark_is_attached(
         horizontal_gap = group_bbox.x0 - character.bbox.x1
     elif character.bbox.x0 > group_bbox.x1:
         horizontal_gap = character.bbox.x0 - group_bbox.x1
+    # PDFium may expose an explicit space as a zero-height glyph. Preserve it
+    # when it is immediately before a host line in native order and lies on
+    # that line's vertical band. This is textual evidence, not invented
+    # indentation, and the native adjacency guard prevents column gutters
+    # from being interpreted as leading spaces.
+    if character.text.isspace() and character.bbox.height <= 0.25:
+        host_start = min(item.char_index for item in group)
+        native_delta = host_start - character.char_index
+        vertical_tolerance = max(1.5, median_height * 0.35)
+        on_host_band = (
+            group_bbox.y0 - vertical_tolerance
+            <= character.bbox.y0
+            <= group_bbox.y1 + vertical_tolerance
+        )
+        return (
+            character.bbox.x1 <= group_bbox.x0
+            and 0 < native_delta <= 2
+            and on_host_band
+            and horizontal_gap <= max(14.0, median_height * 2.0)
+        )
+
     vertical_overlap = min(character.bbox.y1, group_bbox.y1) - max(
         character.bbox.y0, group_bbox.y0
     )
-    return (
-        horizontal_gap <= max(6.0, median_height * 1.5)
-        and vertical_overlap > 0.0
-    )
+    return vertical_overlap > 0.0 and horizontal_gap <= max(6.0, median_height * 1.5)
 
 
 def _split_groups_by_column_gap(
