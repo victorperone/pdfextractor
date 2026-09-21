@@ -148,6 +148,8 @@ tests/corpus/**
 !tests/corpus/
 !tests/corpus/.gitkeep
 !tests/corpus/README.md
+!tests/corpus/ocr_stress_v1/
+!tests/corpus/ocr_stress_v1/corpus_validation.md
 tests/golden/**
 !tests/golden/
 !tests/golden/.gitkeep

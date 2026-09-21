@@ -287,6 +287,28 @@ def _raster_image(
     return image
 
 
+def _continuous_figure_images(width: float, height: float) -> tuple[Image.Image, Image.Image]:
+    """Create two page crops from one wider raster source image."""
+    source_buffer = BytesIO()
+    local = canvas.Canvas(source_buffer, pagesize=(width * 2, height), invariant=1)
+    local.setFillColor(white)
+    local.rect(0, 0, width * 2, height, stroke=0, fill=1)
+    for offset, page in enumerate((15, 16)):
+        top = 28.0
+        for line in (
+            f"{_marker(page)} — FIGURA CONTÍNUA {page - 14}/2",
+            "Trecho raster horizontal contínuo",
+            "OCRS-CONTINUA-15-16",
+            "Dados fictícios 15,16%",
+        ):
+            _draw_text(local, line, offset * width + 28, top, page_height=height, size=15)
+            top += 15 * 1.45
+    local.save()
+    source = pdfium.PdfDocument(source_buffer.getvalue())[0].render(scale=1.5).to_pil().convert("RGB")
+    midpoint = source.width // 2
+    return source.crop((0, 0, midpoint, source.height)), source.crop((midpoint, 0, source.width, source.height))
+
+
 def _draw_image(
     pdf: canvas.Canvas,
     image: Image.Image,
@@ -322,17 +344,19 @@ def _add_raster_region(
     kind: str = "text",
     text_in_image: bool = True,
     quality: str = "clean",
+    source_crop: str | None = None,
 ) -> None:
     _draw_image(pdf, image, x, top, width, height, page_height=page_height)
-    meta["raster_regions"].append(
-        {
+    region = {
             "region_id": region_id,
             "kind": kind,
             "bbox_pt": [round(x, 2), round(top, 2), round(x + width, 2), round(top + height, 2)],
             "text_in_image": text_in_image,
             "quality": quality,
         }
-    )
+    if source_crop is not None:
+        region["source_crop"] = source_crop
+    meta["raster_regions"].append(region)
 
 
 def _header(pdf: canvas.Canvas, meta: dict, title: str, *, page_height: float) -> None:
@@ -475,10 +499,27 @@ def _draw_page(pdf: canvas.Canvas, meta: dict) -> None:
         _add_raster_region(pdf, meta, image, 56, 230, 500, 100, page_height=height, region_id="P14-R02")
         _draw_text(pdf, "A ordem deve conservar o texto digital abaixo da imagem.", 32, 365, page_height=height, size=10)
     elif page in {15, 16}:
-        lines = [f"{_marker(page)} — FIGURA CONTÍNUA {page - 14}/2", "Trecho raster horizontal contínuo", "OCRS-CONTINUA-15-16", "Dados fictícios 15,16%"]
-        image = _raster_image(lines, width, height, font_size=15, mode="clean", seed=page)
-        _add_raster_region(pdf, meta, image, 0, 0, width, height, page_height=height, region_id=f"P{page:02d}-R01", kind="continuous_figure")
-        meta["continuation"] = {"group_id": "figure-15-16", "role": "first" if page == 15 else "second", "paired_page": 16 if page == 15 else 15}
+        left, right = _continuous_figure_images(width, height)
+        image = left if page == 15 else right
+        _add_raster_region(
+            pdf,
+            meta,
+            image,
+            0,
+            0,
+            width,
+            height,
+            page_height=height,
+            region_id=f"P{page:02d}-R01",
+            kind="continuous_figure",
+            source_crop="left" if page == 15 else "right",
+        )
+        meta["continuation"] = {
+            "group_id": "figure-15-16",
+            "shared_image_id": "figure-source-15-16",
+            "role": "first" if page == 15 else "second",
+            "paired_page": 16 if page == 15 else 15,
+        }
     elif page == 17:
         meta["has_native_text_layer"] = True
         _native_body(pdf, page, width=width, height=height, title=title)

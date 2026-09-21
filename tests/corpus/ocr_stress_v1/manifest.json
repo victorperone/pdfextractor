@@ -572,7 +572,8 @@
             612.0
           ],
           "text_in_image": true,
-          "quality": "clean"
+          "quality": "clean",
+          "source_crop": "left"
         }
       ],
       "has_table": false,
@@ -581,6 +582,7 @@
       "tables": [],
       "continuation": {
         "group_id": "figure-15-16",
+        "shared_image_id": "figure-source-15-16",
         "role": "first",
         "paired_page": 16
       },
@@ -613,7 +615,8 @@
             612.0
           ],
           "text_in_image": true,
-          "quality": "clean"
+          "quality": "clean",
+          "source_crop": "right"
         }
       ],
       "has_table": false,
@@ -622,6 +625,7 @@
       "tables": [],
       "continuation": {
         "group_id": "figure-15-16",
+        "shared_image_id": "figure-source-15-16",
         "role": "second",
         "paired_page": 15
       },

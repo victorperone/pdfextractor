@@ -102,6 +102,21 @@ def test_required_subsets_preserve_original_page_mapping(tmp_path: Path) -> None
         assert all(page["continuation"] for page in manifest["pages"])
 
 
+def test_continuous_figure_uses_one_source_with_distinct_crops(tmp_path: Path) -> None:
+    generator = _generator_module()
+    _, manifest_path = generator.generate(
+        tmp_path / "15-16",
+        pages=[15, 16],
+        manifest_path=tmp_path / "15-16.json",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first, second = manifest["pages"]
+    assert first["continuation"]["shared_image_id"] == "figure-source-15-16"
+    assert second["continuation"]["shared_image_id"] == "figure-source-15-16"
+    assert first["raster_regions"][0]["source_crop"] == "left"
+    assert second["raster_regions"][0]["source_crop"] == "right"
+
+
 def test_manifest_declares_valid_local_codes_and_no_external_assets() -> None:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     qr_pages = [
