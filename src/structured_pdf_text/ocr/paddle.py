@@ -1566,6 +1566,15 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _normalize_deskew_angle(angle: float) -> float:
+    """Map ``minAreaRect`` output to the nearest horizontal axis."""
+    if angle < -45.0:
+        return 90.0 + angle
+    if angle > 45.0:
+        return angle - 90.0
+    return angle
+
+
 def _deskew_image(
     image: object,
     min_angle_deg: float = 0.5,
@@ -1602,10 +1611,7 @@ def _deskew_image(
 
         coords_xy = coords[:, ::-1].astype(np.float32)
 
-        angle = cv2.minAreaRect(coords_xy)[-1]
-
-        if angle < -45.0:
-            angle = 90.0 + angle
+        angle = _normalize_deskew_angle(cv2.minAreaRect(coords_xy)[-1])
 
         if abs(angle) < min_angle_deg:
             return image, 0.0

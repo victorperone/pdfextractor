@@ -29,6 +29,7 @@ from structured_pdf_text.ocr.paddle import (
     _half_turn_box_to_original,
     _merge_compact_candidate_tokens,
     _make_candidate,
+    _normalize_deskew_angle,
     _overlap_conflict_count,
     _select_best_candidate,
     _spatial_consensus,
@@ -76,6 +77,12 @@ def _ocr_token(text: str, confidence: float, x: float = 0.0, y: float = 0.0) -> 
         language="pt",
         source=SourceKind.OCR_PAGE,
     )
+
+
+def test_deskew_normalizes_min_area_rect_angles_to_nearest_axis() -> None:
+    assert _normalize_deskew_angle(88.8) == pytest.approx(-1.2)
+    assert _normalize_deskew_angle(-88.8) == pytest.approx(1.2)
+    assert _normalize_deskew_angle(2.2) == pytest.approx(2.2)
 
 
 def test_sidebar_main_flow_precedes_sidebar_even_when_input_is_reversed() -> None:
