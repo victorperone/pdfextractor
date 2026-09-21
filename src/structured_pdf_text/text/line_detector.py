@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from dataclasses import dataclass, replace
 from statistics import median
 from difflib import SequenceMatcher
@@ -126,11 +127,21 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
     candidates = [line.strip() for line in extracted_text.replace("\r", "").split("\n") if line.strip()]
     available = set(range(len(candidates)))
     cursor = 0  # monotonic lower bound — never decreases
-    output: list[TextLine] = []
-    for line in lines:
+    output: list[TextLine | None] = [None] * len(lines)
+    processing_order = sorted(
+        enumerate(lines),
+        key=lambda item: (
+            item[1].native_order_min is None,
+            item[1].native_order_min
+            if item[1].native_order_min is not None
+            else item[0],
+            item[0],
+        ),
+    )
+    for line_index, line in processing_order:
         compact = _compact(line.text)
         if not compact:
-            output.append(line)
+            output[line_index] = line
             continue
         best_index: int | None = None
         best_score = 0.0
@@ -148,31 +159,29 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
             candidate = candidates[best_index]
             should_replace = (
                 best_score < 1.0
-                or _needs_textpage_spacing_recovery(line.text)
+                or _needs_textpage_spacing_recovery(line.text, candidate)
             )
             if should_replace:
-                output.append(
-                    TextLine(
-                        tokens=line.tokens,
-                        bbox=line.bbox,
-                        baseline=line.baseline,
-                        direction=line.direction,
-                        native_order_min=line.native_order_min,
-                        native_order_max=line.native_order_max,
-                        gap_mode=line.gap_mode,
-                        order_mode=line.order_mode,
-                        line_id=line.line_id,
-                        text_override=candidate,
-                        join_next_without_space=line.join_next_without_space,
-                    )
+                output[line_index] = TextLine(
+                    tokens=line.tokens,
+                    bbox=line.bbox,
+                    baseline=line.baseline,
+                    direction=line.direction,
+                    native_order_min=line.native_order_min,
+                    native_order_max=line.native_order_max,
+                    gap_mode=line.gap_mode,
+                    order_mode=line.order_mode,
+                    line_id=line.line_id,
+                    text_override=candidate,
+                    join_next_without_space=line.join_next_without_space,
                 )
             else:
-                output.append(line)
+                output[line_index] = line
             available.remove(best_index)
             cursor = best_index + 1
         else:
-            output.append(line)
-    return output
+            output[line_index] = line
+    return [line for line in output if line is not None]
 
 
 def _is_ghost_punctuation_line(line: TextLine) -> bool:
@@ -213,6 +222,14 @@ def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
             line for line in output
             if line is not candidate
             and line.bbox.height >= candidate.bbox.height * 1.20
+            # A normal baseline punctuation glyph (for example the hyphen in
+            # ``2 - controles``) can be emitted as a tiny separate line. It
+            # must remain independent; script merging is only valid when the
+            # candidate actually extends above or below the target line box.
+            and (
+                candidate.bbox.y0 < line.bbox.y0
+                or candidate.bbox.y1 > line.bbox.y1
+            )
             and line.bbox.x0 - candidate.bbox.width <= candidate.bbox.cx <= line.bbox.x1 + candidate.bbox.width
             and candidate.bbox.overlap_ratio(line.bbox) >= 0.18
         ]
@@ -248,13 +265,17 @@ def _compact(text: str) -> str:
     return "".join(character.casefold() for character in text if character.isalnum())
 
 
-def _needs_textpage_spacing_recovery(text: str) -> bool:
+def _needs_textpage_spacing_recovery(text: str, candidate: str | None = None) -> bool:
     compact = text.strip()
     if not compact:
         return False
     spaces = sum(character.isspace() for character in compact)
     if spaces / max(len(compact), 1) >= 0.18:
         return True
+    if candidate is not None:
+        candidate_spaces = sum(character.isspace() for character in candidate.strip())
+        if candidate_spaces > spaces:
+            return True
     return any(
         previous.islower() and current.isupper()
         for previous, current in zip(compact, compact[1:])
@@ -294,7 +315,10 @@ def _remove_near_duplicates(characters: list[NativeCharacter]) -> list[NativeCha
 
 
 def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCharacter]]:
-    heights = [char.bbox.height for char in characters if char.bbox.height > 0]
+    # PDFium represents explicit spaces as almost-zero-height glyph boxes.
+    # They are useful evidence for text/indentation, but must not dominate the
+    # scale used to compare ordinary glyph baselines.
+    heights = [char.bbox.height for char in characters if char.bbox.height > 0.25]
     median_height = median(heights) if heights else 8.0
     tolerance = max(1.5, median_height * 0.55)
 
@@ -306,6 +330,10 @@ def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCha
         best_delta = float("inf")
         for idx, center_y in enumerate(group_centers):
             delta = abs(char_center - center_y)
+            if delta <= tolerance and not _baseline_group_is_horizontally_connected(
+                groups[idx], char, median_height
+            ):
+                continue
             if delta < best_delta:
                 best_delta = delta
                 best_index = idx
@@ -315,7 +343,280 @@ def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCha
         else:
             groups[best_index].append(char)
             group_centers[best_index] = median([_line_center(item, median_height) for item in groups[best_index]])
-    return _split_groups_by_column_gap(groups)
+    groups = _merge_baseline_components(groups, tolerance, median_height)
+    groups = _merge_inline_attached_components(groups, median_height)
+    groups = _merge_inline_attached_groups(groups, median_height)
+    groups = _split_groups_by_column_gap(groups)
+    # A zero-height explicit space can be split from its host by the column
+    # gap pass. Reconcile it once more after that pass, using native adjacency
+    # and local geometry so it cannot bridge an unrelated column.
+    return _merge_inline_attached_groups(groups, median_height)
+
+
+def _baseline_group_is_horizontally_connected(
+    group: list[NativeCharacter],
+    character: NativeCharacter,
+    median_height: float,
+) -> bool:
+    """Prevent nearby baselines in separate columns from becoming one line.
+
+    Baseline proximity alone is insufficient when a sidebar is vertically
+    offset by a few points. Characters from one inline run remain connected
+    through normal word/glyph gaps; a distant column does not. Large gaps are
+    still split later by ``_split_groups_by_column_gap``.
+    """
+    if not group:
+        return False
+    group_x0 = min(item.bbox.x0 for item in group)
+    group_x1 = max(item.bbox.x1 for item in group)
+    if character.bbox.x1 < group_x0:
+        horizontal_gap = group_x0 - character.bbox.x1
+    elif character.bbox.x0 > group_x1:
+        horizontal_gap = character.bbox.x0 - group_x1
+    else:
+        horizontal_gap = 0.0
+    return horizontal_gap <= max(20.0, median_height * 4.0)
+
+
+def _merge_baseline_components(
+    groups: list[list[NativeCharacter]],
+    tolerance: float,
+    median_height: float,
+) -> list[list[NativeCharacter]]:
+    """Rejoin adjacent components that belong to the same baseline.
+
+    The incremental baseline assignment above intentionally keeps distant
+    columns apart.  It can nevertheless create two components for one line
+    when glyph metrics move the running center slightly.  Reconcile those
+    components using both baseline proximity and their actual horizontal
+    distance; this is order-independent and cannot bridge a normal column
+    gutter.
+    """
+    result = [list(group) for group in groups]
+    join_distance = max(20.0, median_height * 4.0)
+    changed = True
+    while changed:
+        changed = False
+        for left_index, left in enumerate(result):
+            left_center = median(
+                [_line_center(item, median_height) for item in left]
+            )
+            left_bbox = BBox.union_all([item.bbox for item in left])
+            for right_index in range(left_index + 1, len(result)):
+                right = result[right_index]
+                right_center = median(
+                    [_line_center(item, median_height) for item in right]
+                )
+                if (
+                    abs(left_center - right_center) > tolerance
+                    and not _inline_symbol_component_can_join(
+                        left,
+                        right,
+                        median_height,
+                    )
+                ):
+                    continue
+                right_bbox = BBox.union_all([item.bbox for item in right])
+                if left_bbox.x1 < right_bbox.x0:
+                    horizontal_gap = right_bbox.x0 - left_bbox.x1
+                elif right_bbox.x1 < left_bbox.x0:
+                    horizontal_gap = left_bbox.x0 - right_bbox.x1
+                else:
+                    horizontal_gap = 0.0
+                if horizontal_gap > join_distance:
+                    continue
+                left.extend(right)
+                del result[right_index]
+                changed = True
+                break
+            if changed:
+                break
+    return result
+
+
+def _inline_symbol_component_can_join(
+    first: list[NativeCharacter],
+    second: list[NativeCharacter],
+    median_height: float,
+) -> bool:
+    """Join a compact inline run contained in a larger visual line.
+
+    PDFium can expose punctuation, superscripts, or small ordinal glyphs with
+    a slightly different baseline from the surrounding text. If that run is
+    contained in the larger component and overlaps it vertically, its
+    geometry is stronger evidence of one line than the baseline delta alone.
+    Ordinary letters remain excluded; the small-letter exception is limited
+    to glyphs whose height confirms the same compact inline role.
+    """
+    smaller, larger = (
+        (first, second) if len(first) <= len(second) else (second, first)
+    )
+    visible = [character for character in smaller if not character.text.isspace()]
+    if not visible or len(smaller) > 8 or len(smaller) > max(8, len(larger) // 3):
+        return False
+    if not all(
+        (
+            unicodedata.category(character.text[0]).startswith(("N", "P", "S"))
+            or (
+                unicodedata.category(character.text[0]).startswith("L")
+                and character.bbox.height < median_height * 0.75
+            )
+        )
+        for character in visible
+        if character.text
+    ):
+        return False
+
+    smaller_bbox = BBox.union_all([character.bbox for character in smaller])
+    larger_bbox = BBox.union_all([character.bbox for character in larger])
+    vertical_overlap = min(smaller_bbox.y1, larger_bbox.y1) - max(
+        smaller_bbox.y0,
+        larger_bbox.y0,
+    )
+    if vertical_overlap <= 0.0:
+        return False
+    if vertical_overlap / max(min(smaller_bbox.height, larger_bbox.height), 0.01) < 0.35:
+        return False
+    containment_tolerance = max(2.0, median_height * 0.35)
+    if smaller_bbox.x0 < larger_bbox.x0 - containment_tolerance:
+        return False
+    if smaller_bbox.x1 > larger_bbox.x1 + containment_tolerance:
+        return False
+    center_delta = abs(
+        median(_line_center(character, median_height) for character in first)
+        - median(_line_center(character, median_height) for character in second)
+    )
+    return center_delta <= max(4.0, median_height * 0.75)
+
+
+def _merge_inline_attached_groups(
+    groups: list[list[NativeCharacter]],
+    median_height: float,
+) -> list[list[NativeCharacter]]:
+    """Attach inline punctuation/marks split by their smaller glyph boxes."""
+    result = [list(group) for group in groups]
+    for candidate in list(result):
+        if len(candidate) != 1 or not _is_inline_mark(candidate[0]):
+            continue
+        character = candidate[0]
+        targets = [group for group in result if group is not candidate]
+        compatible = [
+            group
+            for group in targets
+            if _inline_mark_is_attached(character, group, median_height)
+        ]
+        if not compatible:
+            continue
+        target = min(
+            compatible,
+            key=lambda group: min(
+                abs(character.bbox.cx - item.bbox.cx) for item in group
+            ),
+        )
+        target.append(character)
+        result.remove(candidate)
+    return result
+
+
+def _merge_inline_attached_components(
+    groups: list[list[NativeCharacter]],
+    median_height: float,
+) -> list[list[NativeCharacter]]:
+    """Attach small glyph components that overlap an established text line.
+
+    Descenders and superscripts can have a different box height and therefore
+    a displaced baseline center.  When such a component is horizontally
+    adjacent to, or lies inside, a larger line component and its boxes overlap
+    vertically, the geometry is stronger evidence than the center alone.
+    The small-component guard prevents two ordinary lines from being merged.
+    """
+    result = [list(group) for group in groups]
+    max_center_delta = max(4.0, median_height * 0.75)
+    changed = True
+    while changed:
+        changed = False
+        for left_index, left in enumerate(result):
+            for right_index in range(left_index + 1, len(result)):
+                right = result[right_index]
+                if min(len(left), len(right)) > 2:
+                    continue
+                left_bbox = BBox.union_all([item.bbox for item in left])
+                right_bbox = BBox.union_all([item.bbox for item in right])
+                vertical_overlap = min(left_bbox.y1, right_bbox.y1) - max(
+                    left_bbox.y0, right_bbox.y0
+                )
+                minimum_height = min(left_bbox.height, right_bbox.height)
+                if vertical_overlap <= 0.0 or vertical_overlap / max(minimum_height, 0.01) < 0.35:
+                    continue
+                left_center = median(
+                    [_line_center(item, median_height) for item in left]
+                )
+                right_center = median(
+                    [_line_center(item, median_height) for item in right]
+                )
+                if abs(left_center - right_center) > max_center_delta:
+                    continue
+                if left_bbox.x1 < right_bbox.x0:
+                    horizontal_gap = right_bbox.x0 - left_bbox.x1
+                elif right_bbox.x1 < left_bbox.x0:
+                    horizontal_gap = left_bbox.x0 - right_bbox.x1
+                else:
+                    horizontal_gap = 0.0
+                if horizontal_gap > max(4.0, median_height * 0.85):
+                    continue
+                left.extend(right)
+                del result[right_index]
+                changed = True
+                break
+            if changed:
+                break
+    return result
+
+
+def _is_inline_mark(character: NativeCharacter) -> bool:
+    text = character.text
+    return bool(text) and (
+        text.isspace()
+        or unicodedata.category(text[0]).startswith(("M", "P"))
+    )
+
+
+def _inline_mark_is_attached(
+    character: NativeCharacter,
+    group: list[NativeCharacter],
+    median_height: float,
+) -> bool:
+    group_bbox = BBox.union_all([item.bbox for item in group])
+    horizontal_gap = 0.0
+    if character.bbox.x1 < group_bbox.x0:
+        horizontal_gap = group_bbox.x0 - character.bbox.x1
+    elif character.bbox.x0 > group_bbox.x1:
+        horizontal_gap = character.bbox.x0 - group_bbox.x1
+    # PDFium may expose an explicit space as a zero-height glyph. Preserve it
+    # when it is immediately before a host line in native order and lies on
+    # that line's vertical band. This is textual evidence, not invented
+    # indentation, and the native adjacency guard prevents column gutters
+    # from being interpreted as leading spaces.
+    if character.text.isspace() and character.bbox.height <= 0.25:
+        host_start = min(item.char_index for item in group)
+        native_delta = host_start - character.char_index
+        vertical_tolerance = max(1.5, median_height * 0.35)
+        on_host_band = (
+            group_bbox.y0 - vertical_tolerance
+            <= character.bbox.y0
+            <= group_bbox.y1 + vertical_tolerance
+        )
+        return (
+            character.bbox.x1 <= group_bbox.x0
+            and 0 < native_delta <= 2
+            and on_host_band
+            and horizontal_gap <= max(14.0, median_height * 2.0)
+        )
+
+    vertical_overlap = min(character.bbox.y1, group_bbox.y1) - max(
+        character.bbox.y0, group_bbox.y0
+    )
+    return vertical_overlap > 0.0 and horizontal_gap <= max(6.0, median_height * 1.5)
 
 
 def _split_groups_by_column_gap(
@@ -342,7 +643,17 @@ def _split_groups_by_column_gap(
         # conservative boundary protects tracked headings whose inter-glyph
         # spacing is intentionally large; ordinary word separation is handled
         # later by _infer_gap_threshold.
-        gap_threshold = max(20.0, median_width * 4.0)
+        positive_gaps = [
+            curr.bbox.x0 - prev.bbox.x1
+            for prev, curr in zip(sorted_by_x, sorted_by_x[1:])
+            if curr.bbox.x0 - prev.bbox.x1 > 0.0
+        ]
+        typical_gap = median(positive_gaps) if positive_gaps else 0.0
+        gap_threshold = max(
+            8.0,
+            median_width * 3.5,
+            typical_gap * 3.0,
+        )
         current: list[NativeCharacter] = [sorted_by_x[0]]
         for prev, curr in zip(sorted_by_x, sorted_by_x[1:]):
             horizontal_gap = curr.bbox.x0 - prev.bbox.x1
@@ -356,18 +667,12 @@ def _split_groups_by_column_gap(
 
 
 def _line_center(char: NativeCharacter, median_height: float) -> float:
-    if (
-        char.bbox.height < median_height * 0.25
-        or (
-            char.text in "_,.;"
-            and char.bbox.height < median_height * 0.70
-        )
-    ):
-        # Baseline glyphs such as underscores, periods and hyphens may have a
-        # very short box whose geometric center falls below the surrounding
-        # letters. Anchor them using the shared baseline instead.
-        return char.bbox.y1 - median_height / 2.0
-    return char.bbox.cy
+    # Glyphs from the same visual line do not share the same vertical center:
+    # ascenders, accents and descenders change the top/bottom of each box.
+    # The lower edge is the stable baseline signal for the horizontal line
+    # detector. Using the center split one line into several groups when, for
+    # example, ``i`` and accented characters were taller than lowercase glyphs.
+    return char.bbox.y1 - median_height / 2.0
 
 
 def _line_from_chars(

@@ -13,7 +13,9 @@ from structured_pdf_text.assemble.content import (
     PageContentAssemblyResult,
     _table_has_renderable_content,
     assemble_page_content,
+    prose_flow_lines_by_region,
 )
+from structured_pdf_text.assemble.page import assemble_page
 from structured_pdf_text.document import (
     ComplexityReason,
     ContentKind,
@@ -34,6 +36,7 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.text.reading_order import order_region_lines
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +341,40 @@ def test_title_before_table_order() -> None:
     assert title_idx < table_idx, "TITLE must come before TABLE"
 
 
+def test_orphan_table_is_anchored_between_title_and_prose() -> None:
+    """A table outside all regions keeps its physical position in the stream."""
+    title_bbox = _bbox(0, 0, 200, 30)
+    table_bbox = _bbox(0, 50, 200, 110)
+    prose_bbox = _bbox(0, 140, 200, 170)
+
+    title = _region(
+        RegionKind.TITLE,
+        title_bbox,
+        [_line("Título", title_bbox)],
+        region_id="title",
+        heading_level=1,
+    )
+    prose = _region(
+        RegionKind.TEXT,
+        prose_bbox,
+        [_line("Texto depois", prose_bbox)],
+        region_id="prose",
+    )
+    table = _table(
+        "orphan-table",
+        0,
+        table_bbox,
+        [_cell(0, 0, "Dado", _bbox(10, 60, 190, 100))],
+        col_count=1,
+    )
+
+    result = assemble_page_content(_page([title, prose], [table]))
+    kinds = [block.kind for block in result.blocks]
+
+    assert kinds == [ContentKind.TITLE, ContentKind.TABLE, ContentKind.TEXT]
+    assert result.orphan_tables == 1
+
+
 # ---------------------------------------------------------------------------
 # Section 24.6: TABLE region with no table at all → fallback
 # ---------------------------------------------------------------------------
@@ -516,3 +553,117 @@ def test_reading_order_preserved_two_column_layout() -> None:
         f"Left column must precede right column entirely. "
         f"Got order: {texts}"
     )
+
+
+def test_same_line_identity_in_overlapping_regions_is_rendered_once() -> None:
+    shared_line = _line("ocorrência única", _bbox(0, 20, 100, 35))
+    first = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 120, 50),
+        [shared_line],
+        region_id="first",
+    )
+    second = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 120, 50),
+        [shared_line],
+        region_id="second",
+    )
+
+    result = assemble_page_content(_page([first, second], []))
+
+    assert result.reading_text.count("ocorrência única") == 1
+    assert result.deduplicated_lines == 1
+    assert result.reading_decision.deduplicated_lines == 1
+
+
+def test_distinct_same_text_native_occurrences_are_preserved() -> None:
+    first = replace(
+        _line("texto repetido", _bbox(0, 20, 100, 35)),
+        line_id="native:0:10:22",
+    )
+    second = replace(
+        _line("texto repetido", _bbox(140, 20, 240, 35)),
+        line_id="native:0:40:52",
+    )
+    region = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 240, 50),
+        [first, second],
+    )
+
+    result = assemble_page_content(_page([region], []))
+
+    assert result.reading_text.count("texto repetido") == 2
+    assert result.deduplicated_lines == 0
+
+
+def test_assemble_page_keeps_column_diagnostics_without_table_filter() -> None:
+    lines = [
+        _line("A1", _bbox(0, 0, 80, 10)),
+        _line("B1", _bbox(120, 0, 200, 10)),
+        _line("A2", _bbox(0, 20, 80, 30)),
+        _line("B2", _bbox(120, 20, 200, 30)),
+        _line("A3", _bbox(0, 40, 80, 50)),
+        _line("B3", _bbox(120, 40, 200, 50)),
+    ]
+    region = _region(RegionKind.TEXT, _bbox(0, 0, 200, 60), lines)
+    diagnostics = PageDiagnostics(
+        page_index=0,
+        strategy=PageStrategy.NATIVE,
+        reasons=[],
+        native_chars=0,
+        native_text_length=0,
+    )
+
+    page = assemble_page(0, _bbox(0, 0, 200, 60), [region], [], diagnostics, "")
+
+    assert page.diagnostics.facts["reading_flow_mode"] == "MULTI_COLUMN"
+
+
+def test_table_lines_do_not_drive_mixed_prose_to_form_flow() -> None:
+    """Table-owned parallel lines must not determine the prose hypothesis."""
+    prose_lines: list[TextLine] = []
+    table_lines: list[TextLine] = []
+    cells: list[TableCell] = []
+    for index in range(6):
+        prose_lines.extend(
+            (
+                _line(f"A{index}", _bbox(0, index * 30, 50, index * 30 + 10)),
+                _line(f"B{index}", _bbox(90, index * 30, 135, index * 30 + 10)),
+            )
+        )
+    for index in range(20):
+        y0 = 180 + index * 8
+        left_bbox = _bbox(0, y0, 25, y0 + 10)
+        right_bbox = _bbox(35, y0, 60, y0 + 10)
+        table_lines.extend((_line(f"K{index}", left_bbox), _line(f"V{index}", right_bbox)))
+        cells.extend(
+            (
+                _cell(index, 0, "K", left_bbox),
+                _cell(index, 1, "V", right_bbox),
+            )
+        )
+
+    region = _region(
+        RegionKind.TEXT,
+        _bbox(0, 0, 220, 500),
+        [*prose_lines, *table_lines],
+        region_id="mixed",
+    )
+    table = _table(
+        "mixed-table",
+        0,
+        _bbox(0, 180, 60, 340),
+        cells,
+        col_count=2,
+        row_count=20,
+    )
+    flow_lines = prose_flow_lines_by_region([region], [table], 0)
+
+    _, without_table_ownership = order_region_lines([region])
+    _, with_table_ownership = order_region_lines([region], flow_lines)
+
+    assert without_table_ownership.flow_mode == "FORM"
+    assert with_table_ownership.flow_mode == "MULTI_COLUMN"
+    assert with_table_ownership.line_preservation_ok

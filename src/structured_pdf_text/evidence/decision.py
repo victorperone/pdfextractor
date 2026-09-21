@@ -72,8 +72,8 @@ def assess_region_recovery(
         }:
             selected.append(region)
 
-    total_area = sum(region.bbox.area for region in considered)
-    bad_area = sum(region.bbox.area for region in selected)
+    total_area = _regions_union_area(considered, page_bbox)
+    bad_area = _regions_union_area(selected, page_bbox)
     bad_region_ratio = len(selected) / max(len(considered), 1)
     bad_area_ratio = min(1.0, bad_area / max(total_area, 1.0))
     explicit_escalation = any(
@@ -96,6 +96,44 @@ def assess_region_recovery(
         bad_area_ratio=round(bad_area_ratio, 6),
         reasons=tuple(reasons),
     )
+
+
+def _regions_union_area(regions: list[LayoutRegion], page_bbox: BBox) -> float:
+    """Measure occupied region area once, clipping regions to the page."""
+    boxes = [
+        intersection
+        for region in regions
+        if (intersection := region.bbox.intersection(page_bbox)) is not None
+    ]
+    return _union_area(boxes)
+
+
+def _union_area(boxes: list[BBox]) -> float:
+    """Return the exact union area of axis-aligned rectangles."""
+    if not boxes:
+        return 0.0
+    x_edges = sorted({edge for box in boxes for edge in (box.x0, box.x1)})
+    area = 0.0
+    for left, right in zip(x_edges, x_edges[1:]):
+        if right <= left:
+            continue
+        intervals = sorted(
+            (box.y0, box.y1)
+            for box in boxes
+            if box.x0 < right and box.x1 > left and box.y1 > box.y0
+        )
+        if not intervals:
+            continue
+        covered = 0.0
+        start, end = intervals[0]
+        for next_start, next_end in intervals[1:]:
+            if next_start > end:
+                covered += end - start
+                start, end = next_start, next_end
+            else:
+                end = max(end, next_end)
+        area += (right - left) * (covered + end - start)
+    return area
 
 
 def _assess_one_region(
@@ -140,6 +178,17 @@ def _assess_one_region(
     if not text and visible and region.kind not in {RegionKind.HEADER, RegionKind.FOOTER}:
         reasons.extend(("native_text_missing", "visible_ink_present"))
         return RegionQuality(RegionDecision.OCR_REGION, reasons, 0.78)
+
+    if text and ink_ratio is not None and not visible:
+        # A native layer can be intentionally invisible or sit outside the
+        # visible artwork. Preserve that evidence, but do not ask OCR to
+        # hallucinate recovery from a region with no visible ink.
+        reasons.extend(("native_text_not_visible", "preserve_native_evidence"))
+        return RegionQuality(
+            RegionDecision.KEEP_NATIVE,
+            reasons,
+            min(0.55, page_complexity.native_text_score),
+        )
 
     damaged_layer = bool(
         {

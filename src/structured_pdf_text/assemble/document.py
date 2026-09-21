@@ -112,6 +112,12 @@ def assemble_document(
                 "content_table_block_count": sum(1 for b in blocks if b.kind == ContentKind.TABLE),
                 "content_table_fallbacks": result.table_fallbacks,
                 "content_claimed_table_lines": result.claimed_table_lines,
+                "content_deduplicated_lines": getattr(result, "deduplicated_lines", 0),
+                "reading_deduplicated_lines": getattr(
+                    getattr(result, "reading_decision", None),
+                    "deduplicated_lines",
+                    0,
+                ),
                 "content_orphan_tables": result.orphan_tables,
                 "decorative_block_count": sum(1 for b in blocks if b.decorative),
                 "list_segment_count": result.list_segment_count,

@@ -9,6 +9,10 @@ from structured_pdf_text.layout.engine import LayoutRegionPrediction
 from structured_pdf_text.document import NativePageEvidence
 
 
+_NESTED_REGION_MIN_OVERLAP = 0.80
+_NESTED_REGION_MAX_AREA_RATIO = 0.65
+
+
 def full_page_text_region(
     page_index: int,
     page_bbox: BBox,
@@ -69,7 +73,51 @@ def regions_from_predictions(
                 quality=quality,
             )
         )
-    return assigned_regions
+    return _coalesce_nested_regions(assigned_regions)
+
+
+def _coalesce_nested_regions(regions: list[LayoutRegion]) -> list[LayoutRegion]:
+    """Collapse duplicate semantic predictions around the same text band.
+
+    A semantic detector can emit a broad region and a smaller, overlapping
+    prediction of the same kind. Keeping both regions splits one logical band
+    even though line assignment deliberately sends each line to only one of
+    them. Coalescing is restricted to strongly nested boxes with identical
+    semantic metadata; adjacent columns and different semantic roles remain
+    independent.
+    """
+    coalesced: list[LayoutRegion] = []
+    for region in regions:
+        host = next(
+            (
+                candidate
+                for candidate in coalesced
+                if _can_coalesce_nested(candidate, region)
+            ),
+            None,
+        )
+        if host is None:
+            coalesced.append(region)
+            continue
+        host.bbox = BBox.union_all([host.bbox, region.bbox])
+        host.native_lines.extend(region.native_lines)
+        host.native_lines.sort(key=lambda line: (line.bbox.y0, line.bbox.x0))
+        host.ocr_lines.extend(region.ocr_lines)
+        host.ocr_tokens.extend(region.ocr_tokens)
+        if host.layout_confidence is None:
+            host.layout_confidence = region.layout_confidence
+    return coalesced
+
+
+def _can_coalesce_nested(left: LayoutRegion, right: LayoutRegion) -> bool:
+    if left.kind != right.kind:
+        return False
+    if left.semantic_role != right.semantic_role or left.edge_role != right.edge_role:
+        return False
+    smaller, larger = (left, right) if left.bbox.area <= right.bbox.area else (right, left)
+    if smaller.bbox.area > larger.bbox.area * _NESTED_REGION_MAX_AREA_RATIO:
+        return False
+    return smaller.bbox.overlap_ratio(larger.bbox) >= _NESTED_REGION_MIN_OVERLAP
 
 
 def _clamp_bbox(box: BBox, page_bbox: BBox) -> BBox:

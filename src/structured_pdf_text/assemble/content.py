@@ -46,6 +46,7 @@ class PageContentAssemblyResult:
     table_fallbacks: int
     orphan_tables: int
     assembly_ms: float
+    deduplicated_lines: int = 0
     list_segment_count: int = 0
     list_item_count: int = 0
     list_inferred_marker_count: int = 0
@@ -68,6 +69,11 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     consistency = native_order_consistency(page.regions)
 
     physical_tables = _physical_tables_for_page(page)
+    flow_lines_by_region = prose_flow_lines_by_region(
+        page.regions,
+        physical_tables,
+        page.page_index,
+    )
     emitted_table_ids: set[str] = set()
 
     blocks: list[PageContentBlock] = []
@@ -78,6 +84,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     list_inferred_marker_count = 0
     list_continuation_count = 0
     list_unassigned_line_count = 0
+    deduplicated_lines = 0
     canonical_line_order: list[str] = []
     canonical_line_ids_seen: set[str] = set()
 
@@ -86,13 +93,24 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
     diag_column_groups = 0
     diag_rotated_lines = 0
     diag_table_regions = 0
-    # deduplicated_lines remains 0: the canonical assembler processes each
-    # region independently and does not run cross-region deduplication. If
-    # real-document validation shows duplicate lines between regions, that
-    # step should be reintroduced here rather than counted hypothetically.
+    # Exact line identities are deduplicated at the assembly boundary when
+    # overlapping regions expose the same native occurrence more than once.
 
     for region in ordered_regions:
-        ordered_lines, groups = order_lines_in_region(region)
+        ordered_lines, groups = order_lines_in_region(
+            region,
+            flow_lines=flow_lines_by_region.get(region.region_id),
+        )
+        unique_ordered_lines: list[TextLine] = []
+        for line in ordered_lines:
+            line_id = line_identity(line)
+            if line_id in canonical_line_ids_seen:
+                deduplicated_lines += 1
+                continue
+            canonical_line_ids_seen.add(line_id)
+            canonical_line_order.append(line_id)
+            unique_ordered_lines.append(line)
+        ordered_lines = unique_ordered_lines
         diag_column_groups += groups
         diag_rotated_lines += sum(
             1 for line in ordered_lines
@@ -109,11 +127,6 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
             ordered_lines=ordered_lines,
         )
         blocks.extend(region_blocks)
-        for line in ordered_lines:
-            line_id = line_identity(line)
-            if line_id not in canonical_line_ids_seen:
-                canonical_line_ids_seen.add(line_id)
-                canonical_line_order.append(line_id)
         claimed_table_lines += claimed
         table_fallbacks += fallbacks
         if region.kind in {RegionKind.TEXT, RegionKind.LIST, RegionKind.TABLE}:
@@ -134,7 +147,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         table_regions=diag_table_regions,
         native_order_consistency=consistency,
         region_edges=region_edges,
-        deduplicated_lines=0,
+        deduplicated_lines=deduplicated_lines,
     )
 
     orphan_blocks, orphan_count = _insert_orphan_tables(
@@ -142,7 +155,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         tables=physical_tables,
         emitted_table_ids=emitted_table_ids,
     )
-    blocks.extend(orphan_blocks)
+    blocks = _merge_orphan_blocks(blocks, orphan_blocks)
 
     blocks = _reindex_blocks(blocks)
 
@@ -158,6 +171,7 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         table_fallbacks=table_fallbacks,
         orphan_tables=orphan_count,
         assembly_ms=assembly_ms,
+        deduplicated_lines=deduplicated_lines,
         list_segment_count=list_segment_count,
         list_item_count=list_item_count,
         list_inferred_marker_count=list_inferred_marker_count,
@@ -178,6 +192,36 @@ def _physical_tables_for_page(page: StructuredPage) -> list[StructuredTable]:
         for table in page.tables
         if any(f.page_index == page.page_index for f in table.page_fragments)
     ]
+
+
+def prose_flow_lines_by_region(
+    regions: list[LayoutRegion],
+    tables: list[StructuredTable],
+    page_index: int,
+) -> dict[str, list[TextLine]]:
+    """Return each region's lines after removing lines owned by valid tables.
+
+    The returned lists are used only for prose-flow hypotheses.  Callers still
+    order and assemble the complete region line set, so table lines remain
+    available for table emission and conservation accounting.
+    """
+    table_owned_ids = {
+        id(line)
+        for region in regions
+        for line in region.native_lines
+        if any(_line_claimed_by_table(line, table, page_index) for table in tables)
+    }
+    result: dict[str, list[TextLine]] = {}
+    for region in regions:
+        if region.kind == RegionKind.TABLE:
+            continue
+        flow_lines = [
+            line for line in region.native_lines
+            if id(line) not in table_owned_ids
+        ]
+        if len(flow_lines) != len(region.native_lines):
+            result[region.region_id] = flow_lines
+    return result
 
 
 def _table_fragment_bbox(table: StructuredTable, page_index: int) -> BBox | None:
@@ -488,11 +532,63 @@ def _insert_orphan_tables(
 def _order_content_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
     """Sort blocks by geometric position (y0, then x0).
 
-    Used only to order orphan tables among themselves before appending them at
-    the end of the page. The main block list preserves the order produced by
-    order_regions() / order_lines_in_region() and must not be re-sorted here.
+    Used only to order orphan tables among themselves before anchoring them in
+    the main block list. The main block list preserves the order produced by
+    order_regions() / order_lines_in_region() and must not be globally sorted.
     """
     return sorted(blocks, key=lambda b: (b.bbox.y0, b.bbox.x0))
+
+
+def _merge_orphan_blocks(
+    blocks: list[PageContentBlock],
+    orphan_blocks: list[PageContentBlock],
+) -> list[PageContentBlock]:
+    """Anchor orphan tables near the existing block with closest geometry.
+
+    An orphan table has no intersecting layout region, so it cannot participate
+    in the region reading-order graph. Insert it relative to the nearest known
+    block instead of blindly appending it. This preserves the established
+    graph order while recovering the common title/table/prose sequence.
+    """
+    merged = list(blocks)
+    for orphan in orphan_blocks:
+        if not merged:
+            merged.append(orphan)
+            continue
+        anchor_index = min(
+            range(len(merged)),
+            key=lambda index: _orphan_anchor_key(orphan, merged[index]),
+        )
+        anchor = merged[anchor_index]
+        if _comes_before(orphan, anchor):
+            merged.insert(anchor_index, orphan)
+        else:
+            merged.insert(anchor_index + 1, orphan)
+    return merged
+
+
+def _orphan_anchor_key(
+    orphan: PageContentBlock,
+    candidate: PageContentBlock,
+) -> tuple[int, float, float]:
+    """Prefer a block in the same horizontal band, then geometric distance."""
+    horizontal_overlap = max(
+        0.0,
+        min(orphan.bbox.x1, candidate.bbox.x1)
+        - max(orphan.bbox.x0, candidate.bbox.x0),
+    )
+    vertical_distance = abs(orphan.bbox.cy - candidate.bbox.cy)
+    horizontal_distance = abs(orphan.bbox.cx - candidate.bbox.cx)
+    return (
+        0 if horizontal_overlap > 0 else 1,
+        vertical_distance + 0.25 * horizontal_distance,
+        horizontal_distance,
+    )
+
+
+def _comes_before(first: PageContentBlock, second: PageContentBlock) -> bool:
+    """Return the stable top-origin position of one block relative to another."""
+    return (first.bbox.cy, first.bbox.cx) < (second.bbox.cy, second.bbox.cx)
 
 
 def _reindex_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
@@ -501,12 +597,8 @@ def _reindex_blocks(blocks: list[PageContentBlock]) -> list[PageContentBlock]:
     The incoming order is the reading order established by order_regions() and
     order_lines_in_region(). Sorting globally by (y0, x0) here would undo the
     sophisticated graph-based reading order for multi-column and mixed layouts.
-    Orphan tables are already sorted among themselves by _insert_orphan_tables()
-    and appended at the end; they do not justify reordering all other blocks.
-
-    TODO: orphan tables are currently appended after all region blocks. A future
-    improvement should anchor each orphan table at its correct reading position
-    using geometric proximity to a known region.
+    Orphan tables were anchored relative to that order before this final index
+    assignment.
     """
     result: list[PageContentBlock] = []
     for i, block in enumerate(blocks):

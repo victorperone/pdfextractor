@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 from structured_pdf_text.document import (
@@ -16,11 +17,19 @@ from structured_pdf_text.text.normalize import normalize_text
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.line_detector import (
     _is_ghost_punctuation_line,
+    _line_center,
     _mark_ghost_punctuation_candidates,
     _merge_script_lines,
     _reconcile_with_textpage,
     reconstruct_native_lines,
 )
+
+
+def test_line_center_uses_shared_baseline_for_different_glyph_heights() -> None:
+    normal = _char(index=0, text="a", bbox=BBox(0.0, 5.0, 5.0, 10.0), angle=0.0)
+    ascender = _char(index=1, text="i", bbox=BBox(6.0, 2.0, 8.0, 10.0), angle=0.0)
+
+    assert _line_center(normal, median_height=5.0) == _line_center(ascender, median_height=5.0)
 
 
 def _char(
@@ -262,6 +271,15 @@ def test_script_merge_records_source_lineage() -> None:
     assert "exponent-line" in merged.merged_source_line_ids
 
 
+def test_script_merge_does_not_consume_baseline_hyphen() -> None:
+    body = _body_line("2 controles", x=0.0, y=0.0, line_id="body-line")
+    hyphen = _script_candidate("-", x=8.0, y=6.0, line_id="hyphen-line")
+
+    result = _merge_script_lines([body, hyphen])
+
+    assert [line.text for line in result] == ["2 controles", "-"]
+
+
 def test_no_merge_when_candidate_has_no_tall_neighbor() -> None:
     """An isolated single-char line with no matching neighbor keeps its lineage clean."""
     isolated = _script_candidate("2", x=0.0, y=0.0, line_id="isolated")
@@ -347,6 +365,38 @@ def test_reconciliation_spacing_recovery_still_works() -> None:
     result = _reconcile_with_textpage([tracked], extracted)
 
     assert result[0].text == "entrada Fundos"
+
+
+def test_reconciliation_uses_native_order_for_rotated_lines() -> None:
+    body = replace(
+        _recon_line("Corpo horizontal", "body"),
+        native_order_min=20,
+        native_order_max=35,
+    )
+    rotated = replace(
+        _recon_line("RÓTULO019 • LEITURA INVERTIDA", "rotated"),
+        native_order_min=1,
+        native_order_max=19,
+    )
+
+    result = _reconcile_with_textpage(
+        [body, rotated],
+        "RÓTULO 019 • LEITURA INVERTIDA\nCorpo horizontal",
+    )
+
+    assert [line.text for line in result] == [
+        "Corpo horizontal",
+        "RÓTULO 019 • LEITURA INVERTIDA",
+    ]
+
+
+def test_reconciliation_recovers_spaces_between_uppercase_words() -> None:
+    tracked = _recon_line("RÓTULO019 • LEITURAINVERTIDA", "tracked-label")
+    extracted = "RÓTULO 019 • LEITURA INVERTIDA"
+
+    result = _reconcile_with_textpage([tracked], extracted)
+
+    assert result[0].text == extracted
 
 
 def test_reconciliation_advances_past_exact_matches_before_spacing_recovery() -> None:

@@ -300,6 +300,25 @@ def _resolve_duplicate_ownership(
 
     Returns (claims_detected, claims_resolved).
     """
+    # A malformed upstream block can repeat the same canonical line ID inside
+    # its own claim list.  This is not a conflict between semantic owners, but
+    # it is still a conservation violation: keeping the duplicate would make
+    # the block text and its provenance disagree.  Keep the first visual claim
+    # and rebuild the block before ranking inter-block claimants.
+    intra_block_duplicates = 0
+    for block in blocks:
+        unique_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for line_id in block.line_ids:
+            canonical = _canonical_line_id(line_id)
+            if canonical in seen_ids:
+                intra_block_duplicates += 1
+                continue
+            seen_ids.add(canonical)
+            unique_ids.append(line_id)
+        if len(unique_ids) != len(block.line_ids):
+            _rebuild_block_from_lines(block, unique_ids, accepted_map)
+
     # First pass: collect claimants and choose the semantic owner explicitly.
     claimants: dict[str, list[tuple[int, int, int, PageContentBlock]]] = {}
     for block_index, block in enumerate(blocks):
@@ -321,8 +340,8 @@ def _resolve_duplicate_ownership(
         owner_by_line[canonical] = max(candidates, key=lambda item: item[:3])[3].block_id
 
     # Second pass: strip duplicate claims and rebuild affected blocks.
-    claims_detected = 0
-    claims_resolved = 0
+    claims_detected = intra_block_duplicates
+    claims_resolved = intra_block_duplicates
     for block in blocks:
         losing_lids = [
             lid for lid in block.line_ids
@@ -337,19 +356,8 @@ def _resolve_duplicate_ownership(
         remaining_ids = [lid for lid in block.line_ids if lid not in losing_set]
 
         if remaining_ids:
-            remaining_lines = [
-                accepted_map[_canonical_line_id(lid)]
-                for lid in remaining_ids
-                if _canonical_line_id(lid) in accepted_map
-            ]
+            remaining_lines = _rebuild_block_from_lines(block, remaining_ids, accepted_map)
             if remaining_lines:
-                block.line_ids = remaining_ids
-                block.text = "\n".join(
-                    t for t in (
-                        normalize_reading_text(ln.text).strip() for ln in remaining_lines
-                    ) if t
-                )
-                block.bbox = BBox.union_all([ln.bbox for ln in remaining_lines])
                 if block.kind == ContentKind.LIST:
                     segmentation = segment_list_lines(
                         remaining_lines,
@@ -381,6 +389,31 @@ def _resolve_duplicate_ownership(
         claims_resolved += len(losing_lids)
 
     return claims_detected, claims_resolved
+
+
+def _rebuild_block_from_lines(
+    block: PageContentBlock,
+    line_ids: list[str],
+    accepted_map: dict[str, TextLine],
+) -> list[TextLine]:
+    """Rebuild a block after removing repeated or losing line claims."""
+    remaining_lines = [
+        accepted_map[_canonical_line_id(line_id)]
+        for line_id in line_ids
+        if _canonical_line_id(line_id) in accepted_map
+    ]
+    block.line_ids = line_ids
+    if not remaining_lines:
+        block.text = ""
+        block.list_items = []
+        return []
+    block.text = "\n".join(
+        text for text in (
+            normalize_reading_text(line.text).strip() for line in remaining_lines
+        ) if text
+    )
+    block.bbox = BBox.union_all([line.bbox for line in remaining_lines])
+    return remaining_lines
 
 
 def _ownership_priority(block: PageContentBlock) -> int:

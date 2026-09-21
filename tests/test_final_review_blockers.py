@@ -216,3 +216,188 @@ def test_spacing_diagnostics_marks_explicit_whitespace_separately() -> None:
 
     assert diagnostics["gap_explicit_lines"] == 1
     assert lines[0].gap_mode == "explicit"
+
+
+def test_baseline_grouping_keeps_sidebar_word_together() -> None:
+    from structured_pdf_text.document import NativeCharacter
+
+    def char(index: int, text: str, x: float, y0: float, y1: float) -> NativeCharacter:
+        return NativeCharacter(
+            page_index=0,
+            char_index=index,
+            text=text,
+            unicode_codepoint=ord(text),
+            bbox=BBox(x, y0, x + 5.0, y1),
+            font_size=10.0,
+        )
+
+    characters = (
+        char(0, "m", 0, 0, 10),
+        char(1, "a", 6, 0, 10),
+        char(2, "i", 12, 0, 10),
+        char(3, "n", 18, 0, 10),
+        char(4, "p", 100, 2, 13),
+        char(5, "a", 106, 2, 12),
+        char(6, "r", 112, 2, 12),
+        char(7, "a", 118, 2, 12),
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["main", "para"]
+
+
+def test_inline_descenders_and_superscripts_join_their_line() -> None:
+    from structured_pdf_text.document import NativeCharacter
+
+    def char(index: int, text: str, x: float, y0: float, y1: float) -> NativeCharacter:
+        return NativeCharacter(
+            page_index=0,
+            char_index=index,
+            text=text,
+            unicode_codepoint=ord(text),
+            bbox=BBox(x, y0, x + 4.0, y1),
+            font_size=10.0,
+        )
+
+    characters = (
+        char(0, "r", 0.0, 0.0, 10.0),
+        char(1, "e", 5.0, 0.0, 10.0),
+        char(2, "p", 10.0, 2.0, 13.0),
+        char(3, "e", 15.0, 0.0, 10.0),
+        char(4, "t", 20.0, 0.0, 10.0),
+        char(5, "i", 25.0, 0.0, 10.0),
+        char(6, "ç", 30.0, 2.0, 13.0),
+        char(7, "ã", 35.0, 0.0, 10.0),
+        char(8, "o", 40.0, 0.0, 10.0),
+        char(9, "²", 45.0, -1.0, 4.0),
+        char(10, "x", 50.0, 0.0, 10.0),
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["repetição²x"]
+
+
+def test_compact_symbol_component_inside_line_is_rejoined() -> None:
+    characters = tuple(
+        [
+            NativeCharacter(
+                page_index=0,
+                char_index=index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(index * 8.0, 0.0, index * 8.0 + 6.0, 10.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("abcdefghijklmno")
+        ]
+        + [
+            NativeCharacter(
+                page_index=0,
+                char_index=15 + index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(80.0 + index * 7.0, 2.0, 85.0 + index * 7.0, 4.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("=-_`\"")
+        ]
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ['abcdefghijklmno=-_`"']
+
+
+def test_ordinal_symbol_component_inside_line_is_rejoined() -> None:
+    characters = tuple(
+        [
+            NativeCharacter(
+                page_index=0,
+                char_index=index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(index * 8.0, 0.0, index * 8.0 + 6.0, 10.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("valor")
+        ]
+        + [
+            NativeCharacter(
+                page_index=0,
+                char_index=5 + index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(40.0 + index * 7.0, 4.5, 45.0 + index * 7.0, 6.5),
+                font_size=10.0,
+            )
+            for index, character in enumerate("¹²³ºª°")
+        ]
+        + [
+            NativeCharacter(
+                page_index=0,
+                char_index=11 + index,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(85.0 + index * 8.0, 0.0, 91.0 + index * 8.0, 10.0),
+                font_size=10.0,
+            )
+            for index, character in enumerate("texto")
+        ]
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["valor¹²³ºª° texto"]
+
+
+def test_zero_height_leading_space_stays_with_adjacent_native_line() -> None:
+    characters = (
+        NativeCharacter(
+            page_index=0,
+            char_index=0,
+            text=" ",
+            unicode_codepoint=ord(" "),
+            bbox=BBox(0.0, 9.4, 4.4, 9.4),
+            font_size=8.0,
+        ),
+        *(
+            NativeCharacter(
+                page_index=0,
+                char_index=index + 1,
+                text=character,
+                unicode_codepoint=ord(character),
+                bbox=BBox(18.0 + index * 5.0, 0.0, 22.0 + index * 5.0, 7.0),
+                font_size=8.0,
+            )
+            for index, character in enumerate("return value")
+        ),
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == [" return value"]
+
+
+def test_column_gap_split_uses_relative_geometry() -> None:
+    from structured_pdf_text.document import NativeCharacter
+
+    def char(index: int, text: str, x: float) -> NativeCharacter:
+        return NativeCharacter(
+            page_index=0,
+            char_index=index,
+            text=text,
+            unicode_codepoint=ord(text),
+            bbox=BBox(x, 0.0, x + 3.0, 10.0),
+            font_size=10.0,
+        )
+
+    characters = tuple(
+        [char(index, text, index * 4.0) for index, text in enumerate("left")]
+        + [char(index + 10, text, 36.0 + index * 4.0) for index, text in enumerate("right")]
+    )
+
+    lines = reconstruct_native_lines(characters)
+
+    assert [line.text for line in lines] == ["left", "right"]

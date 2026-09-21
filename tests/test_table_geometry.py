@@ -133,3 +133,20 @@ def test_det01_strict_grid_accepts_partial_verticals() -> None:
     assert len(grid.y_edges) >= 3, (
         f"Expected ≥3 y-edges (top, mid, bottom), got {grid.y_edges}"
     )
+
+
+def test_det02_strict_grid_accepts_repeated_cell_rectangles() -> None:
+    """Cell rectangles must provide a grid even without thin line paths."""
+    page_b = _page_bbox(240, 180)
+    paths = [
+        _path(x0, y0, x1, y1)
+        for y0, y1 in ((20, 60), (60, 100))
+        for x0, x1 in ((20, 100), (100, 220))
+    ]
+    page = _page(paths, page_bbox=page_b)
+
+    grid = _detect_strict_grid(page, page_b)
+
+    assert grid is not None
+    assert len(grid.x_edges) == 3
+    assert len(grid.y_edges) == 3

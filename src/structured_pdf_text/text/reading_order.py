@@ -101,6 +101,7 @@ def native_order_consistency(regions: list[LayoutRegion]) -> float | None:
 
 def order_lines_in_region(
     region: LayoutRegion,
+    flow_lines: list[TextLine] | None = None,
 ) -> tuple[list[TextLine], int]:
     """Return the lines of a single region in reading order.
 
@@ -124,7 +125,11 @@ def order_lines_in_region(
         region.kind == RegionKind.DECORATIVE
         and not (region.semantic_role or "").startswith("decorative_watermark:")
     ):
-        lines, groups = _order_prose_lines(region.native_lines, region.bbox.width)
+        lines, groups = _order_prose_lines(
+            region.native_lines,
+            region.bbox.width,
+            flow_lines=flow_lines,
+        )
         return lines, groups
     if region.kind == RegionKind.FIGURE and region.ocr_lines:
         figure_lines = list(region.native_lines)
@@ -137,7 +142,10 @@ def order_lines_in_region(
     return sorted(region.native_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
 
 
-def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], ReadingOrderDecision]:
+def order_region_lines(
+    regions: list[LayoutRegion],
+    flow_lines_by_region: dict[str, list[TextLine]] | None = None,
+) -> tuple[list[TextLine], ReadingOrderDecision]:
     """Order page lines using region semantics and selective column splitting.
 
     Compatibility wrapper around order_regions() + order_lines_in_region().
@@ -166,6 +174,11 @@ def order_region_lines(regions: list[LayoutRegion]) -> tuple[list[TextLine], Rea
                 region.bbox.x0,
                 region.bbox.width,
                 region.bbox,
+                flow_lines=(
+                    None
+                    if flow_lines_by_region is None
+                    else flow_lines_by_region.get(region.region_id, [])
+                ),
             )
             lines, groups = list(prose_result.lines), prose_result.column_groups
             prose_decisions.append(prose_result.decision)
@@ -575,7 +588,11 @@ def _order_table_lines(lines: list[TextLine]) -> list[TextLine]:
     ]
 
 
-def _order_prose_lines(lines: list[TextLine], region_width: float) -> tuple[list[TextLine], int]:
+def _order_prose_lines(
+    lines: list[TextLine],
+    region_width: float,
+    flow_lines: list[TextLine] | None = None,
+) -> tuple[list[TextLine], int]:
     if not lines:
         return [], 0
     result = _order_prose_lines_with_decision(
@@ -588,6 +605,7 @@ def _order_prose_lines(lines: list[TextLine], region_width: float) -> tuple[list
             max(line.bbox.x1 for line in lines),
             max(line.bbox.y1 for line in lines),
         ),
+        flow_lines=flow_lines,
     )
     return list(result.lines), result.column_groups
 
@@ -597,15 +615,24 @@ def _order_prose_lines_with_decision(
     region_x0: float,
     region_width: float,
     region_bbox: BBox,
+    flow_lines: list[TextLine] | None = None,
 ) -> _ProseFlowResult:
     if not lines:
         decision = ProseFlowDecision("FALLBACK", 0.0, 0.0, 1, 0, ("no_lines",), fallback_used=True)
         return _ProseFlowResult((), decision, 0)
+    decision_lines = lines if flow_lines is None else flow_lines
+    if not decision_lines:
+        ordered = tuple(sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0)))
+        decision = ProseFlowDecision(
+            "FALLBACK", 0.0, 0.0, 1, 0, ("no_prose_lines",), fallback_used=True,
+            line_preservation_ok=_preserves_flat_line_set(lines, ordered),
+        )
+        return _ProseFlowResult(ordered, decision, 0)
     if region_width <= 0:
         ordered = tuple(sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0)))
         decision = ProseFlowDecision("FALLBACK", 0.0, 0.0, 1, 0, ("invalid_region_width",), fallback_used=True)
         return _ProseFlowResult(ordered, decision, 0)
-    if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
+    if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in decision_lines):
         ordered = tuple(sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0)))
         decision = ProseFlowDecision(
             "FALLBACK", 0.0, 0.0, 1, 0,
@@ -616,7 +643,8 @@ def _order_prose_lines_with_decision(
         return _ProseFlowResult(ordered, decision, 0)
 
     ordered = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
-    diagram = _order_diagram_lines(ordered, region_bbox)
+    decision_ordered = sorted(decision_lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    diagram = None if flow_lines is not None else _order_diagram_lines(decision_ordered, region_bbox)
     if diagram is not None:
         decision = ProseFlowDecision(
             "DIAGRAM",
@@ -629,14 +657,14 @@ def _order_prose_lines_with_decision(
             line_preservation_ok=_preserves_flat_line_set(lines, diagram),
         )
         return _ProseFlowResult(tuple(diagram), decision, 0)
-    gutters = _detect_persistent_gutters(ordered, region_bbox)
-    lanes = _build_reading_lanes(ordered, region_bbox, gutters)
+    gutters = _detect_persistent_gutters(decision_ordered, region_bbox)
+    lanes = _build_reading_lanes(decision_ordered, region_bbox, gutters)
     if len(lanes) < 2:
-        inferred = _infer_recurrent_lanes(ordered, region_bbox)
+        inferred = _infer_recurrent_lanes(decision_ordered, region_bbox)
         if inferred is not None:
             lanes, gutters = inferred
-    form = _score_form_hypothesis(ordered, region_bbox, len(gutters))
-    column = _score_column_hypothesis(ordered, region_bbox, gutters, lanes)
+    form = _score_form_hypothesis(decision_ordered, region_bbox, len(gutters))
+    column = _score_column_hypothesis(decision_ordered, region_bbox, gutters, lanes)
     margin = max(0.35, 0.12 * max(form.score, column.score, 1.0))
     if column.score >= 1.0 and column.score >= form.score + margin and len(lanes) >= 2:
         mode = "MULTI_COLUMN"
@@ -1027,13 +1055,13 @@ def _order_lane_segments(
     for line in lines:
         overlaps = [_line_lane_overlap(line, lane.x0, lane.x1) for lane in lanes]
         relevant = [index for index, overlap in enumerate(overlaps) if overlap >= 0.20]
-        covered = sum(_axis_overlap(line.bbox.x0, line.bbox.x1, lane.x0, lane.x1) for lane in lanes)
-        combined = sum(lane.x1 - lane.x0 for lane in lanes)
-        if (
-            len(relevant) >= 2
-            or covered / max(combined, 1.0) >= 0.70
-            or line.bbox.width >= region_bbox.width * 0.45
-        ):
+        crosses_gutter = any(
+            line.bbox.x0 < left_lane.x1
+            and line.bbox.x1 > right_lane.x0
+            and right_lane.x0 > left_lane.x1
+            for left_lane, right_lane in zip(lanes, lanes[1:])
+        )
+        if len(relevant) >= 2 and crosses_gutter:
             split = _split_line_by_lanes(line, lanes)
             if len(split) >= 2:
                 for segment in split:
