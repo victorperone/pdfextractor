@@ -488,6 +488,7 @@ class PdfTextExtractor:
                         page_index=page_index,
                         native_lines=native_lines,
                         quality_policy=effective_ocr_quality_policy(self.config).value,
+                        warnings=warnings,
                     )
                     if figure_refinements:
                         for (
@@ -1696,6 +1697,7 @@ def _refine_figure_ocr(
     page_index: int,
     native_lines: list[TextLine],
     quality_policy: str = "baseline",
+    warnings: list[str] | None = None,
 ) -> list[
     tuple[
         BBox,
@@ -1711,7 +1713,15 @@ def _refine_figure_ocr(
 
     The extractor deliberately does not infer axes, labels, series, arrows, or
     chart structure. Any text returned is preserved with its observed geometry.
+
+    When ``warnings`` is provided, geometric rejections (figure outside the
+    rendered page area, zero width/height) are appended there so the caller can
+    expose them via ``PageDiagnostics`` without surfacing PIL/image internals.
+    An invalid figure is skipped; other figures on the same page are still
+    processed.
     """
+    import math
+
     refinements: list[
         tuple[
             BBox,
@@ -1726,47 +1736,89 @@ def _refine_figure_ocr(
     refiner = OcrRegionRefiner(engine)
     for image in page.objects.images:
         figure_bbox = image.bbox
-        if figure_bbox is None or figure_bbox.height <= 0:
-            continue
-        for ocr_box in _subfigure_boxes(page_image, page.bbox, figure_bbox):
-            result = refiner.refine(
-                page_image,
-                page_index,
-                page.bbox,
-                RegionRefinementRequest(
-                    bbox=ocr_box,
-                    quality_variants=str(quality_policy).lower() != "baseline",
-                    quality_policy=quality_policy,
-                    goal=RegionRefinementGoal.TEXT,
-                ),
-            )
-            figure_tokens = [
-                replace(token, provenance="figure_ocr")
-                for token in result.tokens
-            ]
-            if not figure_tokens:
-                continue
-            all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox)
-            figure_fusion = fuse_native_and_ocr(native_lines, figure_tokens)
-            unmatched_tokens = list(figure_fusion.unmatched_ocr_tokens)
-            unmatched_lines = reconstruct_ocr_lines(unmatched_tokens, page_index, page.bbox)
-            refinements.append(
-                (
-                    ocr_box,
-                    all_lines,
-                    figure_tokens,
-                    unmatched_lines,
-                    unmatched_tokens,
-                    result.ocr_passes,
-                    result.ocr_batches,
+        if figure_bbox is None or figure_bbox.height <= 0 or figure_bbox.width <= 0:
+            if warnings is not None and figure_bbox is not None:
+                warnings.append(
+                    f"figure_ocr_skipped:page={page_index + 1}"
+                    f":reason=zero_dimensions"
+                    f":bbox=({figure_bbox.x0:.1f},{figure_bbox.y0:.1f}"
+                    f",{figure_bbox.x1:.1f},{figure_bbox.y1:.1f})"
                 )
-            )
+            continue
+
+        # Guard: non-finite coordinates indicate a corrupt or synthetic bbox.
+        for coord in (figure_bbox.x0, figure_bbox.y0, figure_bbox.x1, figure_bbox.y1):
+            if not math.isfinite(coord):
+                if warnings is not None:
+                    warnings.append(
+                        f"figure_ocr_skipped:page={page_index + 1}"
+                        f":reason=non_finite_coordinates"
+                        f":bbox=({figure_bbox.x0},{figure_bbox.y0}"
+                        f",{figure_bbox.x1},{figure_bbox.y1})"
+                    )
+                break
+        else:
+            # Check whether the figure has any area within the rendered page.
+            # _subfigure_boxes returns [] when the crop is None (no overlap).
+            ocr_boxes = _subfigure_boxes(page_image, page.bbox, figure_bbox)
+            if not ocr_boxes:
+                if warnings is not None:
+                    warnings.append(
+                        f"figure_ocr_skipped:page={page_index + 1}"
+                        f":reason=no_visible_area_in_page"
+                        f":figure_bbox=({figure_bbox.x0:.1f},{figure_bbox.y0:.1f}"
+                        f",{figure_bbox.x1:.1f},{figure_bbox.y1:.1f})"
+                        f":page_bbox=({page.bbox.x0:.1f},{page.bbox.y0:.1f}"
+                        f",{page.bbox.x1:.1f},{page.bbox.y1:.1f})"
+                    )
+            for ocr_box in ocr_boxes:
+                result = refiner.refine(
+                    page_image,
+                    page_index,
+                    page.bbox,
+                    RegionRefinementRequest(
+                        bbox=ocr_box,
+                        quality_variants=str(quality_policy).lower() != "baseline",
+                        quality_policy=quality_policy,
+                        goal=RegionRefinementGoal.TEXT,
+                    ),
+                )
+                figure_tokens = [
+                    replace(token, provenance="figure_ocr")
+                    for token in result.tokens
+                ]
+                if not figure_tokens:
+                    continue
+                all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox)
+                figure_fusion = fuse_native_and_ocr(native_lines, figure_tokens)
+                unmatched_tokens = list(figure_fusion.unmatched_ocr_tokens)
+                unmatched_lines = reconstruct_ocr_lines(unmatched_tokens, page_index, page.bbox)
+                refinements.append(
+                    (
+                        ocr_box,
+                        all_lines,
+                        figure_tokens,
+                        unmatched_lines,
+                        unmatched_tokens,
+                        result.ocr_passes,
+                        result.ocr_batches,
+                    )
+                )
     return refinements
 
 
 def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox) -> list[BBox]:
-    """Find well-separated horizontal subfigures using rendered ink gaps."""
+    """Find well-separated horizontal subfigures using rendered ink gaps.
+
+    Returns an empty list when the figure has no rendereable area within the
+    page (i.e. ``_crop_page_image`` returns ``None``).  Returns
+    ``[figure_bbox]`` as a single undivided box when the crop exists but is too
+    small to split or splitting finds no significant gaps.
+    """
     crop = _crop_page_image(image, page_bbox, figure_bbox)
+    if crop is None:
+        # Figure is completely outside the rendered page area; no subfigures.
+        return []
     width, height = _image_size(crop)
     if width < 240 or height < 80 or figure_bbox.width / max(figure_bbox.height, 1.0) < 2.0:
         return [figure_bbox]
@@ -1824,15 +1876,66 @@ def _replace_tokens_in_box(tokens: list[OcrToken], box: BBox, replacement: list[
     return outside + replacement
 
 
-def _crop_page_image(image: Any, page_bbox: BBox, region_bbox: BBox) -> Any:
-    """Crop a rendered page using PDF-point coordinates at any render scale."""
+def _crop_page_image(image: Any, page_bbox: BBox, region_bbox: BBox) -> Any | None:
+    """Crop a rendered page using PDF-point coordinates at any render scale.
+
+    Returns the cropped image when the region has a positive rendereable area,
+    or ``None`` when:
+
+    - ``page_bbox`` has zero or negative dimensions (invalid geometry),
+    - ``region_bbox`` contains non-finite coordinates,
+    - the intersection of ``region_bbox`` with ``page_bbox`` is empty (figure
+      is completely outside the rendered page area), or
+    - the intersection maps to zero pixels after scaling and rounding.
+
+    A ``None`` return signals a legitimately absent rendereable area and must
+    **not** be treated as a fatal error by callers.  A genuine transformation
+    inconsistency that would make a visible figure disappear is distinguished
+    from an empty intersection: when ``page_bbox`` itself is valid and
+    ``region_bbox`` is finite but produces no intersection, the figure is simply
+    outside the rendered area.  When ``page_bbox`` is degenerate the caller
+    should treat the entire page as un-renderable.
+    """
+    import math
+
     width, height = _image_size(image)
-    scale_x = width / max(page_bbox.width, 1.0)
-    scale_y = height / max(page_bbox.height, 1.0)
-    left = max(0, int((region_bbox.x0 - page_bbox.x0) * scale_x))
-    top = max(0, int((region_bbox.y0 - page_bbox.y0) * scale_y))
-    right = min(width, max(left + 1, int((region_bbox.x1 - page_bbox.x0) * scale_x)))
-    bottom = min(height, max(top + 1, int((region_bbox.y1 - page_bbox.y0) * scale_y)))
+
+    # Guard: page geometry must be well-formed and match the image.
+    if page_bbox.width <= 0 or page_bbox.height <= 0 or width <= 0 or height <= 0:
+        return None
+
+    # Guard: figure coordinates must be finite.
+    for coord in (region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1):
+        if not math.isfinite(coord):
+            return None
+
+    # Intersect the figure bbox with the page bbox to find the visible area.
+    # BBox.intersection() returns None when there is no overlap.
+    visible = region_bbox.intersection(page_bbox)
+    if visible is None:
+        return None
+
+    scale_x = width / page_bbox.width
+    scale_y = height / page_bbox.height
+
+    # Convert the visible intersection to pixel coordinates using the page
+    # origin so that pages with a non-zero CropBox origin are handled correctly.
+    left = int((visible.x0 - page_bbox.x0) * scale_x)
+    top = int((visible.y0 - page_bbox.y0) * scale_y)
+    # Use ceil for the right/bottom edges to preserve sub-pixel areas.
+    right = math.ceil((visible.x1 - page_bbox.x0) * scale_x)
+    bottom = math.ceil((visible.y1 - page_bbox.y0) * scale_y)
+
+    # Clamp to the actual image dimensions.
+    left = min(width, max(0, left))
+    right = min(width, max(0, right))
+    top = min(height, max(0, top))
+    bottom = min(height, max(0, bottom))
+
+    # After clamping, the region may have collapsed to zero pixels.
+    if right <= left or bottom <= top:
+        return None
+
     if hasattr(image, "crop"):
         return image.crop((left, top, right, bottom))
     return image[top:bottom, left:right]
