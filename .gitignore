@@ -54,7 +54,8 @@ target/
 *.dylib
 *.dll
 *.exp
-*.pdb
+
+*.pdbc
 
 # Editors and operating systems
 .idea/
@@ -119,6 +120,7 @@ table-viewer/
 *.db
 *.db-shm
 *.db-wal
+*.db-wal74
 
 # Private PDF corpus and acceptance corpus
 corpus/**

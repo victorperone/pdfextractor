@@ -1,0 +1,2371 @@
+{
+  "schema": "structured-pdf-text.ocr-stress.v1",
+  "corpus": "Document_OCR_Stress_V1",
+  "version": 1,
+  "seed": 20260921,
+  "page_count": 60,
+  "source_page_count": 60,
+  "pdf_file": "Document_OCR_Stress_V1.pdf",
+  "pdf_sha256": "f335b2ab558f2c640c0247ddede2c8e5be0b310bbe52639e3fda40fa64117db1",
+  "generator": "tests/corpus/ocr_stress_v1/generate.py",
+  "dependencies": [
+    "reportlab",
+    "Pillow",
+    "pypdfium2"
+  ],
+  "ocr_models_loaded": false,
+  "production_parser_imported": false,
+  "pages": [
+    {
+      "page": 1,
+      "source_page": 1,
+      "scenario": "texto digital de controle",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P01-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P01-CONTROL"
+    },
+    {
+      "page": 2,
+      "source_page": 2,
+      "scenario": "raster simples legível",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P02-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P02-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P02-CONTROL"
+    },
+    {
+      "page": 3,
+      "source_page": 3,
+      "scenario": "raster em resolução moderada",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P03-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P03-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P03-CONTROL"
+    },
+    {
+      "page": 4,
+      "source_page": 4,
+      "scenario": "raster de baixa resolução",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P04-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "low_resolution"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P04-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P04-CONTROL"
+    },
+    {
+      "page": 5,
+      "source_page": 5,
+      "scenario": "raster com fonte pequena",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P05-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P05-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P05-CONTROL"
+    },
+    {
+      "page": 6,
+      "source_page": 6,
+      "scenario": "raster com acentuação e Unicode",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P06-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P06-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P06-CONTROL"
+    },
+    {
+      "page": 7,
+      "source_page": 7,
+      "scenario": "raster com valores e datas",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P07-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P07-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P07-CONTROL"
+    },
+    {
+      "page": 8,
+      "source_page": 8,
+      "scenario": "raster com contraste reduzido",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P08-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "contrast"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P08-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P08-CONTROL"
+    },
+    {
+      "page": 9,
+      "source_page": 9,
+      "scenario": "raster com ruído leve e compressão",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P09-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "noise"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P09-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P09-CONTROL"
+    },
+    {
+      "page": 10,
+      "source_page": 10,
+      "scenario": "raster com inclinação pequena",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P10-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "skew"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P10-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P10-CONTROL"
+    },
+    {
+      "page": 11,
+      "source_page": 11,
+      "scenario": "texto sobre textura e carimbo",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P11-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "texture"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P11-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P11-CONTROL"
+    },
+    {
+      "page": 12,
+      "source_page": 12,
+      "scenario": "raster com múltiplos blocos",
+      "block": "A",
+      "block_label": "OCR básico",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P12-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "stamp"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página integralmente raster, sem texto selecionável"
+      ],
+      "expected_indicators": [
+        "OCRS-P12-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P12-CONTROL"
+    },
+    {
+      "page": 13,
+      "source_page": 13,
+      "scenario": "texto digital e comprovante raster",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P13-R02",
+          "kind": "receipt",
+          "bbox_pt": [
+            350,
+            160,
+            560,
+            290
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P13-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P13-CONTROL"
+    },
+    {
+      "page": 14,
+      "source_page": 14,
+      "scenario": "texto digital acima e abaixo de raster",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P14-R02",
+          "kind": "text",
+          "bbox_pt": [
+            56,
+            230,
+            556,
+            330
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P14-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P14-CONTROL"
+    },
+    {
+      "page": 15,
+      "source_page": 15,
+      "scenario": "figura raster contínua — parte 1",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        792.0,
+        612.0
+      ],
+      "orientation": "landscape",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P15-R01",
+          "kind": "continuous_figure",
+          "bbox_pt": [
+            0,
+            0,
+            792.0,
+            612.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": {
+        "group_id": "figure-15-16",
+        "role": "first",
+        "paired_page": 16
+      },
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P15-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P15-CONTROL"
+    },
+    {
+      "page": 16,
+      "source_page": 16,
+      "scenario": "figura raster contínua — parte 2",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        792.0,
+        612.0
+      ],
+      "orientation": "landscape",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P16-R01",
+          "kind": "continuous_figure",
+          "bbox_pt": [
+            0,
+            0,
+            792.0,
+            612.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": {
+        "group_id": "figure-15-16",
+        "role": "second",
+        "paired_page": 15
+      },
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P16-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P16-CONTROL"
+    },
+    {
+      "page": 17,
+      "source_page": 17,
+      "scenario": "duas imagens raster afastadas",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P17-R02",
+          "kind": "text",
+          "bbox_pt": [
+            40,
+            230,
+            280,
+            380
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        },
+        {
+          "region_id": "P17-R03",
+          "kind": "text",
+          "bbox_pt": [
+            330,
+            230,
+            570,
+            380
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P17-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P17-CONTROL"
+    },
+    {
+      "page": 18,
+      "source_page": 18,
+      "scenario": "raster sobre elemento decorativo",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P18-R02",
+          "kind": "text",
+          "bbox_pt": [
+            245,
+            360,
+            495,
+            490
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P18-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P18-CONTROL"
+    },
+    {
+      "page": 19,
+      "source_page": 19,
+      "scenario": "imagem decorativa sem texto",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P19-F01",
+          "text": false,
+          "decorative": true
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P19-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P19-CONTROL"
+    },
+    {
+      "page": 20,
+      "source_page": 20,
+      "scenario": "comprovante raster e texto semelhante",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P20-R02",
+          "kind": "receipt",
+          "bbox_pt": [
+            300,
+            220,
+            560,
+            380
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P20-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P20-CONTROL"
+    },
+    {
+      "page": 21,
+      "source_page": 21,
+      "scenario": "nota marginal raster",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P21-R02",
+          "kind": "marginal_note",
+          "bbox_pt": [
+            408,
+            220,
+            588,
+            310
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P21-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P21-CONTROL"
+    },
+    {
+      "page": 22,
+      "source_page": 22,
+      "scenario": "carimbo e assinatura raster",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P22-R02",
+          "kind": "stamp_signature",
+          "bbox_pt": [
+            300,
+            225,
+            540,
+            355
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P22-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P22-CONTROL"
+    },
+    {
+      "page": 23,
+      "source_page": 23,
+      "scenario": "duas colunas e imagem próxima",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P23-R03",
+          "kind": "text",
+          "bbox_pt": [
+            32,
+            305,
+            182,
+            410
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P23-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P23-CONTROL"
+    },
+    {
+      "page": 24,
+      "source_page": 24,
+      "scenario": "raster textual e gráfico sem texto",
+      "block": "B",
+      "block_label": "páginas mistas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P24-R02",
+          "kind": "text",
+          "bbox_pt": [
+            45,
+            240,
+            225,
+            340
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P24-F01",
+          "text": false,
+          "decorative": true
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P24-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P24-CONTROL"
+    },
+    {
+      "page": 25,
+      "source_page": 25,
+      "scenario": "tabela digital com grade",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P25-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 4,
+          "columns": 4
+        }
+      ],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P25-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P25-CONTROL"
+    },
+    {
+      "page": 26,
+      "source_page": 26,
+      "scenario": "tabela digital sem bordas",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P26-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 4,
+          "columns": 4
+        }
+      ],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P26-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P26-CONTROL"
+    },
+    {
+      "page": 27,
+      "source_page": 27,
+      "scenario": "tabela raster financeira",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P27-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P27-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P27-CONTROL"
+    },
+    {
+      "page": 28,
+      "source_page": 28,
+      "scenario": "tabela raster sem bordas",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P28-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P28-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P28-CONTROL"
+    },
+    {
+      "page": 29,
+      "source_page": 29,
+      "scenario": "tabela raster com fonte pequena",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P29-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "low_resolution"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P29-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P29-CONTROL"
+    },
+    {
+      "page": 30,
+      "source_page": 30,
+      "scenario": "tabela raster com células multilinha",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P30-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P30-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P30-CONTROL"
+    },
+    {
+      "page": 31,
+      "source_page": 31,
+      "scenario": "tabela digital com células mescladas",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P31-T01",
+          "raster": false,
+          "merged_cells": true,
+          "rows": 5,
+          "columns": 4
+        }
+      ],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P31-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P31-CONTROL"
+    },
+    {
+      "page": 32,
+      "source_page": 32,
+      "scenario": "tabela raster com células mescladas",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P32-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P32-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P32-CONTROL"
+    },
+    {
+      "page": 33,
+      "source_page": 33,
+      "scenario": "tabela digital e imagem em célula",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P33-R02",
+          "kind": "table_cell",
+          "bbox_pt": [
+            300,
+            318,
+            410,
+            373
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P33-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 5,
+          "columns": 4
+        }
+      ],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P33-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P33-CONTROL"
+    },
+    {
+      "page": 34,
+      "source_page": 34,
+      "scenario": "tabela digital seguida de raster",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P34-R02",
+          "kind": "table",
+          "bbox_pt": [
+            105,
+            335,
+            495,
+            460
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P34-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 5,
+          "columns": 4
+        }
+      ],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P34-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P34-CONTROL"
+    },
+    {
+      "page": 35,
+      "source_page": 35,
+      "scenario": "tabela raster com muitas colunas",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P35-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "contrast"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P35-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P35-CONTROL"
+    },
+    {
+      "page": 36,
+      "source_page": 36,
+      "scenario": "tabela digital continuada — parte 1",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P36-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 5,
+          "columns": 4
+        }
+      ],
+      "continuation": {
+        "group_id": "table-36-37",
+        "role": "first",
+        "paired_page": 37
+      },
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P36-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P36-CONTROL"
+    },
+    {
+      "page": 37,
+      "source_page": 37,
+      "scenario": "tabela digital continuada — parte 2",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P37-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 5,
+          "columns": 4
+        }
+      ],
+      "continuation": {
+        "group_id": "table-36-37",
+        "role": "second",
+        "paired_page": 36
+      },
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P37-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P37-CONTROL"
+    },
+    {
+      "page": 38,
+      "source_page": 38,
+      "scenario": "tabela raster continuada — parte 1",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P38-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": {
+        "group_id": "table-38-39",
+        "role": "first",
+        "paired_page": 39
+      },
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P38-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P38-CONTROL"
+    },
+    {
+      "page": 39,
+      "source_page": 39,
+      "scenario": "tabela raster continuada — parte 2",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P39-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            612.0,
+            792.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": {
+        "group_id": "table-38-39",
+        "role": "second",
+        "paired_page": 38
+      },
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P39-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P39-CONTROL"
+    },
+    {
+      "page": 40,
+      "source_page": 40,
+      "scenario": "tabela raster em paisagem",
+      "block": "C",
+      "block_label": "tabelas",
+      "page_size_pt": [
+        792.0,
+        612.0
+      ],
+      "orientation": "landscape",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P40-R01",
+          "kind": "table",
+          "bbox_pt": [
+            0,
+            0,
+            792.0,
+            612.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P40-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P40-CONTROL"
+    },
+    {
+      "page": 41,
+      "source_page": 41,
+      "scenario": "texto digital em paisagem",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        792.0,
+        612.0
+      ],
+      "orientation": "landscape",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P41-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P41-CONTROL"
+    },
+    {
+      "page": 42,
+      "source_page": 42,
+      "scenario": "raster horizontal em paisagem",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        792.0,
+        612.0
+      ],
+      "orientation": "landscape",
+      "has_native_text_layer": false,
+      "raster_regions": [
+        {
+          "region_id": "P42-R01",
+          "kind": "text",
+          "bbox_pt": [
+            0,
+            0,
+            792.0,
+            612.0
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [],
+      "expected_indicators": [
+        "OCRS-P42-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P42-CONTROL"
+    },
+    {
+      "page": 43,
+      "source_page": 43,
+      "scenario": "objeto de texto girado em 90 graus",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P43-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P43-CONTROL"
+    },
+    {
+      "page": 44,
+      "source_page": 44,
+      "scenario": "imagem textual girada dentro da página",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P44-R02",
+          "kind": "text",
+          "bbox_pt": [
+            260,
+            260,
+            350,
+            430
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P44-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P44-CONTROL"
+    },
+    {
+      "page": 45,
+      "source_page": 45,
+      "scenario": "três colunas e nota lateral",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P45-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P45-CONTROL"
+    },
+    {
+      "page": 46,
+      "source_page": 46,
+      "scenario": "QR válido e rótulo separado",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P46-F01",
+          "kind": "qr",
+          "valid_generated": true,
+          "decoded_value": "OCRS-QR-046-FICTITIOUS"
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P46-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P46-CONTROL"
+    },
+    {
+      "page": 47,
+      "source_page": 47,
+      "scenario": "código de barras válido e rótulo",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P47-F01",
+          "kind": "code128",
+          "valid_generated": true,
+          "decoded_value": "OCRS-BC-047"
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P47-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P47-CONTROL"
+    },
+    {
+      "page": 48,
+      "source_page": 48,
+      "scenario": "várias imagens, poucas com texto",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P48-R02",
+          "kind": "text",
+          "bbox_pt": [
+            45,
+            230,
+            235,
+            335
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P48-F01",
+          "text": false,
+          "decorative": true
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P48-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P48-CONTROL"
+    },
+    {
+      "page": 49,
+      "source_page": 49,
+      "scenario": "imagem textual parcialmente fora da página",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P49-R02",
+          "kind": "text",
+          "bbox_pt": [
+            -45,
+            260,
+            215,
+            400
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "imagem parcialmente fora da área visível; trecho interno é válido",
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P49-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P49-CONTROL"
+    },
+    {
+      "page": 50,
+      "source_page": 50,
+      "scenario": "figura inteiramente fora da área visível",
+      "block": "D",
+      "block_label": "orientação, layout e figuras",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P50-R02",
+          "kind": "off_page",
+          "bbox_pt": [
+            632.0,
+            260,
+            812.0,
+            360
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "objeto de figura fora da área visível; não exigir texto raster na saída",
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P50-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P50-CONTROL"
+    },
+    {
+      "page": 51,
+      "source_page": 51,
+      "scenario": "texto, comprovante raster e tabela",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P51-R02",
+          "kind": "receipt",
+          "bbox_pt": [
+            350,
+            200,
+            570,
+            320
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P51-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 3,
+          "columns": 3
+        }
+      ],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P51-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P51-CONTROL"
+    },
+    {
+      "page": 52,
+      "source_page": 52,
+      "scenario": "texto, tabela raster e figura decorativa",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P52-R02",
+          "kind": "table",
+          "bbox_pt": [
+            50,
+            225,
+            440,
+            350
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P52-F01",
+          "text": false,
+          "decorative": true
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P52-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P52-CONTROL"
+    },
+    {
+      "page": 53,
+      "source_page": 53,
+      "scenario": "página só digital entre páginas OCR",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "página exclusivamente digital entre páginas OCR; OCR não é necessário",
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P53-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P53-CONTROL"
+    },
+    {
+      "page": 54,
+      "source_page": 54,
+      "scenario": "várias regiões raster e decoração",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P54-R02",
+          "kind": "text",
+          "bbox_pt": [
+            42,
+            220,
+            262,
+            320
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        },
+        {
+          "region_id": "P54-R03",
+          "kind": "text",
+          "bbox_pt": [
+            42,
+            365,
+            262,
+            465
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P54-F01",
+          "text": false,
+          "decorative": true
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P54-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P54-CONTROL"
+    },
+    {
+      "page": 55,
+      "source_page": 55,
+      "scenario": "documento paisagem misto",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        792.0,
+        612.0
+      ],
+      "orientation": "landscape",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P55-R02",
+          "kind": "table",
+          "bbox_pt": [
+            390,
+            170,
+            730,
+            300
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": false,
+      "figures": [],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P55-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P55-CONTROL"
+    },
+    {
+      "page": 56,
+      "source_page": 56,
+      "scenario": "tabela digital continuada com OCR",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P56-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 5,
+          "columns": 4
+        }
+      ],
+      "continuation": {
+        "group_id": "table-56-57",
+        "role": "first",
+        "paired_page": 57
+      },
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P56-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P56-CONTROL"
+    },
+    {
+      "page": 57,
+      "source_page": 57,
+      "scenario": "continuação com cabeçalho e célula raster",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P57-R02",
+          "kind": "table_cell",
+          "bbox_pt": [
+            320,
+            340,
+            440,
+            400
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": true,
+      "has_figure": false,
+      "figures": [],
+      "tables": [
+        {
+          "table_id": "OCRS-P57-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 5,
+          "columns": 4
+        }
+      ],
+      "continuation": {
+        "group_id": "table-56-57",
+        "role": "second",
+        "paired_page": 56
+      },
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P57-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P57-CONTROL"
+    },
+    {
+      "page": 58,
+      "source_page": 58,
+      "scenario": "QR, barras, texto e imagem",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P58-R02",
+          "kind": "text",
+          "bbox_pt": [
+            360,
+            235,
+            550,
+            340
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P58-F01",
+          "kind": "qr",
+          "valid_generated": true,
+          "decoded_value": "OCRS-QR-058"
+        },
+        {
+          "figure_id": "P58-F02",
+          "kind": "code128",
+          "valid_generated": true,
+          "decoded_value": "OCRS-BC-058"
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P58-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P58-CONTROL"
+    },
+    {
+      "page": 59,
+      "source_page": 59,
+      "scenario": "figuras múltiplas e raster parcial",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P59-R02",
+          "kind": "text",
+          "bbox_pt": [
+            -20,
+            240,
+            230,
+            365
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": false,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P59-F01",
+          "text": false,
+          "decorative": true
+        }
+      ],
+      "tables": [],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P59-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P59-CONTROL"
+    },
+    {
+      "page": 60,
+      "source_page": 60,
+      "scenario": "integração densa",
+      "block": "E",
+      "block_label": "integração",
+      "page_size_pt": [
+        612.0,
+        792.0
+      ],
+      "orientation": "portrait",
+      "has_native_text_layer": true,
+      "raster_regions": [
+        {
+          "region_id": "P60-R02",
+          "kind": "text",
+          "bbox_pt": [
+            32,
+            205,
+            277,
+            320
+          ],
+          "text_in_image": true,
+          "quality": "clean"
+        }
+      ],
+      "has_table": true,
+      "has_figure": true,
+      "figures": [
+        {
+          "figure_id": "P60-F01",
+          "kind": "qr",
+          "valid_generated": true,
+          "decoded_value": "OCRS-QR-060"
+        }
+      ],
+      "tables": [
+        {
+          "table_id": "OCRS-P60-T01",
+          "raster": false,
+          "merged_cells": false,
+          "rows": 3,
+          "columns": 3
+        }
+      ],
+      "continuation": null,
+      "notes": [
+        "camada PDF nativa intencional"
+      ],
+      "expected_indicators": [
+        "OCRS-P60-CONTROL"
+      ],
+      "source_page_marker": "OCRS-P60-CONTROL"
+    }
+  ]
+}
