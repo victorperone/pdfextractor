@@ -6,7 +6,7 @@
   "page_count": 60,
   "source_page_count": 60,
   "pdf_file": "Document_OCR_Stress_V1.pdf",
-  "pdf_sha256": "862d206ee8fdd917138b917f81da9a68fdbc395abc917aecb3f66b85ee9a5978",
+  "pdf_sha256": "be42cdfe9ee3f161b3ed04a0eb2edbaf41b5ae1dd06755b1be8df564b6d8f15d",
   "generator": "tests/corpus/ocr_stress_v1/generate.py",
   "dependencies": [
     "reportlab",
@@ -1986,7 +1986,7 @@
             50,
             225,
             440,
-            350
+            395
           ],
           "text_in_image": true,
           "quality": "clean"
@@ -2115,7 +2115,7 @@
             390,
             170,
             730,
-            300
+            330
           ],
           "text_in_image": true,
           "quality": "clean"

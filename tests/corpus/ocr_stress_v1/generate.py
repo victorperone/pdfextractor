@@ -681,8 +681,8 @@ def _draw_page(pdf: canvas.Canvas, meta: dict) -> None:
     elif page == 52:
         meta["has_native_text_layer"] = True
         _native_body(pdf, page, width=width, height=height, title=title)
-        image = _raster_image(["TABELA RASTER 052", "A", "B"], 390, 125, font_size=10, seed=page, table=[["Campo", "Valor"], ["A", "52,00"], ["B", "53,00"]])
-        _add_raster_region(pdf, meta, image, 50, 225, 390, 125, page_height=height, region_id="P52-R02", kind="table")
+        image = _raster_image(["TABELA RASTER 052", "A", "B"], 390, 170, font_size=10, seed=page, table=[["Campo", "Valor"], ["A", "52,00"], ["B", "53,00"]])
+        _add_raster_region(pdf, meta, image, 50, 225, 390, 170, page_height=height, region_id="P52-R02", kind="table")
         meta["has_figure"] = True
         pdf.setFillColor(HexColor("#c2ccd5"))
         pdf.circle(500, height - 285, 45, stroke=0, fill=1)
@@ -704,8 +704,8 @@ def _draw_page(pdf: canvas.Canvas, meta: dict) -> None:
     elif page == 55:
         meta["has_native_text_layer"] = True
         _native_body(pdf, page, width=width, height=height, title=title)
-        image = _raster_image(["TABELA RASTER 055", "R$ 55,00"], 340, 130, font_size=11, seed=page, table=[["Campo", "Valor", "Status"], ["A", "55,00", "OK"], ["B", "56,00", "OK"]])
-        _add_raster_region(pdf, meta, image, 390, 170, 340, 130, page_height=height, region_id="P55-R02", kind="table")
+        image = _raster_image(["TABELA RASTER 055", "R$ 55,00"], 340, 160, font_size=11, seed=page, table=[["Campo", "Valor", "Status"], ["A", "55,00", "OK"], ["B", "56,00", "OK"]])
+        _add_raster_region(pdf, meta, image, 390, 170, 340, 160, page_height=height, region_id="P55-R02", kind="table")
     elif page in {56, 57}:
         meta["has_native_text_layer"] = True
         _header(pdf, meta, title, page_height=height)

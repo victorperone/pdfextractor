@@ -197,3 +197,37 @@ Resultados end-to-end:
 Não houve troca de modelo, runtime, resolução ou regra condicionada ao texto
 do corpus. O residual da página 29 (`Ficticio` sem acento) permanece separado
 e não foi mascarado por substituição textual.
+
+## Auditoria final de orientação e integração
+
+As páginas 42–50 foram reproduzidas com a política `baseline`: paisagem,
+texto nativo girado, imagem girada, três colunas, QR/Code128, múltiplas
+imagens e objetos parcial ou totalmente fora da página preservaram o conteúdo
+esperado. A página 57 continuou preservando a célula raster da tabela em
+continuação.
+
+Na integração 51–60, as páginas 52 e 55 inicialmente pareciam perder a última
+linha das tabelas raster. O diagnóstico mostrou que os tokens reconhecidos
+correspondiam somente aos pixels existentes: as linhas `B 53,00` e `B 56,00`
+tinham sido desenhadas fora da altura dos bitmaps pelo gerador. A correção foi
+restrita ao fixture, aumentando as regiões para `390×170` e `340×160` pontos;
+nenhum arquivo de produção foi alterado. A nova extração recuperou todas as
+linhas e a página 55 voltou a formar uma tabela visual completa.
+
+O teste `test_raster_table_fixtures_expose_all_declared_rows` fixa essa
+invariante do corpus. A falha residual real continua sendo a acentuação de
+`Ficticio` na página 29, localizada no reconhecimento dos pixels e sem
+correção genérica segura disponível nesta etapa.
+
+## Extração completa após a correção do fixture
+
+O PDF completo foi regenerado e extraído com `balanced`/`baseline`. A execução
+terminou com código 0; os 60 marcadores `OCRS-P01-CONTROL` …
+`OCRS-P60-CONTROL` aparecem exatamente uma vez cada. A saída completa foi
+preservada em `/tmp/ocr-stress-audit/full-after-fixture.md` e o log registrou
+somente o aviso esperado de área visível nula para a figura da página 50.
+
+Também foram confirmados na saída completa: `B 53,00` na página 52, a tabela
+visual com `A 55,00` e `B 56,00` na página 55, e `3-3 CÉLULA OCRS-057` na
+página 57. O comando de validação estrutural, `compileall`, a suíte dirigida,
+`pytest -q` e `git diff --check` continuam aprovados.

@@ -164,6 +164,26 @@ def test_page_57_raster_region_is_inside_declared_table_cell(tmp_path: Path) -> 
     assert 240 <= y0 < y1 <= 270
 
 
+def test_raster_table_fixtures_expose_all_declared_rows(tmp_path: Path) -> None:
+    generator = _generator_module()
+    _, manifest_path = generator.generate(
+        tmp_path / "raster-tables",
+        pages=[52, 55],
+        manifest_path=tmp_path / "raster-tables.json",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    regions = {
+        page["source_page"]: page["raster_regions"][0]["bbox_pt"]
+        for page in manifest["pages"]
+    }
+
+    # The original bitmap heights clipped the final declared row before the
+    # production extractor saw the page. Keep the synthetic table content
+    # fully inside its raster region so OCR regressions remain meaningful.
+    assert regions[52] == [50, 225, 440, 395]
+    assert regions[55] == [390, 170, 730, 330]
+
+
 def test_manifest_declares_valid_local_codes_and_no_external_assets() -> None:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     qr_pages = [
