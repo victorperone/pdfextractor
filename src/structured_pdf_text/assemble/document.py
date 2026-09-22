@@ -19,6 +19,7 @@ from structured_pdf_text.assemble.content import _build_reading_text, _reindex_b
 from structured_pdf_text.assemble.conservation import record_content_conservation
 from structured_pdf_text.assemble.repeated_regions import detect_repeated_headers_footers, repeated_line_keys
 from structured_pdf_text.layout.heading import assign_heading_levels
+from structured_pdf_text.geometry import BBox
 from structured_pdf_text.tables.cross_page import resolve_cross_page_tables_with_diagnostics
 
 
@@ -199,17 +200,54 @@ def assemble_document(
 
 
 def _page_continuation_titles(page: StructuredPage) -> tuple[str, ...]:
-    """Collect title-like top-band text for cross-page decisions."""
-    top_limit = page.bbox.y0 + page.bbox.height * 0.22
+    """Collect title-like top-band text for cross-page decisions.
+
+    The "top 22%" band is defined in visual reading order, not in raw canonical
+    coordinates. For pages with a PDF /Rotate attribute the canonical axes are
+    mapped to the visual axes before the threshold is computed.
+    """
+    rotation = 0
+    if page.native_evidence is not None:
+        rotation = page.native_evidence.objects.rotation % 360
+
     candidates: list[str] = []
     for region in page.regions:
         for line in region.native_lines:
             text = line.text.strip()
             if not text or len(text) > 180:
                 continue
-            if region.kind == RegionKind.TITLE or line.bbox.y0 <= top_limit:
+            if region.kind == RegionKind.TITLE or _line_in_top_band(
+                line.bbox, page.bbox, rotation
+            ):
                 candidates.append(text)
     return tuple(dict.fromkeys(candidates))
+
+
+def _line_in_top_band(line_bbox: BBox, page_bbox: BBox, rotation: int) -> bool:
+    """Return True if *line_bbox* falls within the visual top 22% of the page.
+
+    ``rotation`` is the PDF /Rotate value (counterclockwise degrees: 0/90/180/270).
+    All bboxes are in the canonical top-left coordinate system (y grows down).
+    The mapping from canonical axes to visual axes depends on the rotation:
+
+    * 0°   : visual-top  = canonical small-y  (default, y0 ≤ limit)
+    * 90°  : visual-top  = canonical small-x  (x0 ≤ limit)
+    * 180° : visual-top  = canonical large-y  (y1 ≥ limit)
+    * 270° : visual-top  = canonical large-x  (x1 ≥ limit)
+    """
+    fraction = 0.22
+    if rotation == 90:
+        limit = page_bbox.x0 + page_bbox.width * fraction
+        return line_bbox.x0 <= limit
+    if rotation == 180:
+        limit = page_bbox.y1 - page_bbox.height * fraction
+        return line_bbox.y1 >= limit
+    if rotation == 270:
+        limit = page_bbox.x1 - page_bbox.width * fraction
+        return line_bbox.x1 >= limit
+    # 0° or unknown: canonical top-left, y grows down
+    limit = page_bbox.y0 + page_bbox.height * fraction
+    return line_bbox.y0 <= limit
 
 
 def _apply_repeated_suppression(
