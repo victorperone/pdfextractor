@@ -1072,6 +1072,7 @@ def _recover_selected_regions(
             quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
             page_rotation=page_rotation,
+            quality_reasons=tuple(region.quality.reasons),
         )
         for region in regions
     ]

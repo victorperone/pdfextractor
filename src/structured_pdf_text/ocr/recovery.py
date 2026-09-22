@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
 from typing import Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
@@ -11,6 +13,98 @@ from structured_pdf_text.errors import (
     raise_if_resource_exhausted,
 )
 from structured_pdf_text.geometry import BBox
+
+# ---------------------------------------------------------------------------
+# OCR RGB budget — configurable upper bound on the estimated uncompressed size
+# of images sent to Paddle.  This is an operational limit that protects
+# against STATUS_ACCESS_VIOLATION in Paddle's native runtime on large crop
+# variants; it is NOT a documented Paddle limit.
+# ---------------------------------------------------------------------------
+
+_MIB = 1024 * 1024
+
+# Default: 8 MiB.  Override with PDFEXTRACTOR_OCR_RGB_BUDGET_MIB.
+_OCR_RGB_BUDGET_MIB: float = float(
+    os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "8.0")
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ScalePlan:
+    scale: float
+    width: int
+    height: int
+    estimated_rgb_bytes: int
+
+    @property
+    def estimated_rgb_mib(self) -> float:
+        return self.estimated_rgb_bytes / _MIB
+
+
+def plan_ocr_scales(
+    width: int,
+    height: int,
+    scale_factors: tuple[float, ...],
+    max_rgb_mib: float = _OCR_RGB_BUDGET_MIB,
+) -> tuple[list[ScalePlan], list[ScalePlan]]:
+    """Partition scale factors into allowed and budget-blocked lists.
+
+    Rounding follows resize_image() exactly so the estimate matches what
+    Paddle will actually receive.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Image dimensions must be positive, got {width}×{height}.")
+    if not isfinite(max_rgb_mib) or max_rgb_mib <= 0:
+        raise ValueError(f"max_rgb_mib must be a positive finite number, got {max_rgb_mib}.")
+
+    limit_bytes = int(max_rgb_mib * _MIB)
+    allowed: list[ScalePlan] = []
+    blocked: list[ScalePlan] = []
+
+    for scale in scale_factors:
+        if not isfinite(scale) or scale <= 0:
+            raise ValueError(f"Invalid OCR scale factor: {scale}")
+        # Match resize_image() rounding exactly.
+        if scale <= 1.0:
+            target_width = width
+            target_height = height
+        else:
+            target_width = max(width + 1, round(width * scale))
+            target_height = max(height + 1, round(height * scale))
+
+        est_bytes = target_width * target_height * 3  # RGB uint8
+
+        plan = ScalePlan(
+            scale=scale,
+            width=target_width,
+            height=target_height,
+            estimated_rgb_bytes=est_bytes,
+        )
+        if est_bytes <= limit_bytes:
+            allowed.append(plan)
+        else:
+            blocked.append(plan)
+
+    return allowed, blocked
+
+
+# ---------------------------------------------------------------------------
+# Debug log — same env var as paddle.py so all entries land in one file.
+# ---------------------------------------------------------------------------
+
+def _recovery_debug(msg: str) -> None:
+    """Append one line to the OCR debug log with immediate flush."""
+    path = os.environ.get("PDFEXTRACTOR_OCR_DEBUG_LOG") or None
+    if not path:
+        return
+    try:
+        import datetime
+        ts = datetime.datetime.now().isoformat(timespec="milliseconds")
+        with open(path, "a", encoding="utf-8") as _f:
+            _f.write(f"[{ts}] {msg}\n")
+            _f.flush()
+    except Exception:
+        pass
 
 
 class RegionRefinementGoal(str, Enum):
@@ -31,6 +125,7 @@ class RegionRefinementRequest:
     min_confidence: float = 0.0
     page_rotation: int = 0
     quality_policy: str | None = None
+    quality_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,12 +196,67 @@ class OcrRegionRefiner:
         total_passes = 0
         total_batches = 0
 
-        scales = tuple(
+        scales_raw = tuple(
             dict.fromkeys(max(1.0, float(value)) for value in request.scale_factors)
         ) or (1.0,)
         rotations = tuple(
             dict.fromkeys(float(value) for value in request.rotations)
         ) or (0.0,)
+
+        # ---- RGB budget gate -----------------------------------------------
+        crop_w, crop_h = image_size(crop)
+        reasons_str = ",".join(request.quality_reasons) if request.quality_reasons else "none"
+        _recovery_debug(
+            f"REGION_SELECTED page={page_index}"
+            f" bbox={region_bbox.x0:.1f},{region_bbox.y0:.1f}"
+            f",{region_bbox.x1:.1f},{region_bbox.y1:.1f}"
+            f" base_width={crop_w} base_height={crop_h}"
+            f" requested_scales={','.join(str(s) for s in scales_raw)}"
+            f" quality_reasons=[{reasons_str}]"
+        )
+
+        allowed_plans, blocked_plans = plan_ocr_scales(
+            crop_w, crop_h, scales_raw, _OCR_RGB_BUDGET_MIB
+        )
+        _recovery_debug(
+            f"OCR_SCALE_PLAN page={page_index}"
+            f" limit_rgb_mib={_OCR_RGB_BUDGET_MIB:.1f}"
+            f" allowed_scales={','.join(str(p.scale) for p in allowed_plans) or 'none'}"
+            f" blocked_scales={','.join(str(p.scale) for p in blocked_plans) or 'none'}"
+        )
+        for bp in blocked_plans:
+            _recovery_debug(
+                f"OCR_SCALE_BLOCKED page={page_index}"
+                f" scale={bp.scale}"
+                f" width={bp.width} height={bp.height}"
+                f" estimated_rgb_mib={bp.estimated_rgb_mib:.3f}"
+                f" reason=rgb_budget_exceeded"
+            )
+
+        if not allowed_plans:
+            # Even 1× exceeds the budget.  Do not silently drop the region —
+            # log an explicit failure so it can be investigated separately.
+            _recovery_debug(
+                f"OCR_SCALE_ALL_BLOCKED page={page_index}"
+                f" base_width={crop_w} base_height={crop_h}"
+                f" estimated_1x_mib={crop_w * crop_h * 3 / _MIB:.3f}"
+                f" limit_rgb_mib={_OCR_RGB_BUDGET_MIB:.1f}"
+                f" action=recovery_skipped"
+            )
+            return RegionRefinementResult(
+                bbox=region_bbox,
+                tokens=(),
+                attempts=tuple(attempts),
+                selected_scale_factor=None,
+                selected_rotation=None,
+                ocr_passes=0,
+                ocr_batches=0,
+            )
+
+        allowed_scale_set = frozenset(p.scale for p in allowed_plans)
+        scales = tuple(s for s in scales_raw if s in allowed_scale_set)
+        # ---- end budget gate ------------------------------------------------
+
         for scale_factor in scales:
             try:
                 scaled = resize_image(crop, scale_factor)

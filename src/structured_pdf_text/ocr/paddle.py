@@ -180,7 +180,13 @@ def _log_ocr_versions() -> None:
             versions[pkg] = getattr(mod, "__version__", "unknown")
         except ImportError:
             versions[pkg] = "not_installed"
-    _ocr_debug("VERSIONS " + " ".join(f"{k}={v}" for k, v in versions.items()))
+    import math as _math
+    budget_mib = float(os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "8.0"))
+    det_limit = max(960, round(_math.sqrt(int(budget_mib * 1024 * 1024) / 3) * 1.2 / 32) * 32)
+    _ocr_debug(
+        "VERSIONS " + " ".join(f"{k}={v}" for k, v in versions.items())
+        + f" rgb_budget_mib={budget_mib:.1f} det_limit_side_len={det_limit}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -791,11 +797,31 @@ class PaddleOcrEngine:
             "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"
         ] = "True"
 
+        # Derive the detection limit from the RGB budget so that scale variants
+        # within budget are processed at full resolution by PP-OCRv5_server_det.
+        # The default 960 px limit makes all variants produce the same ~625×960
+        # tensor, making upscaling pointless for detection.  We use √2 * base
+        # (A4 aspect ratio) to accommodate the long side of portrait documents.
+        import math as _math
+        _budget_mib = float(
+            os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "8.0")
+        )
+        _budget_bytes = int(_budget_mib * 1024 * 1024)
+        # Long side of an A4-portrait image that fills the budget: √(B/3 · √2)
+        # rounded to the nearest multiple of 32 (detection-model requirement).
+        _det_limit = max(
+            960,
+            round(_math.sqrt(_budget_bytes / 3) * 1.2 / 32) * 32,
+        )
+
         options = {
             "use_doc_orientation_classify": True,
             "use_doc_unwarping": False,
             "use_textline_orientation": True,
             "enable_mkldnn": False,
+            # Detection limit aligned to RGB budget — overridable via self.options.
+            "text_det_limit_side_len": _det_limit,
+            "text_det_limit_type": "max",
             **self.options,
         }
 
