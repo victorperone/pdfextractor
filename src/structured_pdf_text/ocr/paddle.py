@@ -51,6 +51,9 @@ class OcrOrientationContext:
 # env-var writes (PADDLE_PDX_CACHE_HOME, PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK)
 # are never interleaved between two instances with different cache directories.
 _INIT_LOCK: threading.Lock = threading.Lock()
+# Paddle's detection models use stride-16 backbones; images smaller than this
+# in either dimension cause an access violation in the C++ inference runtime.
+_MIN_OCR_DIM: int = 16
 
 
 def _local_model_root(
@@ -704,6 +707,23 @@ class PaddleOcrEngine:
 
     @staticmethod
     def _predict(ocr: Any, page_image: object) -> Any:
+        # Paddle's C++ inference runtime crashes (access violation / STATUS_ACCESS_VIOLATION)
+        # when fed an image whose width or height is below the model's minimum stride.
+        # _records(None) already returns [] so callers handle this gracefully.
+        if isinstance(page_image, (list, tuple)):
+            page_image = [
+                item for item in page_image
+                if min(_image_size(item)) >= _MIN_OCR_DIM
+            ]
+            if not page_image:
+                return None
+        else:
+            try:
+                if min(_image_size(page_image)) < _MIN_OCR_DIM:
+                    return None
+            except Exception:
+                pass
+
         input_image = page_image
         if isinstance(page_image, (list, tuple)):
             try:
