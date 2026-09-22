@@ -1149,17 +1149,18 @@ def _enhancement_variants(image: object) -> list[OcrImageVariant]:
             import numpy as np
 
             gray_array = np.asarray(ImageOps.grayscale(pil_image))
-            denoised = cv2.medianBlur(gray_array, 3)
-            _, otsu = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            clahe_filter = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            clahe_applied = clahe_filter.apply(gray_array)
-            variants.extend(
-                [
-                    OcrImageVariant("median_denoise", Image.fromarray(denoised).convert("RGB"), "noise"),
-                    OcrImageVariant("otsu", Image.fromarray(otsu).convert("RGB"), "noise"),
-                    OcrImageVariant("clahe", Image.fromarray(clahe_applied).convert("RGB"), "contrast"),
-                ]
-            )
+            if min(gray_array.shape[:2]) >= 3:
+                denoised = cv2.medianBlur(gray_array, 3)
+                _, otsu = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                clahe_filter = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                clahe_applied = clahe_filter.apply(gray_array)
+                variants.extend(
+                    [
+                        OcrImageVariant("median_denoise", Image.fromarray(denoised).convert("RGB"), "noise"),
+                        OcrImageVariant("otsu", Image.fromarray(otsu).convert("RGB"), "noise"),
+                        OcrImageVariant("clahe", Image.fromarray(clahe_applied).convert("RGB"), "contrast"),
+                    ]
+                )
         except (ImportError, AttributeError, TypeError, ValueError):
             pass
         return variants
