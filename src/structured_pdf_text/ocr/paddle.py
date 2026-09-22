@@ -107,12 +107,74 @@ def _image_meta(image: object) -> str:
         return f"meta_error={type(exc).__name__}"
 
 
+def _ocr_proc_mem() -> str:
+    """Return process and system memory metrics as a space-separated log string.
+
+    Priority order: psutil (cross-platform) → /proc/self/status (Linux) →
+    fallback with gc/tid only.  Never reads document content.
+    """
+    import gc
+    import threading
+
+    tid = threading.get_ident()
+    gc_n = sum(gc.get_count())
+
+    try:
+        import psutil  # type: ignore[import-untyped]
+
+        proc = psutil.Process()
+        mi = proc.memory_info()
+        rss_mb = mi.rss / (1024 * 1024)
+        vms_mb = mi.vms / (1024 * 1024)
+        vm = psutil.virtual_memory()
+        sys_avail_mb = vm.available / (1024 * 1024)
+        return (
+            f"rss_MB={rss_mb:.1f} vms_MB={vms_mb:.1f}"
+            f" sys_avail_MB={sys_avail_mb:.0f} gc_n={gc_n} tid={tid}"
+        )
+    except Exception:
+        pass
+
+    try:
+        rss_kb = 0
+        with open("/proc/self/status", encoding="ascii", errors="replace") as _f:
+            for line in _f:
+                if line.startswith("VmRSS:"):
+                    rss_kb = int(line.split()[1])
+                elif line.startswith("VmSize:"):
+                    vms_kb = int(line.split()[1])
+        avail_kb = 0
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as _f:
+            for line in _f:
+                if line.startswith("MemAvailable:"):
+                    avail_kb = int(line.split()[1])
+                    break
+        return (
+            f"rss_MB={rss_kb / 1024:.1f} vms_MB={vms_kb / 1024:.1f}"  # type: ignore[possibly-undefined]
+            f" sys_avail_MB={avail_kb / 1024:.0f} gc_n={gc_n} tid={tid}"
+        )
+    except Exception:
+        pass
+
+    return f"mem=unavailable gc_n={gc_n} tid={tid}"
+
+
+def _mem_delta(before: str, after: str) -> str:
+    """Extract RSS delta between two _ocr_proc_mem() strings."""
+    try:
+        rss_b = float(before.split("rss_MB=")[1].split()[0])
+        rss_a = float(after.split("rss_MB=")[1].split()[0])
+        return f" delta_rss_MB={rss_a - rss_b:+.1f}"
+    except Exception:
+        return ""
+
+
 def _log_ocr_versions() -> None:
     """Log installed library versions once, right after engine initialisation."""
     if not _ocr_debug_path():
         return
     versions: dict[str, str] = {}
-    for pkg in ("paddle", "paddleocr", "paddlex", "numpy", "cv2"):
+    for pkg in ("paddle", "paddleocr", "paddlex", "numpy", "cv2", "psutil"):
         try:
             mod = __import__(pkg)
             versions[pkg] = getattr(mod, "__version__", "unknown")
@@ -571,17 +633,21 @@ class PaddleOcrEngine:
         self.last_pass_count += 1
         self.last_batch_count += 1
         self._dbg_attempt += 1
+        mem_before = _ocr_proc_mem()
         _ocr_debug(
             f"CALL_START stage={self._dbg_stage} policy={self._dbg_policy}"
             f" variant={self._dbg_variant} attempt={self._dbg_attempt}"
-            f" {_image_meta(page_image)}"
+            f" {_image_meta(page_image)} {mem_before}"
         )
         t0 = time.perf_counter()
         result = self._predict(ocr, page_image)
+        elapsed = time.perf_counter() - t0
+        mem_after = _ocr_proc_mem()
         _ocr_debug(
             f"CALL_END stage={self._dbg_stage} attempt={self._dbg_attempt}"
-            f" elapsed_s={time.perf_counter() - t0:.3f}"
+            f" elapsed_s={elapsed:.3f}"
             f" result={'None' if result is None else 'OK'}"
+            f" {mem_after}{_mem_delta(mem_before, mem_after)}"
         )
         return result
 
@@ -595,10 +661,11 @@ class PaddleOcrEngine:
             self.last_batch_count += 1
             self._dbg_attempt += 1
             chunk_meta = " | ".join(_image_meta(img) for img in chunk)
+            mem_before_batch = _ocr_proc_mem()
             _ocr_debug(
                 f"BATCH_START stage={self._dbg_stage} policy={self._dbg_policy}"
                 f" variant={self._dbg_variant} attempt={self._dbg_attempt}"
-                f" batch_size={len(chunk)} images=[{chunk_meta}]"
+                f" batch_size={len(chunk)} images=[{chunk_meta}] {mem_before_batch}"
             )
             t0 = time.perf_counter()
             batch_ok = False
@@ -606,9 +673,12 @@ class PaddleOcrEngine:
                 raw = self._predict(ocr, chunk)
                 raw_items = list(raw) if hasattr(raw, "__iter__") and not isinstance(raw, (dict, str, bytes)) else [raw]
                 if len(raw_items) == len(chunk):
+                    elapsed_b = time.perf_counter() - t0
+                    mem_after_batch = _ocr_proc_mem()
                     _ocr_debug(
                         f"BATCH_END stage={self._dbg_stage} attempt={self._dbg_attempt}"
-                        f" elapsed_s={time.perf_counter() - t0:.3f} result=OK"
+                        f" elapsed_s={elapsed_b:.3f} result=OK"
+                        f" {mem_after_batch}{_mem_delta(mem_before_batch, mem_after_batch)}"
                     )
                     outputs.extend(raw_items)
                     batch_ok = True
@@ -620,26 +690,33 @@ class PaddleOcrEngine:
                     raise
                 pass
             if not batch_ok:
+                elapsed_b = time.perf_counter() - t0
+                mem_after_batch = _ocr_proc_mem()
                 _ocr_debug(
                     f"BATCH_END stage={self._dbg_stage} attempt={self._dbg_attempt}"
-                    f" elapsed_s={time.perf_counter() - t0:.3f} result=FALLBACK_SINGLE"
+                    f" elapsed_s={elapsed_b:.3f} result=FALLBACK_SINGLE"
+                    f" {mem_after_batch}{_mem_delta(mem_before_batch, mem_after_batch)}"
                 )
             # Some older PaddleOCR backends do not support list input.
             for img_idx, image in enumerate(chunk):
                 self.last_batch_count += 1
                 self._dbg_attempt += 1
+                mem_before_item = _ocr_proc_mem()
                 _ocr_debug(
                     f"CALL_START stage={self._dbg_stage}_single policy={self._dbg_policy}"
                     f" variant={self._dbg_variant} attempt={self._dbg_attempt}"
-                    f" batch_item={img_idx} {_image_meta(image)}"
+                    f" batch_item={img_idx} {_image_meta(image)} {mem_before_item}"
                 )
                 t1 = time.perf_counter()
                 try:
                     result = self._predict(ocr, image)
+                    elapsed_i = time.perf_counter() - t1
+                    mem_after_item = _ocr_proc_mem()
                     _ocr_debug(
                         f"CALL_END stage={self._dbg_stage}_single attempt={self._dbg_attempt}"
-                        f" elapsed_s={time.perf_counter() - t1:.3f}"
+                        f" elapsed_s={elapsed_i:.3f}"
                         f" result={'None' if result is None else 'OK'}"
+                        f" {mem_after_item}{_mem_delta(mem_before_item, mem_after_item)}"
                     )
                     outputs.append(result)
                 except FatalExtractionError:
@@ -650,9 +727,12 @@ class PaddleOcrEngine:
                     ValueError,
                     RuntimeError,
                 ) as exc:
+                    mem_err = _ocr_proc_mem()
                     _ocr_debug(
                         f"CALL_ERROR stage={self._dbg_stage}_single attempt={self._dbg_attempt}"
+                        f" elapsed_s={time.perf_counter() - t1:.3f}"
                         f" error={type(exc).__name__}: {exc}"
+                        f" {mem_err}{_mem_delta(mem_before_item, mem_err)}"
                     )
                     raise_if_resource_exhausted(
                         exc,
