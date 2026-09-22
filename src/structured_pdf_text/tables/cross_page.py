@@ -449,12 +449,13 @@ def _has_continuation_marker(value: str) -> bool:
     if re.search(r"\bcont\.(?:\s|$)", folded):
         return True
     normalized = _normalize_header(value)
+    # "arte2" was removed: it is a substring of "parte2" (already in the list)
+    # and causes false positives on section titles such as "Arte 2" or "Arte2".
     return any(
         marker in normalized
         for marker in (
             "continu",
             "parte2",
-            "arte2",
             "proxima",
             "ultimalinha",
         )
