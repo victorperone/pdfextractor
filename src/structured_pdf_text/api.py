@@ -1688,6 +1688,7 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int)
             row_tokens.extend(cell_tokens[(cell.row, cell.col)])
         if not row_tokens:
             continue
+        row_tokens = _merge_short_table_fragments(row_tokens)
         row_bbox = BBox.union_all([token.bbox for token in row_tokens])
         rebuilt.append(
             TextLine(
