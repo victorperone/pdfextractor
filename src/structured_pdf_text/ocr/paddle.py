@@ -56,6 +56,74 @@ _INIT_LOCK: threading.Lock = threading.Lock()
 _MIN_OCR_DIM: int = 16
 
 
+# ---------------------------------------------------------------------------
+# Diagnostic instrumentation — enabled only when PDFEXTRACTOR_OCR_DEBUG_LOG
+# is set to a writable file path.  Logs only technical metadata; never logs
+# pixel content, recognised text, or any document content.
+# ---------------------------------------------------------------------------
+
+def _ocr_debug_path() -> str | None:
+    return os.environ.get("PDFEXTRACTOR_OCR_DEBUG_LOG") or None
+
+
+def _ocr_debug(msg: str) -> None:
+    """Append one line to the debug log with immediate flush."""
+    path = _ocr_debug_path()
+    if not path:
+        return
+    try:
+        import datetime
+        ts = datetime.datetime.now().isoformat(timespec="milliseconds")
+        with open(path, "a", encoding="utf-8") as _f:
+            _f.write(f"[{ts}] {msg}\n")
+            _f.flush()
+    except Exception:
+        pass
+
+
+def _image_meta(image: object) -> str:
+    """Return a string with image dimensions, channel count, dtype and size.
+
+    Never reads pixel values or text content.
+    """
+    try:
+        import numpy as np
+        if hasattr(image, "mode"):
+            arr = np.asarray(image)
+            h = int(arr.shape[0]) if arr.ndim >= 1 else 0
+            w = int(arr.shape[1]) if arr.ndim >= 2 else 0
+            c = int(arr.shape[2]) if arr.ndim >= 3 else 1
+            dtype = str(arr.dtype)
+            est_mb = h * w * c * arr.itemsize / (1024 * 1024)
+            return f"w={w} h={h} c={c} dtype={dtype} pil_mode={image.mode} est_MB={est_mb:.3f}"
+        a = np.asarray(image)
+        h = int(a.shape[0]) if a.ndim >= 1 else 0
+        w = int(a.shape[1]) if a.ndim >= 2 else 0
+        c = int(a.shape[2]) if a.ndim >= 3 else 1
+        dtype = str(a.dtype)
+        est_mb = h * w * c * a.itemsize / (1024 * 1024)
+        return f"w={w} h={h} c={c} dtype={dtype} est_MB={est_mb:.3f}"
+    except Exception as exc:
+        return f"meta_error={type(exc).__name__}"
+
+
+def _log_ocr_versions() -> None:
+    """Log installed library versions once, right after engine initialisation."""
+    if not _ocr_debug_path():
+        return
+    versions: dict[str, str] = {}
+    for pkg in ("paddle", "paddleocr", "paddlex", "numpy", "cv2"):
+        try:
+            mod = __import__(pkg)
+            versions[pkg] = getattr(mod, "__version__", "unknown")
+        except ImportError:
+            versions[pkg] = "not_installed"
+    _ocr_debug("VERSIONS " + " ".join(f"{k}={v}" for k, v in versions.items()))
+
+
+# ---------------------------------------------------------------------------
+
+
 def _local_model_root(
     cache_home: str | Path,
 ) -> Path:
@@ -198,6 +266,12 @@ class PaddleOcrEngine:
         self.last_fusion_conflict_clusters = 0
         # Compatibility alias for callers using the historical name.
         self.last_fusion_duplicate_clusters = 0
+        # Instrumentation context — updated in _recognize_page_impl before each
+        # Paddle call so _predict_counted can include it in the log entry.
+        self._dbg_attempt: int = 0
+        self._dbg_stage: str = "none"
+        self._dbg_policy: str = "none"
+        self._dbg_variant: str = "none"
 
     def recognize_page(
         self,
@@ -244,6 +318,9 @@ class PaddleOcrEngine:
             page_image,
             page_index=page_index,
         )
+        self._dbg_stage = "baseline"
+        self._dbg_policy = str(quality_policy or self.quality_policy or "default")
+        self._dbg_variant = "none"
         raw = self._predict_counted(ocr, page_image)
         tokens = _tokens_from_result(
             raw,
@@ -294,6 +371,8 @@ class PaddleOcrEngine:
             rotated = _rotate_image(page_image, angle)
             if rotated is None:
                 continue
+            self._dbg_stage = f"orientation_rot{angle}"
+            self._dbg_variant = "none"
             rotated_raw = self._predict_counted(ocr, rotated)
             rotated_tokens = _tokens_from_result(
                 rotated_raw,
@@ -384,6 +463,8 @@ class PaddleOcrEngine:
             for start in range(0, len(variants), self.batch_size):
                 wave = variants[start : start + self.batch_size]
                 self.last_variants_attempted.extend(variant.name for variant in wave)
+                self._dbg_stage = "quality_variant"
+                self._dbg_variant = ",".join(v.name for v in wave)
                 raw_wave = self._predict_many_counted(ocr, [variant.image for variant in wave])
                 wave_sufficient = False
                 for variant, raw_variant in zip(wave, raw_wave):
@@ -486,22 +567,51 @@ class PaddleOcrEngine:
         self.last_fusion_duplicate_clusters = 0
 
     def _predict_counted(self, ocr: Any, page_image: object) -> Any:
+        import time
         self.last_pass_count += 1
         self.last_batch_count += 1
-        return self._predict(ocr, page_image)
+        self._dbg_attempt += 1
+        _ocr_debug(
+            f"CALL_START stage={self._dbg_stage} policy={self._dbg_policy}"
+            f" variant={self._dbg_variant} attempt={self._dbg_attempt}"
+            f" {_image_meta(page_image)}"
+        )
+        t0 = time.perf_counter()
+        result = self._predict(ocr, page_image)
+        _ocr_debug(
+            f"CALL_END stage={self._dbg_stage} attempt={self._dbg_attempt}"
+            f" elapsed_s={time.perf_counter() - t0:.3f}"
+            f" result={'None' if result is None else 'OK'}"
+        )
+        return result
 
     def _predict_many_counted(self, ocr: Any, images: list[object]) -> list[Any]:
         """Predict quality variants in bounded batches while preserving order."""
+        import time
         outputs: list[Any] = []
         for start in range(0, len(images), self.batch_size):
             chunk = images[start : start + self.batch_size]
             self.last_pass_count += len(chunk)
             self.last_batch_count += 1
+            self._dbg_attempt += 1
+            chunk_meta = " | ".join(_image_meta(img) for img in chunk)
+            _ocr_debug(
+                f"BATCH_START stage={self._dbg_stage} policy={self._dbg_policy}"
+                f" variant={self._dbg_variant} attempt={self._dbg_attempt}"
+                f" batch_size={len(chunk)} images=[{chunk_meta}]"
+            )
+            t0 = time.perf_counter()
+            batch_ok = False
             try:
                 raw = self._predict(ocr, chunk)
                 raw_items = list(raw) if hasattr(raw, "__iter__") and not isinstance(raw, (dict, str, bytes)) else [raw]
                 if len(raw_items) == len(chunk):
+                    _ocr_debug(
+                        f"BATCH_END stage={self._dbg_stage} attempt={self._dbg_attempt}"
+                        f" elapsed_s={time.perf_counter() - t0:.3f} result=OK"
+                    )
                     outputs.extend(raw_items)
+                    batch_ok = True
                     continue
             except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
                 if isinstance(exc, FatalExtractionError):
@@ -509,11 +619,29 @@ class PaddleOcrEngine:
                 if is_resource_exhaustion(exc):
                     raise
                 pass
+            if not batch_ok:
+                _ocr_debug(
+                    f"BATCH_END stage={self._dbg_stage} attempt={self._dbg_attempt}"
+                    f" elapsed_s={time.perf_counter() - t0:.3f} result=FALLBACK_SINGLE"
+                )
             # Some older PaddleOCR backends do not support list input.
-            for image in chunk:
+            for img_idx, image in enumerate(chunk):
                 self.last_batch_count += 1
+                self._dbg_attempt += 1
+                _ocr_debug(
+                    f"CALL_START stage={self._dbg_stage}_single policy={self._dbg_policy}"
+                    f" variant={self._dbg_variant} attempt={self._dbg_attempt}"
+                    f" batch_item={img_idx} {_image_meta(image)}"
+                )
+                t1 = time.perf_counter()
                 try:
-                    outputs.append(self._predict(ocr, image))
+                    result = self._predict(ocr, image)
+                    _ocr_debug(
+                        f"CALL_END stage={self._dbg_stage}_single attempt={self._dbg_attempt}"
+                        f" elapsed_s={time.perf_counter() - t1:.3f}"
+                        f" result={'None' if result is None else 'OK'}"
+                    )
+                    outputs.append(result)
                 except FatalExtractionError:
                     raise
                 except (
@@ -522,6 +650,10 @@ class PaddleOcrEngine:
                     ValueError,
                     RuntimeError,
                 ) as exc:
+                    _ocr_debug(
+                        f"CALL_ERROR stage={self._dbg_stage}_single attempt={self._dbg_attempt}"
+                        f" error={type(exc).__name__}: {exc}"
+                    )
                     raise_if_resource_exhausted(
                         exc,
                         stage="ocr_inference",
@@ -703,6 +835,7 @@ class PaddleOcrEngine:
             self._init_error = error
             raise error from exc
 
+        _log_ocr_versions()
         return self._ocr
 
     @staticmethod
