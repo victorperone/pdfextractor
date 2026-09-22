@@ -221,8 +221,15 @@ def _raster_image(
     local = canvas.Canvas(source, pagesize=(width, height), invariant=1)
     local.setFillColor(white)
     local.rect(0, 0, width, height, stroke=0, fill=1)
-    top = 28.0
-    for line in lines:
+    line_items = list(lines)
+    top = min(
+        28.0,
+        max(
+            font_size,
+            height - font_size * 1.45 * max(1, len(line_items)) - 2.0,
+        ),
+    )
+    for line in line_items:
         _draw_text(local, line, 28, top, page_height=height, size=font_size)
         top += font_size * 1.45
     if table is not None:
@@ -595,8 +602,12 @@ def _draw_page(pdf: canvas.Canvas, meta: dict) -> None:
             _header(pdf, meta, title, page_height=height)
             _table(pdf, meta, 42, 142, width - 84, merged=page in {31}, rows=5 if page in {31, 33, 34, 36, 37} else 4, columns=5 if page == 35 else 4)
             if page == 33:
-                image = _raster_image(["CÉLULA", "OCRS-033"], 110, 55, font_size=8, seed=page)
-                _add_raster_region(pdf, meta, image, 300, 318, 110, 55, page_height=height, region_id="P33-R02", kind="table_cell")
+                # Row 3, column 3 of the native table spans x=306..438 and
+                # top=232..262. Keep the raster entirely inside that cell so
+                # the scenario exercises mixed table-cell ownership.
+                image = _raster_image(["CÉLULA OCRS-033"], 110, 30, font_size=9, seed=page)
+                _add_raster_region(pdf, meta, image, 307, 232, 110, 30, page_height=height, region_id="P33-R02", kind="table_cell")
+                meta["notes"].append("imagem raster textual posicionada dentro de uma célula nativa")
             if page == 34:
                 image = _raster_image(["TABELA RASTER 034", "R$ 1.234,56"], 390, 125, font_size=10, seed=page)
                 _add_raster_region(pdf, meta, image, 105, 335, 390, 125, page_height=height, region_id="P34-R02", kind="table")
@@ -701,8 +712,11 @@ def _draw_page(pdf: canvas.Canvas, meta: dict) -> None:
         _table(pdf, meta, 42, 150, width - 84, rows=5, columns=4)
         meta["continuation"] = {"group_id": "table-56-57", "role": "first" if page == 56 else "second", "paired_page": 57 if page == 56 else 56}
         if page == 57:
-            image = _raster_image(["CÉLULA OCR", "OCRS-057"], 120, 60, font_size=8, seed=page)
-            _add_raster_region(pdf, meta, image, 320, 340, 120, 60, page_height=height, region_id="P57-R02", kind="table_cell")
+            # Row 3, column 3 of the continued table spans x=306..438 and
+            # top=240..270. Keep the raster inside that cell as on page 33.
+            image = _raster_image(["CÉLULA OCRS-057"], 120, 30, font_size=9, seed=page)
+            _add_raster_region(pdf, meta, image, 310, 240, 120, 30, page_height=height, region_id="P57-R02", kind="table_cell")
+            meta["notes"].append("imagem raster textual posicionada dentro de uma célula nativa")
     elif page == 58:
         meta["has_native_text_layer"] = True
         _native_body(pdf, page, width=width, height=height, title=title)

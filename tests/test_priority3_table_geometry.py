@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from structured_pdf_text.api import _rebuild_table_ocr_lines, _validate_detected_tables
+from structured_pdf_text.api import (
+    _merge_ocr_region_tokens_into_table_cells,
+    _rebuild_table_ocr_lines,
+    _validate_detected_tables,
+)
 from structured_pdf_text.document import (
     EvidenceRef,
     LayoutRegion,
@@ -144,6 +148,37 @@ def test_reconstructed_ocr_lines_keep_provenance_and_canonical_geometry() -> Non
 
     assert lines[0].tokens[0].provenance == "quality_variant:sharpness"
     assert lines[0].bbox == BBox(10, 20, 50, 30)
+
+
+def test_embedded_figure_ocr_is_assigned_to_native_table_cell() -> None:
+    table = _table()
+    ocr_token = OcrToken(
+        text="CÉLULA OCRS-033",
+        bbox=BBox(20, 10, 80, 25),
+        confidence=0.92,
+        language="pt",
+        source=SourceKind.OCR_REGION,
+        provenance="targeted_region_recovery",
+    )
+    region = LayoutRegion(
+        region_id="embedded-figure",
+        kind=RegionKind.FIGURE,
+        bbox=BBox(10, 0, 90, 40),
+        layout_confidence=1.0,
+        native_lines=[],
+        ocr_tokens=[ocr_token],
+        quality=RegionQuality(RegionDecision.OCR_REGION),
+    )
+
+    consumed = _merge_ocr_region_tokens_into_table_cells(
+        tables=[table],
+        regions=[region],
+        page_index=0,
+    )
+
+    assert consumed == {id(ocr_token)}
+    assert "CÉLULA OCRS-033" in table.cells[0].text
+    assert table.cells[0].tokens[-1].provenance == "targeted_region_recovery"
 
 
 def test_spatial_consensus_records_its_provenance_without_changing_bbox() -> None:

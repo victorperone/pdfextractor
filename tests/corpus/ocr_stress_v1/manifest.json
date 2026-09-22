@@ -6,7 +6,7 @@
   "page_count": 60,
   "source_page_count": 60,
   "pdf_file": "Document_OCR_Stress_V1.pdf",
-  "pdf_sha256": "3752b1f1fc8d86fa1430a720e772fa6a2d015d72c435cde895d6c037ef73287a",
+  "pdf_sha256": "862d206ee8fdd917138b917f81da9a68fdbc395abc917aecb3f66b85ee9a5978",
   "generator": "tests/corpus/ocr_stress_v1/generate.py",
   "dependencies": [
     "reportlab",
@@ -1264,10 +1264,10 @@
           "region_id": "P33-R02",
           "kind": "table_cell",
           "bbox_pt": [
-            300,
-            318,
-            410,
-            373
+            307,
+            232,
+            417,
+            262
           ],
           "text_in_image": true,
           "quality": "clean"
@@ -1287,6 +1287,7 @@
       ],
       "continuation": null,
       "notes": [
+        "imagem raster textual posicionada dentro de uma célula nativa",
         "camada PDF nativa intencional"
       ],
       "expected_indicators": [
@@ -2188,10 +2189,10 @@
           "region_id": "P57-R02",
           "kind": "table_cell",
           "bbox_pt": [
-            320,
-            340,
-            440,
-            400
+            310,
+            240,
+            430,
+            270
           ],
           "text_in_image": true,
           "quality": "clean"
@@ -2215,6 +2216,7 @@
         "paired_page": 56
       },
       "notes": [
+        "imagem raster textual posicionada dentro de uma célula nativa",
         "camada PDF nativa intencional"
       ],
       "expected_indicators": [

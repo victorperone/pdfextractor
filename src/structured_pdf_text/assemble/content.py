@@ -101,6 +101,18 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
             region,
             flow_lines=flow_lines_by_region.get(region.region_id),
         )
+        if region.kind == RegionKind.FIGURE:
+            ordered_lines = [
+                line
+                for line in ordered_lines
+                if not any(
+                    cell.bbox is not None
+                    and cell.bbox.x0 <= line.bbox.cx <= cell.bbox.x1
+                    and cell.bbox.y0 <= line.bbox.cy <= cell.bbox.y1
+                    for table in physical_tables
+                    for cell in table.cells
+                )
+            ]
         unique_ordered_lines: list[TextLine] = []
         for line in ordered_lines:
             line_id = line_identity(line)
@@ -139,6 +151,12 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
             list_inferred_marker_count += stats.inferred_marker_count
             list_continuation_count += stats.continuation_count
             list_unassigned_line_count += stats.unassigned_line_count
+
+    _attach_table_source_line_claims(
+        blocks=blocks,
+        tables=physical_tables,
+        regions=page.regions,
+    )
 
     reading_decision = ReadingOrderDecision(
         region_order=tuple(r.region_id for r in ordered_regions),
@@ -417,6 +435,43 @@ def _table_intersects_region(
 def _table_fragment_sort_key(table: StructuredTable, page_index: int) -> tuple[float, float]:
     bbox = _table_fragment_bbox(table, page_index)
     return (bbox.y0, bbox.x0) if bbox else (float("inf"), float("inf"))
+
+
+def _attach_table_source_line_claims(
+    *,
+    blocks: list[PageContentBlock],
+    tables: list[StructuredTable],
+    regions: list[LayoutRegion],
+) -> None:
+    """Claim source lines whose tokens were assigned to a table cell.
+
+    Grid detection can use lines from a figure/image-overlap region even when
+    the prose region that emits the table does not own those lines.  Link the
+    table block back to the exact source token identities so conservation does
+    not render that occurrence again as an orphan or figure line.
+    """
+    tables_by_id = {table.table_id: table for table in tables}
+    for block in blocks:
+        if block.kind != ContentKind.TABLE or block.table_id is None:
+            continue
+        table = tables_by_id.get(block.table_id)
+        if table is None:
+            continue
+        cell_token_ids = {
+            id(token)
+            for cell in table.cells
+            for token in cell.tokens
+        }
+        if not cell_token_ids:
+            continue
+        claimed = set(block.line_ids)
+        for region in regions:
+            for line in [*region.native_lines, *region.ocr_lines]:
+                if any(id(token) in cell_token_ids for token in line.tokens):
+                    line_id = line_identity(line)
+                    if line_id not in claimed:
+                        block.line_ids.append(line_id)
+                        claimed.add(line_id)
 
 
 def _emit_prose_blocks(

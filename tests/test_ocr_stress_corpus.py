@@ -130,6 +130,40 @@ def test_page_30_declares_multiline_raster_cells(tmp_path: Path) -> None:
     assert "células raster com conteúdo multilinha intencional" in page["notes"]
 
 
+def test_page_33_raster_region_is_inside_declared_table_cell(tmp_path: Path) -> None:
+    generator = _generator_module()
+    _, manifest_path = generator.generate(
+        tmp_path / "33",
+        pages=[33],
+        manifest_path=tmp_path / "33.json",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    page = manifest["pages"][0]
+    region = page["raster_regions"][0]
+    x0, y0, x1, y1 = region["bbox_pt"]
+    assert page["scenario"] == "tabela digital e imagem em célula"
+    assert "imagem raster textual posicionada dentro de uma célula nativa" in page["notes"]
+    assert 306 <= x0 < x1 <= 438
+    assert 232 <= y0 < y1 <= 262
+
+
+def test_page_57_raster_region_is_inside_declared_table_cell(tmp_path: Path) -> None:
+    generator = _generator_module()
+    _, manifest_path = generator.generate(
+        tmp_path / "57",
+        pages=[57],
+        manifest_path=tmp_path / "57.json",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    page = manifest["pages"][0]
+    region = page["raster_regions"][0]
+    x0, y0, x1, y1 = region["bbox_pt"]
+    assert page["scenario"] == "continuação com cabeçalho e célula raster"
+    assert "imagem raster textual posicionada dentro de uma célula nativa" in page["notes"]
+    assert 306 <= x0 < x1 <= 438
+    assert 240 <= y0 < y1 <= 270
+
+
 def test_manifest_declares_valid_local_codes_and_no_external_assets() -> None:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     qr_pages = [

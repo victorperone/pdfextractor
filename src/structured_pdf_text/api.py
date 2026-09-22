@@ -620,6 +620,7 @@ class PdfTextExtractor:
                         f"Native table detection unavailable: {type(exc).__name__}: {exc}"
                     )
                 table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] = {}
+                visual_table = None
                 if not tables and rendered_page is not None and (
                     self.config.enable_tables
                     or complexity.layout_needed
@@ -686,6 +687,23 @@ class PdfTextExtractor:
                             ocr_passes_total = (ocr_passes_total or 0) + table_passes
                             ocr_batches_total = (ocr_batches_total or 0) + table_batches
                         tables = [visual_table]
+                consumed_table_ocr = _merge_ocr_region_tokens_into_table_cells(
+                    tables=tables,
+                    regions=regions,
+                    page_index=page_index,
+                )
+                if consumed_table_ocr:
+                    unmatched_ocr_tokens = [
+                        token
+                        for token in unmatched_ocr_tokens
+                        if id(token) not in consumed_table_ocr
+                    ]
+                    unmatched_ocr_lines = reconstruct_ocr_lines(
+                        unmatched_ocr_tokens,
+                        page_index,
+                        native_page.bbox,
+                    )
+                    ocr_table_tokens += len(consumed_table_ocr)
                 (
                     tables,
                     table_validation_facts,
@@ -1451,6 +1469,78 @@ def _validate_detected_tables(
         else:
             warnings.append("table_structure_uncertain")
     return valid_tables, validation_facts, construction_facts, provenance_facts
+
+
+def _merge_ocr_region_tokens_into_table_cells(
+    *,
+    tables: list[Any],
+    regions: list[LayoutRegion],
+    page_index: int,
+) -> set[int]:
+    """Attach OCR from an image wholly inside a native table cell.
+
+    Native grid detection owns the cell geometry, while regional OCR owns the
+    pixels of an embedded image.  When the image bbox is substantially inside
+    one cell, both evidences belong to that cell.  OCR outside a cell, and all
+    visual-table refinements, remain on their existing paths.
+    """
+    consumed: set[int] = set()
+    for table in tables:
+        if table.method == TableMethod.VISUAL_MODEL:
+            continue
+        cells = [cell for cell in table.cells if cell.bbox is not None]
+        if not cells:
+            continue
+        for region in regions:
+            if not region.ocr_tokens or region.kind == RegionKind.TABLE:
+                continue
+            matching_cells = [
+                cell
+                for cell in cells
+                if region.bbox.overlap_ratio(cell.bbox) >= 0.80
+                and cell.bbox.overlap_ratio(region.bbox) >= 0.75
+            ]
+            if not matching_cells:
+                continue
+            for token in region.ocr_tokens:
+                cell = next(
+                    (
+                        candidate
+                        for candidate in matching_cells
+                        if candidate.bbox.x0 <= token.bbox.cx <= candidate.bbox.x1
+                        and candidate.bbox.y0 <= token.bbox.cy <= candidate.bbox.y1
+                    ),
+                    None,
+                )
+                if cell is None:
+                    continue
+                if any(
+                    existing.text == token.text
+                    and existing.bbox.iou(token.bbox) >= 0.80
+                    for existing in cell.tokens
+                ):
+                    consumed.add(id(token))
+                    continue
+                cell.tokens.append(
+                    TextToken(
+                        text=token.text,
+                        bbox=token.bbox,
+                        sources=[
+                            EvidenceRef(
+                                token.source,
+                                page_index,
+                                f"ocr-table:{table.table_id}:{cell.row}:{cell.col}",
+                            )
+                        ],
+                        confidence=max(0.0, min(1.0, token.confidence or 0.0)),
+                        normalized_text=token.text,
+                        provenance=token.provenance or "table_cell_ocr",
+                        rotation=token.rotation,
+                    )
+                )
+                cell.text = join_table_tokens(cell.tokens)
+                consumed.add(id(token))
+    return consumed
 
 
 def _table_prefix_diagnostics(regions: list[LayoutRegion]) -> dict[str, Any]:

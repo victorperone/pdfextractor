@@ -159,3 +159,41 @@ Não houve alteração no modo `native`, no OCR regional, no modelo, na resoluç
 no runtime ou no ledger. O próximo risco residual é a qualidade de
 reconhecimento da página 29 (`Ficticio` sem acento), que não foi corrigida por
 esta mudança estrutural.
+
+## Correção: OCR raster dentro de células nativas
+
+Na auditoria seguinte dos cenários 31–40 e da continuação 56–57, foram
+encontradas duas inconsistências do próprio fixture: as imagens declaradas
+como células raster nas páginas 33 e 57 estavam desenhadas abaixo das tabelas.
+O gerador e o manifesto foram corrigidos para posicioná-las dentro de células
+reais, com texto legível e sem alterar o parser de produção.
+
+Com o fixture corrigido, o diagnóstico da página 33 mostrou que o OCR
+regional reconhecia `CÉLULA OCRS-033`, mas o token era emitido como figura
+separada. A causa estava na montagem: a geometria da tabela já continha a
+célula, porém o token OCR da imagem não era associado à célula e a linha
+nativa sobreposta não era reivindicada pelo bloco de tabela.
+
+A correção de produção é geométrica e genérica:
+
+- tokens OCR de uma região substancialmente contida em uma célula nativa são
+  convertidos em evidência da célula;
+- o token consumido deixa de ser enviado ao texto suplementar;
+- linhas nativas cujos tokens compõem células são reivindicadas pelo bloco da
+  tabela, evitando fallback ou duplicação em figura/prosa;
+- tabelas visuais continuam no caminho de refinamento existente.
+
+Resultados end-to-end:
+
+- página 33: `3-3 CÉLULA OCRS-033` dentro da célula, sem bloco residual;
+- página 57: `3-3 CÉLULA OCRS-057` dentro da célula, preservando a continuação
+  56–57;
+- `ocr_unmatched_tokens=1` antes da associação e nenhum texto suplementar ou
+  fallback após a associação;
+- controles 1, 2, 13, 14, 19 e 24 repetidos sem erro;
+- testes direcionados, `pytest -q`, `compileall` e `git diff --check`
+  aprovados.
+
+Não houve troca de modelo, runtime, resolução ou regra condicionada ao texto
+do corpus. O residual da página 29 (`Ficticio` sem acento) permanece separado
+e não foi mascarado por substituição textual.
