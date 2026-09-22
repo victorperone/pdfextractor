@@ -329,7 +329,15 @@ def _is_multiline_continuation(
     current_columns = {
         column for column, _ in _assign_groups(groups, anchors)
     }
-    return bool(current_columns) and current_columns <= previous_columns
+    # Require a *proper* subset: a line using exactly the same set of columns
+    # as the previous line is a new independent row, not a continuation.
+    # Also limit to at most 2 cell groups: genuine wrapped-cell continuations
+    # almost never span more than two cells; a wider row is likely a new entry.
+    return (
+        bool(current_columns)
+        and current_columns < previous_columns
+        and len(groups) <= 2
+    )
 
 
 def _merge_table_lines(first: TextLine, second: TextLine) -> TextLine:
