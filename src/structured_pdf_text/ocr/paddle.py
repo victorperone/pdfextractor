@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import difflib
+import threading
 from dataclasses import dataclass, replace
 from numbers import Real
 from pathlib import Path
@@ -44,6 +45,12 @@ class OcrOrientationContext:
     source_size: tuple[int, int]
     oriented_size: tuple[int, int]
     name: str
+
+
+# Serialises concurrent PaddleOCR initialisations so that the process-wide
+# env-var writes (PADDLE_PDX_CACHE_HOME, PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK)
+# are never interleaved between two instances with different cache directories.
+_INIT_LOCK: threading.Lock = threading.Lock()
 
 
 def _local_model_root(
@@ -159,6 +166,7 @@ class PaddleOcrEngine:
         self.quality_thresholds = options.pop("quality_thresholds", OcrQualityThresholds())
         self._ocr: Any | None = None
         self._init_error: Exception | None = None
+        self._lock: threading.Lock = threading.Lock()
         self.last_pass_count = 0
         self.last_batch_count = 0
         self.last_attempt_errors: list[str] = []
@@ -197,23 +205,24 @@ class PaddleOcrEngine:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
-        try:
-            return self._recognize_page_impl(
-                page_image,
-                page_index,
-                page_bbox,
-                quality_variants=quality_variants,
-                quality_policy=quality_policy,
-            )
-        except FatalExtractionError:
-            raise
-        except Exception as exc:
-            raise_if_resource_exhausted(
-                exc,
-                page_index=page_index,
-                stage="ocr_inference",
-            )
-            raise
+        with self._lock:
+            try:
+                return self._recognize_page_impl(
+                    page_image,
+                    page_index,
+                    page_bbox,
+                    quality_variants=quality_variants,
+                    quality_policy=quality_policy,
+                )
+            except FatalExtractionError:
+                raise
+            except Exception as exc:
+                raise_if_resource_exhausted(
+                    exc,
+                    page_index=page_index,
+                    stage="ocr_inference",
+                )
+                raise
 
     def _recognize_page_impl(
         self,
@@ -532,20 +541,33 @@ class PaddleOcrEngine:
         return self.recognize_page(image, page_index, region_bbox)
 
     def _get_ocr(self) -> Any:
+        # Fast path: no lock needed once initialised.
         if self._ocr is not None:
             return self._ocr
-
         if self._init_error is not None:
             raise self._init_error
 
+        with _INIT_LOCK:
+            # Double-checked locking: re-test inside the critical section in
+            # case another thread completed initialisation while we waited.
+            if self._ocr is not None:
+                return self._ocr
+            if self._init_error is not None:
+                raise self._init_error
+
+            return self._init_ocr()
+
+    def _init_ocr(self) -> Any:
+        """Initialise PaddleOCR under _INIT_LOCK (called exactly once per instance)."""
         cache_home = (
             Path(self.cache_home)
             .expanduser()
             .resolve()
         )
 
-        # Runtime policy:
-        # extraction must never perform model-source discovery.
+        # Runtime policy: extraction must never perform model-source discovery.
+        # These env vars are set inside _INIT_LOCK so concurrent initialisations
+        # with different cache directories do not interleave their writes.
         os.environ[
             "PADDLE_PDX_CACHE_HOME"
         ] = str(cache_home)
