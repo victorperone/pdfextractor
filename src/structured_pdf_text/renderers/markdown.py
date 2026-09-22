@@ -223,8 +223,12 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
     already retains them; HTML keeps the same semantics in the human-facing
     Markdown view without flattening headers into blank cells.
     """
-    rows: list[list[str]] = [[] for _ in range(max(table.row_count, 1))]
+    max_row = max((cell.row for cell in table.cells), default=0)
+    row_count = max(table.row_count, max_row + 1)
+    rows: list[list[str]] = [[] for _ in range(row_count)]
     for cell in sorted(table.cells, key=lambda item: (item.row, item.col)):
+        if cell.row < 0 or cell.row >= row_count:
+            continue
         tag = "th" if cell.row == 0 else "td"
         attrs: list[str] = []
         if cell.rowspan > 1:
