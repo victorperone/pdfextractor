@@ -1,3 +1,5 @@
+"""Native evidence extraction: PDFium adapter and evidence source protocol."""
+
 from .pdfium_source import PdfiumNativeEvidenceSource, PdfiumUnavailableError
 from .source import NativeEvidenceSource
 

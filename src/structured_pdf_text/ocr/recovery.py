@@ -1,3 +1,25 @@
+"""OCR region-level recovery: scale-variant planning, geometry transforms,
+token mapping and RGB budget enforcement.
+
+The central component is :class:`OcrRegionRefiner`, which takes an arbitrary
+page crop in PDF coordinates, applies the scale factors and rotations specified
+by the caller, runs each variant through the OCR engine, and maps every
+recognised token back to the original page coordinate system.
+
+**RGB budget gate** — to prevent ``STATUS_ACCESS_VIOLATION`` in Paddle's C++
+inference runtime when upscaled variants produce very large images,
+:func:`plan_ocr_scales` partitions the requested scale factors into *allowed*
+and *blocked* groups before any image is created.  The limit is controlled by
+the ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB`` environment variable (default 8 MiB).
+See ``docs/ocr-rgb-budget-crash-fix.md`` for the full incident analysis.
+
+**Debug log** — when ``PDFEXTRACTOR_OCR_DEBUG_LOG`` is set to a writable path,
+this module writes ``REGION_SELECTED``, ``OCR_SCALE_PLAN``,
+``OCR_SCALE_BLOCKED`` and ``OCR_SCALE_ALL_BLOCKED`` entries to the same file
+used by ``ocr/paddle.py``, providing a single unified trace of the recovery
+decision chain.
+"""
+
 from __future__ import annotations
 
 import math
@@ -31,6 +53,22 @@ _OCR_RGB_BUDGET_MIB: float = float(
 
 @dataclass(frozen=True, slots=True)
 class ScalePlan:
+    """Pre-computed geometry for one OCR scale variant.
+
+    Instances are produced by :func:`plan_ocr_scales` before any image is
+    created.  A plan is *allowed* when its ``estimated_rgb_bytes`` fits within
+    the configured budget; it is *blocked* otherwise.
+
+    Attributes:
+        scale: The scale factor relative to the base crop (≥ 1.0).
+        width: Target image width in pixels after applying *scale*.
+        height: Target image height in pixels after applying *scale*.
+        estimated_rgb_bytes: Estimated uncompressed RGB memory footprint
+            (``width × height × 3`` bytes for uint8 RGB).  Matches the actual
+            allocation produced by :func:`resize_image` because both use the
+            same rounding rule.
+    """
+
     scale: float
     width: int
     height: int
@@ -38,6 +76,7 @@ class ScalePlan:
 
     @property
     def estimated_rgb_mib(self) -> float:
+        """Estimated RGB memory footprint in mebibytes (convenience accessor)."""
         return self.estimated_rgb_bytes / _MIB
 
 
@@ -49,8 +88,38 @@ def plan_ocr_scales(
 ) -> tuple[list[ScalePlan], list[ScalePlan]]:
     """Partition scale factors into allowed and budget-blocked lists.
 
-    Rounding follows resize_image() exactly so the estimate matches what
-    Paddle will actually receive.
+    Evaluates each scale factor against the RGB memory budget and returns two
+    ordered lists: variants whose estimated footprint fits within *max_rgb_mib*
+    (allowed) and variants that exceed it (blocked).
+
+    The pixel-count estimate uses **exactly the same rounding rule** as
+    :func:`resize_image` (``max(dim + 1, round(dim * scale))`` for scale > 1,
+    identity for scale ≤ 1) so that the pre-flight check and the actual image
+    allocation are always consistent.
+
+    Args:
+        width: Base crop width in pixels.  Must be positive.
+        height: Base crop height in pixels.  Must be positive.
+        scale_factors: Ordered sequence of scale multipliers to evaluate.
+            Duplicate values produce duplicate plans.
+        max_rgb_mib: Upper bound on uncompressed RGB size in mebibytes.
+            Defaults to :data:`_OCR_RGB_BUDGET_MIB` (env-var controlled).
+
+    Returns:
+        A ``(allowed, blocked)`` tuple preserving the original order within
+        each list.  Plans in *allowed* all have
+        ``estimated_rgb_bytes ≤ max_rgb_mib × 1024²``; plans in *blocked*
+        exceed the limit.
+
+    Raises:
+        ValueError: If *width* or *height* ≤ 0, *max_rgb_mib* is not a
+            positive finite number, or any scale factor is not positive finite.
+
+    Example::
+
+        allowed, blocked = plan_ocr_scales(868, 1334, (1.0, 1.5, 2.0))
+        # allowed → [ScalePlan(1.0, 868, 1334, ...), ScalePlan(1.5, 1302, 2001, ...)]
+        # blocked → [ScalePlan(2.0, 1736, 2668, ...)]  # 13.3 MiB > 8.0 MiB default
     """
     if width <= 0 or height <= 0:
         raise ValueError(f"Image dimensions must be positive, got {width}×{height}.")
@@ -115,7 +184,37 @@ class RegionRefinementGoal(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class RegionRefinementRequest:
-    """Describe OCR recovery for one region in canonical PDF coordinates."""
+    """Parameterize OCR recovery for one region in canonical PDF coordinates.
+
+    All geometry is expressed in the same top-left coordinate system as the
+    page's ``BBox``.  The refiner converts to raster coordinates internally.
+
+    Attributes:
+        bbox: Region to recover, in canonical PDF user-space points.
+        scale_factors: Scale multipliers applied to the crop before OCR.
+            Duplicates are deduplicated; values below 1.0 are clamped to 1.0.
+            The RGB budget gate may further reduce this list; see
+            :func:`plan_ocr_scales`.
+        rotations: Rotation angles in degrees (counter-clockwise).  Each
+            combination of (scale, rotation) is one OCR variant.
+        quality_variants: Whether to ask the OCR engine for its own internal
+            quality variants (e.g. orientation recovery) for each call.
+        goal: Governs token selection and candidate ranking.  ``TEXT`` keeps
+            all non-blank tokens; ``NUMERIC`` keeps only tokens that contain
+            at least one digit or ``%``; ``TEXTUAL`` keeps only tokens with
+            at least two characters and at least one alpha character.
+        min_confidence: Lower bound on token confidence scores.  Tokens
+            whose ``confidence`` is ``None`` always pass.
+        page_rotation: PDF ``/Rotate`` value for the source page (0, 90, 180
+            or 270).  Required to correctly transform ``bbox`` into the visual
+            orientation used by the rendered image.
+        quality_policy: OCR quality policy string forwarded verbatim to the
+            engine's ``recognize_page``; ``None`` lets the engine use its
+            default.
+        quality_reasons: Textual reasons from upstream quality assessment
+            forwarded to the debug log (e.g. ``"small"``, ``"sparse"``).
+            Does not affect behaviour.
+    """
 
     bbox: BBox
     scale_factors: tuple[float, ...] = (1.0,)
@@ -130,6 +229,20 @@ class RegionRefinementRequest:
 
 @dataclass(frozen=True, slots=True)
 class RegionRefinementAttempt:
+    """Diagnostic record for one (scale, rotation) OCR variant.
+
+    Attributes:
+        scale_factor: Scale applied to the base crop for this attempt.
+        rotation: Counter-clockwise rotation in degrees.
+        token_count: Number of tokens that survived :func:`_filter_tokens`.
+        score: Composite quality score from :func:`_candidate_score`.  Higher
+            is better; ``-inf`` means no tokens or a hard error.
+        average_confidence: Mean confidence of surviving tokens, or ``0.0``
+            when all confidences are ``None`` or there are no tokens.
+        error: Exception class and message if this variant failed; ``None`` on
+            success (even if ``token_count`` is zero).
+    """
+
     scale_factor: float
     rotation: float
     token_count: int
@@ -140,6 +253,26 @@ class RegionRefinementAttempt:
 
 @dataclass(frozen=True, slots=True)
 class RegionRefinementResult:
+    """Output of :meth:`OcrRegionRefiner.refine` for one recovery request.
+
+    Attributes:
+        bbox: Effective region actually cropped (may differ from the requested
+            ``bbox`` after intersection with the page boundary).
+        tokens: Final selected tokens in page coordinate space, mapped back
+            from whichever (scale, rotation) variant won.  Empty when no
+            candidate produced any token, or when the RGB budget blocked all
+            scale variants.
+        attempts: One record per (scale, rotation) combination tried, in the
+            order they were attempted.  Useful for diagnostics.
+        selected_scale_factor: Scale of the winning variant, or ``None`` when
+            no candidate produced tokens.
+        selected_rotation: Rotation of the winning variant, or ``None`` when
+            no candidate produced tokens.
+        ocr_passes: Total number of individual OCR inference calls across all
+            variants (tracks engine-internal quality passes).
+        ocr_batches: Total number of batch calls across all variants.
+    """
+
     bbox: BBox
     tokens: tuple[OcrToken, ...]
     attempts: tuple[RegionRefinementAttempt, ...]
@@ -168,6 +301,41 @@ class OcrRegionRefiner:
         page_bbox: BBox,
         request: RegionRefinementRequest,
     ) -> RegionRefinementResult:
+        """Run OCR scale-and-rotation variants on one page region.
+
+        **RGB budget gate** — before creating any image, :func:`plan_ocr_scales`
+        evaluates every requested scale factor against
+        ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB`` (default 8 MiB).  Scale factors
+        whose estimated uncompressed RGB size exceeds the budget are silently
+        skipped (a ``OCR_SCALE_BLOCKED`` entry is written to the debug log).
+        If **all** scale factors are blocked (including 1×), recovery is
+        abandoned and an empty result is returned with an
+        ``OCR_SCALE_ALL_BLOCKED`` log entry.
+
+        This guard prevents ``STATUS_ACCESS_VIOLATION`` in Paddle's C++
+        inference runtime caused by consecutive very large image allocations.
+        See ``docs/ocr-rgb-budget-crash-fix.md`` for the full analysis.
+
+        **Variant selection** — for each allowed (scale, rotation) pair the
+        crop is OCR-processed and tokens are mapped back to page coordinates
+        via an inverse affine transform.  The winning variant is the one with
+        the highest composite quality score (:func:`_candidate_score`).  For
+        ``NUMERIC`` goals with multiple candidates, tokens are merged across
+        variants to maximise coverage (:func:`_merge_numeric_candidates`).
+
+        Args:
+            page_image: Rendered page image (PIL ``Image`` or NumPy array).
+                Must cover the full page at a consistent scale.
+            page_index: 0-based page index; included in diagnostic log entries.
+            page_bbox: Page bounding box in canonical PDF coordinates (top-left
+                origin, points).  Used to compute crop-to-page scale factors.
+            request: Full specification of region geometry, scale/rotation
+                variants, quality policy and filtering goal.
+
+        Returns:
+            :class:`RegionRefinementResult` with selected tokens in page
+            coordinate space and per-variant attempt diagnostics.
+        """
         region_bbox = request.bbox.intersection(page_bbox)
         if region_bbox is None or region_bbox.area <= 0:
             return RegionRefinementResult(
@@ -363,6 +531,12 @@ class OcrRegionRefiner:
         page_bbox: BBox,
         requests: list[RegionRefinementRequest] | tuple[RegionRefinementRequest, ...],
     ) -> list[RegionRefinementResult]:
+        """Apply :meth:`refine` to every request in *requests* sequentially.
+
+        Returns results in the same order as *requests*.  Each request is
+        processed independently; budget gate and variant selection are applied
+        per-request.
+        """
         return [
             self.refine(page_image, page_index, page_bbox, request)
             for request in requests
@@ -422,6 +596,16 @@ def crop_page_region(
 
 
 def resize_image(image: Any, factor: float) -> Any:
+    """Upscale *image* by *factor* using the best available backend.
+
+    When *factor* ≤ 1.0 the original image is returned unchanged.  Otherwise
+    the target dimensions are ``(max(w+1, round(w*factor)), max(h+1, round(h*factor)))``
+    — the ``+1`` floor ensures at least one pixel of growth even for sub-pixel
+    scale requests.  This rounding is mirrored exactly by :func:`plan_ocr_scales`.
+
+    Prefers PIL/Pillow (LANCZOS resampling) and falls back to OpenCV (cubic).
+    Returns the input unchanged if neither library is available.
+    """
     if factor <= 1.0:
         return image
     width, height = image_size(image)
@@ -486,6 +670,7 @@ def rotate_image_expanded(
 
 
 def image_size(image: Any) -> tuple[int, int]:
+    """Return ``(width, height)`` from a PIL Image or NumPy array."""
     if hasattr(image, "size") and isinstance(image.size, tuple):
         return int(image.size[0]), int(image.size[1])
     shape = getattr(image, "shape", None)
@@ -503,6 +688,7 @@ def _recognize(
     quality_variants: bool,
     quality_policy: str | None = None,
 ) -> list[OcrToken]:
+    """Call the OCR engine, tolerating engines that accept fewer keyword args."""
     try:
         return engine.recognize_page(
             image,
@@ -524,6 +710,16 @@ def _map_token_to_page(
     source_size: tuple[int, int],
     region_bbox: BBox,
 ) -> OcrToken:
+    """Map an OCR token from the rotated/scaled variant back to page coordinates.
+
+    Applies the inverse affine transform (6-element row-major matrix from
+    :func:`rotate_image_expanded`) to all four corners of the token bounding
+    box, clamps them to the source image bounds, and then linearly interpolates
+    into the ``region_bbox`` in canonical PDF page space.
+
+    The resulting token carries ``source=OCR_REGION`` and
+    ``provenance="targeted_region_recovery"``.
+    """
     a, b, c, d, e, f = inverse
     points = (
         (token.bbox.x0, token.bbox.y0),
@@ -557,6 +753,7 @@ def _filter_tokens(
     tokens: list[OcrToken],
     request: RegionRefinementRequest,
 ) -> list[OcrToken]:
+    """Apply goal-specific and confidence filtering to a list of OCR tokens."""
     filtered = [
         token
         for token in tokens
@@ -584,6 +781,13 @@ def _candidate_score(
     tokens: list[OcrToken],
     goal: RegionRefinementGoal,
 ) -> tuple[float, float]:
+    """Score a list of filtered tokens for variant selection.
+
+    Returns ``(score, average_confidence)``.  Score is ``-inf`` for empty
+    lists.  Otherwise it combines mean confidence, a log-capped character
+    count bonus, a horizontal-orientation bonus, and a small token-count
+    bonus for NUMERIC goals.
+    """
     if not tokens:
         return -math.inf, 0.0
     confidences = [token.confidence for token in tokens if token.confidence is not None]
@@ -618,6 +822,10 @@ def _merge_numeric_candidates(
 
 
 def _same_token_position(first: OcrToken, second: OcrToken) -> bool:
+    """Return True when two tokens overlap enough to be considered the same position.
+
+    Uses IoU ≥ 0.25 or one-sided intersection coverage ≥ 0.50 as criteria.
+    """
     if first.bbox.iou(second.bbox) >= 0.25:
         return True
     intersection = first.bbox.intersection(second.bbox)
@@ -630,6 +838,12 @@ def _same_token_position(first: OcrToken, second: OcrToken) -> bool:
 
 
 def _numeric_token_score(token: OcrToken) -> float:
+    """Score a single token for numeric-merge conflict resolution.
+
+    Higher score wins.  Combines OCR confidence with a syntax ratio (fraction
+    of characters that are digits or common numeric punctuation) and a small
+    bonus for each digit up to six.
+    """
     text = "".join(token.text.split())
     digits = sum(character.isdigit() for character in text)
     accepted = sum(character.isdigit() or character in ".,%+-/R$" for character in text)

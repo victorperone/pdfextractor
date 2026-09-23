@@ -1,3 +1,10 @@
+"""Visual debug overlay renderer for PDF pages.
+
+Renders a page at a configurable scale and draws colour-coded bounding boxes
+over layout regions (orange), text lines (blue), non-whitespace tokens (red),
+and table cells (green). Intended for development and manual inspection only;
+not part of the production extraction path.
+"""
 from __future__ import annotations
 
 from pathlib import Path

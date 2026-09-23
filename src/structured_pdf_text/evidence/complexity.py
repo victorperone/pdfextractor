@@ -1,3 +1,12 @@
+"""Page complexity analysis for native PDF evidence.
+
+Heuristics that classify each page by the quality and reliability of its
+native text layer.  No OCR or learned model is invoked here; the analysis
+combines Unicode statistics, geometry, and — optionally — a rendered image
+to produce a :class:`PageComplexity` verdict with a recommended
+:class:`~structured_pdf_text.document.PageStrategy`.
+"""
+
 from __future__ import annotations
 
 import math
@@ -12,6 +21,28 @@ from structured_pdf_text.geometry import BBox
 
 @dataclass(frozen=True, slots=True)
 class PageComplexity:
+    """Immutable verdict produced by :class:`ComplexityAnalyzer` for one page.
+
+    Attributes:
+        reasons: Set of :class:`~structured_pdf_text.document.ComplexityReason`
+            flags that explain why the page may need recovery.
+        native_text_score: Float in [0, 1] estimating how trustworthy the
+            native PDF text layer is (1 = fully reliable, 0 = completely
+            untrustworthy).
+        visual_recovery_needed: True when at least one reason indicates that
+            the native text layer is incomplete or corrupt and visual recovery
+            (OCR, region merging) should be attempted.
+        layout_needed: True when structural complexity (tables, multi-column
+            layout, rotated text, embedded images) warrants layout analysis.
+        full_page_ocr_candidate: True when the page should be sent through
+            full-page OCR rather than region-level recovery.
+        recommended_strategy: Recommended
+            :class:`~structured_pdf_text.document.PageStrategy` derived from
+            the above flags.
+        facts: Diagnostic key-value bag with the raw measurements that
+            produced this verdict.
+    """
+
     reasons: set[ComplexityReason]
     native_text_score: float
     visual_recovery_needed: bool
@@ -33,6 +64,40 @@ class ComplexityAnalyzer:
         self.render_scale = max(0.05, float(render_scale))
 
     def analyze(self, page: NativePageEvidence, rendered_page: Any | None = None) -> PageComplexity:
+        """Classify a single page and return its complexity verdict.
+
+        Runs a multi-signal heuristic pipeline over the native PDF evidence:
+
+        1. **Character filtering** — whitespace and zero-area characters are
+           removed; the useful-text string drives length/coverage checks.
+        2. **Coverage metrics** — union area of text, image and path bounding
+           boxes, normalised to page area.
+        3. **Grid detection** — thin horizontal and vertical path segments are
+           counted to detect table grids.
+        4. **Unicode quality** — replacement-character ratio (U+FFFD),
+           private-use-area ratio, control-character ratio and explicit
+           mapping-failure flags are each thresholded independently.
+        5. **Duplicate-layer detection** — characters whose centre and text
+           match an earlier character inside a 2-pixel bucket are counted.
+        6. **Invisible-text detection** — when *rendered_page* is provided,
+           each text line is checked against visible ink in the rendered image;
+           lines with an ink ratio below 1.5 % are counted as invisible.
+        7. **Reason accumulation** — each threshold gate adds a
+           :class:`~structured_pdf_text.document.ComplexityReason` flag.
+        8. **Score and strategy** — a continuous ``native_text_score`` and a
+           discrete :class:`~structured_pdf_text.document.PageStrategy` are
+           derived from the collected flags.
+
+        Args:
+            page: Native evidence bundle extracted from the PDF page.
+            rendered_page: Optional PIL ``Image`` of the rendered page used
+                for visible-ink checks.  When *None*, ink-based signals are
+                skipped.
+
+        Returns:
+            A :class:`PageComplexity` instance with the verdict, score and
+            a ``facts`` dict containing all raw measurements for diagnostics.
+        """
         characters = [
             character
             for character in page.characters
@@ -200,6 +265,12 @@ def _coverage(boxes: list[BBox], page_area: float) -> float:
 
 
 def _union_area(boxes: list[BBox]) -> float:
+    """Compute the exact union area of a list of axis-aligned bounding boxes.
+
+    Uses a sweep-line algorithm: x-edges partition the plane into vertical
+    slabs; within each slab the covered y-intervals are merged and summed.
+    Returns 0.0 for an empty list.
+    """
     if not boxes:
         return 0.0
     x_edges = sorted({box.x0 for box in boxes} | {box.x1 for box in boxes})
@@ -233,6 +304,14 @@ def _is_page_background(box: BBox, page_bbox: BBox) -> bool:
 
 
 def _grid_line_count(boxes: list[BBox], page_bbox: BBox) -> int:
+    """Count thin path segments that form a table grid.
+
+    A path box qualifies as a horizontal rule when its height is at most 4 pt
+    and its width spans at least 20 % of the page; it qualifies as a vertical
+    rule when its width is at most 4 pt and its height spans at least 12 % of
+    the page.  Returns the total segment count only when both directions have
+    at least two qualifying segments (i.e., a real grid), otherwise returns 0.
+    """
     horizontal = 0
     vertical = 0
     for box in boxes:
@@ -262,6 +341,16 @@ def _is_scanned_candidate(
     largest_image_coverage: float,
     visible_ink_ratio: float | None,
 ) -> bool:
+    """Return True when the page looks like a scanned image with no reliable native text.
+
+    Three independent signals trigger a positive result:
+
+    - Very little native text (≤ 30 chars) combined with a large image that
+      covers at least 75 % of the page.
+    - No native text at all and images covering at least 40 % of the page.
+    - No native text at all but visible ink in a rendered image (ink ratio ≥ 2 %),
+      suggesting content not reflected in the native layer.
+    """
     if useful_text_length <= 30 and largest_image_coverage >= 0.75:
         return True
     if useful_text_length == 0 and image_coverage >= 0.40:
@@ -278,6 +367,11 @@ def _private_use_ratio(text: str) -> float:
 
 
 def _control_ratio(text: str) -> float:
+    """Return the fraction of non-whitespace characters classified as control characters.
+
+    Unicode general category "C*" characters (other than U+FFFD) are treated as
+    control characters.  A high ratio indicates an unreliable or corrupt text layer.
+    """
     meaningful = [char for char in text if not char.isspace()]
     controls = sum(
         1
@@ -288,6 +382,13 @@ def _control_ratio(text: str) -> float:
 
 
 def _duplicate_char_count(characters: list[NativeCharacter]) -> int:
+    """Count characters that are spatial and textual duplicates of an earlier character.
+
+    Characters are bucketed by their centre coordinates (rounded to 2 pt cells).
+    A character is a duplicate when another character with identical text has an
+    IoU of at least 0.85 with it.  The count drives the ``duplicate_char_ratio``
+    used by the DUPLICATE_TEXT_LAYER signal.
+    """
     if len(characters) < 2:
         return 0
     buckets: dict[tuple[int, int], list[NativeCharacter]] = {}
@@ -308,6 +409,13 @@ def _duplicate_char_count(characters: list[NativeCharacter]) -> int:
 
 
 def _line_boxes(characters: list[NativeCharacter]) -> list[BBox]:
+    """Group characters into text lines and return each line's bounding box.
+
+    Characters are sorted by vertical centre, then grouped using a greedy
+    nearest-centre strategy.  The vertical tolerance is 60 % of the median
+    character height (minimum 1.5 pt).  Each group's union bounding box is
+    returned as a :class:`~structured_pdf_text.geometry.BBox`.
+    """
     if not characters:
         return []
     heights = [character.bbox.height for character in characters if character.bbox.height > 0]
@@ -340,6 +448,13 @@ def _ink_ratio(image: Any) -> float:
 
 
 def _ink_ratio_in_bbox(image: Any, bbox: BBox, page_bbox: BBox) -> float:
+    """Return the fraction of pixels inside a bounding box that contain visible ink.
+
+    Coordinates are re-projected from PDF space (relative to *page_bbox*) to
+    pixel space before cropping.  Delegates to :func:`_ink_ratio` for the
+    per-pixel darkness threshold.  Returns 0.0 when the projected region has
+    zero size.
+    """
     if page_bbox.width <= 0 or page_bbox.height <= 0:
         return 0.0
     width, height = image.size
@@ -362,6 +477,14 @@ def _multi_column_signal(
     characters: list[NativeCharacter],
     grid_line_count: int,
 ) -> bool:
+    """Return True when the page text is arranged in two or more columns.
+
+    The test is intentionally conservative: it requires at least 120 useful
+    characters, both left and right halves must each contain at least 20 % of
+    all characters, and a horizontal gutter of at least 6 % of the page width
+    must separate the two groups.  Pages with a detected table grid are excluded
+    because table rules can look similar to prose columns.
+    """
     if page.bbox.width <= 0 or len(characters) < 120 or grid_line_count >= 4:
         return False
     # This is intentionally conservative. It only reports two substantial
@@ -384,6 +507,14 @@ def _native_text_score(
     duplicate_char_ratio: float,
     mapping_failure_ratio: float,
 ) -> float:
+    """Compute a [0, 1] score representing how trustworthy the native text layer is.
+
+    Starts at 1.0 and subtracts fixed penalties for each active
+    :class:`~structured_pdf_text.document.ComplexityReason`, plus continuous
+    penalties proportional to the duplicate-character and Unicode-mapping-failure
+    ratios.  A score of 1.0 means the layer is fully reliable; 0.0 means it
+    cannot be trusted.
+    """
     score = 1.0
     if useful_text_length == 0:
         score -= 0.80

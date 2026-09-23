@@ -1,3 +1,17 @@
+"""Heuristic layout engine and vendor-neutral region prediction types.
+
+This module provides:
+
+* :class:`LayoutRegionPrediction` — an immutable, vendor-neutral description
+  of one detected page region, consumed by the rest of the pipeline.
+* :class:`LayoutEngine` — a structural :class:`~typing.Protocol` that any
+  layout backend (ML model or heuristic) must satisfy.
+* :class:`NativeHeuristicLayoutEngine` — a deterministic implementation that
+  derives regions purely from native PDF evidence (text bands, ruled paths,
+  embedded images) without invoking any external model.
+* Private helpers used by :meth:`NativeHeuristicLayoutEngine.detect_page` for
+  classifying individual lines.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,6 +30,25 @@ from structured_pdf_text.layout.decorative import (
 
 @dataclass(frozen=True, slots=True)
 class LayoutRegionPrediction:
+    """Vendor-neutral description of one predicted page region.
+
+    Attributes:
+        kind: Coarse structural category (e.g. ``TEXT``, ``TABLE``, ``FIGURE``).
+        bbox: Bounding box of the predicted region in page coordinates.
+        confidence: Detector confidence in [0, 1], or ``None`` when unavailable.
+        label: Human-readable tag set by the detector for diagnostics (e.g.
+            ``"native_grid_1"`` or ``"heuristic_full_page"``).
+        semantic_role: Fine-grained semantic classification attached by the
+            heuristic engine when the region carries a specific textual role
+            beyond its structural kind (e.g. ``"decorative_watermark:rotated"``
+            or ``"semantic_status"``).  ``None`` for generic regions.
+        edge_role: Positional role on the page for header/footer candidates
+            (``"top_candidate"`` or ``"bottom_candidate"``).  ``None`` for
+            interior regions.  Stored on the resulting
+            :class:`~structured_pdf_text.document.LayoutRegion` so that
+            downstream steps can detect repeated edge content.
+    """
+
     kind: RegionKind
     bbox: BBox
     confidence: float | None = None
@@ -30,6 +63,13 @@ class PageImage(Protocol):
 
 
 class LayoutEngine(Protocol):
+    """Structural contract for any page layout backend.
+
+    Implementations may use a computer-vision model, a set of heuristics, or a
+    combination of both.  Callers depend only on this interface so that backends
+    can be swapped without changing the pipeline.
+    """
+
     def detect(self, image: PageImage) -> list[LayoutRegionPrediction]:
         """Detect structural regions on a page image."""
 
@@ -58,6 +98,54 @@ class NativeHeuristicLayoutEngine:
         lines: list[Any],
         image: PageImage | None = None,
     ) -> list[LayoutRegionPrediction]:
+        """Derive region predictions from native PDF evidence in five phases.
+
+        Phase 1 — Edge bands
+            Lines are partitioned into a compact top band (header) and a
+            compact bottom band (footer) using the observed line height as the
+            band threshold.  Both sets receive an ``edge_role`` tag so that
+            repeated content can be identified across pages.
+
+        Phase 2 — Ruled tables
+            Vector path geometry is analysed by
+            :func:`~structured_pdf_text.tables.geometry.detect_path_table_candidates`
+            to locate grid structures.  Each candidate becomes a ``TABLE``
+            prediction with confidence 0.88.
+
+        Phase 3 — Embedded images
+            Each :class:`~structured_pdf_text.document.ImageEvidence` with a
+            non-null bbox is converted to a ``FIGURE`` prediction (confidence
+            0.90).
+
+        Phase 4 — Semantic classification
+            Lines that survive edge-band and structure exclusion are passed to
+            :func:`_semantic_predictions`, which classifies watermarks,
+            semantic-status stamps, captions, footnotes, marginalia, and
+            headings using style and geometry heuristics.
+
+        Phase 5 — Remaining body text
+            Lines not claimed by any earlier prediction are unioned into a
+            single ``TEXT`` region (confidence 0.72).  If the page produced no
+            predictions at all, a full-page fallback with confidence 0.20 is
+            returned so callers always receive at least one region.
+
+        The result is passed through :func:`_normalize_predictions` before
+        being returned, which clamps all bounding boxes to the page extent and
+        removes zero-area entries.
+
+        Args:
+            page: Native evidence bundle for the page, including its bounding
+                box, vector paths, and embedded image metadata.
+            lines: Text lines extracted from the native PDF layer.
+            image: Optional rasterised page image (currently unused by this
+                implementation but required by the :class:`LayoutEngine`
+                protocol for ML-backed adapters).
+
+        Returns:
+            A list of :class:`LayoutRegionPrediction` objects ordered
+            approximately from high-priority structural regions to the body
+            text fallback.
+        """
         predictions: list[LayoutRegionPrediction] = []
         page_bbox = page.bbox
         header_lines, footer_lines = _edge_band_lines(lines)
@@ -260,6 +348,15 @@ def _is_decorative(line: Any, page_bbox: BBox, typical_height: float) -> bool:
 
 
 def _decorative_reasons(line: Any, page_bbox: BBox, typical_height: float) -> tuple[str, ...]:
+    """Return the set of decorative signal tags that fire for *line*.
+
+    Each tag represents one independent visual cue (e.g. ``"rotated"``,
+    ``"light_luminance"``, ``"low_opacity"``, ``"large_font"``,
+    ``"broad_span"``).  The caller decides whether enough tags are present to
+    classify the line as decorative.  An empty tuple means no cue fired or the
+    line is in the top-edge band, where decorative classification is suppressed
+    to avoid misclassifying page headers.
+    """
     tokens = [token for token in line.tokens if token.text.strip()]
     if not tokens:
         return ()
@@ -302,6 +399,12 @@ def _decorative_reasons(line: Any, page_bbox: BBox, typical_height: float) -> tu
 
 
 def _line_is_rotated(line: Any) -> bool:
+    """Return ``True`` when the line's baseline deviates meaningfully from horizontal.
+
+    The threshold of 0.20 radians (~11.5°) filters out minor rendering
+    artefacts while catching rotated stamps and watermarks that are typically
+    tilted by 30° or more.
+    """
     baseline = getattr(line, "baseline", None)
     angle = getattr(baseline, "angle", None)
     if angle is None:
@@ -312,6 +415,15 @@ def _line_is_rotated(line: Any) -> bool:
 
 
 def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> bool:
+    """Return ``True`` when *line* is likely a heading by geometry and style.
+
+    The check combines three complementary signals: positional proximity to the
+    top of the page, horizontal centering, and a typographic style score from
+    :func:`_heading_style_score`.  At least one positional or centering signal
+    must be present unless the style score alone reaches 2.  Lines whose text
+    ends with certain punctuation and exceeds 45 characters are excluded because
+    they are likely body sentences, not headings.
+    """
     # Punctuation-only fragments are often rules, OCR residue, or decorative
     # marks. They are never semantic headings regardless of their size.
     if not text or not any(character.isalnum() for character in text) or len(text) > 140:
@@ -329,6 +441,13 @@ def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> b
 
 
 def _heading_style_score(line: Any, typical_height: float) -> int:
+    """Compute an integer style score (0–3) indicating heading-like typography.
+
+    One point is awarded for a font size at least 1.35× the typical body
+    height, one point for bold weight or a font name containing ``"bold"``, and
+    a further point when the size ratio reaches 1.70×.  The score is used as a
+    tiebreaker in :func:`_is_title` when positional signals are weak.
+    """
     tokens = [token for token in line.tokens if token.text.strip()]
     sizes = [token.font_size for token in tokens if token.font_size and token.font_size > 0]
     size_ratio = median(sizes) / max(typical_height, 1.0) if sizes else 0.0
@@ -360,6 +479,13 @@ def _is_footnote(
     page_bbox: BBox,
     typical_height: float,
 ) -> bool:
+    """Return ``True`` when *line* is likely a footnote or source attribution.
+
+    A line qualifies when it appears in the bottom third of the page (below
+    68 % of page height), its glyph height does not exceed 1.30× the body
+    line height, and it begins with a recognised footnote marker such as a
+    numerical reference, a dagger, ``nota``, or ``fonte``.
+    """
     if line.bbox.y0 < page_bbox.y0 + page_bbox.height * 0.68:
         return False
     if line.bbox.height > typical_height * 1.30:
@@ -436,6 +562,12 @@ def _normalize_predictions(
     predictions: list[LayoutRegionPrediction],
     page_bbox: BBox,
 ) -> list[LayoutRegionPrediction]:
+    """Clamp every prediction's bounding box to the page extent and drop empties.
+
+    Predictions whose bounding box has zero area after clamping are silently
+    removed.  This guards against off-page coordinates produced by ``expand()``
+    calls near the page boundary.
+    """
     normalized: list[LayoutRegionPrediction] = []
     for prediction in predictions:
         bbox = _clamp_bbox(prediction.bbox, page_bbox)

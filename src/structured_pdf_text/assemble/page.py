@@ -1,3 +1,11 @@
+"""Provisional per-page assembly.
+
+Builds a ``StructuredPage`` from the layout and evidence outputs of a single
+page pipeline run. At this stage ``reading_text`` and ``content_blocks`` are
+intentionally left empty; they are filled by ``assemble_document`` after
+heading levels and repeated header/footer detection are complete across all
+pages.
+"""
 from __future__ import annotations
 
 from structured_pdf_text.document import (

@@ -1,3 +1,11 @@
+"""Side-by-side extraction comparison between registered adapters.
+
+Provides a small adapter registry (``structured-native``, ``structured-balanced``,
+``pdfium-raw``, ``pymupdf``) and a ``compare_extractors`` entry point that runs
+each requested adapter and reports pairwise fidelity signals relative to a chosen
+reference. No single winner score is produced — the metrics are observational
+until the reference is verified ground truth.
+"""
 from __future__ import annotations
 
 import importlib.util
@@ -17,6 +25,13 @@ from structured_pdf_text.native.pdfium_source import PdfiumNativeEvidenceSource
 
 @dataclass(frozen=True, slots=True)
 class ComparisonExtraction:
+    """Immutable result record produced by a single ``ComparisonAdapter`` run.
+
+    Carries the adapter name, extraction status, page count, both text views,
+    elapsed time, optional adapter-specific metadata, and an error string when
+    the extraction failed.
+    """
+
     adapter: str
     status: str
     page_count: int
@@ -28,6 +43,13 @@ class ComparisonExtraction:
 
 
 class ComparisonAdapter(Protocol):
+    """Protocol satisfied by every extraction backend registered for comparison.
+
+    Concrete implementations must expose ``name``, ``available()``, and
+    ``extract(path)`` so that ``compare_extractors`` can invoke them uniformly
+    without importing optional dependencies eagerly.
+    """
+
     name: str
 
     def available(self) -> bool:
@@ -38,6 +60,13 @@ class ComparisonAdapter(Protocol):
 
 
 class StructuredPdfTextAdapter:
+    """Adapter that wraps ``PdfTextExtractor`` for extraction comparison.
+
+    Supports all ``ExtractionMode`` values. The adapter name encodes the mode
+    so that multiple instances (e.g. NATIVE and BALANCED) can coexist in the
+    same comparison run.
+    """
+
     def __init__(self, mode: ExtractionMode | str = ExtractionMode.NATIVE, language: str = "pt") -> None:
         self.mode = ExtractionMode(mode)
         self.language = language
@@ -92,6 +121,13 @@ class PdfiumRawAdapter:
 
 
 class PyMuPdfAdapter:
+    """Adapter that wraps PyMuPDF (``pymupdf`` / ``fitz``) for extraction comparison.
+
+    Imports the library lazily inside ``extract`` so that the adapter remains
+    instantiable even when PyMuPDF is not installed. ``available()`` returns
+    ``False`` in that case and the adapter is skipped by ``compare_extractors``.
+    """
+
     name = "pymupdf"
 
     def available(self) -> bool:
@@ -247,6 +283,13 @@ def _extraction_entry(
 
 
 def _pairwise_metrics(reference: str, candidate: str) -> dict[str, float]:
+    """Compute fidelity signals between a reference and a candidate text view.
+
+    Returns character-level similarity, word recall, word precision, and
+    accented-word recall. All values are rounded to six decimal places. These
+    are observational metrics; they become accuracy measures only when the
+    reference is verified ground truth.
+    """
     normalized_reference = _normalize(reference)
     normalized_candidate = _normalize(candidate)
     reference_words = Counter(_words(normalized_reference))

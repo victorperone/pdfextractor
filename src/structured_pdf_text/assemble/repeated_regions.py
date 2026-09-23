@@ -1,3 +1,10 @@
+"""Repeated header and footer detection across a multi-page document.
+
+A line is classified as repeated furniture only when its normalised text
+template recurs on multiple pages **and** its vertical position and typography
+are stable. Pure position matching is deliberately excluded because unique body
+content often begins or ends in the same page band as genuine headers/footers.
+"""
 from __future__ import annotations
 
 import re
@@ -153,6 +160,11 @@ def _stable_edge_position(
 def _stable_style(
     values: list[tuple[str, TextLine, StructuredPage]],
 ) -> bool:
+    """Return True when typography is consistent enough across occurrences to confirm furniture.
+
+    Checks font size spread (≤ 35 %), unique font family count (≤ 1), and font
+    weight spread (≤ 200). Lines with no typographic metadata pass by default.
+    """
     sizes: list[float] = []
     fonts: set[str] = set()
     weights: list[int] = []

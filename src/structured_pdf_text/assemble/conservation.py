@@ -46,6 +46,17 @@ class TransformedContentSource:
 
 @dataclass(frozen=True, slots=True)
 class ContentConservationSummary:
+    """Aggregate conservation accounting result for one page.
+
+    Counts every accepted line exactly once and records the disposition that
+    each line received (rendered, table/figure-owned, suppressed, deduplicated,
+    etc.). ``unaccounted_lines`` is the residual after all blocks and fallback
+    recovery: a non-zero value indicates a conservation gap that should be
+    investigated.
+
+    Serialised to diagnostic facts via ``to_facts()``.
+    """
+
     accepted_lines: int
     rendered_lines: int
     table_owned_lines: int
@@ -464,6 +475,10 @@ def _insert_fallbacks_at_position(
 
 
 def _block_disposition(block: PageContentBlock) -> tuple[ContentDisposition, str]:
+    """Map a block's kind and suppression state to a ``ContentDisposition`` value.
+
+    Returns ``(disposition, reason_string)`` suitable for ledger records.
+    """
     if block.suppressed:
         reason = block.suppression_reason or "explicit_policy"
         if reason == "repeated_header":

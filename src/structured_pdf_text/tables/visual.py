@@ -1,3 +1,19 @@
+"""Visual (raster) table detection backed by OpenCV morphological analysis.
+
+This module is the raster-grid tier.  It is called only when page images are
+available and native path-based detection has not already claimed the region.
+The :func:`detect_visual_table` function orchestrates the detection pipeline:
+
+1. Delegate grid discovery to a
+   :class:`~structured_pdf_text.tables.visual_engine.TableStructureEngine`
+   (defaulting to the OpenCV-based implementation in :mod:`visual_engine`).
+2. Scale pixel-space edges to PDF coordinate space.
+3. Validate that the detected grid falls inside a page image object (to avoid
+   promoting chart axes or decorative borders to table grids).
+4. Assign OCR tokens to cells and verify minimum text support.
+
+:func:`detect_visual_grid` is also exported for direct use by engine adapters.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +26,21 @@ from structured_pdf_text.tables.text_join import join_table_tokens
 
 @dataclass(frozen=True, slots=True)
 class VisualGrid:
+    """Pixel-space grid produced by a :class:`~structured_pdf_text.tables.visual_engine.TableStructureEngine`.
+
+    All edge coordinates are in image pixel space and must be scaled to PDF
+    coordinates before constructing cell bounding boxes.
+
+    Attributes:
+        x_edges: Sorted x-coordinates of vertical column separators.
+        y_edges: Sorted y-coordinates of horizontal row separators.
+        confidence: Detection confidence in [0, 1].
+        horizontal_lines: Raw ``(x, y, width, height)`` tuples for each
+            detected horizontal line contour.
+        vertical_lines: Raw ``(x, y, width, height)`` tuples for each
+            detected vertical line contour.
+    """
+
     x_edges: tuple[float, ...]
     y_edges: tuple[float, ...]
     confidence: float
@@ -99,6 +130,13 @@ def _has_visual_table_text_support(
     cells: list[TableCell],
     grid: VisualGrid,
 ) -> bool:
+    """Return ``True`` when cell tokens provide sufficient evidence for the detected grid.
+
+    Checks three occupancy thresholds: at least 10 % of all cells are
+    non-empty, at least 30 % of rows contain text, and at least 30 % of
+    columns contain text.  For very small grids with low confidence, also
+    requires at least one cell to contain a recognisable alphabetic word.
+    """
     populated = [cell for cell in cells if cell.text.strip()]
     if not populated:
         return False
@@ -136,6 +174,16 @@ def _join_cell_tokens(tokens: list[Any]) -> str:
 
 
 def detect_visual_grid(image: Any) -> VisualGrid | None:
+    """Detect a ruled grid in *image* using OpenCV morphological operations.
+
+    Applies separate horizontal and vertical structuring elements to isolate
+    ruling lines, clusters their centre coordinates into edge positions, and
+    computes a confidence score from the line density and spatial extent of
+    the detected grid.
+
+    Returns ``None`` when OpenCV is unavailable, the image is too small, or
+    fewer than three edges are detected in either dimension.
+    """
     try:
         import cv2
         import numpy as np
@@ -240,6 +288,15 @@ def _has_horizontal_separator(image: Any, page_bbox: BBox, y: float, x0: float, 
 
 
 def _separator_strength(image: Any, page_bbox: BBox, box: BBox, *, vertical: bool) -> float:
+    """Sample the image under *box* and return the maximum dark-pixel fraction.
+
+    Projects *box* from PDF coordinates to pixel coordinates, extracts the
+    image slice, and returns the maximum column-wise (vertical separator) or
+    row-wise (horizontal separator) fraction of pixels darker than 225.  A
+    value of 0.0 means no dark pixels; 1.0 means the full strip is dark.
+    Returns 1.0 on import or attribute errors so that missing separators are
+    conservatively treated as present.
+    """
     try:
         import cv2
         import numpy as np

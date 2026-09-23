@@ -18,6 +18,32 @@ class DecorativeRole(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class DecorativeCluster:
+    """A group of visually related lines classified as decorative or semantic.
+
+    Attributes:
+        lines: The constituent :class:`~structured_pdf_text.document.TextLine`
+            objects that were merged into this cluster.
+        bbox: Union bounding box of all member lines.
+        angle: Median baseline angle of member lines, in radians.  A value
+            near zero means horizontal text; non-zero values indicate rotated
+            stamps or watermarks.
+        luminance: Mean perceptual luminance of token fill colours, computed
+            with ITU-R BT.709 coefficients and normalised to [0, 1].
+            ``None`` when no colour information is available.  High values
+            (≥ 0.78) suggest light-coloured or near-white text that is likely
+            decorative.
+        opacity: Mean alpha channel of token fill colours, normalised to
+            [0, 1].  ``None`` when no colour information is available.  Low
+            values (< 0.82) indicate translucent content such as watermarks.
+        role: Semantic classification of the cluster; one of
+            :attr:`~DecorativeRole.DECORATIVE_WATERMARK`,
+            :attr:`~DecorativeRole.SEMANTIC_STATUS`, or
+            :attr:`~DecorativeRole.UNKNOWN`.
+        confidence: Model confidence in *role*, in [0, 1].
+        reasons: Tuple of short string tags (e.g. ``"unusual_angle"``,
+            ``"light_luminance"``) that contributed to the classification.
+    """
+
     lines: tuple[TextLine, ...]
     bbox: BBox
     angle: float
@@ -186,6 +212,15 @@ def _looks_like_semantic_status(
 
 
 def _style_is_coherent(lines: list[TextLine]) -> bool:
+    """Return ``True`` when all lines share a consistent font size and face.
+
+    A cluster is considered style-coherent when:
+
+    * The ratio of maximum to minimum font size does not exceed 1.35 (allowing
+      minor rounding differences between glyphs).
+    * At most one distinct font name appears across all tokens.  Mixed fonts
+      suggest separate content fragments rather than a single styled element.
+    """
     sizes = [_font_size(line) for line in lines if _font_size(line) > 0]
     if sizes and max(sizes) / max(min(sizes), 0.01) > 1.35:
         return False

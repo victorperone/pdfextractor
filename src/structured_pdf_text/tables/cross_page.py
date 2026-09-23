@@ -1,3 +1,19 @@
+"""Cross-page table continuation: detection, scoring, and merging.
+
+Tables that span a page boundary appear as independent fragments in the
+per-page extraction pass.  This module compares adjacent-page fragment pairs
+and decides, based on structural evidence (column count, x-track alignment,
+header similarity, page-boundary proximity, and explicit continuation
+markers), whether two fragments belong to a single logical table.
+
+The public surface is:
+
+- :func:`resolve_cross_page_tables` — returns the merged table list.
+- :func:`resolve_cross_page_tables_with_diagnostics` — same, plus per-pair
+  :class:`~structured_pdf_text.tables.model.TableContinuationDecision`
+  objects that explain why each candidate pair was accepted or rejected.
+- :func:`table_signature` — extracts a structural fingerprint for auditing.
+"""
 from __future__ import annotations
 
 import re
@@ -122,6 +138,17 @@ def _continuation_decision(
     page_bboxes: dict[int, BBox],
     page_titles: dict[int, tuple[str, ...]],
 ) -> TableContinuationDecision:
+    """Evaluate whether *following* is a continuation of *previous*.
+
+    Returns a :class:`~structured_pdf_text.tables.model.TableContinuationDecision`
+    that records every evidence signal (adjacent pages, column-count match,
+    x-track delta, header similarity, page-boundary proximity, continuation
+    markers, new-section titles, table width, and column-type profiles) along
+    with their individual contributions to the numeric *score*.  The pair is
+    accepted only when the score exceeds the threshold **and** no hard-rejection
+    criterion was triggered (non-adjacent pages, column-count mismatch, large
+    x-track delta, or a strong new title without a continuation marker).
+    """
     previous_page = _last_page(previous)
     following_page = _first_page(following)
     reasons: list[str] = []
@@ -273,6 +300,13 @@ def _continuation_decision(
 
 
 def _merge(previous: StructuredTable, following: StructuredTable) -> StructuredTable:
+    """Combine two table fragments into a single :class:`~structured_pdf_text.document.StructuredTable`.
+
+    When both fragments have identical header rows, the repeated header row on
+    the *following* table is dropped.  All remaining rows of *following* are
+    re-numbered so they continue from the last row of *previous*, and all page
+    fragment records are adjusted with the same offset.
+    """
     first_signature = table_signature(previous)
     second_signature = table_signature(following)
     repeated_header = (
@@ -330,6 +364,16 @@ def _table_y(table: StructuredTable) -> float:
 
 
 def _header_row(table: StructuredTable) -> int | None:
+    """Identify the most likely header row index for *table*.
+
+    Scans the first few rows (up to 8) and scores each candidate by the number
+    of non-empty cells and whether the immediately following row looks like data
+    (which boosts the preceding row's score).  Rows that contain values that
+    look like data themselves are penalised to prevent a dense numeric first
+    record from being mistaken for a header.
+
+    Returns ``None`` when no plausible header row exists.
+    """
     if not table.cells or table.row_count <= 0:
         return None
     rows: dict[int, list[TableCell]] = {}
@@ -441,6 +485,12 @@ def _continuation_marker(table: StructuredTable) -> bool:
 
 
 def _has_continuation_marker(value: str) -> bool:
+    """Return ``True`` if *value* contains a cross-page continuation marker.
+
+    Normalises the string (NFKD decomposition, casefold, combining-character
+    strip) before checking for common Portuguese-language continuation phrases
+    such as "cont.", "continuação", "parte 2", and "próxima".
+    """
     folded = "".join(
         character
         for character in unicodedata.normalize("NFKD", value.casefold())
@@ -475,6 +525,14 @@ def _width_similarity(first: BBox, second: BBox) -> float:
 
 
 def _column_type_similarity(first: StructuredTable, second: StructuredTable) -> float:
+    """Return a [0, 1] score measuring per-column type alignment.
+
+    Each column in *first* is typed as ``"numeric"``, ``"mixed"``, ``"text"``,
+    or ``"empty"`` and compared with the corresponding column in *second*.  An
+    exact type match scores 1.0; ``numeric``/``mixed`` proximity scores 0.5;
+    all other pairs score 0.0.  The result is the mean across the shared column
+    count.
+    """
     first_profile = _column_types(first)
     second_profile = _column_types(second)
     columns = min(len(first_profile), len(second_profile))
@@ -492,6 +550,13 @@ def _column_type_similarity(first: StructuredTable, second: StructuredTable) -> 
 
 
 def _column_types(table: StructuredTable) -> tuple[str, ...]:
+    """Return the dominant cell type for every column in *table*.
+
+    Header cells (identified via :func:`_header_row`) are excluded so that
+    alphabetic column labels do not skew the profile of numeric data columns.
+    Returns a tuple of ``"numeric"``, ``"mixed"``, ``"text"``, or ``"empty"``
+    strings, one per column.
+    """
     header_row = _header_row(table)
     columns: list[str] = []
     for column in range(table.column_count):

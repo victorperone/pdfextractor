@@ -1,3 +1,17 @@
+"""PDFium-backed native evidence source.
+
+Wraps ``pypdfium2`` to extract immutable, loss-minimising evidence from a PDF
+file. The source deliberately does not perform layout, OCR, deduplication, or
+reading-order decisions — those are downstream consumers of the evidence it
+produces.
+
+Key responsibilities:
+- PDF header validation and security limit enforcement
+- Per-page character extraction with full typographic metadata
+- Page object enumeration (images, paths, annotations)
+- PDF structure-tree harvesting
+- Coordinate-system normalisation to a top-left origin (y grows down)
+"""
 from __future__ import annotations
 
 import ctypes
@@ -68,6 +82,14 @@ class PdfiumNativeEvidenceSource:
         self.close()
 
     def open(self) -> DocumentContext:
+        """Open and validate the PDF, returning a ``DocumentContext``.
+
+        Validates the ``%PDF-`` file header, checks file size and page count
+        against the configured security limits, and loads the document via
+        ``pypdfium2``. Idempotent: calling ``open`` more than once returns the
+        cached context. Raises ``PdfiumUnavailableError`` when ``pypdfium2`` is
+        not installed.
+        """
         if self._doc is not None and self._context is not None:
             return self._context
         if pdfium is None:
@@ -102,6 +124,16 @@ class PdfiumNativeEvidenceSource:
         return self._context
 
     def extract_page(self, page_index: int) -> NativePageEvidence:
+        """Extract immutable native evidence for a single page.
+
+        Acquires the PDFium text-page, iterates every character to populate
+        ``NativeCharacter`` objects with bounding boxes, typography, and flags,
+        then enumerates page objects (images, paths) and annotations. Coordinates
+        are transformed from PDFium's bottom-left origin to the canonical top-left
+        origin (y grows down). Closes the text-page and page objects before
+        returning; the returned ``NativePageEvidence`` is safe to hold
+        indefinitely without holding the document open.
+        """
         if self._doc is None:
             self.open()
         assert self._doc is not None
@@ -291,6 +323,13 @@ class PdfiumNativeEvidenceSource:
         origin_x: float,
         origin_y: float,
     ) -> tuple[list[NativeCharacter], dict[str, bool]]:
+        """Iterate the PDFium text-page and build one ``NativeCharacter`` per glyph.
+
+        Collects text, bounding box, angle, origin point, font metadata, fill/stroke
+        colours, render mode, and boolean flags (generated, hyphen, unicode mapping
+        failure). Returns the character list together with a capabilities dict that
+        records which optional PDFium APIs were available for this build.
+        """
         count = int(textpage.count_chars() or 0)
         chars: list[NativeCharacter] = []
         style_cache: dict[
@@ -367,6 +406,14 @@ class PdfiumNativeEvidenceSource:
         origin_y: float,
         rotation: int,
     ) -> NativeObjectEvidence:
+        """Enumerate page objects (images, paths) and build ``NativeObjectEvidence``.
+
+        Iterates all page objects to collect ``ImageEvidence`` and
+        ``PathEvidence`` with normalised bounding boxes, then calls
+        ``_extract_annotations`` for annotation evidence. Returns a
+        ``NativeObjectEvidence`` that records the coordinate origin, page
+        boxes, rotation, and a capabilities dict.
+        """
         images: list[ImageEvidence] = []
         paths: list[PathEvidence] = []
         summaries: list[NativeObjectSummary] = []
@@ -454,6 +501,12 @@ def _canonical_page_box(
     fallback_width: float,
     fallback_height: float,
 ) -> BBox:
+    """Convert a PDFium page box (bottom-left origin) to a canonical top-left BBox.
+
+    Subtracts the crop origin so that all coordinate values are relative to the
+    effective page frame exposed by PDFium. Fallback dimensions are used when
+    the computed width or height would be zero.
+    """
     x0, y0, x1, y1 = box
     width = max(0.0, x1 - x0) or fallback_width
     height = max(0.0, y1 - y0) or fallback_height
@@ -645,6 +698,13 @@ def _get_character_style(
         tuple[str | None, float | None, int | None, int | None, int | None],
     ],
 ) -> tuple[str | None, float | None, int | None, int | None, int | None]:
+    """Extract font name, size, weight, render mode, and marked-content ID for a character.
+
+    Results are keyed by the raw text-object pointer and cached to avoid
+    redundant FFI round-trips for consecutive characters in the same run.
+    Returns ``(None, None, None, None, None)`` when the text object is
+    unavailable.
+    """
     get_textobj = getattr(textpage, "get_textobj", None)
     if not callable(get_textobj):
         return None, None, None, None, None
@@ -772,6 +832,12 @@ def _extract_annotations(
     origin_x: float,
     origin_y: float,
 ) -> list[AnnotationEvidence]:
+    """Collect all annotations on a page as ``AnnotationEvidence`` objects.
+
+    Returns an empty list when the required PDFium raw functions are
+    unavailable. Each annotation records its subtype, bounding box, text
+    content, appearance streams, and object count.
+    """
     if pdfium_c is None:
         return []
     count_function = getattr(pdfium_c, "FPDFPage_GetAnnotCount", None)
@@ -920,6 +986,12 @@ def _get_annotation_object_count(annot: Any) -> int | None:
 
 
 def _extract_structure_tree(page: Any) -> StructureTreeEvidence:
+    """Walk the PDF logical structure tree and return a ``StructureTreeEvidence`` summary.
+
+    Records root element count, total node count, and a recursive JSON-compatible
+    summary of element types. Returns ``StructureTreeEvidence(available=False)``
+    when the tree API is unavailable or the page has no structure tree.
+    """
     if pdfium_c is None:
         return StructureTreeEvidence(available=False)
     get_tree = getattr(pdfium_c, "FPDF_StructTree_GetForPage", None)

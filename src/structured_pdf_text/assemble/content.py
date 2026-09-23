@@ -39,6 +39,14 @@ from structured_pdf_text.text.reading_order import (
 
 @dataclass(frozen=True, slots=True)
 class PageContentAssemblyResult:
+    """Return value of ``assemble_page_content``.
+
+    Bundles the ordered content block list together with the reading text,
+    the reading-order decision record, table-claim statistics, and list
+    segmentation counters. All values are immutable and safe to pass across
+    threads after assembly.
+    """
+
     blocks: tuple[PageContentBlock, ...]
     reading_text: str
     reading_decision: ReadingOrderDecision
@@ -481,6 +489,12 @@ def _emit_prose_blocks(
     page_index: int,
     fallback_from_table: bool = False,
 ) -> list[PageContentBlock]:
+    """Convert a list of prose lines into one or more ``PageContentBlock`` objects.
+
+    For TEXT and LIST kinds the lines are first passed through
+    ``segment_list_lines`` so that embedded lists get their own LIST block.
+    Each non-empty segment becomes one block; empty segments are skipped.
+    """
     if not lines:
         return []
     if kind in {ContentKind.TEXT, ContentKind.LIST}:
@@ -538,6 +552,12 @@ def _emit_table_block(
     page_index: int,
     region: LayoutRegion,
 ) -> PageContentBlock:
+    """Build a TABLE ``PageContentBlock`` shell for a physical table fragment.
+
+    The block carries a reference ``table_id`` that renderers use to look up
+    the full ``StructuredTable`` object. ``line_ids`` starts empty and is
+    populated later by ``_attach_table_source_line_claims``.
+    """
     frag_bbox = _table_fragment_bbox(table, page_index)
     bbox = frag_bbox or region.bbox
     return PageContentBlock(

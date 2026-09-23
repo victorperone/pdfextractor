@@ -1,3 +1,10 @@
+"""Line-to-region assignment for native PDF layout.
+
+Each :class:`~structured_pdf_text.document.TextLine` is matched to exactly
+one :class:`~structured_pdf_text.document.LayoutRegion` based on the fraction
+of the line bounding box that falls inside each candidate region.  Lines whose
+best coverage is below *_MIN_LINE_REGION_COVERAGE* are left unassigned.
+"""
 from __future__ import annotations
 
 from structured_pdf_text.document import LayoutRegion, TextLine
@@ -32,6 +39,26 @@ def _best_region_for_line(
     line: TextLine,
     regions: list[LayoutRegion],
 ) -> LayoutRegion | None:
+    """Return the single best region for *line*, or ``None`` if none qualifies.
+
+    All four selection criteria are encoded as a sortable tuple so that a
+    single ``max()`` call resolves ties deterministically without explicit
+    branching:
+
+    * Position 0 — coverage ratio (higher is better; compared first).
+    * Position 1 — negative region area (negative so that *smaller* regions
+      sort *higher*, i.e. more specific geometry wins when coverage is tied).
+    * Position 2 — ``layout_confidence`` (higher is better).
+    * Position 3 — negative list index (negative so that the *earlier* region
+      wins on a final tie, preserving the original ordering).
+    * Position 4 — the :class:`~structured_pdf_text.document.LayoutRegion`
+      itself (carried along for retrieval; not used in comparisons).
+
+    Only candidates whose coverage exceeds *_MIN_LINE_REGION_COVERAGE* enter
+    the tuple list.  Among those, only candidates within
+    *_COVERAGE_TIE_TOLERANCE* of the maximum coverage are kept before the
+    secondary sort.
+    """
     candidates: list[tuple[float, float, float, int, LayoutRegion]] = []
     for index, region in enumerate(regions):
         coverage = line.bbox.overlap_ratio(region.bbox)

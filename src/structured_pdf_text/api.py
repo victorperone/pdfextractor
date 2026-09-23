@@ -1059,7 +1059,24 @@ def _recover_selected_regions(
     quality_policy: str | None = None,
     page_rotation: int = 0,
 ) -> tuple[list[OcrToken], int, int, dict[str, dict[str, Any]]]:
-    """Recover only regions selected by the quality gate."""
+    """Run targeted OCR recovery on regions flagged by the quality gate.
+
+    For each region the function constructs a :class:`RegionRefinementRequest`
+    and delegates to :class:`OcrRegionRefiner`.  Regions whose quality reasons
+    include ``"small"``, ``"sparse"``, ``"missing"`` or ``"damaged"`` receive
+    scale factors ``(1.0, 1.5, 2.0)``; all others use only ``(1.0,)``.  The
+    ``quality_reasons`` field is forwarded verbatim to the refiner so they
+    appear in the ``REGION_SELECTED`` debug log entry.
+
+    The RGB budget gate in :func:`plan_ocr_scales` may further reduce the
+    effective scale list; blocked variants are never created or sent to Paddle.
+
+    Returns:
+        A 4-tuple of ``(tokens, total_passes, total_batches, per_region_stats)``.
+        *tokens* is de-duplicated by position across all recovered regions.
+        *per_region_stats* maps ``region_id`` to a dict with token counts,
+        attempt counts, errors and selected scale/rotation for diagnostics.
+    """
     refiner = OcrRegionRefiner(engine)
     requests = [
         RegionRefinementRequest(
@@ -1121,7 +1138,21 @@ def _recover_weak_ocr_regions(
     page_rotation: int = 0,
     enforce_policy: bool = False,
 ) -> tuple[list[OcrToken], int, int, dict[str, dict[str, Any]]]:
-    """Refine only locally weak OCR lines after page candidate selection."""
+    """Refine OCR lines that scored poorly after page-level candidate selection.
+
+    Identifies weak lines by running :func:`assess_ocr_quality` on each line's
+    tokens.  Lines whose quality assessment recommends recovery or whose
+    suspicious-token ratio exceeds 10 % are grouped spatially into compact
+    crops and re-processed at higher scale via :class:`OcrRegionRefiner`.
+
+    When ``enforce_policy`` is ``True`` and the resolved policy is
+    ``"baseline"``, the function is a no-op and returns the original *tokens*
+    unchanged — baseline policy must not trigger targeted quality recovery.
+
+    Returns:
+        A 4-tuple of ``(tokens, total_passes, total_batches, per_region_stats)``
+        in the same format as :func:`_recover_selected_regions`.
+    """
     # Baseline is intentionally a single normal OCR path plus any orientation
     # needed for a valid reading. Targeted quality recovery belongs to
     # adaptive/exhaustive and must not be smuggled into baseline by the API.

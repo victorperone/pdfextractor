@@ -1,9 +1,24 @@
+"""Human-readable one-line-per-page extraction report.
+
+Formats a ``StructuredDocument`` as a compact multi-line string where the
+first line contains document-level summary facts and each subsequent line
+contains per-page strategy, reason codes, and key diagnostic values. Intended
+for CLI output and log emission; not a structured format.
+"""
 from __future__ import annotations
 
 from structured_pdf_text.document import StructuredDocument
 
 
 def document_report(document: StructuredDocument) -> str:
+    """Format a ``StructuredDocument`` as a human-readable diagnostic report.
+
+    Produces one summary line with document-level facts (status, page counts,
+    timing, repeated regions) followed by one line per page showing strategy,
+    reason codes, native character count, text length, coverage scores, layout
+    decisions, and per-page timing. All values are read directly from the
+    document's diagnostic structures with no recomputation.
+    """
     lines = [
         f"status={document.diagnostics.status.value}",
         f"pages={document.diagnostics.page_count}",

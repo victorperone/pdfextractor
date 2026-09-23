@@ -1,3 +1,10 @@
+"""Lightweight Unicode normalization helpers for PDF text output.
+
+These utilities are intentionally conservative: they preserve diacritics,
+punctuation, numbers, and semantically significant symbols. The only
+transformations applied are NFC composition, line-ending unification, and
+removal of control characters that carry no textual meaning.
+"""
 from __future__ import annotations
 
 import unicodedata

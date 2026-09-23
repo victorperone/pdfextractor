@@ -1,3 +1,16 @@
+"""Native PDF line reconstruction from PDFium character streams.
+
+Converts raw ``NativeCharacter`` sequences produced by the evidence layer into
+``TextLine`` objects by grouping glyphs that share the same baseline and
+writing direction. The key decisions made here are:
+
+- orientation bucketing (horizontal, vertical, rotated, other)
+- baseline grouping with tolerance for ascenders/descenders
+- column-gap splitting to prevent multi-column merging
+- word-gap inference (bimodal / unimodal / fallback strategies)
+- superscript/subscript merging
+- reconciliation against PDFium's own text-page extraction
+"""
 from __future__ import annotations
 
 import math
@@ -90,6 +103,14 @@ def reconstruct_native_lines(
 
 
 def lines_to_text(lines: list[TextLine]) -> str:
+    """Join ordered text lines into a single newline-separated string.
+
+    Applies NFC normalisation to each line so that combining codepoints stored
+    separately (e.g. ``'e'`` + combining accent) are composed into their
+    canonical precomposed forms (e.g. ``'é'``) before joining. Adjacent lines
+    whose ``join_next_without_space`` flag is set are concatenated without an
+    intervening newline (used for hyphen/soft-hyphen continuation).
+    """
     # F12: apply NFC to each assembled line so that combining characters that
     # were stored as separate codepoints (e.g. 'e' + combining accent) compose
     # into their canonical forms (e.g. 'é') in the final output.
@@ -213,6 +234,15 @@ _SUBSCRIPTS = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉�
 
 
 def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
+    """Attach isolated single-digit/sign glyphs as Unicode superscripts or subscripts.
+
+    PDFium can emit a superscript or subscript character as a standalone line
+    because its bounding box sits outside the baseline band of the host line.
+    If the candidate is a single character that can be translated into a
+    Unicode combining form, and it overlaps the host line horizontally while
+    extending above or below its vertical bounds, the character is converted
+    and appended to the host token list.
+    """
     output = list(lines)
     for candidate in list(lines):
         text = candidate.text.strip()
@@ -315,6 +345,14 @@ def _remove_near_duplicates(characters: list[NativeCharacter]) -> list[NativeCha
 
 
 def _group_by_baseline(characters: list[NativeCharacter]) -> list[list[NativeCharacter]]:
+    """Cluster horizontal characters into lines by shared baseline position.
+
+    Uses the lower edge of each glyph box (adjusted by the median height) as a
+    stable baseline signal rather than the center, which is sensitive to glyph
+    height variation. After the initial tolerance-based scan the result is
+    refined by merging adjacent fragmented components, attaching inline marks,
+    and splitting at column gutters.
+    """
     # PDFium represents explicit spaces as almost-zero-height glyph boxes.
     # They are useful evidence for text/indentation, but must not dominate the
     # scale used to compare ordinary glyph baselines.
@@ -586,6 +624,14 @@ def _inline_mark_is_attached(
     group: list[NativeCharacter],
     median_height: float,
 ) -> bool:
+    """Return True when a mark or space character belongs to an established group.
+
+    Zero-height explicit spaces are treated with stricter native-adjacency
+    guards: they must be immediately before the host line in the PDFium
+    character stream and lie within the host's vertical band, so that column
+    gutters are never interpreted as leading spaces. Ordinary marks (category M
+    or P) require only vertical overlap and a small horizontal gap.
+    """
     group_bbox = BBox.union_all([item.bbox for item in group])
     horizontal_gap = 0.0
     if character.bbox.x1 < group_bbox.x0:
@@ -680,6 +726,13 @@ def _line_from_chars(
     direction: WritingDirection,
     reverse_axis: bool = False,
 ) -> TextLine:
+    """Build a ``TextLine`` from an already-grouped character list.
+
+    Sorts characters geometrically along their writing axis (or by native
+    PDFium index when the sequence is plausible), infers word-gap tokens via
+    ``_chars_to_text_tokens_with_diagnostics``, computes the union bounding box
+    and baseline, and propagates hyphen/soft-hyphen flags for line joining.
+    """
     order_mode = "geometry"
     if direction == WritingDirection.TOP_TO_BOTTOM:
         ordered = sorted(
@@ -750,6 +803,18 @@ def _chars_to_text_tokens_with_diagnostics(
     direction: WritingDirection = WritingDirection.LEFT_TO_RIGHT,
     reverse_axis: bool = False,
 ) -> tuple[list[TextToken], str]:
+    """Convert a sorted character sequence into ``TextToken`` objects with gap diagnostics.
+
+    Infers whitespace tokens between characters whose geometric gap exceeds the
+    threshold computed by ``_infer_gap_threshold_with_diagnostics``. Returns
+    the token list together with a mode string describing which gap strategy was
+    used (``'bimodal'``, ``'unimodal_conservative'``, ``'explicit'``, or
+    ``'fallback'``).
+
+    Typographically attached pairs (e.g. ``word,``) and compact compact
+    identifier patterns (URLs, dates, UUIDs) are protected from erroneous gap
+    insertion.
+    """
     if not characters:
         return [], "fallback"
 
@@ -908,6 +973,15 @@ def _infer_gap_threshold_with_diagnostics(
     direction: WritingDirection,
     median_advance: float,
 ) -> tuple[float, str]:
+    """Estimate the inter-character gap above which a space token should be inserted.
+
+    Collects normalised inter-character gap observations, then looks for a
+    bimodal split (tight kerning vs. word spacing). When a clear split exists
+    the midpoint is used; otherwise a conservative median-MAD estimate prevents
+    uniform-tracking lines from being over-segmented. Returns ``(threshold,
+    mode)`` where mode is one of ``'bimodal'``, ``'unimodal_conservative'``, or
+    ``'fallback'``.
+    """
     observations = _gap_observations(characters, direction, median_advance)
     positive = sorted(observation.normalized_gap for observation in observations if observation.gap > 0)
     if not positive:
@@ -1183,6 +1257,14 @@ def spacing_diagnostics(lines: list[TextLine]) -> dict[str, int]:
 
 
 def _orientation_bucket(character: NativeCharacter) -> str:
+    """Map a character's rotation angle to one of five orientation categories.
+
+    Returns one of ``'horizontal'``, ``'horizontal_reverse'``, ``'vertical'``,
+    ``'vertical_reverse'``, or ``'other'``. Characters with no angle information
+    default to ``'horizontal'``. A ±8° tolerance is applied so slightly rotated
+    glyphs in a nominally axis-aligned font are not separated into their own
+    group.
+    """
     if character.angle is None:
         return "horizontal"
     angle = character.angle % (2.0 * math.pi)
@@ -1209,6 +1291,12 @@ def _orientation_bucket(character: NativeCharacter) -> str:
 
 
 def _group_by_vertical_axis(characters: list[NativeCharacter]) -> list[list[NativeCharacter]]:
+    """Cluster vertically-oriented characters by their horizontal centre position.
+
+    Used for top-to-bottom text runs (e.g. CJK vertical typesetting or rotated
+    labels). Characters are grouped by proximity of their ``bbox.cx`` value
+    using a tolerance derived from the median glyph width.
+    """
     widths = [char.bbox.width for char in characters if char.bbox.width > 0]
     tolerance = max(1.5, (median(widths) if widths else 8.0) * 0.75)
     groups: list[list[NativeCharacter]] = []
