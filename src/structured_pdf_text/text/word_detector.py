@@ -1,3 +1,9 @@
+"""Word segmentation from assembled text lines.
+
+Splits a ``TextLine`` into ``Word`` objects by treating whitespace tokens as
+delimiters. Used downstream by table cell extraction and layout heuristics that
+operate at word granularity rather than character granularity.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +20,12 @@ class Word:
 
 
 def words_from_line(line: TextLine) -> list[Word]:
+    """Split a ``TextLine`` into individual ``Word`` objects at whitespace boundaries.
+
+    Each ``Word`` carries the concatenated text, the union bounding box of its
+    constituent tokens, and a reference to those tokens for downstream
+    geometry-aware consumers.
+    """
     words: list[Word] = []
     current: list[TextToken] = []
     for token in line.tokens:

@@ -325,6 +325,31 @@ to the original page and marked with `ocr_region` provenance. The same
 component is used internally for visual tables, figure panels, axes, labels
 and small numeric values.
 
+### OCR RGB budget gate
+
+Recovery regions are OCR-processed at multiple scale factors (1.0×, 1.5×,
+2.0×) when quality signals indicate small, sparse or damaged text.  To prevent
+`STATUS_ACCESS_VIOLATION` crashes in Paddle's C++ inference runtime — caused by
+consecutive very large image allocations — the refiner applies a configurable
+RGB memory budget before creating any upscaled variant.
+
+The two controlling environment variables are:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PDFEXTRACTOR_OCR_RGB_BUDGET_MIB` | `8.0` | Max uncompressed RGB size (MiB) per OCR scale variant.  Variants whose estimated `width × height × 3` bytes exceed this limit are skipped. |
+| `PDFEXTRACTOR_OCR_DEBUG_LOG` | (unset) | Absolute path to append a machine-readable debug log.  When set, every OCR call writes `CALL_START` / `CALL_END` entries with memory metrics, and every recovery decision writes `REGION_SELECTED` / `OCR_SCALE_PLAN` / `OCR_SCALE_BLOCKED` entries. |
+
+Both variables are read at module import time and remain constant for the
+lifetime of the process.  Restart the process to apply a new budget.
+
+The detection model's `limit_side_len` is also derived from the budget
+(`max(960, round(√(budget_bytes/3) × 1.2 / 32) × 32)`) so that variants
+within budget are processed at full resolution rather than being normalised to
+the legacy 960 px cap.  For the default 8 MiB budget this yields 2016 px.
+
+See `docs/ocr-rgb-budget-crash-fix.md` for the full incident analysis.
+
 In `balanced` mode, OCR is selective by default: layout and local region
 quality are evaluated first, healthy native regions are kept, suspect crops
 are recovered, and only scans or pages with broadly damaged regions are

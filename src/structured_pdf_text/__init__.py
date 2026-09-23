@@ -1,3 +1,11 @@
+"""structured-pdf-text — local, auditable PDF text extraction engine.
+
+Public API entry point.  Import :class:`PdfTextExtractor` and
+:func:`best_extraction_config` for typical usage.  All other symbols are
+re-exported here for convenience but are also importable from their respective
+sub-modules.
+"""
+
 from .api import PdfTextExtractor
 from .config import (
     ExtractionMode,

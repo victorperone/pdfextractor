@@ -1,3 +1,5 @@
+"""Diagnostic utilities: corpus reports, native page dumps, overlays and comparison adapters."""
+
 from .corpus import corpus_report
 from .dump import dump_native_page_json, write_native_page_json
 from .overlay import render_overlay

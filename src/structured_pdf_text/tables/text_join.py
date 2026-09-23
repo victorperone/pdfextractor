@@ -8,6 +8,20 @@ from structured_pdf_text.document import TextToken
 
 
 def join_table_tokens(tokens: Iterable[TextToken]) -> str:
+    """Join a collection of tokens into a single cell-text string.
+
+    Two paths are taken depending on token content:
+
+    * **Character tokens** — when every non-space token is a single character
+      (common in OCR output for individual glyph boxes), delegates to
+      :func:`_join_character_tokens`, which groups characters into rows by
+      their y-centre before assembling the string.
+    * **Word tokens** — sorts tokens left-to-right, inserts a space whenever
+      the horizontal gap between consecutive tokens exceeds a height-relative
+      threshold, and concatenates the result.
+
+    Returns the stripped assembled string.
+    """
     source = [token for token in tokens if token.text]
     nonspace = [token for token in source if token.text.strip()]
     if nonspace and all(len(token.text.strip()) == 1 for token in nonspace):
@@ -76,6 +90,14 @@ def _compact(value: str) -> str:
 
 
 def _join_character_tokens(tokens: list[TextToken]) -> str:
+    """Assemble a string from single-character OCR tokens.
+
+    Clusters visible tokens into horizontal rows based on their y0 coordinates
+    (using the median glyph height as the row-membership tolerance), then sorts
+    each row by x0 and concatenates characters.  A space is emitted between
+    tokens in the same row when the inter-token gap exceeds the height-relative
+    threshold, and between tokens on different rows.
+    """
     visible = [token for token in tokens if token.text.strip()]
     if not visible:
         return ""

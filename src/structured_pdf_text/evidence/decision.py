@@ -1,3 +1,13 @@
+"""Recovery planning for layout regions.
+
+Translates the page-level
+:class:`~structured_pdf_text.evidence.complexity.PageComplexity` verdict
+and per-region ink / text evidence into concrete
+:class:`~structured_pdf_text.document.RegionQuality` decisions and an
+overall :class:`RegionRecoveryPlan` that controls whether the page is
+promoted to full-page OCR.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,6 +27,21 @@ from structured_pdf_text.evidence.complexity import PageComplexity
 
 @dataclass(frozen=True, slots=True)
 class RegionRecoveryPlan:
+    """Outcome of region-level recovery planning for a single page.
+
+    Attributes:
+        region_ids: IDs of regions that require OCR involvement
+            (MERGE_OCR, OCR_REGION, or ESCALATE_PAGE_OCR decisions).
+        promote_page_ocr: When True, the page should be processed with
+            full-page OCR instead of region-level crops.
+        bad_region_ratio: Fraction of non-zero-area regions that received
+            an OCR decision.
+        bad_area_ratio: Fraction of total region area covered by regions
+            that received an OCR decision.
+        reasons: Human-readable strings explaining why ``promote_page_ocr``
+            was set, if it was.
+    """
+
     region_ids: tuple[str, ...]
     promote_page_ocr: bool
     bad_region_ratio: float
@@ -25,6 +50,12 @@ class RegionRecoveryPlan:
 
 
 def default_region_quality(page_complexity: PageComplexity) -> RegionQuality:
+    """Return a page-wide :class:`~structured_pdf_text.document.RegionQuality` from the complexity verdict.
+
+    This is the fallback quality used when no layout regions are available.
+    The page-level strategy (full-page OCR, hybrid, or native) maps directly
+    to the corresponding :class:`~structured_pdf_text.document.RegionDecision`.
+    """
     if page_complexity.full_page_ocr_candidate:
         return RegionQuality(
             decision=RegionDecision.ESCALATE_PAGE_OCR,
@@ -142,6 +173,19 @@ def _assess_one_region(
     page_image: Any | None,
     page_bbox: BBox,
 ) -> RegionQuality:
+    """Assign a :class:`~structured_pdf_text.document.RegionQuality` decision to a single layout region.
+
+    Evaluates each region independently by combining:
+
+    - Semantic kind (FIGURE, TABLE, body, header/footer).
+    - Native text availability and density within the region's bounding box.
+    - Visible-ink signal derived from the rendered page image.
+    - Page-level corruption flags (garbled Unicode, duplicate layer).
+
+    Returns a :class:`~structured_pdf_text.document.RegionQuality` with a
+    :class:`~structured_pdf_text.document.RegionDecision` and a confidence
+    score.  The caller assigns the returned value to ``region.quality``.
+    """
     text = "".join(line.text for line in region.native_lines).strip()
     intersections = [
         intersection
@@ -215,6 +259,12 @@ def _assess_one_region(
 
 
 def _region_ink_ratio(image: Any | None, page_bbox: BBox, region_bbox: BBox) -> float | None:
+    """Return the fraction of dark pixels inside *region_bbox* on the rendered page.
+
+    Coordinates are converted from PDF space (relative to *page_bbox*) to the
+    pixel grid of *image*.  Returns *None* when *image* is absent or when any
+    conversion error occurs, which callers interpret as "ink presence unknown".
+    """
     if image is None:
         return None
     try:

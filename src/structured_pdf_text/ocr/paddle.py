@@ -635,6 +635,13 @@ class PaddleOcrEngine:
         self.last_fusion_duplicate_clusters = 0
 
     def _predict_counted(self, ocr: Any, page_image: object) -> Any:
+        """Run one OCR inference call, incrementing pass/batch counters and writing debug log entries.
+
+        Captures process RSS, VMS, system-available memory, GC object count and
+        wall-clock time both before and after the call.  All measurements are
+        written to the debug log as ``CALL_START`` / ``CALL_END`` entries.  The
+        log is only written when ``PDFEXTRACTOR_OCR_DEBUG_LOG`` is set.
+        """
         import time
         self.last_pass_count += 1
         self.last_batch_count += 1

@@ -1,3 +1,16 @@
+"""Document-level assembly orchestrator.
+
+Combines per-page ``StructuredPage`` objects produced by the pipeline into a
+single ``StructuredDocument``. Responsibilities:
+
+- Optional cross-page table merging (``resolve_cross_page_tables_with_diagnostics``)
+- Heading level assignment across the full document
+- Repeated header/footer detection and suppression
+- Per-page canonical content block assembly (``assemble_page_content``)
+- Content conservation accounting and fallback block insertion
+- Block reindexing after conservation adjustments
+- Document-level text concatenation and diagnostic aggregation
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -30,6 +43,53 @@ def assemble_document(
     preserve_headers_footers: bool = True,
     document_warnings: list[str] | None = None,
 ) -> StructuredDocument:
+    """Assemble a final ``StructuredDocument`` from a list of structured pages.
+
+    This is the top-level orchestration function. It performs the following
+    steps in order:
+
+    1. **Cross-page table merging** (when ``merge_cross_page_tables=True``):
+       identifies tables that span a page boundary and merges them into a
+       single logical ``StructuredTable`` with fragments on both pages.
+
+    2. **Heading level assignment**: analyses font sizes and region kinds
+       across all pages and assigns normalised H1–H6 levels.
+
+    3. **Repeated header/footer detection**: finds text that recurs with
+       stable geometry and typography across multiple pages.
+
+    4. **Per-page content assembly**: calls ``assemble_page_content`` for each
+       page, building the canonical ``PageContentBlock`` list.
+
+    5. **Repeated region suppression** (when ``preserve_headers_footers=False``):
+       marks confirmed furniture blocks as suppressed.
+
+    6. **Content conservation**: runs ``record_content_conservation`` to ensure
+       every accepted line is accounted for, inserting text fallback blocks for
+       any unaccounted lines.
+
+    7. **Block reindexing**: assigns final ``order_index`` and ``block_id``
+       values after conservation adjustments.
+
+    8. **Diagnostic aggregation**: merges per-page diagnostic facts into the
+       ``DocumentDiagnostics`` object.
+
+    Args:
+        pages: Ordered list of ``StructuredPage`` objects produced by the
+            pipeline. Page index values must be unique and stable.
+        metadata: Document-level metadata (source path, PDFium version, etc.).
+        merge_cross_page_tables: When ``True``, run the cross-page table
+            resolution heuristic before content assembly.
+        preserve_headers_footers: When ``True`` (default), confirmed repeated
+            headers and footers are retained in the output. Set to ``False`` to
+            suppress them.
+        document_warnings: Optional list of pre-existing warning strings to
+            include in the result diagnostics.
+
+    Returns:
+        A fully assembled ``StructuredDocument`` with ``reading_text``,
+        ``raw_text``, content blocks on each page, and complete diagnostics.
+    """
     tables: list[StructuredTable] = []
     for page in pages:
         tables.extend(page.tables)

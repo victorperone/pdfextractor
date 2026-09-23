@@ -1,3 +1,11 @@
+"""Cell-level token assignment for reconstructed table grids.
+
+Provides :func:`tokens_in_cell`, which maps raw page tokens to an individual
+table cell bounding box using overlap heuristics.  The function retains
+explicit whitespace tokens that fall within a cell's x range, which is
+necessary for accurate text reconstruction in cells that contain deliberate
+spacing.
+"""
 from __future__ import annotations
 
 from structured_pdf_text.document import TextLine, TextToken

@@ -1,3 +1,12 @@
+"""Operational corpus-level diagnostics for batch extraction runs.
+
+Extracts every PDF in a corpus and aggregates per-document and per-page
+diagnostics into a report structure. The output is deliberately not a quality
+benchmark — without annotated ground truth, counts cannot prove correctness.
+It is an operational record intended for manual review, regression tracking,
+and identifying pages where OCR, rotation handling, or table recovery was
+invoked.
+"""
 from __future__ import annotations
 
 from collections import Counter
@@ -58,6 +67,12 @@ def _extract_document_entry(argument: tuple[str, ExtractorConfig]) -> dict[str, 
 
 
 def _document_entry(document: StructuredDocument) -> dict[str, object]:
+    """Build a serialisable diagnostics entry for one extracted document.
+
+    Aggregates strategy and reason counters, region kind counts, table method
+    counts, processing-time percentiles by strategy, OCR page lists, and the
+    full per-page diagnostic records.
+    """
     strategy_counts = Counter(page.diagnostics.strategy.value for page in document.pages)
     reason_counts = Counter(
         reason.value

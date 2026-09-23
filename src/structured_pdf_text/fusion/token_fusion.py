@@ -1,3 +1,10 @@
+"""Token-level fusion of native PDF text and OCR output.
+
+Combines spatially-aligned native tokens and OCR words into a unified
+representation, deduplicating the native layer before comparison and
+recording conflicts where the two sources disagree.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,6 +18,18 @@ from .align import find_native_candidates
 
 @dataclass(frozen=True, slots=True)
 class FusionResult:
+    """Result of fusing native PDF tokens with OCR words for one page or region.
+
+    Attributes:
+        unmatched_ocr_tokens: OCR words that had no overlapping native token
+            and therefore represent content absent from the native layer
+            (e.g., text recovered from a scanned region).
+        matched_ocr_tokens: Count of OCR words that matched a native token
+            with identical normalised text.
+        conflicts: OCR words that overlapped a native token but whose text
+            differed after normalisation; the native text is always ``chosen``.
+    """
+
     unmatched_ocr_tokens: tuple[OcrToken, ...]
     matched_ocr_tokens: int
     conflicts: tuple[TokenConflict, ...]

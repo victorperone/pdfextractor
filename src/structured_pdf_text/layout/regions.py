@@ -1,3 +1,12 @@
+"""Conversion from layout predictions to domain regions.
+
+:func:`regions_from_predictions` is the main entry point: it materialises
+vendor-neutral :class:`~structured_pdf_text.layout.engine.LayoutRegionPrediction`
+objects into :class:`~structured_pdf_text.document.LayoutRegion` instances,
+assigns text lines to each region, collects unassigned lines into an overflow
+``UNKNOWN`` region, and coalesces strongly nested duplicate predictions of the
+same semantic kind.
+"""
 from __future__ import annotations
 
 from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine
@@ -19,6 +28,11 @@ def full_page_text_region(
     lines: list[TextLine],
     complexity: PageComplexity,
 ) -> LayoutRegion:
+    """Return a single ``TEXT`` region that spans the entire page.
+
+    Used as a fallback when no layout model is available or when a page
+    contains only a flat stream of native text lines.
+    """
     return LayoutRegion(
         region_id=f"page-{page_index + 1}:region-1",
         kind=RegionKind.TEXT,
@@ -110,6 +124,18 @@ def _coalesce_nested_regions(regions: list[LayoutRegion]) -> list[LayoutRegion]:
 
 
 def _can_coalesce_nested(left: LayoutRegion, right: LayoutRegion) -> bool:
+    """Return ``True`` when *right* should be merged into *left* (or vice versa).
+
+    Coalescing is only allowed when:
+
+    * Both regions have the same ``kind``, ``semantic_role``, and ``edge_role``
+      (different semantic roles represent distinct content, not duplicates).
+    * The smaller region's area is at most *_NESTED_REGION_MAX_AREA_RATIO* of
+      the larger (prevents merging adjacent columns of comparable size).
+    * The smaller region overlaps the larger by at least
+      *_NESTED_REGION_MIN_OVERLAP* (ensures the smaller is genuinely contained,
+      not merely nearby).
+    """
     if left.kind != right.kind:
         return False
     if left.semantic_role != right.semantic_role or left.edge_role != right.edge_role:
@@ -121,6 +147,11 @@ def _can_coalesce_nested(left: LayoutRegion, right: LayoutRegion) -> bool:
 
 
 def _clamp_bbox(box: BBox, page_bbox: BBox) -> BBox:
+    """Return *box* with all coordinates clamped to the bounds of *page_bbox*.
+
+    Prevents ``expand()`` calls from pushing region edges outside the page
+    coordinate space, which would later cause zero-area or inverted boxes.
+    """
     def clamp(value: float, lower: float, upper: float) -> float:
         return min(upper, max(lower, value))
 

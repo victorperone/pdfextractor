@@ -1,3 +1,5 @@
+"""Utility functions for bounding and normalising confidence scores."""
+
 from __future__ import annotations
 
 

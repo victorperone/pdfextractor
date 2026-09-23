@@ -1,3 +1,11 @@
+"""Relaxed text-track table detector (Level 2 fallback).
+
+Called when the strict vector-grid detector fails for a TABLE-labelled region.
+Instead of requiring explicit path separators, this tier infers column edges
+from repeated x-anchor positions across lines.  It applies the same
+prose-versus-table classifier as the borderless tier so that decorative rules
+around paragraphs are not promoted to tables.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -100,6 +108,12 @@ def detect_relaxed_table(
 
 
 def _word_spans(line: TextLine) -> list[_WordSpan]:
+    """Split a line's token stream into whitespace-delimited word groups.
+
+    Whitespace tokens act as delimiters; the remaining visible tokens are
+    collected into :class:`_WordSpan` instances whose bounding box is the
+    union of all member token boxes.
+    """
     spans: list[_WordSpan] = []
     current: list[TextToken] = []
     for token in line.tokens:
@@ -115,6 +129,13 @@ def _word_spans(line: TextLine) -> list[_WordSpan]:
 
 
 def _repeated_anchors(spans_by_line: list[list[_WordSpan]], width: float) -> list[float]:
+    """Find x-positions that recur across at least 30 % of the given lines.
+
+    Groups the left-edge x-coordinates of every word span using a tolerance
+    proportional to the region width, then retains only those cluster medians
+    that appear in a minimum fraction of lines.  The result forms the column
+    skeleton used to assign spans to cells.
+    """
     values = [span.bbox.x0 for spans in spans_by_line for span in spans]
     if not values:
         return []
@@ -130,6 +151,13 @@ def _repeated_anchors(spans_by_line: list[list[_WordSpan]], width: float) -> lis
 
 
 def _track_edges(anchors: list[float], region: BBox) -> list[float]:
+    """Convert anchor positions to column-dividing edge coordinates.
+
+    Inserts a midpoint boundary between each consecutive anchor pair and
+    clamps the result to the region's x-extent.  The returned list has
+    ``len(anchors) + 1`` elements and is suitable as input to
+    :func:`_column_for_x`.
+    """
     anchors = sorted(set(anchors))
     if len(anchors) < 2:
         return []

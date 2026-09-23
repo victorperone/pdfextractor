@@ -69,6 +69,12 @@ class ListSegmentationResult:
 
 
 def parse_list_marker(text: str) -> tuple[str, str] | None:
+    """Extract the list marker and body text from a candidate line.
+
+    Returns a ``(marker, text)`` tuple when the line starts with a recognised
+    marker (bullet, dash, or ordered label), or ``None`` when the line does not
+    match.
+    """
     match = _MARKER.match(text)
     if match is None:
         return None
@@ -221,6 +227,12 @@ def _item_text(lines: list[TextLine], marker: str) -> str:
 
 
 def _is_continuation(previous: TextLine, extra: TextLine, median_height: float, tolerance: float) -> bool:
+    """Return True when ``extra`` is a wrapped continuation of the ``previous`` item.
+
+    Checks that the line has no marker of its own, sits within one line-height
+    below the previous line, and starts at approximately the same x position as
+    the text body of the previous item (not its marker).
+    """
     if parse_list_marker(extra.text) is not None or not extra.text.strip():
         return False
     gap = extra.bbox.y0 - previous.bbox.y1
@@ -232,6 +244,13 @@ def _is_continuation(previous: TextLine, extra: TextLine, median_height: float, 
 
 
 def _is_inferred_nested_item(parent: TextLine, extra: TextLine, median_height: float, tolerance: float) -> bool:
+    """Return True when ``extra`` looks like an implicit nested list item under ``parent``.
+
+    Applies conservative geometric guards: the candidate must be significantly
+    indented relative to the parent, vertically adjacent, short, and must not
+    end with a sentence-terminating character that would indicate prose rather
+    than a compact nested entry.
+    """
     if parse_list_marker(extra.text) is not None or not extra.text.strip():
         return False
     gap = extra.bbox.y0 - parent.bbox.y1

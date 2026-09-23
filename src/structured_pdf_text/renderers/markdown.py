@@ -15,6 +15,14 @@ from structured_pdf_text.document import (
 
 
 def render_markdown(document: StructuredDocument) -> str:
+    """Render a ``StructuredDocument`` to a Markdown string.
+
+    Iterates each page's ``content_blocks`` in ``order_index`` order. Tables
+    are rendered as GFM pipe tables or, when merged cells exist, as embedded
+    HTML. Suppressed blocks (repeated headers/footers, decorative watermarks)
+    are omitted. Falls back to a region-based legacy path for pages that have
+    no ``content_blocks`` (e.g. pages produced by older test fixtures).
+    """
     preserve_hf: bool = document.diagnostics.facts.get(
         "preserve_headers_footers",
         True,
@@ -49,6 +57,13 @@ def _render_content_block(
     *,
     preserve_hf: bool,
 ) -> str:
+    """Render a single ``PageContentBlock`` to a Markdown fragment.
+
+    Returns an empty string for suppressed blocks or TABLE blocks without a
+    matching table object. Applies heading prefixes to TITLE blocks, formats
+    LIST blocks from their ``list_items``, and delegates TABLE blocks to
+    ``_render_table``. FIGURE blocks include OCR text when present.
+    """
     if block.suppressed:
         return ""
     if block.kind in (ContentKind.HEADER, ContentKind.FOOTER):
@@ -189,6 +204,13 @@ def _render_page_section(page_index: int, parts: list[str]) -> str:
 
 
 def _render_table(table: StructuredTable) -> str:
+    """Render a ``StructuredTable`` as a GFM pipe table or, for merged cells, as HTML.
+
+    Returns an empty string when the table has no cells or no columns. The
+    first row is always treated as the header row. Tables with any rowspan > 1
+    or colspan > 1 are rendered as an HTML ``<table>`` block so that span
+    semantics are not silently lost.
+    """
     if not table.cells or table.column_count <= 0:
         return ""
 

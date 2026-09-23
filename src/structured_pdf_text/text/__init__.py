@@ -1,3 +1,5 @@
+"""Text processing subsystem: line detection, reading order, list parsing and word tokenisation."""
+
 from .line_detector import GapObservation, lines_to_text, reconstruct_native_lines, spacing_diagnostics
 from .lists import ListLineAssignment, ListSegment, ListSegmentationResult, segment_list_lines
 from .normalize import normalize_text

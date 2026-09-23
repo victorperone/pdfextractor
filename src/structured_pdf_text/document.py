@@ -8,6 +8,8 @@ from .geometry import BBox, Point
 
 
 class SourceKind(str, Enum):
+    """Origin of a text token or table cell, used as provenance throughout the pipeline."""
+
     NATIVE_PDF = "native_pdf"
     NATIVE_GENERATED = "native_generated"
     OCR_REGION = "ocr_region"
@@ -18,6 +20,8 @@ class SourceKind(str, Enum):
 
 
 class TokenFlag(str, Enum):
+    """Diagnostic flags attached to individual ``TextToken`` instances."""
+
     DUPLICATE = "duplicate"
     WHITESPACE_INFERRED = "whitespace_inferred"
     UNICODE_MAPPING_FAILED = "unicode_mapping_failed"
@@ -26,6 +30,8 @@ class TokenFlag(str, Enum):
 
 
 class RegionKind(str, Enum):
+    """Semantic type of a layout region detected on a page."""
+
     TEXT = "text"
     TITLE = "title"
     LIST = "list"
@@ -41,6 +47,14 @@ class RegionKind(str, Enum):
 
 
 class RegionDecision(str, Enum):
+    """Quality-gate decision for a single layout region.
+
+    ``KEEP_NATIVE`` — native text is healthy; no OCR needed.
+    ``MERGE_OCR`` — blend OCR tokens with native text.
+    ``OCR_REGION`` — replace native text with targeted region OCR.
+    ``ESCALATE_PAGE_OCR`` — full-page OCR required.
+    """
+
     KEEP_NATIVE = "keep_native"
     MERGE_OCR = "merge_ocr"
     OCR_REGION = "ocr_region"
@@ -48,6 +62,8 @@ class RegionDecision(str, Enum):
 
 
 class TableMethod(str, Enum):
+    """Algorithm that produced a ``StructuredTable``."""
+
     STRICT_GRID = "strict_grid"
     RELAXED_GRID = "relaxed_grid"
     TEXT_TRACKS = "text_tracks"
@@ -56,12 +72,16 @@ class TableMethod(str, Enum):
 
 
 class ExtractionStatus(str, Enum):
+    """Overall outcome of document extraction."""
+
     SUCCESS = "success"
     PARTIAL_SUCCESS = "partial_success"
     FAILURE = "failure"
 
 
 class PageStrategy(str, Enum):
+    """Extraction strategy resolved for a single page."""
+
     NATIVE = "native"
     HYBRID_CANDIDATE = "hybrid_candidate"
     OCR_CANDIDATE = "ocr_candidate"
@@ -69,6 +89,8 @@ class PageStrategy(str, Enum):
 
 
 class ComplexityReason(str, Enum):
+    """Signal that influenced page complexity classification."""
+
     NO_TEXT = "no_text"
     SCANNED = "scanned"
     SPARSE_TEXT = "sparse_text"
@@ -85,6 +107,8 @@ class ComplexityReason(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class EvidenceRef:
+    """Pointer to the origin of a text token within the evidence graph."""
+
     source: SourceKind
     page_index: int
     element_id: str
@@ -92,6 +116,13 @@ class EvidenceRef:
 
 @dataclass(frozen=True, slots=True)
 class NativeCharacter:
+    """Single character extracted from a PDFium text page.
+
+    Preserves the full raw evidence: geometry, origin, font, color, text render
+    mode, marked-content ID, and PDFium flags.  Optional fields are ``None``
+    when the underlying PDFium capability is unavailable.
+    """
+
     page_index: int
     char_index: int
     text: str
@@ -194,6 +225,12 @@ class NativePageEvidence:
 
 @dataclass(frozen=True, slots=True)
 class OcrToken:
+    """One OCR recognition result in canonical PDF page coordinates.
+
+    Immutable; produced by PaddleOcrEngine and region refinement and consumed
+    by the fusion layer.
+    """
+
     text: str
     bbox: BBox
     confidence: float | None
@@ -205,6 +242,13 @@ class OcrToken:
 
 @dataclass(slots=True)
 class TextToken:
+    """Mutable composite token produced after native evidence processing.
+
+    Aggregates one or more ``NativeCharacter`` references and carries
+    normalised text, font metadata, and diagnostic flags.  Mutability allows
+    the pipeline to attach flags and overrides without creating new objects.
+    """
+
     text: str
     bbox: BBox
     sources: list[EvidenceRef]
@@ -257,6 +301,13 @@ class TextLine:
 
 @dataclass(slots=True)
 class RegionQuality:
+    """Quality assessment result for one layout region.
+
+    Produced by the quality gate and consumed by the recovery decision logic
+    to determine whether a region should be kept native, OCR-recovered or
+    escalated to full-page OCR.
+    """
+
     decision: RegionDecision
     reasons: list[str] = field(default_factory=list)
     confidence: float | None = None
@@ -264,6 +315,13 @@ class RegionQuality:
 
 @dataclass(slots=True)
 class LayoutRegion:
+    """One detected layout region on a page.
+
+    Holds both native text lines and the OCR tokens that replace or supplement
+    them after targeted recovery.  ``heading_level`` is set only for TITLE
+    regions after heading-level assignment.
+    """
+
     region_id: str
     kind: RegionKind
     bbox: BBox
@@ -271,7 +329,7 @@ class LayoutRegion:
     native_lines: list[TextLine]
     ocr_tokens: list[OcrToken]
     quality: RegionQuality
-    heading_level: int | None = None  # 1, 2 ou 3; None para regiões não-título
+    heading_level: int | None = None  # 1, 2 or 3; None for non-title regions
     ocr_lines: list[TextLine] = field(default_factory=list)
     semantic_role: str | None = None
     edge_role: str | None = None
@@ -299,6 +357,14 @@ class TableCell:
 
 @dataclass(slots=True)
 class StructuredTable:
+    """A complete detected table, potentially spanning multiple page fragments.
+
+    ``page_fragments`` tracks which physical page(s) contain table rows.  When
+    ``continued_from_previous_page`` or ``continues_to_next_page`` is ``True``,
+    this instance is one logical fragment of a cross-page table — the document-
+    level ``tables`` list holds the merged logical view.
+    """
+
     table_id: str
     page_fragments: list[TableFragment]
     cells: list[TableCell]
@@ -312,6 +378,12 @@ class StructuredTable:
 
 @dataclass(slots=True)
 class PageDiagnostics:
+    """Per-page extraction diagnostics included in the API result.
+
+    ``facts`` is an open-ended dict for structured data (timings, OCR passes,
+    variant scores, table decisions, etc.) that does not fit the fixed fields.
+    """
+
     page_index: int
     strategy: PageStrategy
     reasons: list[ComplexityReason]
@@ -327,6 +399,8 @@ class PageDiagnostics:
 
 @dataclass(slots=True)
 class DocumentDiagnostics:
+    """Document-level extraction summary included in the API result."""
+
     status: ExtractionStatus
     page_count: int
     native_pages: int
@@ -344,6 +418,8 @@ class DocumentMetadata:
 
 
 class ContentKind(str, Enum):
+    """Semantic type of a ``PageContentBlock`` used by the Markdown renderer."""
+
     TEXT = "text"
     TITLE = "title"
     LIST = "list"
@@ -358,6 +434,8 @@ class ContentKind(str, Enum):
 
 
 class ContentDisposition(str, Enum):
+    """Reason a ``PageContentBlock`` was rendered or suppressed."""
+
     RENDERED = "rendered"
     TABLE_OWNED = "table_owned"
     FIGURE_OWNED = "figure_owned"
@@ -382,6 +460,13 @@ class StructuredListItem:
 
 @dataclass(slots=True)
 class PageContentBlock:
+    """One atomic renderable unit on a page.
+
+    Produced by ``assemble_page_content()`` and consumed by the renderers.
+    Renderers iterate blocks in ``order_index`` order and dispatch by ``kind``
+    with no geometry lookups.
+    """
+
     block_id: str
     page_index: int
     kind: ContentKind
@@ -431,6 +516,11 @@ class StructuredDocument:
 
 
 def to_plain_data(value: Any) -> Any:
+    """Recursively convert dataclasses, Enums, sets and nested collections to plain data.
+
+    Produces output that is JSON-serialisable without a custom encoder.
+    Set members are sorted by string representation to ensure deterministic output.
+    """
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, set):

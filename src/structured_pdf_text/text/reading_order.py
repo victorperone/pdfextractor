@@ -1,3 +1,18 @@
+"""Reading-order determination for structured PDF pages.
+
+Provides two complementary ordering passes:
+
+1. **Region ordering** — builds a weighted DAG of layout regions and resolves
+   it into a topological sequence that respects header/footer priority, sidebar
+   relations, figure/caption adjacency, and native character-stream order.
+
+2. **Prose line ordering** — inside each region, chooses between a MULTI_COLUMN
+   lane model, a FORM row model, or a FALLBACK top-to-bottom sort based on
+   scored hypotheses about the region's content structure.
+
+All ordering decisions are captured in ``ReadingOrderDecision`` and
+``ProseFlowDecision`` for audit and diagnostics.
+"""
 from __future__ import annotations
 
 import math
@@ -20,6 +35,14 @@ SIDEBAR_MAX_HORIZONTAL_OVERLAP = 0.20
 
 @dataclass(frozen=True, slots=True)
 class ReadingOrderDecision:
+    """Immutable record of every ordering decision made for a page.
+
+    Populated by ``order_region_lines`` and attached to ``StructuredPage``
+    diagnostics. Contains the resolved region traversal order, column-layout
+    detection counts, native-order consistency score, and the winning prose
+    flow mode so downstream consumers can audit without re-running the engine.
+    """
+
     region_order: tuple[str, ...]
     column_groups: int
     rotated_lines: int
@@ -49,6 +72,13 @@ class FlowHypothesisScore:
 
 @dataclass(frozen=True, slots=True)
 class ProseFlowDecision:
+    """Scoring outcome for a single prose region's flow hypothesis.
+
+    Records which of MULTI_COLUMN, FORM, or FALLBACK was selected, the
+    hypothesis scores that drove the decision, and the reason tokens that
+    explain the score contributions for audit.
+    """
+
     mode: str
     form_score: float
     column_score: float
@@ -63,6 +93,14 @@ class ProseFlowDecision:
 
 @dataclass(frozen=True, slots=True)
 class ReadingLane:
+    """A vertical reading column defined by its x-axis boundaries.
+
+    ``lines`` contains only the lines whose bounding boxes overlap this lane.
+    Multiple ``ReadingLane`` objects together partition a multi-column region;
+    spanning lines are placed in a separate ``spanning`` list by
+    ``_order_lane_segments``.
+    """
+
     x0: float
     x1: float
     lines: tuple[TextLine, ...]
@@ -493,6 +531,13 @@ def _is_sidebar_relation(
 
 
 def _native_order_consistency(regions: list[LayoutRegion]) -> float | None:
+    """Estimate how well the PDFium character stream order matches visual reading order.
+
+    Sorts lines by their minimum native character index and counts transitions
+    where consecutive lines are in a geometrically plausible order (below or in
+    the next column). Returns the fraction of plausible transitions, or ``None``
+    when fewer than three lines provide native order data.
+    """
     lines = [
         line
         for region in regions
@@ -617,6 +662,17 @@ def _order_prose_lines_with_decision(
     region_bbox: BBox,
     flow_lines: list[TextLine] | None = None,
 ) -> _ProseFlowResult:
+    """Order prose lines and return the ordering decision alongside the result.
+
+    ``flow_lines`` is an optional pre-filtered subset used only for hypothesis
+    scoring (e.g. with table-owned lines removed). When supplied, the scores
+    are derived from ``flow_lines`` while the returned line list still contains
+    all ``lines``. This prevents table lines from polluting column/form scores
+    while ensuring that conservation accounting receives the complete set.
+
+    Falls back to a simple geometric top-to-bottom sort when rotated baselines,
+    an invalid region width, or an empty line set are detected.
+    """
     if not lines:
         decision = ProseFlowDecision("FALLBACK", 0.0, 0.0, 1, 0, ("no_lines",), fallback_used=True)
         return _ProseFlowResult((), decision, 0)
@@ -971,6 +1027,13 @@ def _line_lane_overlap(line: TextLine, x0: float, x1: float) -> float:
 def _score_form_hypothesis(
     lines: list[TextLine], region_bbox: BBox, gutter_count: int,
 ) -> FlowHypothesisScore:
+    """Score the likelihood that the region contains a label/value form layout.
+
+    High scores are driven by a large fraction of lines grouped into horizontal
+    pairs, short average line length, and tight inter-column gaps. Persistent
+    gutters and long prose lines both penalise the score because they are
+    incompatible with a simple two-column form.
+    """
     rows = _group_form_rows(lines)
     pair_rows = [row for row in rows if len(row) >= 2]
     if not rows:
@@ -1000,6 +1063,13 @@ def _score_form_hypothesis(
 def _score_column_hypothesis(
     lines: list[TextLine], region_bbox: BBox, gutters: list[tuple[float, float]], lanes: list[ReadingLane],
 ) -> FlowHypothesisScore:
+    """Score the likelihood that the region is laid out in multiple prose columns.
+
+    Requires at least one persistent gutter and two lanes. Score contributions
+    come from gutter width relative to the region, lane population continuity,
+    lane width balance, and the fraction of lines with long prose content. Narrow
+    gutters or unbalanced lanes shift the score toward FORM or FALLBACK.
+    """
     if len(lanes) < 2 or not gutters:
         return FlowHypothesisScore("MULTI_COLUMN", 0.0, ("no_persistent_gutter",))
     populated = [lane for lane in lanes if len(lane.lines) >= 2]
@@ -1050,6 +1120,15 @@ def _group_form_rows(lines: list[TextLine]) -> list[list[TextLine]]:
 def _order_lane_segments(
     lines: list[TextLine], lanes: list[ReadingLane], region_bbox: BBox,
 ) -> tuple[list[TextLine], int, int]:
+    """Interleave multi-column lane content separated by spanning header/footer bands.
+
+    Lines that cross a gutter boundary are split into per-lane segments when
+    possible, or treated as spanning lines that act as segment delimiters.
+    Returns ``(ordered_lines, spanning_count, segment_count)``.
+
+    Falls back to a simple geometric sort if the line-set preservation
+    invariant is violated after lane assignment.
+    """
     assignments: dict[int, list[TextLine]] = {index: [] for index in range(len(lanes))}
     spanning: list[TextLine] = []
     for line in lines:

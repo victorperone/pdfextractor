@@ -140,6 +140,19 @@ def _region_overlaps_table(region: LayoutRegion, table: StructuredTable) -> bool
 
 
 def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
+    """Attempt to reconstruct a ruled table grid from path objects inside *limit*.
+
+    Paths are separated into horizontal candidates (height <= *thickness*,
+    width >= 45 % of the region) and vertical candidates (width <= *thickness*,
+    height >= 50 % of the grid height).  Both sets are edge-clustered and the
+    resulting grid is accepted only when the combined coverage coherence is at
+    least 0.65.
+
+    Falls back to :func:`_detect_rectangular_grid` when horizontal lines are
+    absent or when the coherence threshold is not met.
+
+    Returns ``None`` when no grid with sufficient evidence can be formed.
+    """
     paths = [path.bbox for path in page.objects.paths if path.bbox is not None]
     paths = [path for path in paths if path.overlap_ratio(limit) > 0.50 and not _is_background(path, page.bbox)]
     if not paths:
@@ -290,6 +303,16 @@ def _table_from_grid(
     grid: _Grid,
     lines: list[TextLine],
 ) -> StructuredTable:
+    """Build a :class:`~structured_pdf_text.document.StructuredTable` from a validated *grid*.
+
+    Cell bounding boxes are derived from consecutive edge pairs.  For grids
+    produced by :func:`_detect_rectangular_grid`, span information is taken
+    directly from the rectangle geometry.  For segment-derived grids, missing
+    internal separators are detected by checking whether a path segment exists
+    at each candidate boundary, and colspan / rowspan values are computed
+    accordingly.  Tokens are assigned to cells via
+    :func:`~structured_pdf_text.tables.cells.tokens_in_cell`.
+    """
     # Derive the same thickness used by _detect_strict_grid so span checks
     # use consistent tolerances. Filter paths to the grid bbox to avoid
     # inflating median_stroke with decorative borders outside the table.
@@ -443,6 +466,13 @@ def _segment_exists_at_y(
 
 
 def _cluster_edges(values: list[float], tolerance: float) -> list[float]:
+    """Cluster a list of coordinate *values* into representative edge positions.
+
+    Values are sorted and grouped so that members within *tolerance* of the
+    running group median remain in the same cluster.  Returns the median of
+    each cluster, giving a stable representative coordinate even when
+    individual line endpoints vary slightly.
+    """
     clusters: list[list[float]] = []
     for value in sorted(values):
         if not clusters or abs(value - median(clusters[-1])) > tolerance:

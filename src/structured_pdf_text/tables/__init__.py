@@ -1,3 +1,5 @@
+"""Table detection subsystem: vector-grid, relaxed-grid, text-track and visual-grid detectors."""
+
 from .cross_page import (
     resolve_cross_page_tables,
     resolve_cross_page_tables_with_diagnostics,

@@ -1,3 +1,17 @@
+"""Heading level assignment and multi-line heading fragment merging.
+
+The public entry point :func:`assign_heading_levels` operates in two passes:
+
+1. **Fragment merging** — adjacent ``TITLE`` regions that share font, size, and
+   alignment are joined into a single region before scoring so that multi-line
+   headings receive the correct level assignment.
+
+2. **Level assignment** — surviving ``TITLE`` regions are scored against the
+   document's body typography.  Scores below *HEADING_ACCEPTANCE_THRESHOLD* or
+   without a clear size/weight signal are demoted to plain ``TEXT``.  Accepted
+   headings are bucketed into up to three levels by clustering their size ratios
+   relative to the median body font.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -125,6 +139,12 @@ def _region_has_alphanumeric_text(region: LayoutRegion) -> bool:
 
 
 def _percentile(values: list[float], fraction: float) -> float:
+    """Return the value at *fraction* of the sorted *values* list.
+
+    Uses nearest-rank interpolation.  Returns 0.0 for an empty list.
+    *fraction* should be in [0, 1]; values outside that range are clamped by
+    the index bounds.
+    """
     if not values:
         return 0.0
     ordered = sorted(values)
@@ -188,6 +208,22 @@ def _heading_is_accepted(
     body_font_median: float | None,
     body_font_p75: float | None,
 ) -> bool:
+    """Return ``True`` when *region* should be kept as a heading.
+
+    A region passes when:
+
+    * Its *score* meets *HEADING_ACCEPTANCE_THRESHOLD*, **and**
+    * At least one of the following independent signals is present:
+
+      - Median font size is at least 1.15× the body median (or 1.10× the 75th
+        percentile body size when available).
+      - The region contains at least one bold token.
+      - The region text begins with a numbered or lettered section prefix such
+        as ``"1."`` or ``"A.1)``.
+
+    When no body font reference is available the score threshold alone governs
+    acceptance.
+    """
     if score < HEADING_ACCEPTANCE_THRESHOLD:
         return False
     if body_font_median is None or body_font_median <= 0:
@@ -226,6 +262,20 @@ def _merge_heading_fragments(page: StructuredPage) -> StructuredPage:
 
 
 def _can_merge_heading_fragments(first: LayoutRegion, second: LayoutRegion) -> bool:
+    """Return ``True`` when *first* and *second* should be joined into one heading.
+
+    Both regions must be ``TITLE``-kind and contain alphanumeric text.  The
+    merge is allowed only when all of the following hold:
+
+    * The vertical gap between the bottom of *first* and the top of *second*
+      does not exceed 75 % of the smaller region height (allowing for generous
+      line spacing but rejecting paragraph breaks).
+    * The left edges are within one line-height of each other (same column).
+    * Median font sizes differ by no more than 18 % of the first region's size.
+    * When both regions have a single consistent font name, those names must
+      match.
+    * Median font weights, when available, differ by no more than 150 units.
+    """
     if first.kind != RegionKind.TITLE or second.kind != RegionKind.TITLE:
         return False
     if not _region_has_alphanumeric_text(first) or not _region_has_alphanumeric_text(second):

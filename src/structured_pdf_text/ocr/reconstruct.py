@@ -1,3 +1,4 @@
+"""Reconstruct structured text lines from flat OCR token lists."""
 from __future__ import annotations
 
 from statistics import median
@@ -171,6 +172,29 @@ def _page_size(tokens: list[OcrToken], page_bbox: BBox | None) -> tuple[float, f
 
 
 def _virtual_bbox(token: OcrToken, page_bbox: BBox | None, page_width: float, page_height: float) -> BBox:
+    """Map a token's bounding box into the upright (0°) coordinate frame.
+
+    Tokens from rotated-page OCR passes carry their original page coordinates
+    and a ``rotation`` attribute.  This function undoes the rotation so that
+    line grouping and reading-order sorting can operate on a consistently
+    upright coordinate system.
+
+    Args:
+        token: The OCR token whose bbox will be transformed.
+        page_bbox: Bounding box of the page in document coordinates, used
+            to translate token coordinates to a page-local origin.  When
+            ``None``, the origin is assumed to be (0, 0).
+        page_width: Width of the page in the local coordinate system,
+            required for 90° and 180° rotations.
+        page_height: Height of the page in the local coordinate system,
+            required for 270° and 180° rotations.
+
+    Returns:
+        A :class:`~structured_pdf_text.geometry.BBox` in the upright
+        coordinate frame.  For ``rotation=0`` (or any value not in
+        {90, 180, 270}) the box is returned with only the page-origin
+        offset applied.
+    """
     origin_x = page_bbox.x0 if page_bbox is not None else 0.0
     origin_y = page_bbox.y0 if page_bbox is not None else 0.0
     x0 = token.bbox.x0 - origin_x
@@ -194,6 +218,34 @@ def _gap_bbox(
     page_width: float,
     page_height: float,
 ) -> BBox:
+    """Compute the bounding box for an inferred inter-word space token.
+
+    Constructs a virtual box spanning the horizontal gap between two adjacent
+    token bounding boxes in the upright coordinate frame, then maps it back
+    to the original (possibly rotated) page coordinate space so that the
+    inferred whitespace token has a geometrically meaningful position for
+    downstream consumers such as table models.
+
+    When the two boxes overlap (i.e. ``current.x0 < previous.x1``), the gap
+    is collapsed to a point at their midpoint rather than producing an
+    inverted rectangle.
+
+    Args:
+        previous: Bounding box of the left-hand token in the upright frame.
+        current: Bounding box of the right-hand token in the upright frame.
+        rotation: Page rotation in degrees (0, 90, 180, or 270) used to
+            reverse the coordinate transform when mapping back to page
+            space.
+        page_bbox: Page bounding box in document coordinates, used to
+            restore the page-level origin offset.
+        page_width: Page width in the local coordinate system.
+        page_height: Page height in the local coordinate system.
+
+    Returns:
+        A :class:`~structured_pdf_text.geometry.BBox` in original page
+        coordinates suitable for assignment to an inferred whitespace
+        :class:`~structured_pdf_text.document.TextToken`.
+    """
     left = previous.x1
     right = current.x0
     if right < left:

@@ -13,6 +13,32 @@ from structured_pdf_text.document import OcrToken, TokenFlag
 
 @dataclass(frozen=True, slots=True)
 class PaddleRawMetrics:
+    """Raw diagnostic counters extracted from a PaddleOCR result object.
+
+    All fields are optional because they depend on the PaddleOCR version and
+    the pipeline configuration actually used at inference time.  Missing fields
+    are ``None`` rather than zero so that callers can distinguish "not produced"
+    from "produced zero".
+
+    Attributes:
+        detection_count: Number of text regions proposed by the detection
+            head.
+        recognition_count: Number of proposed regions that were forwarded
+            to the recognition head and produced a non-empty string.
+        recognition_yield: ``recognition_count / detection_count``, or
+            ``None`` when either count is unavailable.  Values below 0.65
+            indicate that many detected boxes were discarded.
+        mean_detection_score: Average detector confidence across all
+            proposed boxes, or ``None`` when detector scores are absent.
+        recognition_score_threshold: The minimum recognition confidence
+            that PaddleOCR applied when filtering results.
+        document_orientation: Whole-page rotation angle in degrees as
+            reported by the document pre-processor, or ``None``.
+        textline_orientations: Tuple of per-line orientation angles in
+            degrees, one entry per recognised text line.  Empty when the
+            line-orientation classifier was not used.
+    """
+
     detection_count: int | None = None
     recognition_count: int | None = None
     recognition_yield: float | None = None
@@ -24,6 +50,50 @@ class PaddleRawMetrics:
 
 @dataclass(frozen=True, slots=True)
 class OcrQualityAssessment:
+    """Composite quality verdict for a single OCR result.
+
+    Produced by :func:`assess_ocr_quality`.  All ratio fields are in the
+    range ``[0, 1]`` unless noted otherwise.
+
+    Attributes:
+        score: Aggregate quality score in ``[0, 1]``.  When ``sufficient``
+            is ``True``, it is boosted by printability and orientation
+            signals; otherwise it is penalised by suspicious-token and
+            low-confidence rates.
+        sufficient: ``True`` when every quality gate passes and
+            ``char_weighted_confidence`` meets the strong threshold.
+        recovery_recommended: Inverse of ``sufficient``; ``True`` whenever
+            the result does not meet quality requirements.
+        character_count: Total number of characters across all non-
+            separator tokens.
+        token_count: Number of tokens used for metric computation
+            (inferred whitespace separators are excluded).
+        char_weighted_confidence: Mean recognition confidence weighted by
+            the alphanumeric character count of each token.
+        median_confidence: Median per-token recognition confidence.
+        lower_quartile_confidence: 25th-percentile recognition confidence,
+            used to detect a long low-confidence tail.
+        low_confidence_character_ratio: Fraction of alphanumeric characters
+            belonging to tokens whose confidence is below the configured
+            low-confidence threshold.
+        horizontal_token_ratio: Fraction of tokens whose width exceeds
+            their height by at least 15 %, used as a proxy for correctly
+            oriented text.
+        printable_character_ratio: Fraction of characters classified as
+            printable by ``str.isprintable``.
+        alphanumeric_character_ratio: Fraction of characters classified as
+            alphanumeric by ``str.isalnum``.
+        suspicious_token_ratio: Fraction of tokens flagged by
+            :func:`is_suspicious_token`.
+        detection_count: Forwarded from :class:`PaddleRawMetrics`.
+        recognition_count: Forwarded from :class:`PaddleRawMetrics`.
+        recognition_yield: Forwarded from :class:`PaddleRawMetrics`.
+        orientation_incoherent: ``True`` when the caller determined that
+            token orientations are inconsistent across the page.
+        reasons: Tuple of short diagnostic strings, one per failed quality
+            gate.  Empty when ``sufficient`` is ``True``.
+    """
+
     score: float
     sufficient: bool
     recovery_recommended: bool
@@ -46,6 +116,50 @@ class OcrQualityAssessment:
 
 @dataclass(slots=True)
 class OcrCandidate:
+    """Mutable container for one OCR attempt and its evaluation results.
+
+    An attempt is produced by the recovery pipeline for each combination of
+    image enhancement, rotation, and recognition strategy.  The pipeline
+    populates ``quality`` and the coverage fields after running
+    :func:`assess_ocr_quality` and :func:`assess_ocr_coverage`, then
+    selects the best candidate before returning.
+
+    Attributes:
+        name: Human-readable identifier for this attempt, e.g.
+            ``"baseline"`` or ``"rotation_90_clahe"``.
+        tokens: OCR tokens produced by this attempt.
+        raw_metrics: Low-level counters extracted directly from the OCR
+            engine output.
+        quality: Quality assessment computed from ``tokens``.
+        rotation: Page rotation applied before recognition, in degrees
+            (0, 90, 180, or 270).
+        enhancement: Name of the image-enhancement variant applied, or
+            ``None`` for the unmodified image.
+        family: Recovery family this attempt belongs to, e.g.
+            ``"baseline"`` or ``"targeted_region"``.
+        line_cluster_count: Number of text-line clusters found by
+            :func:`~structured_pdf_text.ocr.reconstruct.reconstruct_ocr_lines`.
+        text_area_coverage: Fraction of the page area covered by token
+            bounding boxes.
+        character_count: Total character count (mirrors coverage metrics).
+        token_count: Total token count (mirrors coverage metrics).
+        duplicate_ratio: Fraction of tokens that are near-duplicates of
+            another token on the same page.
+        spatial_coverage_score: Combined spatial-completeness score in
+            ``[0, 1]`` from :func:`assess_ocr_coverage`.
+        fusion_replacements_attempted: Number of region-fusion replacement
+            operations attempted during post-processing.
+        fusion_replacements_accepted: Number of fusion replacements that
+            improved quality and were kept.
+        fusion_replacements_rolled_back: Number of fusion replacements that
+            degraded quality and were reverted.
+        fusion_lost_clusters: Line clusters lost during fusion.
+        fusion_conflict_clusters: Clusters where two OCR sources produced
+            conflicting text for overlapping boxes.
+        fusion_duplicate_clusters: Alias for ``fusion_conflict_clusters``
+            retained for backward compatibility.
+    """
+
     name: str
     tokens: list[OcrToken]
     raw_metrics: PaddleRawMetrics
@@ -71,6 +185,26 @@ class OcrCandidate:
 
 @dataclass(frozen=True, slots=True)
 class OcrCoverageMetrics:
+    """Spatial completeness metrics for a single OCR result.
+
+    Produced by :func:`assess_ocr_coverage` independently from recognition
+    quality.  All ratio and score fields are in ``[0, 1]``.
+
+    Attributes:
+        line_cluster_count: Number of horizontal text-line groups identified
+            by :func:`~structured_pdf_text.ocr.reconstruct.reconstruct_ocr_lines`.
+        text_area_coverage: Fraction of the page (or token-union) area that
+            is covered by at least one token bounding box.
+        character_count: Total characters across all non-empty tokens.
+        token_count: Number of non-empty tokens with positive bounding-box
+            area.
+        duplicate_ratio: Fraction of tokens that are near-identical in text
+            and position to at least one other token (IoU >= 0.70).
+        spatial_coverage_score: Composite score blending
+            ``line_cluster_count`` (weight 0.55) and
+            ``text_area_coverage`` (weight 0.45), capped at 1.0.
+    """
+
     line_cluster_count: int
     text_area_coverage: float
     character_count: int
@@ -189,6 +323,81 @@ def assess_ocr_quality(
     thresholds: OcrQualityThresholds | None = None,
     orientation_incoherent: bool = False,
 ) -> OcrQualityAssessment:
+    """Score the quality of an OCR result and decide whether recovery is needed.
+
+    This is the primary quality-gate function.  It applies a series of
+    threshold checks against confidence distributions, character statistics,
+    and detector-level counters, accumulating a list of failure reasons.
+    A composite numeric score is also produced for ranking multiple
+    candidates against each other.
+
+    **Metric computation**
+
+    Inferred whitespace separators (tokens carrying
+    ``TokenFlag.WHITESPACE_INFERRED`` with blank text) are excluded from
+    every metric so they cannot artificially dilute confidence statistics.
+
+    Confidence is weighted by the alphanumeric character count of each
+    token rather than by raw token count, so a long word with low
+    confidence is penalised more heavily than a single-character token.
+
+    **Scoring**
+
+    When all gates pass (``sufficient=True``), the score is::
+
+        score = min(1.0, char_weighted_confidence
+                        + 0.04 * printable_ratio
+                        + 0.02 * horizontal_ratio)
+
+    When one or more gates fail, the score is penalised::
+
+        score = max(0.0, char_weighted_confidence
+                        - 0.12 * suspicious_ratio
+                        - 0.08 * low_confidence_ratio)
+
+    **Quality gates** (each failed gate appends a reason string):
+
+    - ``no_tokens`` — no non-separator tokens present.
+    - ``low_weighted_confidence`` — ``char_weighted_confidence`` below
+      ``thresholds.severe_mean_confidence``.
+    - ``weak_lower_quartile`` — 25th-percentile confidence below
+      ``thresholds.strong_lower_quartile``.
+    - ``low_confidence_characters`` — weighted low-confidence ratio above
+      ``thresholds.max_low_confidence_char_ratio``.
+    - ``severely_low_confidence_characters`` — same ratio above
+      ``thresholds.severe_low_confidence_char_ratio``.
+    - ``low_printable_ratio`` — printable-character fraction below
+      ``thresholds.minimum_printable_ratio``.
+    - ``suspicious_tokens`` — suspicious-token ratio above 0.20.
+    - ``control_characters`` — control-character fraction above 0.10.
+    - ``orientation_ratio_below_threshold`` — horizontal-token ratio below
+      ``thresholds.minimum_orientation_ratio`` (only checked when tokens
+      are present).
+    - ``low_recognition_yield`` — ``raw_metrics.recognition_yield`` below
+      0.65.
+    - ``orientation_incoherent`` — the caller flagged orientation as
+      inconsistent.
+
+    Args:
+        tokens: Iterable of OCR tokens from a single recognition attempt.
+            May include inferred whitespace separators; they are filtered
+            out before metric computation.
+        raw_metrics: Optional diagnostic counters from the OCR engine.
+            When ``None``, a default :class:`PaddleRawMetrics` instance is
+            used (all fields ``None``).
+        thresholds: Quality thresholds configuration.  When ``None``,
+            default :class:`~structured_pdf_text.config.OcrQualityThresholds`
+            values are used.
+        orientation_incoherent: Pass ``True`` when the caller has
+            independently determined that token orientations are
+            inconsistent, e.g. from comparing ``rotation`` attributes
+            across the page.
+
+    Returns:
+        An :class:`OcrQualityAssessment` with all metric fields populated.
+        ``sufficient`` is ``True`` only when every gate passes and
+        ``char_weighted_confidence`` meets the strong threshold.
+    """
     values = list(tokens)
     # Reconstructed separators are useful in the output stream but are not
     # recognition evidence. Counting them here makes an otherwise good line

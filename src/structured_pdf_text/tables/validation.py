@@ -22,6 +22,26 @@ from structured_pdf_text.geometry import BBox
 
 @dataclass(frozen=True, slots=True)
 class TableGeometryValidation:
+    """Summary result of :func:`validate_table_geometry`.
+
+    Attributes:
+        valid: ``True`` when no validation criterion was violated.
+        row_monotonicity: Fraction of consecutive row-centre pairs that are
+            non-decreasing (1.0 = perfectly ordered).
+        column_monotonicity: Fraction of consecutive column-anchor pairs that
+            are monotone in the reading direction.
+        token_coverage: Fraction of source tokens whose centre falls inside
+            any cell bbox.
+        empty_cell_ratio: Fraction of cells with neither text nor tokens.
+        source_row_assignment_monotonicity: Fraction of source-line-to-row
+            assignments that are non-decreasing by line y-centre.
+        source_column_assignment_monotonicity: Fraction of within-line
+            token-to-column assignments that are monotone in reading direction.
+        source_assignment_conflicts: Total count of ordering violations and
+            unassigned tokens.
+        reasons: Ordered set of validation failure labels; empty when valid.
+    """
+
     valid: bool
     row_monotonicity: float
     column_monotonicity: float
@@ -35,6 +55,13 @@ class TableGeometryValidation:
 
 @dataclass(frozen=True, slots=True)
 class TableConstructionDiagnostics:
+    """Rich per-candidate diagnostic snapshot for page-level audit logs.
+
+    Captures the full construction context — source lines, inferred row and
+    column coordinates, geometry validation results, and token provenance — so
+    that a failed or suspect table can be debugged without re-running detection.
+    """
+
     candidate_id: str
     method: str
     region_bbox: BBox | None
@@ -272,6 +299,17 @@ def _source_assignment_metrics(
     writing_direction: WritingDirection,
     candidate_bbox: BBox | None,
 ) -> tuple[float, float, int]:
+    """Measure how consistently source lines map to table rows and columns.
+
+    For each source line, tokens are assigned to cells by centre-point
+    containment.  The row monotonicity is computed over (line_y_centre, row)
+    pairs sorted by y; column monotonicity is delegated to
+    :func:`_monotonicity_from_ordered_columns`.  Unassigned tokens increment
+    the conflict counter.
+
+    Returns ``(row_monotonicity, column_monotonicity, conflict_count)`` as a
+    3-tuple of ``(float, float, int)``.
+    """
     if not source_lines or not cells:
         return 1.0, 1.0, 0
     line_rows: list[tuple[float, int]] = []
@@ -320,6 +358,14 @@ def _monotonicity_from_ordered_columns(
     writing_direction: WritingDirection,
     candidate_bbox: BBox | None,
 ) -> float:
+    """Compute the per-line column-ordering monotonicity across all source lines.
+
+    Within each source line, tokens are sorted by x0 (reversed for
+    right-to-left text) and their assigned column indices are checked for
+    non-decreasing order.  Returns the fraction of consecutive column pairs
+    that satisfy the ordering constraint, or 1.0 when no multi-token lines
+    exist.
+    """
     total = 0
     valid = 0
     for line in source_lines:

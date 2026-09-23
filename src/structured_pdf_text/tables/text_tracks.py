@@ -1,3 +1,19 @@
+"""Borderless table detection from recurrent text alignment tracks.
+
+A borderless table has no ruling lines — columns are implied by the consistent
+horizontal alignment of words across multiple rows.  This module implements
+three cooperating components:
+
+* :class:`ProseVsTableClassifier` — scores a candidate run of lines on
+  track recurrence, row-shape consistency, numeric density, and prose/code
+  signals to decide whether to accept it as a table.
+* :func:`_candidates` — segments a region's lines into multi-line runs,
+  merges same-baseline lines and multiline-continuation rows, optionally
+  prepends a header line, and hands each run to the classifier.
+* :func:`detect_borderless_table` — picks the best accepted candidate and
+  calls :func:`_build_table` to produce a
+  :class:`~structured_pdf_text.document.StructuredTable`.
+"""
 from __future__ import annotations
 
 from collections import Counter
@@ -21,6 +37,30 @@ from structured_pdf_text.tables.text_join import join_table_tokens
 
 @dataclass(frozen=True, slots=True)
 class TextTrackAssessment:
+    """Auditable outcome of the prose-vs-table classification step.
+
+    All numeric fields are rounded to six decimal places.
+
+    Attributes:
+        accepted: ``True`` when no rejection criterion was triggered.
+        confidence: Weighted combination of evidence signals in [0, 1].
+        reasons: Labels for both rejection causes and positive evidence.
+        row_count: Number of lines in the candidate run.
+        column_count: Number of inferred alignment anchors.
+        track_recurrence: Fraction of rows that populated each anchor column,
+            averaged across columns.
+        row_consistency: Penalty-adjusted measure of how uniformly each row
+            fills all columns.
+        numeric_cell_ratio: Fraction of non-label cells containing a digit.
+        prose_score: Combined signal from sentence-ending punctuation and long
+            cell text.
+        code_score: Fraction of rows matching common source-code patterns.
+        prefix_candidate_count: Lines inspected as potential header prefixes.
+        prefix_accepted_count: Prefix lines that passed structural filters.
+        prefix_rejected_count: Prefix lines that were rejected.
+        prefix_reasons: Rejection labels for each discarded prefix line.
+    """
+
     accepted: bool
     confidence: float
     reasons: tuple[str, ...]
@@ -60,6 +100,16 @@ class ProseVsTableClassifier:
         rows: tuple[tuple[_CellGroup, ...], ...],
         anchors: tuple[float, ...],
     ) -> TextTrackAssessment:
+        """Score *rows* against *anchors* and return a :class:`TextTrackAssessment`.
+
+        Computes per-column track recurrence (fraction of rows that populate
+        the column), row consistency (penalty for rows with fewer occupied
+        columns than the anchor count), numeric-cell density, and prose/code
+        signals.  Returns :attr:`TextTrackAssessment.accepted` = ``True`` only
+        when all four hard conditions pass: at least three rows, at least two
+        anchor columns, track recurrence >= 0.58, and row consistency >= 0.58,
+        with prose and code scores below their respective thresholds.
+        """
         row_count = len(rows)
         column_count = len(anchors)
         assignments = [_assign_groups(row, anchors) for row in rows]
@@ -185,6 +235,22 @@ def detect_borderless_table(
 
 
 def _candidates(region: LayoutRegion) -> list[_Candidate]:
+    """Segment *region* into table-candidate runs and classify each.
+
+    Steps for each run:
+
+    1. Merge same-baseline lines that the native line builder split per cell.
+    2. Split the sorted line sequence at large vertical gaps or single-group
+       lines into contiguous multi-group runs (minimum three lines each).
+    3. Merge physically adjacent continuation lines within each run.
+    4. Walk backward from the first run line to find header or label lines
+       that precede the data body; accept or reject each via
+       :func:`_prefix_structural_reason`.
+    5. Infer x-anchors and classify the enriched run with
+       :class:`ProseVsTableClassifier`.
+
+    Returns one :class:`_Candidate` per run (accepted or rejected).
+    """
     lines = sorted(region.native_lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
     lines = _merge_same_baseline_lines(lines)
     if len(lines) < 3:
@@ -318,6 +384,15 @@ def _is_multiline_continuation(
     *,
     typical_height: float,
 ) -> bool:
+    """Return ``True`` when *line* is a wrapped continuation of *previous_line*.
+
+    A line is considered a continuation when:
+
+    - The vertical gap to the preceding line is <= 35 % of the typical line height.
+    - The current line's occupied anchor columns form a *proper subset* of the
+      preceding line's columns (same set means a new independent row).
+    - The current line has at most two cell groups (wider rows are new entries).
+    """
     if not groups or not previous_groups:
         return False
     vertical_gap = line.bbox.y0 - previous_line.bbox.y1
@@ -341,6 +416,12 @@ def _is_multiline_continuation(
 
 
 def _merge_table_lines(first: TextLine, second: TextLine) -> TextLine:
+    """Merge two :class:`~structured_pdf_text.document.TextLine` objects into one.
+
+    Combines all tokens from both lines, sorted by (y0, x0), and unions their
+    bounding boxes.  Preserves the baseline and direction from *first* and
+    builds a compound ``line_id`` from all source identifiers.
+    """
     tokens = sorted(
         [*first.tokens, *second.tokens],
         key=lambda token: (token.bbox.y0, token.bbox.x0),
@@ -445,6 +526,15 @@ def _prefix_structural_reason(
     body_anchors: tuple[float, ...],
     region_width: float,
 ) -> str | None:
+    """Evaluate whether a candidate prefix *line* should be rejected.
+
+    A line is eligible as a table header or label when it either:
+    - contains multiple groups aligned with body anchors, or
+    - spans the full table body width (spanning title rows).
+
+    Returns a rejection reason string when the line fails structural tests,
+    or ``None`` when the line is acceptable as a prefix.
+    """
     tolerance = max(4.0, region_width * 0.02)
     aligned = bool(
         body_anchors
@@ -470,6 +560,13 @@ def _prefix_structural_reason(
 
 
 def _cell_groups(line: TextLine, gap_threshold: float) -> tuple[_CellGroup, ...]:
+    """Split visible tokens on a line into spatially separated cell groups.
+
+    A new group starts whenever the horizontal gap between consecutive tokens
+    exceeds *gap_threshold*.  Each group's text is assembled by
+    :func:`_join_original_tokens` over the full token list so that implicit
+    whitespace from the native order is preserved.
+    """
     visible = [token for token in line.tokens if token.text and not token.text.isspace()]
     if not visible:
         return ()
@@ -505,6 +602,17 @@ def _infer_anchors(
     rows: tuple[tuple[_CellGroup, ...], ...],
     region_width: float,
 ) -> tuple[float, ...]:
+    """Infer column left-edge anchor positions from cell group bounding boxes.
+
+    Clusters all group x0 values with a tolerance proportional to the region
+    width.  Accepts clusters present in at least 45 % of rows.  When fewer
+    than two anchors survive that threshold, falls back to the modal row width:
+    if a single column count dominates at least 60 % of rows, the median x0 of
+    each column slot in those rows is used instead.
+
+    Returns a tuple of anchor coordinates sorted left-to-right, or an empty
+    tuple when no reliable anchors can be found.
+    """
     tolerance = max(4.0, region_width * 0.015)
     clusters: list[list[float]] = []
     for value in sorted(group.bbox.x0 for row in rows for group in row):
@@ -545,6 +653,14 @@ def _build_table(
     candidate: _Candidate,
     table_id: str,
 ) -> StructuredTable:
+    """Construct a :class:`~structured_pdf_text.document.StructuredTable` from an accepted *candidate*.
+
+    Derives column edges as midpoints between consecutive anchors (bounded by
+    the table bbox) and row edges as midpoints between consecutive line centres.
+    Assigns cell groups to columns by nearest-anchor distance and assembles
+    :class:`~structured_pdf_text.document.TableCell` objects with the joined
+    group text and the candidate's confidence score.
+    """
     lines = candidate.lines
     anchors = candidate.anchors
     table_bbox = BBox.union_all([line.bbox for line in lines])

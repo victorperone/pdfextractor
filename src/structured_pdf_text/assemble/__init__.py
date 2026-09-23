@@ -1,3 +1,5 @@
+"""Document and page assembly: combines layout, OCR and table results into renderable blocks."""
+
 from .document import assemble_document
 from .page import assemble_page
 from .repeated_regions import detect_repeated_headers_footers
