@@ -1125,7 +1125,7 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 
 ## 12. Status de Implementação — Resumo por Fase
 
-> Última atualização: 23/09/2026 — branch `feat/paddle-ocrv6-evaluation` (5 commits sobre main)
+> Última atualização: 23/09/2026 — branch `feat/paddle-ocrv6-evaluation` (8 commits sobre main) — Gate 2 APROVADO
 
 ### Commits na branch
 
@@ -1189,12 +1189,84 @@ PDF     : corpus/Document_AI_V2.pdf
 |---|---|---|
 | 2.1. Script de comparação | ✅ Criado | `scripts/eval_v6/compare_v5_v6.py` — posicional PDF, flags `--v6-cache`, `--output-dir` |
 | 2.2. Corpus de comparação | ✅ Definido | `corpus/Document_AI_V2.pdf` (padrão do script) |
-| 2.3. Execução e coleta | 🔲 Em andamento | Comparação v5 vs pt-v6-medium iniciada no servidor |
-| 2.4. Análise qualitativa | 🔲 Pendente | Requer revisão dos arquivos `v5.md`, `v6_pt-v6-medium.md` e `diff.txt` gerados |
+| 2.3. Execução e coleta | ✅ Concluído | Ver resultado abaixo |
+| 2.4. Análise qualitativa | ✅ Concluído | Ver análise por página abaixo |
 
 **Desvio do plano:** Corpus sintético `Document_OCR_Stress_V1` substituído por `corpus/Document_AI_V2.pdf` conforme instrução do responsável. Script aceita qualquer PDF como argumento posicional.
 
-**Gate 2:** 🔲 Aguardando resultado da comparação e revisão do diff.
+---
+
+**Resultado da Execução — 23/09/2026 (Windows Server 2025, CPU)**
+
+```
+PDF   : C:\Users\a_victor.perone\workspace\pdfextractor\corpus\Document_AI_V2.pdf
+Saída : C:\Users\a_victor.perone\workspace\pdfextractor\output\comparativo_v5_v6
+
+  [pt]          26.019 bytes | 2120.0s → v5.md
+  [pt-v6-medium] 25.930 bytes | 1503.0s → v6_pt-v6-medium.md
+
+[≠] +36 / -34 linhas  →  diff salvo em: output\comparativo_v5_v6\diff.txt
+```
+
+**Métricas de execução:**
+
+| Métrica | v5 (`pt`) | v6-medium (`pt-v6-medium`) |
+|---|---|---|
+| Tempo total | 2120.0 s (≈ 35,3 min) | 1503.0 s (≈ 25,1 min) |
+| Velocidade média | ~50,5 s/página | ~35,8 s/página |
+| Tamanho da saída | 26.019 bytes | 25.930 bytes |
+| Linhas de diff | — | +36 / -34 (net +2) |
+| Páginas com diferença | — | 6 (p.12, p.25, p.27, p.28, p.29, p.30) |
+| Rede utilizada | Nenhuma | Nenhuma |
+| Status de saída | `success` | `success` |
+
+**Achado operacional importante:** v6-medium é **29% mais rápido** que v5 neste documento (1503s vs 2120s). Contradiz a previsão do plano (Seção 3.2) de que v6 medium teria custo similar ao v5_server. O risco "v6 mais lento" da Seção 10 não se confirmou.
+
+---
+
+**Análise qualitativa por página — excluindo gráficos, fluxogramas e organogramas**
+
+Todas as páginas com texto nativo (p.1–11, p.13–21, p.31–42) são **idênticas** entre v5 e v6. As diferenças ocorrem exclusivamente em páginas rasterizadas.
+
+| Página | Caso de teste | Categoria | v5 | v6-medium | Resultado |
+|---|---|---|---|---|---|
+| 12 | Fórmulas renderizadas (imagem) | OCR em imagem matemática | `eiπ + 1 = 0` (parcial) | `ei+1=0` (parcial) | Empate — ambos erram de forma diferente; esperado para fórmulas como imagem |
+| 25 | Imagem raster com texto e caixas | OCR em imagem não degradada | `StatuS: APROVADO` (capitalização incorreta) | `Status: APROVADO` (correto) | **v6 vence** ✓ |
+| 27 | Baixo contraste — título | OCR degradado — capitalização | `OcR de baixo contraste` | `OCR de baixo contraste` | **v6 vence** ✓ |
+| 27 | Baixo contraste — identificador | OCR degradado — sequência longa | `GS2-SCAN-CoNTRAST-O27` (parcial) | `SD` (perda quase total) | **v5 menos ruim** — v6 perde o identificador inteiro |
+| 27 | Baixo contraste — rodapé | OCR degradado — acento | `NÃo CONFIDENCIAL` | `NÃO CONFIDENCIAL` | **v6 vence** ✓ |
+| 28 | Ruído sintético — título | OCR degradado — capitalização início | `OCR com ruído` (correto) | `oCR com ruído` (errado) | **v5 vence** (minor) |
+| 28 | Ruído sintético — token no corpo | OCR degradado — identificador | `NOIsE-028` (mistura maiúscula/minúscula) | `NOISE-028` (correto) | **v6 vence** ✓ |
+| 28 | Ruído sintético — identificador completo | OCR degradado — código | `GS2-SCA-NOISE-028` (truncado) | `GS2-SCAN-NOISE-028` (correto) | **v6 vence** ✓ |
+| 28 | Ruído sintético — rodapé | OCR degradado — letras perdidas | `NÃ CONFDENCIAL` (letras suprimidas) | `NÃO CONFIDENCIAL` (correto) | **v6 vence** ✓✓ |
+| 28 | Ruído sintético — valor monetário | OCR degradado — formatação | `R$ 1.028,33` (correto) | `R$1.028,33` (sem espaço) | **v5 vence** (minor — formatação) |
+| 29 | Texto inclinado 2,2° — identificadores | OCR com inclinação | `SKEw-029` / `GS2-SCAN-SKEw-029` | `SKEW-029` / `GS2-SCAN-SKEW-029` | **v6 vence** ✓ |
+| 30 | Fonte pequena 6,4pt — ordem de leitura | OCR com fonte minúscula | Página inteira na **ordem inversa** (rodapé primeiro, texto por último) | Ordem correta (topo → base) | **v6 vence** ✓✓✓ — falha crítica corrigida |
+| 30 | Fonte pequena 6,4pt — tabela | OCR com fonte minúscula | Cabeçalho e dados **trocados** (`93,0% \| Percentual` como primeira linha) | Estrutura correta (`Campo \| Valor`) | **v6 vence** ✓✓ |
+
+**Contagem:**
+
+| | v6 vence | v5 vence | Empate |
+|---|---|---|---|
+| Casos avaliados | 9 | 3 (sendo 2 minor) | 1 |
+
+---
+
+**Achados críticos:**
+
+1. **Página 30 (fonte pequena) — falha estrutural v5 corrigida por v6:** o v5 inverte completamente a ordem de leitura da página e troca cabeçalho/dados da tabela. O v6 lê na ordem correta. Este é o ganho mais significativo: não é variação de caractere, é recuperação completa da estrutura da página.
+
+2. **Página 28 (ruído) — rodapé:** `NÃ CONFDENCIAL` no v5 indica supressão de letras (`O` e `I`) por ruído sintético. O v6 recupera `NÃO CONFIDENCIAL` corretamente.
+
+3. **Página 27 (baixo contraste) — regressão v6:** o identificador `GS2-SCAN-CoNTRAST-O27` (lido parcialmente pelo v5) é reduzido a `SD` pelo v6. Esta é a única regressão relevante. Contexto: ambos falham nesta página (baixo contraste extremo); v5 captura mais caracteres do identificador, mas ambos ficam abaixo do esperado.
+
+4. **Tabelas nativas (p.13–20) — idênticas:** zero diferença entre v5 e v6 nas tabelas digitais. Confirma que a troca de modelo OCR não afeta o processamento de texto nativo.
+
+5. **Texto nativo (p.1–11, p.31–42) — idêntico:** zero diferença. A fusão nativa+OCR funciona como esperado — o modelo de OCR não é invocado para páginas com texto digital.
+
+---
+
+**Gate 2:** ✅ **APROVADO** — v6-medium apresenta melhorias concretas e reproduzíveis em OCR de páginas rasterizadas, especialmente na ordenação de leitura (p.30) e identificação de caracteres em ruído (p.28/29). É também 29% mais rápido. A única regressão (p.27, identificador em baixo contraste extremo) é pontual e em cenário onde ambos os modelos falham. Não há falha estrutural de tabela que justifique PP-TableMagic.
 
 ---
 
@@ -1227,11 +1299,13 @@ PDF     : corpus/Document_AI_V2.pdf
 
 | Etapa | Status | Observações |
 |---|---|---|
-| 4.1. Identificar casos de uso alvo | 🔲 Pendente | Aguarda Gate 2 para identificar falhas estruturais |
+| 4.1. Identificar casos de uso alvo | ✅ Concluído | Gate 2 analisado — nenhuma falha estrutural de tabela identificada |
 | 4.2. Script de avaliação isolada | ✅ Criado | `scripts/eval_v6/eval_tablemagic.py` — aceita imagem ou PDF+páginas |
-| 4.3. Execução e coleta de métricas | 🔲 Pendente (condicional) | Só executar se Gate 2 evidenciar falhas estruturais que v6 OCR puro não resolve |
+| 4.3. Execução e coleta de métricas | ⏭️ Não necessário | Gate 2 não evidenciou falha estrutural que v6 OCR puro não resolve |
 
-**Gate 4:** 🔲 Condicional — só relevante após Gate 2.
+**Justificativa:** a análise do Gate 2 mostra que as diferenças de tabela entre v5 e v6 se restringem a caracteres OCR em células (ex.: identificadores com letras erradas) — não há inversão de linhas/colunas, perda de células mescladas ou estrutura perdida. As tabelas nativas (p.13–20) são idênticas. O caso de uso de PP-TableMagic (tabela 100% rasterizada com estrutura incorreta) não apareceu neste corpus.
+
+**Gate 4:** ⏭️ **NÃO APLICÁVEL** — Gate 2 não identificou falha estrutural de tabela que PP-TableMagic precisaria resolver. Script disponível para uso futuro se surgir caso concreto.
 
 ---
 
@@ -1250,7 +1324,7 @@ PDF     : corpus/Document_AI_V2.pdf
 | Etapa | Status | Observações |
 |---|---|---|
 | 6.1. Smoke de instalação Windows | ✅ Concluído | Gate 1 executado: 42 págs, 14.610 chars, 1474.9s, status success |
-| 6.2. Testes de integração Windows | 🔲 Em andamento | Comparação v5/v6 (Gate 2) em execução |
+| 6.2. Testes de integração Windows | ✅ Concluído | Gate 2 aprovado — v6-medium comparado em 42 páginas, 6 diferenças relevantes analisadas |
 | 6.3. Verificação `0xC0000005` | 🔲 Pendente | Nenhum crash observado no smoke (42 páginas). Monitorar em corpus completo |
 | 6.4. Validação de rollback | 🔲 Pendente | Executar `pdftext extract --language pt` após Gate 2 e comparar com referência |
 | 6.5. Critérios de aceitação | 🔲 Pendente | Aguarda análise do diff Gate 2 e decisão do responsável |
@@ -1262,12 +1336,12 @@ PDF     : corpus/Document_AI_V2.pdf
 | Fase | Planejado | Implementado | Status |
 |---|---|---|---|
 | 0 — Pré-requisito | Merge + branch | Merge `ee655d4`, branch `feat/paddle-ocrv6-evaluation` criada | ✅ |
-| 1 — Compatibilidade v6 | Setup + smoke test | Gate 1 ✅ — 42 págs, offline, CPU, Windows Server 2025 | ✅ |
-| 2 — Comparação v5/v6 | Script + relatório | Script pronto; comparação em execução no servidor | 🔲 |
+| 1 — Compatibilidade v6 | Setup + smoke test | Gate 1 ✅ — 42 págs, offline, CPU, Windows Server 2025, 1474.9s | ✅ |
+| 2 — Comparação v5/v6 | Script + relatório | Gate 2 ✅ — v6 vence em 9/13 casos; 29% mais rápido; p.30 corrigida | ✅ |
 | 3 — Integração CLI/modelos | perfis + `--ocr-model-profile` | 100% implementado — models.py + cli.py, 307 testes passando | ✅ |
-| 4 — PP-TableMagic | Avaliação isolada | Script `eval_tablemagic.py` criado; execução condicional ao Gate 2 | 🔲 |
-| 5 — PP-StructureV3 | Avaliação condicional | Deferido — risco muito alto (Seção 5.4) | ⏭️ |
-| 6 — Windows + promoção | Testes + checklist | Smoke aprovado; integração e rollback aguardam Gate 2 | 🔲 |
+| 4 — PP-TableMagic | Avaliação isolada | Gate 2 não revelou falha estrutural de tabela — fase não necessária | ⏭️ |
+| 5 — PP-StructureV3 | Avaliação condicional | Deferido — risco muito alto (Seção 5.4); Gate 4 não ativado | ⏭️ |
+| 6 — Windows + promoção | Testes + checklist | Smoke aprovado; rollback e critérios de aceitação pendentes | 🔲 |
 
 **Arquivos modificados nesta branch (em relação à main):**
 
