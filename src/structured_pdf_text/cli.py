@@ -422,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         except PaddleOcrUnavailable as exc:
             print(str(exc), file=sys.stderr)
             print(
-                "Run: python -m structured_pdf_text.cli setup-models",
+                "Run: pdftext setup-models",
                 file=sys.stderr,
             )
             return 1
@@ -491,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
             except PaddleOcrUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 print(
-                    "Run: python -m structured_pdf_text.cli setup-models",
+                    "Run: pdftext setup-models",
                     file=sys.stderr,
                 )
                 return 1
@@ -600,7 +600,10 @@ def _cmd_models_status(language: str, cache_home: str | None) -> int:
         return 0
     else:
         print("Offline OCR readiness: NOT READY")
-        print("Run: python -m structured_pdf_text.cli setup-models")
+        hint = f"Run: pdftext setup-models --ocr-model-profile {language}"
+        if cache_home:
+            hint += f" --cache-home {cache_home}"
+        print(hint)
         return 1
 
 
