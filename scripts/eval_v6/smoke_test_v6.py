@@ -97,7 +97,7 @@ def test_pdf(pdf: Path, cache_home: str, profile: str) -> bool:
     t0 = time.perf_counter()
     doc = PdfTextExtractor(ExtractorConfig(mode=ExtractionMode.BALANCED, language=profile)).extract(pdf)
     elapsed = time.perf_counter() - t0
-    chars = sum(len(p.text or "") for p in doc.pages)
+    chars = sum(len(p.reading_text or "") for p in doc.pages)
     print(f"[OK] {len(doc.pages)} páginas | {chars:,} chars | {elapsed:.1f}s | {doc.diagnostics.status.value}")
     return True
 
