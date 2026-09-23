@@ -22,7 +22,8 @@ Uso:
         --output-dir output/tablemagic_eval
 
 IMPORTANTE: PP-TableMagic usa modelos v5 internamente (SLANeXt_wired, PP-OCRv5_server_det,
-PP-OCRv5_server_rec). O --cache-home deve apontar para o cache v5 de produção.
+latin_PP-OCRv5_mobile_rec). O --cache-home deve apontar para o cache v5 de produção.
+SLANeXt_wired NÃO é baixado pelo setup-models padrão — requer download avulso com rede.
 
 Pré-condição: Esta avaliação só faz sentido se a Fase 2 (compare_v5_v6.py)
 identificou páginas com falhas estruturais de tabela que v6 OCR puro não resolve.
@@ -67,24 +68,33 @@ def eval_tablemagic_on_image(
     from paddleocr import TableRecognitionPipelineV2
 
     official_models = Path(cache_home) / "official_models"
-    t0 = time.perf_counter()
 
+    # Falha rápida: sem modelo local o PaddleX tentaria baixar da internet,
+    # violando o requisito de execução offline.
+    wired_dir = official_models / "SLANeXt_wired"
+    det_dir   = official_models / "PP-OCRv5_server_det"
+    rec_dir   = official_models / "latin_PP-OCRv5_mobile_rec"
+
+    missing = [(n, p) for n, p in [
+        ("SLANeXt_wired", wired_dir),
+        ("PP-OCRv5_server_det", det_dir),
+        ("latin_PP-OCRv5_mobile_rec", rec_dir),
+    ] if not p.exists()]
+    if missing:
+        names = ", ".join(n for n, _ in missing)
+        raise FileNotFoundError(
+            f"Modelos ausentes em {official_models}: {names}. "
+            f"Baixe-os com rede disponível antes de executar offline."
+        )
+
+    t0 = time.perf_counter()
     pipeline_kwargs: dict = {
         "device": "cpu",
         "enable_mkldnn": False,
+        "wired_table_structure_recognition_model_dir": str(wired_dir),
+        "text_detection_model_dir": str(det_dir),
+        "text_recognition_model_dir": str(rec_dir),
     }
-
-    # Wire in local model dirs only if they exist (offline mode)
-    wired_dir = official_models / "SLANeXt_wired"
-    det_dir = official_models / "PP-OCRv5_server_det"
-    rec_dir = official_models / "latin_PP-OCRv5_server_rec"
-
-    if wired_dir.exists():
-        pipeline_kwargs["wired_table_structure_recognition_model_dir"] = str(wired_dir)
-    if det_dir.exists():
-        pipeline_kwargs["text_detection_model_dir"] = str(det_dir)
-    if rec_dir.exists():
-        pipeline_kwargs["text_recognition_model_dir"] = str(rec_dir)
 
     pipeline = TableRecognitionPipelineV2(**pipeline_kwargs)
     init_ms = (time.perf_counter() - t0) * 1000

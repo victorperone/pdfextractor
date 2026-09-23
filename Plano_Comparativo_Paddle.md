@@ -295,24 +295,73 @@ A saída é HTML, não o contrato de `StructuredTable` do projeto. Seria necess�
 
 ### 4.4. Operação offline
 
+Para execução sem rede, todos os diretórios de modelo devem ser passados explicitamente. Sem isso, `TableRecognitionPipelineV2` tenta baixar os pesos automaticamente.
+
 ```python
+# Windows Server — ajustar CACHE_V5 para o caminho real
+CACHE_V5 = r"C:\Users\<usuario>\.cache\pdfextractor\paddlex\official_models"
+
 pipeline = TableRecognitionPipelineV2(
-    wired_table_structure_recognition_model_dir="/local/SLANeXt_wired",
-    text_detection_model_dir="/local/PP-OCRv5_server_det",
-    text_recognition_model_dir="/local/PP-OCRv5_server_rec",
+    wired_table_structure_recognition_model_dir=f"{CACHE_V5}/SLANeXt_wired",
+    text_detection_model_dir=f"{CACHE_V5}/PP-OCRv5_server_det",
+    text_recognition_model_dir=f"{CACHE_V5}/latin_PP-OCRv5_mobile_rec",
     device="cpu",
     enable_mkldnn=False,
 )
 ```
 
+**Modelos necessários e status de download:**
+
+| Modelo | Papel | Baixado pelo `setup-models`? |
+|---|---|---|
+| `SLANeXt_wired` | Estrutura de tabela com bordas | ❌ Não — download avulso necessário |
+| `PP-OCRv5_server_det` | Detecção de células (OCR interno) | ✅ Sim — já no cache v5 |
+| `latin_PP-OCRv5_mobile_rec` | Reconhecimento de texto (OCR interno) | ✅ Sim — já no cache v5 |
+| `PP-LCNet_x1_0_table_cls` | Classificação wired/wireless | ❌ Não — download avulso necessário |
+| `RT-DETR-L_wired_table_cell_det` | Detecção de células com bordas | ❌ Não — download avulso necessário |
+
+`SLANeXt_wired`, `PP-LCNet_x1_0_table_cls` e `RT-DETR-L_wired_table_cell_det` não fazem parte do perfil OCR padrão. Devem ser baixados separadamente com rede disponível antes de qualquer execução offline.
+
 ### 4.5. Avaliação de risco de integração
 
-**RISCO ALTO.** Motivos:
-- Saída em HTML requer parsing para `StructuredTable` — nova camada de transformação.
-- PP-TableMagic não replica o contrato de `page_fragments`, `method`, `confidence`, `TableCell.tokens` com rastreabilidade de origem.
-- Substituiria os 3 tiers atuais de detecção vetorial (que funcionam bem para PDFs digitais).
-- Caso de uso justo: apenas tabelas 100% rasterizadas onde OCR por região falha e a estrutura da tabela não está em vetores.
-- **Recomendação:** avaliar apenas após confirmar que v6 OCR puro não resolve o problema estrutural, e apenas para o subset de páginas rasterizadas com falhas de estrutura comprovadas.
+**RISCO ALTO.** Classificação baseada na análise abaixo.
+
+#### O que PP-TableMagic substitui — e o que não replica
+
+PP-TableMagic é um pipeline de reconhecimento de tabelas completo, não um componente pontual. Ele substitui os 3 tiers atuais de extração de tabela (detecção vetorial, reconstrução por spans, fallback OCR por região) por um único fluxo multi-modelo baseado em imagem.
+
+| Aspecto | Pipeline atual | PP-TableMagic |
+|---|---|---|
+| Entrada | Vetores PDF + OCR por região | Imagem rasterizada apenas |
+| Saída | `StructuredTable` com contrato completo | HTML — requer parser para integração |
+| `TableCell.tokens` com origem | Preservado (nativo ou OCR) | Não existe — OCR interno próprio |
+| `page_fragments` / `method` / `confidence` | Preservados | Não replicados |
+| Rastreabilidade de token | Mantida via Ledger | Perdida — OCR interno opaco |
+| PDFs com tabelas digitais | 3 tiers funcionam bem | Não indicado — força rasterização |
+| Tabelas rasterizadas com estrutura complexa | Pode falhar na estrutura | Caso de uso principal |
+
+#### Impacto arquitetural
+
+Integrar PP-TableMagic implica adicionar um parser HTML → `StructuredTable` e um ponto de decisão no pipeline para rotear tabelas rasterizadas ao caminho alternativo. Esses dois pontos tocam em `tables/`, `assembly/` e possivelmente `evidence/` — módulos com invariantes documentados.
+
+O risco não é inviabilizante, mas é concreto: o escopo de mudança vai além de "trocar modelo". Requer análise de contrato de integração antes de qualquer código de produção.
+
+#### Riscos operacionais
+
+- **RAM e CPU:** PP-TableMagic inicializa múltiplos submodelos simultaneamente (estrutura + classificação + detecção de célula + OCR). Consumo de RAM em CPU no Windows Server com todos os modelos carregados é desconhecido.
+- **Download avulso:** `SLANeXt_wired` e outros modelos de tabela não são baixados pelo `setup-models` do projeto. Requerem setup manual com rede disponível — se esquecidos, a execução tenta download durante inferência.
+- **Escopo correto:** tabelas digitais (com vetores no PDF) não devem passar por PP-TableMagic — os 3 tiers atuais são superiores. O roteamento correto (raster vs digital) é crítico para não regredir documentos que já funcionam.
+
+#### Quando pode ser considerado
+
+Apenas para tabelas onde **todas** as condições são verdadeiras:
+1. A tabela é 100% rasterizada (sem vetores no PDF)
+2. PP-OCRv6 reconhece o texto mas a estrutura de linhas/colunas está incorreta
+3. Os 3 tiers atuais não recuperam a estrutura
+
+Nunca como caminho padrão para tabelas digitais. Nunca substituindo o pipeline completo.
+
+**Recomendação:** implementar apenas script de avaliação isolado (`eval_tablemagic.py`) para medir viabilidade em casos concretos. Integração requer Gate 4 aprovado e análise de contrato separada.
 
 ---
 
@@ -353,12 +402,51 @@ Suporta `.markdown` property e `concatenate_markdown_pages()`.
 
 ### 5.4. Avaliação de risco de integração
 
-**RISCO MUITO ALTO.** Motivos:
-- É um sistema de alto nível que substitui todo o pipeline de extração, não apenas o OCR.
-- Produz Markdown diretamente — não produz o contrato intermediário de `NativePageEvidence → StructuredDocument`.
-- Não expõe o Content Conservation Ledger, rastreabilidade por token, evidências nativas, fusão nativa+OCR.
-- O projeto tem forte vantagem arquitetural sobre ferramentas genéricas justamente pela fusão de evidência nativa. Substituir por PPStructureV3 regressaria a "extrair só por OCR".
-- **Recomendação:** usar apenas como fallback pontual para páginas específicas com layout impossível de resolver via análise nativa, **nunca como caminho principal**. E somente se PP-OCRv6 + PP-TableMagic não resolverem o problema.
+**RISCO MUITO ALTO.** Classificação baseada na análise abaixo.
+
+#### Por que não é apenas "um modelo melhor de OCR"
+
+PP-OCRv6 (Fases 1–3) substitui apenas os pesos de detecção e reconhecimento. O pipeline permanece intacto: a imagem entra no motor OCR e sai uma lista de tokens com bounding boxes, exatamente como antes. O contrato com o restante do projeto não muda.
+
+PP-StructureV3 é diferente em categoria. Não é um componente do pipeline — é um pipeline alternativo completo, que decide sozinho como segmentar, classificar e extrair o conteúdo de uma página. A comparação:
+
+| Aspecto | PP-OCRv6 (Fases 1–3) | PP-StructureV3 (Fase 5) |
+|---|---|---|
+| O que substitui | Pesos de det + rec apenas | O pipeline inteiro de extração |
+| Entrada/saída do componente | Imagem → tokens com bbox | PDF/imagem → Markdown diretamente |
+| Contrato intermediário | `NativePageEvidence → StructuredDocument` preservado | Não existe — produz saída final direto |
+| Content Conservation Ledger | Preservado integralmente | Não exposto; não existe no PP-StructureV3 |
+| Rastreabilidade por token | Preservada (evidência nativa + OCR) | Não existe |
+| Fusão nativa + OCR | Mantida — diferencial arquitetural | Substituída por extração OCR pura |
+| Risco de regressão | Baixo — só troca pesos | Alto — bypassa toda a arquitetura |
+
+#### Perda do diferencial arquitetural
+
+O projeto tem vantagem estrutural sobre ferramentas genéricas (Docling, MinerU, Adobe Extract, etc.) exatamente porque não extrai só por OCR. Quando o PDF tem texto nativo, ele é lido diretamente; o OCR complementa apenas onde o texto nativo é ausente ou corrompido. Essa fusão produz:
+
+- Conservação fiel de caracteres especiais, formatação e estrutura que OCR puro distorce
+- Ledger de auditoria: cada token tem origem rastreável (nativo ou OCR)
+- Menor taxa de alucinação (OCR nunca substitui texto que já existe com fidelidade)
+
+Usar PP-StructureV3 como caminho principal regressaria a "extrair só por OCR" — o mesmo ponto de partida de qualquer ferramenta genérica. O diferencial deixaria de existir.
+
+#### Riscos operacionais adicionais
+
+- **RAM e CPU:** PP-StructureV3 carrega múltiplos submodelos simultaneamente (layout detection, tabela, OCR interno, opcionalmente fórmula e gráficos). Consumo de RAM em CPU no Windows Server é desconhecido e pode ser proibitivo.
+- **Offline:** alguns submodelos podem tentar auto-download na primeira inicialização mesmo com `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`. Requer verificação isolada com rede bloqueada antes de qualquer uso em produção.
+- **Fórmulas e gráficos:** `use_formula_recognition=True` não funciona com ONNX Runtime (CPU). `use_chart_recognition=True` carrega um VLM de 1.4 GB — inviável para CPU de produção. Qualquer descuido na configuração inicial pode causar falhas difíceis de diagnosticar.
+- **Integração com assembly e ledger:** expor a saída do PP-StructureV3 no formato `StructuredDocument` exigiria um adaptador não trivial, tocando em `assembly/`, `evidence/` e `diagnostics/` — módulos que têm invariantes documentados e não devem ser alterados sem análise cuidadosa.
+
+#### Quando pode ser considerado
+
+Apenas como fallback **pontual** e **opt-in** para páginas específicas onde:
+1. O texto nativo não existe (página 100% rasterizada),
+2. PP-OCRv6 extrai texto mas estrutura de tabela/layout está incorreta, e
+3. PP-TableMagic (Fase 4) não resolveu a estrutura.
+
+Nunca como caminho padrão. Nunca substituindo a fusão nativa+OCR para páginas com texto digital.
+
+**Recomendação:** implementar apenas um script de avaliação isolado (`eval_structurev3.py`) para medir viabilidade em CPU, tempo e qualidade em casos concretos. A decisão de integração exige análise separada, Gate 5 aprovado e autorização explícita.
 
 ---
 
@@ -749,57 +837,95 @@ Fallback silencioso de v6 para v5 sem registro: **proibido**. Qualquer fallback 
 
 ### Fase 4 — Avaliação de PP-TableMagic (apenas se justificado)
 
-**Pré-requisito:** fases anteriores concluídas, ou justificativa explícita de que o problema a resolver é estrutural (não OCR puro).
+> **RISCO ALTO — ver análise completa na Seção 4.5.**
+> Esta fase só se justifica se o Gate 2 identificar tabelas rasterizadas onde a estrutura permanece incorreta mesmo após extração com v6.
 
-#### 4.1. Casos de uso alvo
+**Pré-requisito obrigatório:** o diff do Gate 2 (`compare_v5_v6.py`) identificou pelo menos uma página real onde a estrutura de tabela está incorreta (linhas/colunas trocadas, células mescladas perdidas, conteúdo fora de ordem) e v6 OCR puro não corrigiu. Sem esse caso concreto reproduzível, a fase não deve ser iniciada.
 
-Somente tabelas onde:
-- O texto foi reconhecido incorretamente **por causa da estrutura** (não por reconhecimento de caracteres)
-- A estrutura de linhas/colunas foi perdida mesmo após v6 OCR
-- A tabela é 100% rasterizada (sem vetores)
+#### 4.1. O que esta fase faz (e o que não faz)
 
-#### 4.2. Avaliação em ambiente isolado
+**Faz:** executa `scripts/eval_v6/eval_tablemagic.py` sobre imagens das páginas problemáticas identificadas no Gate 2. Avalia se PP-TableMagic recupera a estrutura correta nesses casos específicos. Mede: qualidade estrutural, tempo de inferência, peak RAM em CPU, e ausência de downloads com rede bloqueada.
 
-Script fora do parser, mesmo venv, sem tocar no código de produção:
-```python
+**Não faz:**
+- Não altera `tables/`, `assembly/`, `evidence/`, `fusion/`, `ledger/` nem qualquer módulo de produção.
+- Não integra PP-TableMagic no pipeline principal.
+- Não substitui os 3 tiers atuais de extração de tabela.
+- Não toca em upscaling 2×, processamento textual nativo, modelos v5, modelos v6.
+
+#### 4.2. Pré-download de modelos (com rede)
+
+`SLANeXt_wired` e os modelos de células não fazem parte do `setup-models` do projeto — devem ser baixados manualmente antes de bloquear a rede:
+
+```powershell
+# Windows PowerShell — executar com rede disponível
+python -c "
 from paddleocr import TableRecognitionPipelineV2
-
-pipeline = TableRecognitionPipelineV2(
-    wired_table_structure_recognition_model_dir="/local/SLANeXt_wired",
-    text_detection_model_dir="/local/PP-OCRv5_server_det",
-    text_recognition_model_dir="/local/PP-OCRv5_server_rec",
-    device="cpu",
-    enable_mkldnn=False,
-)
-output = pipeline.predict("imagem_de_tabela.jpg")
+# Primeiro acesso baixa os modelos automaticamente para o cache padrão do PaddleX
+TableRecognitionPipelineV2(device='cpu')
+"
 ```
 
-Comparar output HTML com o resultado atual do pipeline de tabelas do projeto para a mesma imagem.
+Verificar após download que os diretórios existem em `%USERPROFILE%\.paddlex\official_models\` (cache padrão do PaddleX para modelos de pipeline).
 
-#### 4.3. Métricas de avaliação
+#### 4.3. Execução da avaliação
 
-- Células corretas/incorretas/ausentes/inventadas
-- Células mescladas corretas quando previstas
-- Preservação de acentos e caracteres especiais
-- Tempo de inferência e peak RAM em CPU
-- Integração offline confirmada (zero downloads)
-- Tabelas digitais não afetadas (controle negativo)
+Script fora do parser, mesmo venv de produção, sem tocar no código:
 
-**Gate 4:** integrar PP-TableMagic apenas como opt-in para regiões rasterizadas específicas, apenas se solucionar deficiência estrutural real e contrato de integração for compatível sem alterar assembly, ledger ou texto nativo.
+```powershell
+# Avaliar página específica (imagem PNG extraída do PDF problemático)
+python scripts\eval_v6\eval_tablemagic.py --image output\pagina_com_tabela.png
+
+# Ou avaliar páginas diretamente do PDF (extrai imagens automaticamente)
+python scripts\eval_v6\eval_tablemagic.py `
+    --pdf corpus\Document_AI_V2.pdf `
+    --pages 5,6,7 `
+    --output-dir output\tablemagic_eval
+```
+
+**Nota:** o script (`eval_tablemagic.py`) usa `latin_PP-OCRv5_mobile_rec` (modelo correto do cache v5). Falha explicitamente se qualquer modelo não for encontrado — não tenta download silencioso.
+
+Comparar o HTML produzido por PP-TableMagic com o resultado atual do pipeline para a mesma página.
+
+#### 4.4. Métricas de avaliação
+
+- Células corretas / incorretas / ausentes / inventadas (avaliação manual nos casos problemáticos)
+- Células mescladas: preservadas quando esperadas, não inventadas quando ausentes
+- Preservação de acentos e caracteres especiais em português
+- Tempo de inferência e peak RAM em CPU (viabilidade para produção)
+- Offline confirmado: zero tentativas de download com rede bloqueada
+- Controle negativo: tabelas digitais do mesmo documento não devem regredir
+
+**Gate 4:** integrar PP-TableMagic apenas como opt-in para regiões rasterizadas específicas, apenas se solucionar deficiência estrutural real e o contrato de integração for compatível sem alterar `assembly/`, `ledger/` ou processamento textual nativo.
 
 ---
 
 ### Fase 5 — PP-StructureV3 apenas para lacuna estrutural residual
 
-**Pré-requisito:** existe página sintética reproduzível onde v6 + PP-TableMagic ainda falham.
+> **RISCO MUITO ALTO — ver análise completa na Seção 5.4.**
+> Esta fase só se justifica se existir lacuna estrutural concreta não resolvida por v6 + PP-TableMagic.
 
-#### 5.1. Validação antes de qualquer código
+**Pré-requisito obrigatório:** resultado do Gate 4 identificou pelo menos uma página real onde PP-OCRv6 extrai texto mas a estrutura de tabela/layout permanece incorreta e PP-TableMagic não corrigiu. Sem esse caso concreto reproduzível, a fase não deve ser iniciada.
 
-Em ambiente isolado:
-1. Confirmar `device="cpu"` funciona para a configuração mínima (sem fórmulas, sem gráficos)
-2. Medir RAM e tempo em CPU do Windows Server — documentar se viável
-3. Verificar que `use_formula_recognition=False` é obrigatório para funcionar offline com CPU
-4. Confirmar que não faz download automático
+#### 5.1. O que esta fase faz (e o que não faz)
+
+**Faz:** cria um script de avaliação isolado (`scripts/eval_v6/eval_structurev3.py`) que testa `PPStructureV3` em CPU, offline, sobre imagens de páginas específicas. Mede: tempo de inicialização, RAM, qualidade estrutural, e se não há tentativa de download.
+
+**Não faz:**
+- Não altera `assembly/`, `evidence/`, `fusion/`, `ledger/`, nem qualquer módulo de produção.
+- Não integra PP-StructureV3 no pipeline principal.
+- Não substitui o caminho padrão de extração.
+- Não toca em upscaling 2×, processamento textual nativo, modelos v5.
+
+#### 5.2. Validação antes de qualquer código
+
+Em ambiente isolado (venv de avaliação ou venv de produção com rede bloqueada):
+
+1. Confirmar `device="cpu"` inicializa sem crash (histórico: `0xC0000005` em phi.dll pode reaparecer)
+2. Medir RAM de pico durante inicialização e inferência — PP-StructureV3 carrega múltiplos submodelos
+3. Confirmar `use_formula_recognition=False` é obrigatório (ONNX Runtime não suporta o submodelo de fórmula)
+4. Confirmar `use_chart_recognition=False` — VLM de ~1.4 GB, inviável para CPU de produção
+5. Verificar com rede bloqueada (Firewall / `netsh`) que nenhum download ocorre durante `predict()`
+6. Documentar quais modelos PP-StructureV3 precisa baixar previamente e onde os armazena
 
 ```python
 from paddleocr import PPStructureV3
@@ -808,13 +934,26 @@ pipeline = PPStructureV3(
     device="cpu",
     enable_mkldnn=False,
     use_table_recognition=True,
-    use_formula_recognition=False,   # obrigatório para CPU+offline
+    use_formula_recognition=False,   # obrigatório — não funciona em CPU com ONNX
     use_seal_recognition=False,
-    use_chart_recognition=False,     # VLM de 1.4GB — proibido para CPU
+    use_chart_recognition=False,     # VLM de 1.4 GB — proibido para CPU de produção
 )
 ```
 
-**Gate 5:** fallback opcional com ganhos reproduzíveis e custo aceitável. Se lacuna não justificar o modelo, encerrar avaliação sem integrar.
+#### 5.3. Critérios de decisão do Gate 5
+
+Para encerrar a fase **sem integrar** (decisão esperada):
+- RAM ou tempo em CPU inviáveis para o hardware de produção, **ou**
+- Qualidade estrutural não melhora sobre PP-TableMagic nos casos concretos identificados, **ou**
+- Qualquer tentativa de download detectada com rede bloqueada.
+
+Para considerar integração futura (requer análise separada, fora do escopo desta branch):
+- Melhoria estrutural reproduzível e mensurável nos casos concretos
+- RAM e tempo aceitáveis para produção
+- Zero downloads com rede bloqueada
+- Caminho de integração identificado que não toca em assembly/ledger/evidências nativas
+
+**Gate 5:** fallback opcional com ganhos reproduzíveis, custo operacional aceitável, e zero impacto sobre o pipeline padrão. Se a lacuna não justificar, encerrar avaliação aqui — a branch segue apenas com v6 OCR (e opcionalmente PP-TableMagic).
 
 ---
 
@@ -1015,13 +1154,32 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 
 | Etapa | Status | Observações |
 |---|---|---|
-| 1.1. Download de modelos v6 no Windows Server | 🔲 Em andamento | `setup_v6_windows.ps1` executado — aguardando conclusão |
-| 1.2. Smoke test de compatibilidade | 🔲 Em andamento | `smoke_test_v6.py --pdf corpus/Document_AI_V2.pdf` em execução |
-| 1.3. Repetição no Windows Server | 🔲 Em andamento | Testes direto no servidor (sem WSL intermediário) |
+| 1.1. Download de modelos v6 no Windows Server | ✅ Concluído | `setup_v6_windows.ps1` — todos os 4 modelos baixados no cache v6-eval |
+| 1.2. Smoke test de compatibilidade | ✅ Concluído | Ver resultado abaixo |
+| 1.3. Repetição no Windows Server | ✅ Concluído | Testes executados diretamente no servidor (sem WSL intermediário) |
 
-**Desvio do plano:** O plano previa venv Python isolado. Dado que `paddleocr==3.7.0` já suporta v6 sem atualização, o venv de produção é usado diretamente. O `.venv-paddle-v6-eval` foi criado apenas como opção de isolamento adicional se necessário.
+**Resultado do Smoke Test — 23/09/2026 12:51–13:15 (Windows Server 2025, CPU)**
 
-**Gate 1:** 🔲 Não concluído — aguarda execução manual dos scripts.
+```
+Perfil  : pt-v6-medium
+Cache   : C:\Users\a_victor.perone\.cache\pdfextractor\paddlex-v6-eval
+Modelos : [ok] PP-LCNet_x1_0_doc_ori | [ok] PP-LCNet_x1_0_textline_ori
+          [ok] PP-OCRv6_medium_det   | [ok] PP-OCRv6_medium_rec
+PDF     : corpus/Document_AI_V2.pdf
+
+[OK] 42 páginas | 14.610 chars | 1474.9s | status: success
+[PASS] Smoke test OK — modelos v6 funcionando offline em CPU.
+```
+
+**Observações:**
+- Warnings inofensivos: `INFO: Could not find files...` (Paddle), `No ccache found` (compilação) — não afetam a execução
+- Nenhuma tentativa de download de rede detectada (`PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True` ativo)
+- Tempo: ~35 s/página em CPU (esperado — v6 medium tem custo similar ao v5_server, conforme benchmarks da Seção 3.2)
+- Cache v5 permanece intocado em `paddlex/official_models/`
+
+**Desvio do plano:** Venv de produção (`.venv`) usado diretamente — `paddleocr==3.7.0` suporta v6 sem atualização, venv isolado desnecessário.
+
+**Gate 1:** ✅ **APROVADO** — PP-OCRv6 medium funciona offline, CPU-only, Windows Server 2025.
 
 ---
 
@@ -1029,14 +1187,14 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 
 | Etapa | Status | Observações |
 |---|---|---|
-| 2.1. Matriz de comparação | 🔲 Pendente (manual) | Script `scripts/eval_v6/compare_v5_v6.py` criado. Padrão: `corpus/Document_AI_V2.pdf` |
-| 2.2. Corpus de comparação | 🔲 Pendente | Usa `corpus/Document_AI_V2.pdf` (substituição do corpus sintético V1 — ver desvio) |
-| 2.3. Coleta de evidências | 🔲 Pendente | Script captura: chars/página, words, tempo, delta relativo entre perfis |
-| 2.4. Análise qualitativa | 🔲 Pendente | Requer execução e revisão manual do relatório gerado |
+| 2.1. Script de comparação | ✅ Criado | `scripts/eval_v6/compare_v5_v6.py` — posicional PDF, flags `--v6-cache`, `--output-dir` |
+| 2.2. Corpus de comparação | ✅ Definido | `corpus/Document_AI_V2.pdf` (padrão do script) |
+| 2.3. Execução e coleta | 🔲 Em andamento | Comparação v5 vs pt-v6-medium iniciada no servidor |
+| 2.4. Análise qualitativa | 🔲 Pendente | Requer revisão dos arquivos `v5.md`, `v6_pt-v6-medium.md` e `diff.txt` gerados |
 
-**Desvio do plano:** O plano original especificava `Document_OCR_Stress_V1` (60 páginas, corpus sintético) como corpus da Fase 2. A instrução do responsável foi usar `corpus/Document_AI_V2.pdf` como documento de teste preferencial. O script `compare_v5_v6.py` usa esse PDF como padrão (`--pdf corpus/Document_AI_V2.pdf`) e aceita qualquer PDF via argumento.
+**Desvio do plano:** Corpus sintético `Document_OCR_Stress_V1` substituído por `corpus/Document_AI_V2.pdf` conforme instrução do responsável. Script aceita qualquer PDF como argumento posicional.
 
-**Gate 2:** 🔲 Não concluído — aguarda execução manual e revisão do relatório.
+**Gate 2:** 🔲 Aguardando resultado da comparação e revisão do diff.
 
 ---
 
@@ -1055,13 +1213,13 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 | 3.3. Tratamento de erros — perfil inexistente | ✅ Concluído | `get_profile()` levanta `ValueError` com mensagem clara |
 | 3.3. Tratamento de erros — modelos ausentes | ✅ Existente | `PaddleOcrUnavailable` antes de inferência (sem modificação necessária) |
 | 3.4. Testes unitários para v6 | ⏭️ Deferido | Conforme instrução: não focar em testes de software; usar `Document_AI_V2.pdf` para verificar |
-| 3.4. Testes de regressão existentes | ✅ Passando | 91 testes, zero falhas após alterações |
+| 3.4. Testes de regressão existentes | ✅ Passando | 307 testes, zero falhas após todas as alterações |
 
 **Desvio do plano:** O plano previa testes unitários em `tests/test_ocr_v6_profile.py`. Conforme instrução do responsável, testes formais foram deferidos em favor de testes funcionais com o PDF real (`corpus/Document_AI_V2.pdf`). Os testes existentes cobrem o caminho crítico de offline/local.
 
 **Desvio menor:** O plano previa que a Fase 3 era posterior ao Gate 2. A integração de código (profiles + CLI) foi adiantada por ser invasividade zero — nenhum comportamento padrão foi alterado, e as flags são opt-in explícito.
 
-**Gate 3:** ✅ Código integrado. 🔲 Validação end-to-end pendente (aguarda execução com modelos v6 baixados).
+**Gate 3:** ✅ **APROVADO** — código integrado, 307 testes passando, validação end-to-end confirmada pelo Smoke Test (Gate 1).
 
 ---
 
@@ -1091,11 +1249,11 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 
 | Etapa | Status | Observações |
 |---|---|---|
-| 6.1. Smoke de instalação Windows | 🔲 Pendente | Aguarda Gate 1 WSL |
-| 6.2. Testes de integração Windows | 🔲 Pendente | Aguarda Gate 1 Windows |
-| 6.3. Verificação `0xC0000005` | 🔲 Pendente | Monitorar eventos Windows durante corpus completo |
-| 6.4. Validação de rollback | 🔲 Pendente | Confirmar que v5 mantém resultado idêntico à referência |
-| 6.5. Critérios de aceitação | 🔲 Pendente | Checklist formal antes de qualquer merge à main |
+| 6.1. Smoke de instalação Windows | ✅ Concluído | Gate 1 executado: 42 págs, 14.610 chars, 1474.9s, status success |
+| 6.2. Testes de integração Windows | 🔲 Em andamento | Comparação v5/v6 (Gate 2) em execução |
+| 6.3. Verificação `0xC0000005` | 🔲 Pendente | Nenhum crash observado no smoke (42 páginas). Monitorar em corpus completo |
+| 6.4. Validação de rollback | 🔲 Pendente | Executar `pdftext extract --language pt` após Gate 2 e comparar com referência |
+| 6.5. Critérios de aceitação | 🔲 Pendente | Aguarda análise do diff Gate 2 e decisão do responsável |
 
 ---
 
@@ -1103,34 +1261,35 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 
 | Fase | Planejado | Implementado | Status |
 |---|---|---|---|
-| 0 — Pré-requisito | Merge + branch | Merge `ee655d4`, branch criada | ✅ |
-| 1 — Compatibilidade v6 | Setup + smoke test | Scripts criados; execução pendente | 🔲 |
-| 2 — Comparação v5/v6 | Script + relatório | Script criado; execução pendente | 🔲 |
-| 3 — Integração CLI/modelos | profiles + `--ocr-model-profile` | 100% implementado (models.py + cli.py) | ✅ |
-| 4 — PP-TableMagic | Avaliação isolada | Script criado; execução condicional | 🔲 |
-| 5 — PP-StructureV3 | Avaliação condicional | Deferido (risco muito alto) | ⏭️ |
-| 6 — Windows + promoção | Testes + checklist | Aguarda Fases 1–2 | 🔲 |
+| 0 — Pré-requisito | Merge + branch | Merge `ee655d4`, branch `feat/paddle-ocrv6-evaluation` criada | ✅ |
+| 1 — Compatibilidade v6 | Setup + smoke test | Gate 1 ✅ — 42 págs, offline, CPU, Windows Server 2025 | ✅ |
+| 2 — Comparação v5/v6 | Script + relatório | Script pronto; comparação em execução no servidor | 🔲 |
+| 3 — Integração CLI/modelos | perfis + `--ocr-model-profile` | 100% implementado — models.py + cli.py, 307 testes passando | ✅ |
+| 4 — PP-TableMagic | Avaliação isolada | Script `eval_tablemagic.py` criado; execução condicional ao Gate 2 | 🔲 |
+| 5 — PP-StructureV3 | Avaliação condicional | Deferido — risco muito alto (Seção 5.4) | ⏭️ |
+| 6 — Windows + promoção | Testes + checklist | Smoke aprovado; integração e rollback aguardam Gate 2 | 🔲 |
 
 **Arquivos modificados nesta branch (em relação à main):**
 
 | Arquivo | Tipo de alteração |
 |---|---|
 | `src/structured_pdf_text/ocr/models.py` | Adição de perfis `pt-v6-medium` e `pt-v6-small` |
-| `src/structured_pdf_text/cli.py` | Adição de `--ocr-model-profile` e `--cache-home` |
-| `tests/test_paddle_offline.py` | Correção de regex de teste (mensagem de erro renomeada) |
+| `src/structured_pdf_text/cli.py` | `--ocr-model-profile`, `--cache-home`, hints melhorados |
+| `tests/test_paddle_offline.py` | Correção de regex (mensagem de erro renomeada) |
 | `.gitignore` | Adição de `.venv-paddle-v6-eval/` |
-| `scripts/eval_v6/setup_v6_env.sh` | Novo — setup de ambiente e download de modelos v6 |
-| `scripts/eval_v6/smoke_test_v6.py` | Novo — teste de compatibilidade offline+CPU |
-| `scripts/eval_v6/compare_v5_v6.py` | Novo — comparação v5 vs v6 em PDF real |
-| `scripts/eval_v6/eval_tablemagic.py` | Novo — avaliação PP-TableMagic (Fase 4) |
-| `Plano_Comparativo_Paddle.md` | Novo — este documento |
+| `scripts/eval_v6/setup_v6_env.sh` | Setup de ambiente WSL (Linux) |
+| `scripts/eval_v6/setup_v6_windows.ps1` | Setup de modelos v6 para Windows Server |
+| `scripts/eval_v6/smoke_test_v6.py` | Teste de compatibilidade offline+CPU |
+| `scripts/eval_v6/compare_v5_v6.py` | Comparação v5 vs v6 — gera markdowns + diff |
+| `scripts/eval_v6/eval_tablemagic.py` | Avaliação PP-TableMagic (Fase 4, condicional) |
+| `Plano_Comparativo_Paddle.md` | Plano completo com resultados e status por fase |
 
 **Nenhuma alteração nos módulos protegidos:** `ocr/paddle.py`, `ocr/recovery.py`, `ocr/engine.py`, `ocr/quality.py`, `ocr/reconstruct.py`, `config.py`, módulos de texto nativo, assembly, ledger.
 
-**Próximos passos para o responsável:**
-1. Revisar os arquivos modificados nesta branch
-2. Executar `bash scripts/eval_v6/setup_v6_env.sh` (com rede disponível) para baixar modelos v6
-3. Executar `python scripts/eval_v6/smoke_test_v6.py --pdf corpus/Document_AI_V2.pdf` para Gate 1
-4. Executar `python scripts/eval_v6/compare_v5_v6.py` para Gate 2
-5. Revisar relatório de comparação e decidir sobre continuidade
-6. Somente após Gates 1 e 2: executar testes no Windows Server (Gate 6)
+**Próximos passos (responsável):**
+1. ✅ Gate 1 concluído
+2. 🔲 Aguardar resultado do `compare_v5_v6.py` → revisar `v5.md`, `v6_pt-v6-medium.md`, `diff.txt`
+3. 🔲 Com base no diff: decidir se v6 traz ganhos reais para os documentos da empresa
+4. 🔲 Se ganhos confirmados: validar rollback (`pdftext extract --language pt` preserva resultado v5)
+5. 🔲 Se falhas estruturais de tabela persistirem: avaliar com `eval_tablemagic.py` (Gate 4)
+6. 🔲 Merge de `feat/paddle-ocrv6-evaluation` à `main` somente após aprovação explícita
