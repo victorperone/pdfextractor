@@ -18,11 +18,11 @@ Uso:
     # Especificar cache de modelos e diretório de saída:
     python scripts/eval_v6/eval_tablemagic.py \\
         --pdf corpus/Document_AI_V2.pdf \\
-        --cache-home ~/.cache/pdfextractor/paddlex-v6-eval \\
-        --output-dir /tmp/tablemagic_eval
+        --cache-home ~/.cache/pdfextractor/paddlex \\
+        --output-dir output/tablemagic_eval
 
 IMPORTANTE: PP-TableMagic usa modelos v5 internamente (SLANeXt_wired, PP-OCRv5_server_det,
-PP-OCRv5_server_rec). Os modelos devem estar no --cache-home especificado.
+PP-OCRv5_server_rec). O --cache-home deve apontar para o cache v5 de produção.
 
 Pré-condição: Esta avaliação só faz sentido se a Fase 2 (compare_v5_v6.py)
 identificou páginas com falhas estruturais de tabela que v6 OCR puro não resolve.
@@ -131,13 +131,13 @@ def main() -> int:
     )
     ap.add_argument(
         "--cache-home",
-        default=str(Path.home() / ".cache/pdfextractor/paddlex-v6-eval"),
-        help="Cache de modelos (deve conter SLANeXt_wired, PP-OCRv5_server_det, etc.)",
+        default=str(Path.home() / ".cache/pdfextractor/paddlex"),
+        help="Cache de modelos v5 (deve conter SLANeXt_wired, PP-OCRv5_server_det, etc.)",
     )
     ap.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/tmp/tablemagic_eval"),
+        default=Path("output/tablemagic_eval"),
         help="Diretório de saída para HTMLs e JSON",
     )
     ap.add_argument(

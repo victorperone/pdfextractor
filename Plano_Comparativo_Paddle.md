@@ -986,14 +986,24 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 
 ## 12. Status de Implementação — Resumo por Fase
 
-> Última atualização: 23/09/2026 — branch `feat/paddle-ocrv6-evaluation`
+> Última atualização: 23/09/2026 — branch `feat/paddle-ocrv6-evaluation` (5 commits sobre main)
+
+### Commits na branch
+
+| SHA | Mensagem |
+|---|---|
+| `7fd5da1` | feat(ocr): add PP-OCRv6 evaluation profiles and --ocr-model-profile flag |
+| `07c63a8` | feat(eval): add PP-OCRv6 evaluation scripts (phases 1, 2, 4) |
+| `49c7a38` | docs: add PP-OCRv6 comparative evaluation plan with implementation status |
+| `a103457` | feat(eval): simplify v6 evaluation scripts and add Windows PowerShell setup |
+| `75426b1` | fix(cli): show exact setup-models command in models-status hint; fix compare script |
 
 ### Fase 0 — Pré-requisito: consolidar main e criar branch nova
 
 | Etapa | Status | Observações |
 |---|---|---|
 | 0.1. Verificações pré-merge | ✅ Concluído | Branch `feat/ocr-regression-stabilization` em SHA `5a6ccc2`, SHA-base referência validada |
-| 0.2. Gate pré-merge (testes) | ✅ Concluído | `python -m pytest -q` — 91 testes passando, zero falhas |
+| 0.2. Gate pré-merge (testes) | ✅ Concluído | `python -m pytest -q` — 307 testes passando, zero falhas |
 | 0.3. Merge de estabilização à main | ✅ Concluído | Merge realizado em `ee655d4` — merge commit na main |
 | 0.4. Criar branch de avaliação | ✅ Concluído | Branch `feat/paddle-ocrv6-evaluation` criada a partir de `ee655d4` |
 
@@ -1005,12 +1015,11 @@ O v6 é uma **alternativa experimental**, não substituição automática do v5.
 
 | Etapa | Status | Observações |
 |---|---|---|
-| 1.1. Preparação do ambiente Python | 🔲 Pendente (manual) | Script `scripts/eval_v6/setup_v6_env.sh` criado — execução depende de rede disponível |
-| 1.1. Download de modelos v6 | 🔲 Pendente (manual) | `setup-models --ocr-model-profile pt-v6-medium --cache-home` aguarda execução |
-| 1.2. Smoke test de compatibilidade | 🔲 Pendente (manual) | Script `scripts/eval_v6/smoke_test_v6.py` criado — executa após download de modelos |
-| 1.3. Repetição no Windows Server | 🔲 Pendente | Aguarda Gate 1 WSL |
+| 1.1. Download de modelos v6 no Windows Server | 🔲 Em andamento | `setup_v6_windows.ps1` executado — aguardando conclusão |
+| 1.2. Smoke test de compatibilidade | 🔲 Em andamento | `smoke_test_v6.py --pdf corpus/Document_AI_V2.pdf` em execução |
+| 1.3. Repetição no Windows Server | 🔲 Em andamento | Testes direto no servidor (sem WSL intermediário) |
 
-**Desvio do plano:** O plano previa venv Python isolado (`.venv-paddle-v6-eval`). Dado que `paddleocr==3.7.0` já suporta v6 sem atualização (confirmado na Seção 2), o mesmo venv de produção pode ser usado para a extração — o `.venv-paddle-v6-eval` serve apenas como isolamento adicional de segurança. O script foi criado conforme o plano original para reprodutibilidade no Windows Server.
+**Desvio do plano:** O plano previa venv Python isolado. Dado que `paddleocr==3.7.0` já suporta v6 sem atualização, o venv de produção é usado diretamente. O `.venv-paddle-v6-eval` foi criado apenas como opção de isolamento adicional se necessário.
 
 **Gate 1:** 🔲 Não concluído — aguarda execução manual dos scripts.
 
