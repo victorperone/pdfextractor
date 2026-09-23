@@ -46,12 +46,11 @@ def run_extract(
         "--cache-home", cache_home,
     ]
     t0 = time.perf_counter()
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd)  # não captura — Paddle loga ao vivo no console
     elapsed = time.perf_counter() - t0
 
     if result.returncode != 0:
-        print(f"  [FAIL] perfil '{profile}'")
-        print(result.stderr[-1000:] if result.stderr else "(sem stderr)")
+        print(f"\n  [FAIL] perfil '{profile}' — código de saída {result.returncode}")
         raise SystemExit(1)
 
     size = out_file.stat().st_size if out_file.exists() else 0

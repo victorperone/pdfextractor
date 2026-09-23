@@ -8,15 +8,18 @@ Uso:
     python scripts/eval_v6/smoke_test_v6.py \\
         --cache-home ~/.cache/pdfextractor/paddlex-v6-eval
 
-    # Com documento real:
+    # Com documento real (recomendado — usa o venv de produção):
     python scripts/eval_v6/smoke_test_v6.py \\
         --cache-home ~/.cache/pdfextractor/paddlex-v6-eval \\
         --pdf corpus/Document_AI_V2.pdf
 
     # No Windows (PowerShell):
-    python scripts/eval_v6/smoke_test_v6.py `
-        --cache-home C:/Users/victor/.cache/pdfextractor/paddlex-v6-eval `
-        --pdf corpus/Document_AI_V2.pdf
+    python scripts\\eval_v6\\smoke_test_v6.py `
+        --cache-home "$env:USERPROFILE\\.cache\\pdfextractor\\paddlex-v6-eval" `
+        --pdf corpus\\Document_AI_V2.pdf
+
+Nota: quando --pdf é fornecido, o teste de imagem sintética é pulado
+para evitar carregar os modelos duas vezes na memória.
 """
 from __future__ import annotations
 
@@ -53,6 +56,7 @@ def check_models(cache_home: str, profile: str) -> bool:
 
 
 def test_image(cache_home: str, profile: str) -> bool:
+    """Carrega PaddleOCR diretamente e roda inferência numa imagem sintética."""
     _add_src()
     from structured_pdf_text.ocr.models import get_profile
 
@@ -88,6 +92,7 @@ def test_image(cache_home: str, profile: str) -> bool:
 
 
 def test_pdf(pdf: Path, cache_home: str, profile: str) -> bool:
+    """Extrai o PDF via PdfTextExtractor com o perfil v6."""
     _add_src()
     os.environ["PADDLE_PDX_CACHE_HOME"] = str(Path(cache_home).expanduser().resolve())
 
@@ -106,7 +111,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache-home", default=str(Path.home() / ".cache/pdfextractor/paddlex-v6-eval"))
     ap.add_argument("--profile", default="pt-v6-medium", choices=["pt-v6-medium", "pt-v6-small"])
-    ap.add_argument("--pdf", type=Path, default=None)
+    ap.add_argument("--pdf", type=Path, default=None, help="PDF real para teste (recomendado)")
     args = ap.parse_args()
 
     cache_home = str(Path(args.cache_home).expanduser().resolve())
@@ -119,13 +124,18 @@ def main() -> int:
     if not check_models(cache_home, args.profile):
         return 1
 
-    print("Testando com imagem sintética...")
-    if not test_image(cache_home, args.profile):
-        return 1
-
     if args.pdf:
-        print(f"Testando com {args.pdf.name}...")
+        # PDF fornecido: pula imagem sintética para não carregar modelos duas vezes
+        if not args.pdf.exists():
+            print(f"[FAIL] PDF não encontrado: {args.pdf}")
+            return 1
+        print(f"Testando com {args.pdf.name} (modo balanced, perfil {args.profile})...")
         if not test_pdf(args.pdf, cache_home, args.profile):
+            return 1
+    else:
+        # Sem PDF: usa imagem sintética como verificação rápida
+        print("Testando com imagem sintética...")
+        if not test_image(cache_home, args.profile):
             return 1
 
     print("\n[PASS] Smoke test OK — modelos v6 funcionando offline em CPU.")

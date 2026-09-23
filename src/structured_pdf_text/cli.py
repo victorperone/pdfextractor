@@ -374,7 +374,8 @@ def main(argv: list[str] | None = None) -> int:
             except PaddleOcrUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 print(
-                    f"Run: pdftext setup-models --ocr-model-profile {config.language}",
+                    f"Run: pdftext setup-models --ocr-model-profile {config.language}"
+                    + (f" --cache-home {args.cache_home}" if args.cache_home else ""),
                     file=sys.stderr,
                 )
                 return 1
@@ -467,7 +468,8 @@ def main(argv: list[str] | None = None) -> int:
             except PaddleOcrUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 print(
-                    f"Run: pdftext setup-models --ocr-model-profile {config.language}",
+                    f"Run: pdftext setup-models --ocr-model-profile {config.language}"
+                    + (f" --cache-home {args.cache_home}" if args.cache_home else ""),
                     file=sys.stderr,
                 )
                 return 1
