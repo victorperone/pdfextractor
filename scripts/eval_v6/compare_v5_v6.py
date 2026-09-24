@@ -112,6 +112,23 @@ def model_inventory(cache_home: Path, profile: str, *, compute_hashes: bool = Tr
     return models
 
 
+def _profile_labels() -> dict[str, str]:
+    """Return human-readable model pair descriptions for each profile in PROFILES."""
+    src = str(ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from structured_pdf_text.ocr.models import get_profile
+
+    labels: dict[str, str] = {}
+    for profile in PROFILES:
+        try:
+            p = get_profile(profile)
+            labels[profile] = f"{p.detection} + {p.recognition}"
+        except Exception:
+            labels[profile] = profile
+    return labels
+
+
 def parse_pages(value: str) -> list[int]:
     pages: list[int] = []
     for part in value.split(","):
