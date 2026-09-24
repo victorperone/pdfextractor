@@ -98,6 +98,12 @@ def model_inventory(cache_home: Path, profile: str, *, compute_hashes: bool = Tr
     ):
         directory = root / name
         files = [p for p in directory.rglob("*") if p.is_file()] if directory.is_dir() else []
+        weights = [
+            p for p in files
+            if p.suffix.lower() in {".pdiparams", ".pdparams", ".onnx", ".bin", ".nb", ".pt"}
+            or p.name.endswith(".pdiparams.info")
+        ]
+        metadata_files = [p for p in files if p.suffix.lower() in {".json", ".yml", ".yaml"}]
         models.append(
             {
                 "name": name,
@@ -105,6 +111,8 @@ def model_inventory(cache_home: Path, profile: str, *, compute_hashes: bool = Tr
                 "exists": directory.is_dir(),
                 "file_count": len(files),
                 "bytes": sum(p.stat().st_size for p in files),
+                "has_weight": bool(weights),
+                "has_metadata": bool(metadata_files),
                 "sha256": sha256_tree(directory) if compute_hashes else None,
                 "hash_skipped": not compute_hashes,
             }
