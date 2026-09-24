@@ -23,7 +23,7 @@ dev = [
 ocr = [
     "paddlepaddle>=3.3",
     "paddleocr>=3.7",
-    "paddlex>=3.7",
+    "paddlex[ocr]>=3.7",
 ]
 
 [project.scripts]
