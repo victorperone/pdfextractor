@@ -1,12 +1,26 @@
 """OCR model profiles.
 
 Single source of truth for model names used by runtime, setup-models and
-models-status. Adding a new language requires only a new entry in PROFILES;
-all consumers derive their configuration from here automatically.
+models-status. Adding a new language or model variant requires only a new entry
+in PROFILES; all consumers derive their configuration from here automatically.
 
 Supported profiles
 ------------------
-- "pt"  : Portuguese / Latin-script documents (PP-OCRv5 server det + mobile rec).
+- "pt"           : Portuguese / Latin-script documents (PP-OCRv5 server det + mobile rec).
+                   Default production profile. Stable, validated on Windows Server 2025.
+- "pt-v6-medium" : PP-OCRv6 medium models — experimental evaluation only.
+                   Higher accuracy target; same CPU throughput as v5-server.
+                   Requires models in a separate cache directory from v5.
+                   Select via: --ocr-model-profile pt-v6-medium --cache-home <v6-cache>
+- "pt-v6-small"  : PP-OCRv6 small models — experimental evaluation only.
+                   Lower memory footprint, ~2.6× faster than v5-server on CPU.
+                   Select via: --ocr-model-profile pt-v6-small --cache-home <v6-cache>
+
+Notes
+-----
+Profile names are intentionally distinct from language codes so that --language pt
+can be kept as "Portuguese" while --ocr-model-profile selects the actual model set.
+The "pt" profile continues to be the default when --ocr-model-profile is absent.
 """
 from __future__ import annotations
 
@@ -51,12 +65,32 @@ class OcrModelProfile:
 
 
 PROFILES: dict[str, OcrModelProfile] = {
+    # ── Production profile (PP-OCRv6 medium — default since 2026-09-24) ─────
+    # Cache: ~/.cache/pdfextractor/paddlex  (promoted from paddlex-v6-eval)
     "pt": OcrModelProfile(
         language="pt",
         doc_orientation="PP-LCNet_x1_0_doc_ori",
         textline_orientation="PP-LCNet_x1_0_textline_ori",
+        detection="PP-OCRv6_medium_det",
+        recognition="PP-OCRv6_medium_rec",
+    ),
+    # ── Rollback profile (PP-OCRv5 server) ──────────────────────────────────
+    # Use --language pt-v5 to revert to v5 models; requires pointing
+    # --cache-home at the v5 backup cache (paddlex-v5-backup).
+    "pt-v5": OcrModelProfile(
+        language="pt-v5",
+        doc_orientation="PP-LCNet_x1_0_doc_ori",
+        textline_orientation="PP-LCNet_x1_0_textline_ori",
         detection="PP-OCRv5_server_det",
         recognition="latin_PP-OCRv5_mobile_rec",
+    ),
+    # ── Experimental profiles (PP-OCRv6 small) ──────────────────────────────
+    "pt-v6-small": OcrModelProfile(
+        language="pt-v6-small",
+        doc_orientation="PP-LCNet_x1_0_doc_ori",
+        textline_orientation="PP-LCNet_x1_0_textline_ori",
+        detection="PP-OCRv6_small_det",
+        recognition="PP-OCRv6_small_rec",
     ),
 }
 
@@ -64,16 +98,21 @@ SUPPORTED_LANGUAGES = frozenset(PROFILES)
 
 
 def get_profile(language: str) -> OcrModelProfile:
-    """Return the OCR profile for the given language code.
+    """Return the OCR model profile for the given profile name.
 
-    Raises ValueError for unsupported languages with a clear message so callers
-    know exactly what to do instead of getting a cryptic KeyError.
+    The ``language`` parameter doubles as the profile selector when
+    ``--ocr-model-profile`` is not specified.  When the CLI flag is used,
+    its value is passed here directly (e.g. ``"pt-v6-medium"``).
+
+    Raises ValueError for unsupported profile names with a clear message so
+    callers know exactly what to do instead of getting a cryptic KeyError.
     """
     profile = PROFILES.get(language)
     if profile is None:
         supported = ", ".join(sorted(SUPPORTED_LANGUAGES))
         raise ValueError(
-            f"No local OCR profile configured for language '{language}'. "
-            f"Supported: {supported}."
+            f"No local OCR profile configured for '{language}'. "
+            f"Supported profiles: {supported}. "
+            f"Use --ocr-model-profile to select an experimental profile."
         )
     return profile

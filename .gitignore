@@ -26,6 +26,7 @@ htmlcov/
 
 # Virtual environments and local Python installs
 .venv/
+.venv-paddle-v6-eval/
 venv/
 ENV/
 env/

@@ -230,7 +230,7 @@ def test_unknown_language_without_recognition_dir_fails(
 
     engine = _make_engine(tmp_path, language="en")
 
-    with pytest.raises(ValueError, match="No local OCR profile configured for language"):
+    with pytest.raises(ValueError, match="No local OCR profile configured for"):
         engine._get_ocr()
 
     assert not paddleocr_called["called"], "Network download must not be attempted"

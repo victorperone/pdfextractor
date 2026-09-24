@@ -136,7 +136,8 @@ class PdfTextExtractor:
         with source:
             open_pdf_ms = (time.perf_counter() - open_start) * 1000
             context = source.open() if getattr(source, "_context", None) is None else source._context
-            assert context is not None
+            if context is None:
+                raise RuntimeError("source.open() did not return a DocumentContext")
             page_indices = _selected_page_indices(self.config.page_indices, context.page_count)
             for page_index in page_indices:
                 timeout = self.config.security_limits.document_timeout_seconds
