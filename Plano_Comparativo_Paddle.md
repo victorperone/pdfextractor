@@ -1126,3 +1126,160 @@ python scripts/eval_v6/compare_tablemagic.py corpus/Document_AI_V2.pdf \
     --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
     --check-only
 ```
+
+---
+
+## 14. Resultados do Comparativo PP-TableMagic — tm-v5 × tm-v6 (Seção 2.2)
+
+### 14.1. Metadados da execução
+
+| Campo | Valor |
+|---|---|
+| Script | `scripts/eval_v6/compare_tablemagic.py` |
+| SHA do commit | `ee80004bda3176523dba420964b1d8633c7084ef` |
+| Plataforma | Windows Server 2025 (AMD64) |
+| paddleocr | 3.7.0 |
+| paddlepaddle | 3.3.1 |
+| paddlex | 3.7.2 |
+| pypdfium2 | 5.11.0 |
+| Pillow | 11.1.0 |
+| PDF de referência | `Document_AI_V2.pdf` |
+| Páginas processadas | 42 (todas) |
+| Status geral | ✅ 84 inferências, 0 erros |
+
+**Perfis comparados:**
+
+| Perfil | OCR interno | Modelos de estrutura |
+|---|---|---|
+| `tm-v5` | `PP-OCRv5_server_det` + `latin_PP-OCRv5_mobile_rec` | SLANeXt, RT-DETR-L, PP-LCNet (idênticos entre braços) |
+| `tm-v6` | `PP-OCRv6_medium_det` + `PP-OCRv6_medium_rec` | SLANeXt, RT-DETR-L, PP-LCNet (idênticos entre braços) |
+
+Observação sobre o CF-02 desta rodada: o parâmetro `use_ocr_results_with_table_cells` foi omitido do construtor de `TableRecognitionPipelineV2` porque o `paddleocr 3.7.0` rejeita argumentos desconhecidos no construtor. Isso está registrado no manifesto `evaluation.json` como `"not_applied_paddleocr_3.7.0_constructor_rejects_argument"`. O efeito sobre a comparação é simétrico — ambos os braços foram afetados da mesma forma.
+
+### 14.2. Comportamento do pipeline com `use_layout_detection=False`
+
+**Todas as 42 páginas retornaram exatamente 1 "tabela" por página, independentemente do conteúdo real.**
+
+Com `use_layout_detection=False`, a `TableRecognitionPipelineV2` recebe a página inteira como uma única região de tabela, sem etapa prévia de detecção de layout. Isso é intencional no contexto desta avaliação — elimina a variável de detecção de layout para isolar o efeito do OCR interno. Porém, **o campo `table_count_delta` (sempre 0) não tem poder discriminante neste corpus**: páginas de texto puro, gráficos, diagrama e tabelas reais recebem o mesmo tratamento.
+
+Consequência direta: as métricas `tm_v5_tables` e `tm_v6_tables` registradas no `evaluation.json` refletem o número de *regiões processadas pela pipeline de tabela*, não o número de tabelas detectadas no conteúdo do PDF.
+
+### 14.3. Desempenho
+
+**Inicialização do pipeline:**
+
+| Perfil | Init (ms) | Diferença |
+|---|---|---|
+| tm-v5 | 5.627 ms | referência |
+| tm-v6 | 4.591 ms | **−18% (v6 mais rápido)** |
+
+**Inferência por página:**
+
+| Métrica | tm-v5 | tm-v6 | Diferença |
+|---|---|---|---|
+| Total (42 páginas) | ~814 s | ~666 s | **−18% (v6 mais rápido)** |
+| Média por página | ~19,4 s | ~15,9 s | **−18%** |
+| Máximo (págs. 19–20, tabela de 270 células) | ~30 s | ~28 s | −7% |
+
+A vantagem de velocidade do v6 no modo TableMagic (~18%) é ligeiramente inferior à registrada no comparativo OCR puro (~28% em modo adaptativo). A sobreposição dos cinco modelos de estrutura de tabela partilhados amortece parte da diferença.
+
+**Páginas mais lentas (19 e 20)** correspondem à tabela de orçamento trimestral com ~270 células. Ambos os braços levaram ~28-30 s para essas páginas.
+
+### 14.4. Qualidade textual dentro das células
+
+Os modelos de estrutura de tabela (SLANeXt, RT-DETR-L, PP-LCNet) são **idênticos entre tm-v5 e tm-v6**. Portanto, a geometria de células e o HTML estrutural são os mesmos — as diferenças observadas nas saídas são exclusivamente de OCR.
+
+**Casos em que tm-v6 produz resultado melhor:**
+
+| Página | tm-v5 | tm-v6 | Observação |
+|---|---|---|---|
+| 2 | `OcR` | `OCR` | Capitalização corrigida |
+| 4 | `portuquês` | `português` | Acento corrigido |
+| 4 | `GS2-PT-BR-ÁRvORE-004` | `GS2-PT-BR-ÁRVORE-004` | Caixa alta consistente |
+| 7 | `tachade` | `tachado` | Grafia corrigida |
+| 18 | `1° semestre` | `1º semestre` | Símbolo ordinal correto |
+| 27 | `GS2-SCAN-CoNTRAST-O27` | `GS2-SCAN-CONTRAST-027` | Corrige 'O' → '0' e caixa |
+| 28 | `sințético` / `NOIsE-028` | `sintético` / `NOISE-028` | Diacrítico e capitalização corretos |
+
+**Casos em que tm-v5 produz resultado melhor (regressões do v6):**
+
+| Página | tm-v5 | tm-v6 | Observação |
+|---|---|---|---|
+| 11 | `calcular_total` | `calcular total` | v6 remove underscore em nome de função |
+| 13 | `9ª` | `gª` | v6 confunde '9' com 'g' |
+| 15 | `TI` | `πI` | v6 confunde 'T' com 'π' |
+
+As regressões do v6 afetam identificadores de código (underscores) e símbolos alfanuméricos em contextos de baixa resolução. Esse padrão é consistente com o observado no comparativo OCR puro (Seção 13.4).
+
+**Observação importante — página 30 (fonte 6,4 pt):**
+
+No comparativo OCR puro (Seção 13.4), o tm-v5 **falhou completamente** na página 30 em modo baseline, invertendo a ordem de leitura. No modo TableMagic, **ambos os braços leram o conteúdo corretamente**. A hipótese é que a decomposição em células pelo SLANeXt força uma ordem de leitura por grade, mitigando o bug de ordem de leitura do v5. Isso é relevante para a decisão de integração: TableMagic pode compensar problemas de layout do OCR puro em páginas de texto denso.
+
+### 14.5. Confiança do modelo (avg_score)
+
+A maioria das páginas apresenta `avg_score` > 0,99 em ambos os braços — alta confiança no texto extraído.
+
+**Páginas com diferença relevante:**
+
+| Página | Conteúdo | tm-v5 avg_score | tm-v6 avg_score | Observação |
+|---|---|---|---|---|
+| 12 | Fórmulas matemáticas | 0,822 | 0,957 | v6 significativamente mais confiante |
+| 32 | Tabela rotacionada 180° | 0,343 | 0,764 | v6 ~2× mais confiante |
+| 33 | Tabela rotacionada 270° | 0,311 | 0,721 | v6 ~2× mais confiante |
+
+Para conteúdo rotacionado (págs. 32–33), nenhum dos braços corrige a orientação da tabela (`use_table_orientation_classify=False`), mas o v6 apresenta confiança significativamente maior no texto que consegue extrair. Isso se alinha com os melhores modelos de reconhecimento do PP-OCRv6 para caracteres em orientações não padrão.
+
+### 14.6. Introspeção de modelos carregados
+
+O campo `loaded_model_names_observed` em ambos os braços retornou **apenas os cinco modelos de estrutura de tabela**:
+
+```
+['PP-LCNet_x1_0_table_cls', 'RT-DETR-L_wired_table_cell_det',
+ 'RT-DETR-L_wireless_table_cell_det', 'SLANeXt_wired', 'SLANeXt_wireless']
+```
+
+Os modelos OCR internos (`PP-OCRv5_server_det`, `latin_PP-OCRv5_mobile_rec`, `PP-OCRv6_medium_det`, `PP-OCRv6_medium_rec`) **não aparecem** nesta lista. O mecanismo `_loaded_model_names()` acessa `pipeline._model_list` ou equivalente, que no PaddleX 3.7.x expõe apenas os modelos de estrutura de tabela, não os sub-componentes OCR internos.
+
+Isso significa que a verificação de manifesto confirma que os modelos de estrutura corretos foram carregados, mas não comprova via introspeção que o OCR interno correto foi utilizado. A evidência indireta (diferenças de qualidade de texto confirmam comportamento distinto entre os braços) valida que os modelos OCR configurados via `text_detection_model_dir` / `text_recognition_model_dir` foram de fato utilizados.
+
+### 14.7. Volume de artefatos por página — nota para rodadas futuras
+
+A execução atual gerou a seguinte estrutura de saída:
+
+```
+output/compare_tablemagic/
+  tm-v5/
+    page_0001/  input.png + result_000/ (artifacts) + page_result.json
+    page_0002/  ...
+    ...         (42 diretórios × ~5–10 arquivos cada)
+  tm-v6/
+    page_0001/  ...
+    ...         (42 diretórios × ~5–10 arquivos cada)
+  evaluation.json
+```
+
+Para 42 páginas × 2 perfis = **84 diretórios por página**, totalizando centenas de arquivos (PNGs de entrada + HTML de resultado + JSONs por item). Isso é aceitável para a rodada de avaliação, mas inviável para uso corrente ou integração em CI.
+
+**Melhoria pendente:** adicionar flag `--no-artifacts` a `compare_tablemagic.py` para omitir a chamada a `_save_result_artifacts()` e salvar apenas `page_result.json` + `evaluation.json`. O `evaluation.json` já contém `pred_html`, `cell_count`, `avg_score` e `elapsed_ms` para toda análise de qualidade; os artefatos visuais só são necessários para inspeção manual pontual.
+
+### 14.8. Conclusões e próximos passos
+
+**Síntese:**
+
+| Dimensão | Resultado |
+|---|---|
+| Velocidade | tm-v6 ~18% mais rápido na inferência e inicialização |
+| Estrutura de tabela | **Idêntica** entre os braços (mesmos 5 modelos compartilhados) |
+| Qualidade OCR em células | tm-v6 melhor em capitalização, diacríticos e rotações; tm-v5 melhor em underscores e alguns símbolos alfanuméricos |
+| Conteúdo rotacionado | tm-v6 significativamente mais confiante (avg_score 2× maior em págs. 32–33) |
+| Página de fonte mínima (pág. 30) | Ambos corretos via TableMagic (v5 falha sem TableMagic) |
+| Erros de inferência | Nenhum em ambos os braços (42/42 páginas) |
+
+**PP-OCRv6 apresenta vantagem consistente em TableMagic**, preservando a tendência observada no comparativo OCR puro. O risco de regressão mais relevante é a remoção de underscores em identificadores de código (página 11) — cenário presente em PDFs com blocos de código-fonte.
+
+**Próximas etapas:**
+
+1. **Gate 6 — Critérios de rollback e promoção:** definir os limiares quantitativos (avg_score mínimo, taxa de erro, tempo máximo) que determinam se v6 substitui v5 como perfil padrão.
+2. **Decisão de integração do TableMagic:** conforme manifestado pelo usuário, TableMagic deve ser ativado seletivamente — apenas quando tabela for detectada no layout ou quando ambos os OCRs apresentarem baixa confiança. A integração com `use_layout_detection=True` precisa ser avaliada separadamente.
+3. **Flag `--no-artifacts`:** implementar em `compare_tablemagic.py` para uso operacional.
+4. **Corpus de produção:** validar os resultados em documentos reais além do corpus controlado (`Document_AI_V2.pdf`).
