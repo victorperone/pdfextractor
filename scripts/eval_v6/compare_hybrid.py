@@ -541,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         ok = _print_inventory(profile, cache_by_profile[profile], layout_dir)
         all_ok = all_ok and ok
 
-    if not all_ok:
+    if not all_ok and not args.allow_download:
         print(
             "[FAIL] Um ou mais modelos ausentes. "
             "Execute com --allow-download na primeira vez para baixar automaticamente.",
@@ -549,8 +549,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if not all_ok and args.allow_download:
+        print("[INFO] Modelos ausentes serão baixados automaticamente durante a execução.\n")
+
     if args.check_only:
-        print("[OK] Todos os modelos encontrados. Execute sem --check-only para rodar.")
+        if all_ok:
+            print("[OK] Todos os modelos encontrados. Execute sem --check-only para rodar.")
+        else:
+            print("[INFO] Modelos ausentes serão baixados na primeira execução (--allow-download).")
         return 0
 
     out = args.output_dir.expanduser().resolve()

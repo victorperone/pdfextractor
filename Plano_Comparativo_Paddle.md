@@ -1350,52 +1350,34 @@ para cada página e perfil (v5, v6):
 2. **PP-DocLayout_plus-L** baixado em ambos os caches (v5 e v6)
 3. Modelos OCR e de estrutura de tabela já presentes (confirmados na Seção 14)
 
-### 15.4. Comandos de execução
+### 15.4. Comandos de execução (PowerShell — Windows Server)
+
+> O ambiente virtual já deve estar ativo: confirme que o prompt exibe `(.venv)`.
+
+**Passo 0 — Copiar o script do WSL para o workspace Windows (apenas se ainda não estiver presente):**
+
+```powershell
+Copy-Item "\\wsl.localhost\Ubuntu\home\victorperone\workspace\pdfextractor\scripts\eval_v6\compare_hybrid.py" -Destination "scripts\eval_v6\compare_hybrid.py"
+```
 
 **Passo 1 — Baixar PP-DocLayout_plus-L (apenas uma vez, requer internet):**
 
-```bash
-# Ativa o ambiente
-source .venv/bin/activate
-
-# Download automático via check-only com --allow-download (v5 cache)
-python scripts/eval_v6/compare_hybrid.py \
-    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
-    --v5-cache ~/.cache/pdfextractor/paddlex \
-    --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
-    --allow-download \
-    --check-only
-
-# Se o layout model não baixar automaticamente via check-only,
-# execute uma página para forçar o download:
-python scripts/eval_v6/compare_hybrid.py \
-    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
-    --pages 1 \
-    --allow-download \
-    --output-dir output/compare_hybrid_test
+```powershell
+python scripts\eval_v6\compare_hybrid.py corpus\Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf --pages 1 --allow-download --output-dir output\compare_hybrid_test
 ```
 
 **Passo 2 — Verificar inventário offline:**
 
-```bash
-PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
-python scripts/eval_v6/compare_hybrid.py \
-    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
-    --v5-cache ~/.cache/pdfextractor/paddlex \
-    --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
-    --check-only
+```powershell
+$env:PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True"
+python scripts\eval_v6\compare_hybrid.py corpus\Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf --v5-cache "$HOME\.cache\pdfextractor\paddlex" --v6-cache "$HOME\.cache\pdfextractor\paddlex-v6-eval" --check-only
 ```
 
 **Passo 3 — Execução definitiva (100% offline):**
 
-```bash
-PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
-python scripts/eval_v6/compare_hybrid.py \
-    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
-    --v5-cache ~/.cache/pdfextractor/paddlex \
-    --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
-    --confidence-threshold 0.70 \
-    --output-dir output/compare_hybrid
+```powershell
+$env:PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True"
+python scripts\eval_v6\compare_hybrid.py corpus\Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf --v5-cache "$HOME\.cache\pdfextractor\paddlex" --v6-cache "$HOME\.cache\pdfextractor\paddlex-v6-eval" --confidence-threshold 0.70 --output-dir output\compare_hybrid
 ```
 
 ### 15.5. Resultados e conclusão
