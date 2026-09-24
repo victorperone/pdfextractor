@@ -100,6 +100,7 @@ def test_pdf(pdf: Path, cache_home: str, profile: str) -> bool:
     from structured_pdf_text.config import ExtractorConfig, ExtractionMode
 
     t0 = time.perf_counter()
+    # language=profile is the Python-API equivalent of CLI --ocr-model-profile
     doc = PdfTextExtractor(ExtractorConfig(mode=ExtractionMode.BALANCED, language=profile)).extract(pdf)
     elapsed = time.perf_counter() - t0
     chars = sum(len(p.reading_text or "") for p in doc.pages)

@@ -80,9 +80,11 @@ def git_identity() -> dict[str, str | None]:
     }
 
 
-def model_inventory(cache_home: Path, profile: str) -> list[dict[str, Any]]:
+def model_inventory(cache_home: Path, profile: str, *, compute_hashes: bool = True) -> list[dict[str, Any]]:
     """Return names, paths, file counts and hashes for one OCR profile."""
-    sys.path.insert(0, str(ROOT / "src"))
+    src = str(ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
     from structured_pdf_text.ocr.models import get_profile
 
     selected = get_profile(profile)
@@ -103,7 +105,8 @@ def model_inventory(cache_home: Path, profile: str) -> list[dict[str, Any]]:
                 "exists": directory.is_dir(),
                 "file_count": len(files),
                 "bytes": sum(p.stat().st_size for p in files),
-                "sha256": sha256_tree(directory),
+                "sha256": sha256_tree(directory) if compute_hashes else None,
+                "hash_skipped": not compute_hashes,
             }
         )
     return models
@@ -250,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     cache_by_profile = {"pt": args.v5_cache, "pt-v6-medium": args.v6_cache}
+    assert set(cache_by_profile) == set(PROFILES), (
+        f"cache_by_profile keys {set(cache_by_profile)} must match PROFILES {set(PROFILES)}"
+    )
     metadata: dict[str, Any] = {
         "schema": "structured-pdf-text.ocr-v5-v6-evaluation.v2",
         "pdf": str(pdf),
@@ -276,11 +282,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     for profile in PROFILES:
         cache = Path(cache_by_profile[profile]).expanduser().resolve()
-        metadata["model_inventory"][profile] = model_inventory(cache, profile)
-        if args.no_model_hashes:
-            for model in metadata["model_inventory"][profile]:
-                model["sha256"] = None
-                model["hash_skipped"] = True
+        metadata["model_inventory"][profile] = model_inventory(
+            cache, profile, compute_hashes=not args.no_model_hashes
+        )
 
     failures = 0
     output_paths: dict[str, Path] = {}

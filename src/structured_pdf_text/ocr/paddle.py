@@ -137,6 +137,7 @@ def _ocr_proc_mem() -> str:
 
     try:
         rss_kb = 0
+        vms_kb = 0
         with open("/proc/self/status", encoding="ascii", errors="replace") as _f:
             for line in _f:
                 if line.startswith("VmRSS:"):

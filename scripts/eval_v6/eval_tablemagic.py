@@ -80,12 +80,12 @@ def parse_bbox(value: str) -> tuple[float, float, float, float]:
         values = tuple(float(item.strip()) for item in value.split(","))
     except ValueError as exc:
         raise ValueError("bbox must be x0,y0,x1,y1") from exc
-    if len(values) != 4 or not all(math.isfinite(value) for value in values):
+    if len(values) != 4 or not all(math.isfinite(v) for v in values):
         raise ValueError("bbox must contain four finite numbers")
     x0, y0, x1, y1 = values
     if x1 <= x0 or y1 <= y0:
         raise ValueError("bbox must have positive width and height")
-    return values
+    return (x0, y0, x1, y1)
 
 
 def parse_pages(value: str) -> list[int]:
@@ -430,15 +430,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--document-sha", help="SHA-256 of the source PDF (required for --image)")
     parser.add_argument("--page", type=int, help="one human-facing 1-based PDF page")
     parser.add_argument("--pages", help="comma-separated human-facing 1-based PDF pages")
-    parser.add_argument("--bbox", required=True, help="x0,y0,x1,y1 in PDF points, top-left origin")
+    parser.add_argument("--bbox", help="x0,y0,x1,y1 in PDF points, top-left origin (required for --pdf; optional metadata for --image)")
     parser.add_argument("--profile", choices=tuple(TABLE_PROFILES), default="tm-v5")
     parser.add_argument("--cache-home", default=str(Path.home() / ".cache/pdfextractor/paddlex"))
     parser.add_argument("--output-dir", type=Path, default=Path("output/tablemagic_eval"))
     parser.add_argument("--scale", type=float, default=2.0)
     args = parser.parse_args(argv)
 
+    if not args.image and args.page is None and not args.pages:
+        parser.error("--page or --pages is required when using --pdf")
+
     try:
-        bbox = parse_bbox(args.bbox)
         if args.scale <= 0:
             raise ValueError("--scale must be positive")
         if args.image:
@@ -446,8 +448,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--image requires --page and --document-sha")
             if args.pages:
                 raise ValueError("--pages is only valid with --pdf")
+            bbox = parse_bbox(args.bbox) if args.bbox else None
             pages = [args.page]
         else:
+            if not args.bbox:
+                raise ValueError("--bbox is required when using --pdf")
+            bbox = parse_bbox(args.bbox)
             if not args.pdf.is_file():
                 raise FileNotFoundError(f"PDF not found: {args.pdf}")
             if args.page is not None and args.pages:
@@ -481,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
                 input_meta.update({
                     "document_sha256": args.document_sha.lower(),
                     "page_human_1_based": page_number,
-                    "bbox_image_coordinates": list(bbox),
+                    "bbox_image_coordinates": list(bbox) if bbox is not None else None,
                 })
             else:
                 image_path, input_meta = _pdf_input(args.pdf, page_number, bbox, args.scale, item_dir)
