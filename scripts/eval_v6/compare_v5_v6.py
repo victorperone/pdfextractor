@@ -270,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         "python": sys.version,
         "packages": package_versions(),
         "profiles": PROFILES,
+        "profile_labels": _profile_labels(),
         "policies": POLICIES,
         "render_scale": 2.0,
         "rgb_budget_mib": os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "8.0"),
