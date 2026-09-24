@@ -1,12 +1,15 @@
-"""Hybrid confidence-gated evaluation: standard OCR with PP-TableMagic fallback.
+"""Hybrid 3-level evaluation: native text → OCR → PP-TableMagic.
 
 For each page and each profile (v5, v6):
-  1. Run PaddleOCR (v5 or v6 models) → get rec_texts + avg_confidence.
-  2. If avg_confidence < confidence_threshold AND text was detected:
+  1. Extract native PDF text layer (pypdfium2).
+       if char_count >= min_native_chars → use native text, skip OCR.
+  2. Run PaddleOCR (v5 or v6 models) → get rec_texts + avg_confidence.
+       if avg_confidence >= confidence_threshold → use OCR output.
+  3. If avg_confidence < confidence_threshold AND text was detected:
        activate TableRecognitionPipelineV2 (use_layout_detection=True).
        if tables detected  → use TableMagic text output.
        if no tables found  → keep OCR output, record 'ocr_tablemagic_no_table'.
-  3. Record everything in a single evaluation.json (no per-page directories or images).
+  4. Record everything in a single evaluation.json (no per-page directories or images).
 
 Required models per cache directory:
   v5 OCR  : PP-OCRv5_server_det + latin_PP-OCRv5_mobile_rec
@@ -99,6 +102,21 @@ def _rasterize_page(pdf_path: Path, page_number: int, scale: float = 2.0):
         page = doc[page_number - 1]
         bitmap = page.render(scale=scale, rotation=0)
         return bitmap.to_pil().convert("RGB")
+    finally:
+        doc.close()
+
+
+def _extract_native_text(pdf_path: Path, page_number: int) -> tuple[str, int]:
+    """Extract native PDF text layer. Returns (text, char_count)."""
+    import pypdfium2 as pdfium
+    doc = pdfium.PdfDocument(str(pdf_path))
+    try:
+        page = doc[page_number - 1]
+        textpage = page.get_textpage()
+        text = textpage.get_text_bounded()
+        textpage.close()
+        text = text.strip()
+        return text, len(text)
     finally:
         doc.close()
 
@@ -310,19 +328,26 @@ def run_profile(
     threshold: float,
     layout_dir: Path | None,
     scale: float,
+    min_native_chars: int,
 ) -> dict[str, Any]:
     os.environ["PADDLE_PDX_CACHE_HOME"] = str(cache)
 
     print(f"=== Executando: {profile} ===")
 
-    t0 = time.perf_counter()
-    ocr_pipeline = _build_ocr_pipeline(cache, profile)
-    ocr_init_ms = round((time.perf_counter() - t0) * 1000, 1)
-    print(f"  [{profile}] PaddleOCR pronto em {ocr_init_ms:.0f}ms")
-
-    # TableMagic pipeline is lazily initialized (only if a page triggers it)
+    # OCR and TableMagic pipelines are lazily initialized
+    ocr_pipeline: Any = None
+    ocr_init_ms: float | None = None
     tm_pipeline: Any = None
     tm_init_ms: float | None = None
+
+    def _get_ocr() -> Any:
+        nonlocal ocr_pipeline, ocr_init_ms
+        if ocr_pipeline is None:
+            t = time.perf_counter()
+            ocr_pipeline = _build_ocr_pipeline(cache, profile)
+            ocr_init_ms = round((time.perf_counter() - t) * 1000, 1)
+            print(f"  [{profile}] PaddleOCR pronto em {ocr_init_ms:.0f}ms")
+        return ocr_pipeline
 
     def _get_tm() -> Any:
         nonlocal tm_pipeline, tm_init_ms
@@ -338,10 +363,31 @@ def run_profile(
 
     try:
         for page_num in page_list:
+            t_page = time.perf_counter()
+
+            # --- Nível 1: texto nativo ---
+            native_text, native_chars = _extract_native_text(pdf, page_num)
+            if native_chars >= min_native_chars:
+                elapsed = round((time.perf_counter() - t_page) * 1000, 1)
+                page_results.append({
+                    "page": page_num,
+                    "native_chars": native_chars,
+                    "ocr": None,
+                    "tablemagic": None,
+                    "mode": "native",
+                    "confidence_trigger": False,
+                    "final_texts": [native_text],
+                    "final_avg_confidence": None,
+                    "total_elapsed_ms": elapsed,
+                })
+                print(f"  [{profile}] pág {page_num:3d}: native={native_chars} chars  mode=native")
+                continue
+
+            # --- Nível 2: OCR ---
             img_path = tmpdir / f"p{page_num:04d}.png"
             _rasterize_page(pdf, page_num, scale).save(img_path)
 
-            ocr = _ocr_page(img_path, ocr_pipeline)
+            ocr = _ocr_page(img_path, _get_ocr())
 
             conf = ocr.get("avg_confidence")
             trigger = (
@@ -353,6 +399,7 @@ def run_profile(
 
             record: dict[str, Any] = {
                 "page": page_num,
+                "native_chars": native_chars,
                 "ocr": {
                     "avg_confidence": conf,
                     "text_count": ocr["text_count"],
@@ -368,6 +415,7 @@ def run_profile(
                 "total_elapsed_ms": ocr["elapsed_ms"],
             }
 
+            # --- Nível 3: TableMagic ---
             if trigger:
                 tm = _tablemagic_page(img_path, _get_tm())
                 record["tablemagic"] = {
@@ -402,26 +450,26 @@ def run_profile(
             img_path.unlink(missing_ok=True)
             page_results.append(record)
 
-            mode = record["mode"]
             conf_str = f"{conf:.3f}" if conf is not None else " n/a "
             print(
-                f"  [{profile}] pág {page_num:3d}: conf={conf_str}  "
-                f"trigger={'YES' if trigger else ' no'}  mode={mode}"
+                f"  [{profile}] pág {page_num:3d}: native={native_chars:3d}  "
+                f"conf={conf_str}  trigger={'YES' if trigger else ' no'}  mode={record['mode']}"
             )
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    tm_pages = [r["page"] for r in page_results if r["mode"] == "tablemagic"]
-    ocr_pages = [r["page"] for r in page_results if r["mode"] == "ocr"]
-    no_tbl = [r["page"] for r in page_results if r["mode"] == "ocr_tablemagic_no_table"]
-    errors = [r["page"] for r in page_results if r["ocr"]["status"] == "error"]
+    native_pages = [r["page"] for r in page_results if r["mode"] == "native"]
+    ocr_pages    = [r["page"] for r in page_results if r["mode"] == "ocr"]
+    tm_pages     = [r["page"] for r in page_results if r["mode"] == "tablemagic"]
+    no_tbl       = [r["page"] for r in page_results if r["mode"] == "ocr_tablemagic_no_table"]
+    errors       = [r["page"] for r in page_results if (r.get("ocr") or {}).get("status") == "error"]
 
     label = "OK" if not errors else f"PARCIAL ({len(errors)} erro(s))"
     print(
         f"[{label}] {profile}: "
-        f"ocr={len(ocr_pages)}  tablemagic={len(tm_pages)}  "
-        f"no_table={len(no_tbl)}  errors={len(errors)}\n"
+        f"native={len(native_pages)}  ocr={len(ocr_pages)}  "
+        f"tablemagic={len(tm_pages)}  no_table={len(no_tbl)}  errors={len(errors)}\n"
     )
 
     return {
@@ -429,7 +477,9 @@ def run_profile(
         "ocr_init_ms": ocr_init_ms,
         "tm_init_ms": tm_init_ms,
         "confidence_threshold": threshold,
+        "min_native_chars": min_native_chars,
         "pages_total": len(page_list),
+        "pages_native": len(native_pages),
         "pages_ocr_only": len(ocr_pages),
         "pages_tablemagic_activated": len(tm_pages),
         "pages_tablemagic_no_table": len(no_tbl),
@@ -455,14 +505,15 @@ def _compare_pages(
         r6 = by_v6.get(page)
         comparison.append({
             "page": page,
+            "native_chars": r5.get("native_chars") if r5 else (r6.get("native_chars") if r6 else None),
             "v5_mode": r5["mode"] if r5 else "not_run",
             "v6_mode": r6["mode"] if r6 else "not_run",
-            "v5_ocr_confidence": r5["ocr"]["avg_confidence"] if r5 else None,
-            "v6_ocr_confidence": r6["ocr"]["avg_confidence"] if r6 else None,
+            "v5_ocr_confidence": r5["ocr"]["avg_confidence"] if r5 and r5.get("ocr") else None,
+            "v6_ocr_confidence": r6["ocr"]["avg_confidence"] if r6 and r6.get("ocr") else None,
             "v5_final_confidence": r5["final_avg_confidence"] if r5 else None,
             "v6_final_confidence": r6["final_avg_confidence"] if r6 else None,
-            "v5_text_count": r5["ocr"]["text_count"] if r5 else None,
-            "v6_text_count": r6["ocr"]["text_count"] if r6 else None,
+            "v5_text_count": r5["ocr"]["text_count"] if r5 and r5.get("ocr") else None,
+            "v6_text_count": r6["ocr"]["text_count"] if r6 and r6.get("ocr") else None,
             "v5_elapsed_ms": r5["total_elapsed_ms"] if r5 else None,
             "v6_elapsed_ms": r6["total_elapsed_ms"] if r6 else None,
         })
@@ -494,6 +545,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pages", help="Páginas 1-based, ex: 1,3-5,7")
     parser.add_argument("--output-dir", type=Path, default=Path("output/compare_hybrid"))
     parser.add_argument("--scale", type=float, default=2.0)
+    parser.add_argument(
+        "--min-native-chars", type=int, default=50,
+        help="Mínimo de caracteres da camada nativa para usar texto nativo (padrão: 50).",
+    )
     parser.add_argument(
         "--check-only", action="store_true",
         help="Verificar inventário de modelos sem executar inferência.",
@@ -533,6 +588,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"PDF    : {pdf} ({total_pages} páginas)")
     print(f"Páginas: {pages}")
     print(f"Threshold de confiança: {threshold:.2f}")
+    print(f"Min chars nativo: {args.min_native_chars}")
     print(f"Layout model: {LAYOUT_MODEL}")
     print()
 
@@ -563,8 +619,9 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     metadata: dict[str, Any] = {
-        "schema": "structured-pdf-text.hybrid-ocr-tablemagic.v1",
-        "design": "confidence-gated-B",
+        "schema": "structured-pdf-text.hybrid-ocr-tablemagic.v2",
+        "design": "native-ocr-tablemagic-3level",
+        "min_native_chars": args.min_native_chars,
         "pdf": str(pdf),
         "pdf_sha256": sha256_file(pdf),
         "total_pdf_pages": total_pages,
@@ -589,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
     for profile in HYBRID_PROFILES:
         cache = cache_by_profile[profile]
         try:
-            result = run_profile(pdf, pages, cache, profile, threshold, layout_dir, args.scale)
+            result = run_profile(pdf, pages, cache, profile, threshold, layout_dir, args.scale, args.min_native_chars)
             metadata["results"][profile] = result
         except Exception as exc:
             print(f"[FAIL] {profile}: {type(exc).__name__}: {exc}", file=sys.stderr)
