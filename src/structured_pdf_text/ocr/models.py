@@ -65,26 +65,26 @@ class OcrModelProfile:
 
 
 PROFILES: dict[str, OcrModelProfile] = {
-    # ── Stable production profiles ──────────────────────────────────────────
+    # ── Production profile (PP-OCRv6 medium — default since 2026-09-24) ─────
+    # Cache: ~/.cache/pdfextractor/paddlex  (promoted from paddlex-v6-eval)
     "pt": OcrModelProfile(
         language="pt",
-        doc_orientation="PP-LCNet_x1_0_doc_ori",
-        textline_orientation="PP-LCNet_x1_0_textline_ori",
-        detection="PP-OCRv5_server_det",
-        recognition="latin_PP-OCRv5_mobile_rec",
-    ),
-    # ── Experimental evaluation profiles (PP-OCRv6) ─────────────────────────
-    # These profiles require a separate model cache from the v5 production
-    # models.  Always pass --cache-home pointing to the v6 evaluation cache
-    # when using these profiles (e.g. ~/.cache/pdfextractor/paddlex-v6-eval).
-    # Do NOT point them at the v5 production cache.
-    "pt-v6-medium": OcrModelProfile(
-        language="pt-v6-medium",
         doc_orientation="PP-LCNet_x1_0_doc_ori",
         textline_orientation="PP-LCNet_x1_0_textline_ori",
         detection="PP-OCRv6_medium_det",
         recognition="PP-OCRv6_medium_rec",
     ),
+    # ── Rollback profile (PP-OCRv5 server) ──────────────────────────────────
+    # Use --language pt-v5 to revert to v5 models; requires pointing
+    # --cache-home at the v5 backup cache (paddlex-v5-backup).
+    "pt-v5": OcrModelProfile(
+        language="pt-v5",
+        doc_orientation="PP-LCNet_x1_0_doc_ori",
+        textline_orientation="PP-LCNet_x1_0_textline_ori",
+        detection="PP-OCRv5_server_det",
+        recognition="latin_PP-OCRv5_mobile_rec",
+    ),
+    # ── Experimental profiles (PP-OCRv6 small) ──────────────────────────────
     "pt-v6-small": OcrModelProfile(
         language="pt-v6-small",
         doc_orientation="PP-LCNet_x1_0_doc_ori",

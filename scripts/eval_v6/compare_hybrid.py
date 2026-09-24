@@ -50,7 +50,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 HYBRID_PROFILES = ("v5", "v6")
 LAYOUT_MODEL = "PP-DocLayout_plus-L"
-DEFAULT_THRESHOLD = 0.70
+DEFAULT_THRESHOLD = 0.85
 
 _EVAL_DIR = Path(__file__).parent
 if str(_EVAL_DIR) not in sys.path:

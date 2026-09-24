@@ -1380,6 +1380,34 @@ $env:PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True"
 python scripts\eval_v6\compare_hybrid.py corpus\Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf --v5-cache "$HOME\.cache\pdfextractor\paddlex" --v6-cache "$HOME\.cache\pdfextractor\paddlex-v6-eval" --confidence-threshold 0.70 --output-dir output\compare_hybrid
 ```
 
+### 15.6. Gate 6 — Decisão de promoção (2026-09-24) ✅ CONCLUÍDO
+
+**Decisão:** PP-OCRv6 (`pt-v6-medium`) promovido a perfil padrão de produção.
+
+**Alterações realizadas:**
+
+| Ficheiro | Alteração |
+|---|---|
+| `src/structured_pdf_text/ocr/models.py` | Chave `"pt"` passa a apontar para PP-OCRv6 (`PP-OCRv6_medium_det` + `PP-OCRv6_medium_rec`). PP-OCRv5 preservado como `"pt-v5"` para rollback. |
+| `scripts/eval_v6/compare_hybrid.py` | `DEFAULT_THRESHOLD` atualizado de `0.70` para `0.85` (compensa sobreconfiança do v6 em páginas degradadas). |
+
+**Passo de deployment no servidor:**
+```powershell
+# Mover modelos v6 para o caminho padrão de produção
+Rename-Item "$HOME\.cache\pdfextractor\paddlex" "$HOME\.cache\pdfextractor\paddlex-v5-backup"
+Rename-Item "$HOME\.cache\pdfextractor\paddlex-v6-eval" "$HOME\.cache\pdfextractor\paddlex"
+```
+
+**Rollback disponível:**
+```powershell
+# Reverter cache
+Rename-Item "$HOME\.cache\pdfextractor\paddlex" "$HOME\.cache\pdfextractor\paddlex-v6-eval"
+Rename-Item "$HOME\.cache\pdfextractor\paddlex-v5-backup" "$HOME\.cache\pdfextractor\paddlex"
+# Reverter código: alterar chave "pt" em models.py de volta para PP-OCRv5, ou usar --language pt-v5
+```
+
+---
+
 ### 15.5. Resultados e conclusão
 
 **Corpus:** `Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf` — 144 páginas  
