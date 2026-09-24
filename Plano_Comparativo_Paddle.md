@@ -1279,7 +1279,125 @@ Para 42 páginas × 2 perfis = **84 diretórios por página**, totalizando cente
 
 **Próximas etapas:**
 
-1. **Gate 6 — Critérios de rollback e promoção:** definir os limiares quantitativos (avg_score mínimo, taxa de erro, tempo máximo) que determinam se v6 substitui v5 como perfil padrão.
-2. **Decisão de integração do TableMagic:** conforme manifestado pelo usuário, TableMagic deve ser ativado seletivamente — apenas quando tabela for detectada no layout ou quando ambos os OCRs apresentarem baixa confiança. A integração com `use_layout_detection=True` precisa ser avaliada separadamente.
-3. **Flag `--no-artifacts`:** implementar em `compare_tablemagic.py` para uso operacional.
-4. **Corpus de produção:** validar os resultados em documentos reais além do corpus controlado (`Document_AI_V2.pdf`).
+1. **Gate 6 — Critérios de rollback e promoção:** definir os limiares quantitativos (avg_score mínimo, taxa de erro, tempo máximo) que determinam se v6 substitui v5 como perfil padrão. *(pendente)*
+2. ✅ **Integração seletiva do TableMagic (`compare_hybrid.py`):** implementado — `scripts/eval_v6/compare_hybrid.py` ativa TableMagic somente quando `avg_confidence < 0.70`, usa `use_layout_detection=True` (Opção B) e não gera artefatos por página. Ver Seção 15.
+3. ✅ **Sem artefatos por página:** resolvido por design no `compare_hybrid.py` — saída é apenas `evaluation.json`.
+4. **Corpus de produção:** executar `compare_hybrid.py` sobre `corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf` quando o arquivo estiver disponível no servidor. Essa será a rodada definitiva antes da decisão de promoção do v6.
+
+---
+
+## 15. Avaliação Híbrida — OCR com fallback condicional para PP-TableMagic
+
+### 15.1. Design do script `compare_hybrid.py`
+
+**Arquivo:** `scripts/eval_v6/compare_hybrid.py`
+
+**Lógica por página:**
+
+```
+para cada página e perfil (v5, v6):
+    1. PaddleOCR → avg_confidence
+    2. se avg_confidence < 0.70 E texto_detectado > 0:
+           TableRecognitionPipelineV2 (use_layout_detection=True)
+           se tabelas encontradas  → usar texto das células
+           se nenhuma tabela       → manter OCR, registrar 'ocr_tablemagic_no_table'
+    3. senão:
+           usar resultado OCR diretamente
+```
+
+**Modos registrados por página:**
+
+| Modo | Condição |
+|---|---|
+| `ocr` | `avg_confidence >= 0.70` — OCR direto |
+| `tablemagic` | confiança baixa + tabelas detectadas — TableMagic substitui OCR |
+| `ocr_tablemagic_no_table` | confiança baixa + sem tabelas — OCR mantido |
+| `no_text_detected` | PaddleOCR não detectou nenhum texto |
+
+**Decisões de design:**
+
+- **Threshold 0.70** — valor escolhido após análise dos comparativos anteriores: páginas rotacionadas (págs. 31–33) têm confiança << 0.30; ruído (pág. 28) ~0.55–0.70; páginas normais > 0.90. Threshold de 0.80 ativaria TableMagic em páginas aceitáveis (0.70–0.80), adicionando ~15s desnecessários.
+- **`use_layout_detection=True` (Opção B)** — detecta regiões de tabela no layout antes de processar, em vez de tratar a página inteira como uma tabela.
+- **Lazy init do TableMagic** — `TableRecognitionPipelineV2` só é inicializado na primeira página que disparar o threshold, economizando ~4–5s de init quando todas as páginas têm alta confiança.
+- **Sem artefatos** — imagens são criadas em `tempfile.mkdtemp()` e deletadas após cada página; saída é apenas `output/compare_hybrid/evaluation.json`.
+- **Parâmetro `--confidence-threshold`** — configurável via CLI (padrão: 0.70).
+
+### 15.2. Modelo de layout — PP-DocLayout_plus-L
+
+**Modelo escolhido:** `PP-DocLayout_plus-L` — padrão do PaddleX 3.7.2.
+
+**Funcionamento offline:** 100% offline via `layout_detection_model_dir` após download inicial.
+
+**Download:** necessário uma vez por diretório de cache (v5 e v6), na primeira execução com internet. Execuções subsequentes funcionam com `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`.
+
+**Alternativas menores** (se houver necessidade de economizar espaço ou velocidade):
+
+| Modelo | Quando usar |
+|---|---|
+| `PP-DocLayout_plus-L` | ✅ Padrão — melhor precisão, ~200MB |
+| `PP-DocLayout-M` | Alternativa média — menos preciso, mais rápido |
+| `PP-DocLayout-S` | Alternativa pequena — menor espaço, menor precisão |
+
+**Diretório esperado por cache:**
+```
+~/.cache/pdfextractor/paddlex/official_models/PP-DocLayout_plus-L/
+~/.cache/pdfextractor/paddlex-v6-eval/official_models/PP-DocLayout_plus-L/
+```
+
+### 15.3. Pré-requisitos para execução no servidor
+
+1. **PDF do corpus definitivo** disponível em `corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf`
+2. **PP-DocLayout_plus-L** baixado em ambos os caches (v5 e v6)
+3. Modelos OCR e de estrutura de tabela já presentes (confirmados na Seção 14)
+
+### 15.4. Comandos de execução
+
+**Passo 1 — Baixar PP-DocLayout_plus-L (apenas uma vez, requer internet):**
+
+```bash
+# Ativa o ambiente
+source .venv/bin/activate
+
+# Download automático via check-only com --allow-download (v5 cache)
+python scripts/eval_v6/compare_hybrid.py \
+    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
+    --v5-cache ~/.cache/pdfextractor/paddlex \
+    --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
+    --allow-download \
+    --check-only
+
+# Se o layout model não baixar automaticamente via check-only,
+# execute uma página para forçar o download:
+python scripts/eval_v6/compare_hybrid.py \
+    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
+    --pages 1 \
+    --allow-download \
+    --output-dir output/compare_hybrid_test
+```
+
+**Passo 2 — Verificar inventário offline:**
+
+```bash
+PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+python scripts/eval_v6/compare_hybrid.py \
+    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
+    --v5-cache ~/.cache/pdfextractor/paddlex \
+    --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
+    --check-only
+```
+
+**Passo 3 — Execução definitiva (100% offline):**
+
+```bash
+PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+python scripts/eval_v6/compare_hybrid.py \
+    corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \
+    --v5-cache ~/.cache/pdfextractor/paddlex \
+    --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
+    --confidence-threshold 0.70 \
+    --output-dir output/compare_hybrid
+```
+
+### 15.5. Resultados e conclusão
+
+*(A preencher após execução do Passo 3)*
