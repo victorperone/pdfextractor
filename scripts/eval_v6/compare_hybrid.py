@@ -221,7 +221,7 @@ def _ocr_page(img_path: Path, ocr_pipeline: Any) -> dict[str, Any]:
     all_texts: list[str] = []
     all_scores: list[float] = []
     for res in results:
-        raw = res.json() if hasattr(res, "json") else {}
+        raw = _result_json(res)
         all_texts.extend(raw.get("rec_texts") or [])
         all_scores.extend(float(s) for s in (raw.get("rec_scores") or []))
 
