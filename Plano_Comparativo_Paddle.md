@@ -982,3 +982,147 @@ Os links para a branch são **referências de inspeção mutáveis**. O desenvol
 5. **Não promete** ausência de problemas após a execução do checklist; o documento reúne riscos arquiteturais e pontos auditados possíveis com o acesso disponível, e deve ser complementado por testes e revisão do SHA imutável.
 
 **Conclusão para o desenvolvedor:** a comparação pretendida é tecnicamente possível **desde que** o PP-TableMagic use, em cada braço, OCR interno correspondente ao perfil declarado ou que sua geometria seja integrada a um OCR externo sob um desenho experimental explicitamente validado. Sem essa garantia e sem fixar os demais componentes da pipeline, um resultado rotulado “PP-OCRv5 versus PP-OCRv6 com PP-TableMagic” pode ser metodologicamente ambíguo. Executar o plano por fases, fechar cada ticket com evidência e só então interpretar diferenças de qualidade e desempenho.
+
+---
+
+## 13. Resultados do comparativo OCR — PP-OCRv5 × PP-OCRv6 (Seção 2.1)
+
+Execução real concluída sobre `corpus/Document_AI_V2.pdf`, todos os quatro braços com status `success`.
+
+### 13.1. Metadados da execução
+
+| Campo | Valor |
+|---|---|
+| Script | `scripts/eval_v6/compare_v5_v6.py` |
+| PDF | `corpus/Document_AI_V2.pdf` |
+| SHA do repositório | `e8ecba61d432f79f276ac97ba078ffdd26dfaf2e` |
+| Plataforma | Windows Server 2025, CPU-only |
+| Perfil v5 (`pt`) | `PP-OCRv5_server_det` + `latin_PP-OCRv5_mobile_rec` (par híbrido) |
+| Perfil v6 (`pt-v6-medium`) | `PP-OCRv6_medium_det` + `PP-OCRv6_medium_rec` |
+| Políticas | `baseline`, `adaptive` |
+| Modo de extração | `balanced` |
+| Pages registradas | todas as páginas do PDF |
+
+### 13.2. Desempenho (latência e saída)
+
+| Braço | Saída (bytes) | Tempo (s) | Δ latência vs. v5 | RSS pico (MB)¹ |
+|---|---|---|---|---|
+| `pt / baseline` | 26.021 | 615,9 | — | 3,81 |
+| `pt / adaptive` | 26.019 | 1920,0 | — | 3,80 |
+| `pt-v6-medium / baseline` | 25.501 | 367,5 | **−40 %** | 3,81 |
+| `pt-v6-medium / adaptive` | 25.930 | 1378,9 | **−28 %** | 3,82 |
+
+¹ Os valores de RSS (~3,8 MB) são **artefatos de medição**: o monitor `psutil` capturou o processo filho antes de o PaddlePaddle carregar os pesos em memória (comportamento conhecido em Windows Server com subprocesso `Popen`). Os valores reais de RAM devem ser medidos separadamente; o README estima ~10,8 GiB para o modelo v5 completo.
+
+**Síntese de desempenho:** v6-medium é significativamente mais rápido em ambas as políticas sem redução proporcional do tamanho de saída (diferença de bytes é marginal, ≤ 2 %). A vantagem de velocidade é mais expressiva em modo `baseline` (−40 %) do que em `adaptive` (−28 %), onde ambos passam por variantes de recuperação.
+
+### 13.3. Qualidade textual por categoria de página
+
+O `diff_baseline.txt` registrou 37 linhas adicionadas / 37 removidas; `diff_adaptive.txt` registrou 36 / 34. A maioria das páginas com texto nativo digital é idêntica entre os modelos. As diferenças concentram-se nas páginas com conteúdo sintético degradado.
+
+#### 13.3.1. Fórmulas matemáticas — página 12
+
+Ambos os modelos falham em extrair fórmulas corretamente. v6 tem vantagem parcial:
+
+- v6 reconhece o símbolo de somatório `∑` onde v5 produz `( − )²`
+- v6 aproxima melhor `f(ξ) = ∫ +∞f(x)e−2πixξ dx` vs. a versão truncada do v5
+- Nenhum modelo é confiável para conteúdo matemático tipografado; resultado é **descartável** para esse tipo de página
+
+#### 13.3.2. Imagem raster — página 25
+
+| Modelo | Saída |
+|---|---|
+| v5 | `StatuS: APROVADO PARA OCR` |
+| v6 | `Status: APROVADO PARA OCR` |
+
+**v6 vence:** normalização de capitalização correta em texto extraído de imagem.
+
+#### 13.3.3. Texto de baixo contraste — página 27
+
+| Braço | Comportamento |
+|---|---|
+| `pt / baseline` | Lê a maior parte do conteúdo com erros menores (`OcR`, `CoNTRAST-O27`) |
+| `pt-v6-medium / baseline` | **Falha catastrófica:** `DOITDO S2LE`, `OCo oCte`, `ai t`, `SD` — texto ilegível |
+| `pt / adaptive` | Lê o conteúdo com qualidade semelhante ao baseline |
+| `pt-v6-medium / adaptive` | Recuperação parcial; ainda produz `SD` em vez de `Baixo contraste controlado:...` |
+
+**Ponto positivo isolado no v6:** o código de identificação da tabela é normalizado corretamente — v6 produz `GS2-SCAN-CONTRAST-027` onde v5/baseline registrava `GS2-SCAN-CoNTRAST-O27`.
+
+**Conclusão desta página:** v5 é claramente superior em texto de baixo contraste. A falha do v6/baseline nesta categoria é regressão grave e deve ser considerada bloqueadora para qualquer cenário de produção com documentos degradados.
+
+#### 13.3.4. Texto com ruído — página 28
+
+| Braço | Comportamento |
+|---|---|
+| `pt / baseline` | Lê o conteúdo com alguns erros (`NÃ CONFDENCIAL`) |
+| `pt-v6-medium / baseline` | Falha: `OC   DO S2L`, `CR   IdoO`; produz **linhas de tabela fantasma** (`\| a t \|  \|`, `\| a \|  \|`) |
+| `pt / adaptive` | Mantém `NÃ CONFDENCIAL` (ainda com erro) |
+| `pt-v6-medium / adaptive` | Corrige: `NÃO CONFIDENCIAL`; remove tabela fantasma |
+
+**Ponto crítico — alucinação no v6/baseline:** a geração de linhas de tabela sem conteúdo real (`| a t |  |  |`) é uma alucinação estrutural. Esse comportamento é mais danoso do que um erro de OCR simples porque insere estrutura falsa na saída Markdown.
+
+**Conclusão desta página:** v6/adaptive supera v5/adaptive na recuperação de texto; v6/baseline é inferior a v5/baseline e gera alucinações estruturais.
+
+#### 13.3.5. Página inclinada — página 29
+
+| Modelo | ID da amostra | Marca d'água |
+|---|---|---|
+| v5 | `SKEw-029`, `GS2-SCAN-SKEw-029` | `NÃo CONFIDENCIAL` |
+| v6 | `SKEW-029`, `GS2-SCAN-SKEW-029` | `NÃO CONFIDENCIAL` |
+
+**v6 vence:** capitalização consistente em conteúdo inclinado. Diferença marginal na prática, mas indica melhor reconhecimento de caixa alta em condições geométricas adversas.
+
+#### 13.3.6. Fonte muito pequena — página 30 (6,4 pt)
+
+Esta é a diferença de maior impacto prático entre os dois modelos.
+
+- **v5 (baseline e adaptive):** ordem de leitura completamente invertida — colunas e linhas da tabela em sequência revertida; cabeçalhos misturados com valores; conteúdo ilegível estruturalmente.
+- **v6 (baseline e adaptive):** lê na ordem correta — título `DOCUMENT AI GOLD STANDARD V2 - CORPUS SINTÉTICO CONTROLADO GS2-P30-CONTROLE`, corpo de texto e tabela em sequência correta, com conteúdo legível.
+
+**v6 vence de forma decisiva.** O bug de leitura do v5 em página com fonte de 6,4 pt não é recuperado pela política `adaptive`. Se o corpus de produção incluir documentos com fontes abaixo de ~8 pt, v5 apresenta risco concreto de inversão silenciosa de conteúdo.
+
+#### 13.3.7. Páginas rotacionadas — páginas 31–33 (45°, 90°, 270°)
+
+Ambos os modelos se comportam de forma equivalente. Nenhuma diferença material registrada nos diffs.
+
+### 13.4. Resumo comparativo
+
+| Categoria | Vencedor | Observação |
+|---|---|---|
+| Desempenho (latência) | **v6** | −40 % baseline, −28 % adaptive |
+| Tamanho de saída | Empate | Diferença ≤ 2 % |
+| Memória RAM | Indeterminado | Medição via psutil inválida neste setup |
+| Fórmulas matemáticas (pág. 12) | v6 (parcial) | Ambos falham; v6 menos errado |
+| Imagem raster / capitalização (pág. 25) | **v6** | Corrige `StatuS` → `Status` |
+| Baixo contraste baseline (pág. 27) | **v5** | v6/baseline produz texto ilegível |
+| Baixo contraste adaptive (pág. 27) | **v5** | v6/adaptive melhora mas não iguala |
+| Ruído baseline (pág. 28) | **v5** | v6/baseline produz alucinação de tabela |
+| Ruído adaptive (pág. 28) | **v6** | v6/adaptive corrige `NÃO CONFIDENCIAL` |
+| Inclinação / capitalização (pág. 29) | **v6** | Caixa alta consistente |
+| Fonte 6,4 pt / ordem de leitura (pág. 30) | **v6** | v5 inverte leitura; v6 lê corretamente |
+| Rotações (págs. 31–33) | Empate | Comportamento equivalente |
+
+### 13.5. Limitações desta rodada
+
+1. **Sem ground truth verificado.** As comparações são observacionais (diff entre as duas saídas). CER/WER não foram calculados.
+2. **Medição de RAM inválida.** Os valores `peak_rss_mb` (~3,8 MB) refletem a janela de inicialização do subprocesso no Windows, não o pico real de consumo do PaddlePaddle.
+3. **SHA anterior às correções CF-01–CF-05.** A execução usou o commit `e8ecba61`, anterior aos hotfixes desta sessão. Os resultados de qualidade são válidos; o manifesto não inclui os campos `has_weight`/`has_metadata` (adicionados no CF-05).
+4. **Corpus de um único documento controlado.** O `Document_AI_V2.pdf` cobre as principais categorias de forma controlada, mas não representa a distribuição real de documentos de produção.
+
+### 13.6. Estado do cache e próxima etapa — Seção 2.2 (PP-TableMagic)
+
+| Cache | Modelos OCR | Modelos de estrutura de tabela | Status para `compare_tablemagic.py` |
+|---|---|---|---|
+| `paddlex` (v5) | ✅ presentes | ✅ presentes (SLANeXt, RT-DETR-L, PP-LCNet) | **Pronto** |
+| `paddlex-v6-eval` (v6) | ✅ presentes | ❌ ausentes | **Bloqueado — download necessário** |
+
+Antes de executar `compare_tablemagic.py`, os modelos de estrutura de tabela comuns devem ser baixados para o cache v6. Use `eval_tablemagic.py --profile tm-v6` para desencadear o download automático ou copie os modelos do cache v5 (são idênticos entre os braços no Desenho A).
+
+Use `--check-only` para confirmar o estado antes de rodar inferência:
+
+```bash
+python scripts/eval_v6/compare_tablemagic.py corpus/Document_AI_V2.pdf \
+    --v5-cache ~/.cache/pdfextractor/paddlex \
+    --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \
+    --check-only
+```
