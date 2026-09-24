@@ -1382,4 +1382,61 @@ python scripts\eval_v6\compare_hybrid.py corpus\Corpus_Integrado_PDF_OCR_TableMa
 
 ### 15.5. Resultados e conclusão
 
-*(A preencher após execução do Passo 3)*
+**Corpus:** `Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf` — 144 páginas  
+**Data de execução:** 2026-09-24  
+**Script:** `scripts/eval_v6/compare_hybrid.py` — pipeline 3-níveis (nativo → OCR → TableMagic)  
+**Limiar de confiança:** 0.70 | **min_native_chars:** 50
+
+---
+
+#### Distribuição de páginas por modo de extração
+
+| Modo de extração | v5 (PP-OCRv5) | v6 (PP-OCRv6) |
+|---|---|---|
+| Texto nativo (`native`) | **98 / 144 (68,1%)** | **98 / 144 (68,1%)** |
+| Somente OCR (`ocr_only`) | 42 / 144 (29,2%) | 44 / 144 (30,6%) |
+| TableMagic activado com tabelas (`tablemagic`) | **2** | **0** |
+| TableMagic activado sem tabelas (`ocr_tablemagic_no_table`) | 2 | 2 |
+| Erros | **0** | **0** |
+
+---
+
+#### Desempenho de inicialização e OCR
+
+| Métrica | v5 | v6 | Diferença |
+|---|---|---|---|
+| Inicialização OCR (`ocr_init_ms`) | 4 514 ms | **1 221 ms** | v6 **3,7× mais rápido** |
+| Inicialização TableMagic (`tm_init_ms`) | 4 640 ms | 5 645 ms | v6 ~20% mais lento |
+| Velocidade média por página escaneada | ~33–36 s | ~22–25 s | v6 **~30% mais rápido** |
+
+---
+
+#### Análise das páginas críticas
+
+As páginas 96, 97, 99 e 116 são as únicas que acionaram o limiar de confiança em pelo menos um perfil. Todas correspondem a conteúdo com degradação visual severa (rotação, tabelas financeiras invertidas).
+
+| Página | v5 conf. | v5 modo | v6 conf. | v6 modo |
+|---|---|---|---|---|
+| 96 | 0,291 | `ocr_tablemagic_no_table` | 0,666 | `ocr_tablemagic_no_table` |
+| 97 | 0,298 | `ocr_tablemagic_no_table` | 0,683 | `ocr_tablemagic_no_table` |
+| 99 | 0,463 | **`tablemagic` (3 tabelas)** | 0,754 | `ocr_only` |
+| 116 | 0,457 | **`tablemagic` (1 tabela)** | 0,778 | `ocr_only` |
+
+- **Páginas 96 e 97**: ambos os perfis acionam TableMagic, mas nenhuma tabela estruturada é detectada — o conteúdo está demasiado degradado/rotacionado para recuperação automática.
+- **Páginas 99 e 116**: divergência crítica. O v5, com menor confiança (< 0,70), aciona TableMagic e recupera tabelas estruturadas. O v6 retorna confiança acima do limiar (0,754 e 0,778) e permanece em modo OCR — produzindo texto embaralhado com pontuação elevada (sobreconfiança em conteúdo rotacionado).
+
+---
+
+#### Conclusões
+
+1. **Texto nativo idêntico**: ambos os perfis concordam em quais páginas têm camada textual (98/144). O nível 1 do pipeline elimina OCR para 68% do documento.
+
+2. **v6 significativamente mais rápido em OCR**: ~30% de ganho por página e 3,7× na inicialização — vantagem relevante para volumes grandes.
+
+3. **v6 apresenta sobreconfiança em conteúdo degradado/rotacionado**: nas páginas 99 e 116, o v6 atribui scores elevados (> 0,75) a texto ilegível, ignorando o escalamento para TableMagic. O v5 é mais conservador e aciona o fallback correctamente.
+
+4. **Impacto prático do TableMagic**: em 144 páginas de corpus misto, o TableMagic contribuiu em apenas 2 páginas com o v5. A estratégia de fallback funcionou correctamente quando acionada.
+
+5. **Recomendação — limiar diferenciado por perfil**: se o v6 for promovido como perfil padrão, o limiar de confiança deverá ser reduzido para ~0,80–0,85 para compensar a tendência de sobreconfiança, garantindo que páginas como 99 e 116 continuem a activar TableMagic.
+
+6. **Gate 6 (decisão de promoção)**: o v6 é superior em velocidade, mas apresenta risco de qualidade regressiva em páginas com rotação/degradação severa. Antes de promover, é necessário validar o texto produzido para as páginas 99 e 116 em ambos os perfis e definir se o limiar ajustado resolve a divergência.
