@@ -231,7 +231,11 @@ def _result_json(item: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             raw = {"raw_json": raw}
     if isinstance(raw, dict):
-        return raw
+        # PaddleOCR 3.x serializes PipelineResult as {"res": {...}}.
+        # Normalize that wrapper before reading table_res_list while still
+        # preserving the complete normalized payload in result.json.
+        payload = raw.get("res")
+        return payload if isinstance(payload, dict) else raw
     for method_name in ("to_json", "json"):
         method = getattr(item, method_name, None)
         if callable(method):

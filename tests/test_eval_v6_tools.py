@@ -60,6 +60,11 @@ def test_tablemagic_result_json_preserves_full_payload() -> None:
     assert tablemagic._result_json(item)["table_res_list"][0]["cell_box_list"]
 
 
+def test_tablemagic_result_json_unwraps_paddleocr_pipeline_result() -> None:
+    item = SimpleNamespace(json='{"res":{"table_res_list":[{"cell_box_list":[[1,2,3,4]]}]}}')
+    assert tablemagic._result_json(item)["table_res_list"][0]["cell_box_list"]
+
+
 def test_rasterize_pdf_removes_extractable_text(tmp_path: Path) -> None:
     reportlab = pytest.importorskip("reportlab")
     from reportlab.pdfgen import canvas
