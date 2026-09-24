@@ -176,6 +176,11 @@ def pipeline_kwargs(cache_home: Path, profile: str) -> dict[str, Any]:
         "use_doc_unwarping": False,
         "use_layout_detection": False,
         "use_ocr_model": True,
+        # Disable cell-level OCR refinement so the only OCR is the one
+        # declared in the profile (text_detection_model / text_recognition_model).
+        # Without this, the pipeline applies a second OCR pass per cell using
+        # library-default models that are not part of the experiment manifest.
+        "use_ocr_results_with_table_cells": False,
         "table_classification_model_name": names["table_classification"],
         "table_classification_model_dir": str(root / names["table_classification"]),
         "wired_table_structure_recognition_model_name": names["wired_structure"],
@@ -517,7 +522,11 @@ def main(argv: list[str] | None = None) -> int:
         "packages": package_versions(),
         "cache_home": cache_home,
         "pages_human_1_based": pages,
-        "bbox_pdf_points_top_left": list(bbox),
+        "bbox_pdf_points_top_left": list(bbox) if bbox is not None else None,
+        "pipeline_flags": {
+            "use_ocr_model": True,
+            "use_ocr_results_with_table_cells": False,
+        },
         "results": results,
         "quality_metrics": {
             "status": "not_computed",

@@ -1,1369 +1,984 @@
-# Plano Comparativo Paddle OCR — Avaliação PP-OCRv6 e Componentes Complementares
+# PDFExtractor — Auditoria técnica e plano corretivo para comparar PP-OCRv5 e PP-OCRv6 com PP-TableMagic
 
-**Projeto:** `pdfextractor` / `structured-pdf-text`  
-**Data de elaboração:** 23/09/2026  
-**Branch de referência:** `feat/ocr-regression-stabilization`  
-**SHA de referência validado:** `5a6ccc202bfffbdbd79121c28ba6d2be376eff9c`  
-**Branch alvo da avaliação:** `feat/paddle-ocrv6-evaluation` (a criar a partir da `main` atualizada)  
-**Ambientes de execução:** WSL (desenvolvimento e avaliação) → Windows Server 2025 CPU (aceitação)  
-**Requisito crítico:** execução 100% offline (sem rede) durante processamento de documentos. Internet apenas para baixar modelos/pesos na fase de preparação.
+**Data de referência:** 24/09/2026  
+**Destinatário:** equipe de desenvolvimento e de validação do PDFExtractor  
+**Repositório público:** https://github.com/victorperone/pdfextractor  
+**Branch anteriormente indicada:** [`feat/paddle-ocrv6-evaluation`](https://github.com/victorperone/pdfextractor/tree/feat/paddle-ocrv6-evaluation)  
+**Objetivo de produto:** executar um comparativo reproduzível entre **PP-OCRv5 + PP-TableMagic** e **PP-OCRv6 + PP-TableMagic**, tanto no reconhecimento textual quanto na qualidade final de tabelas e documentos exportados, sem misturar modelos, configurações, resultados, caches ou processos.
 
----
+> **IMPORTANTE — escopo e honestidade da auditoria.** Esta é uma revisão estática e um plano de correções/validação, **não** uma confirmação de falhas reproduzidas nem a homologação da revisão mais recente do repositório. Em 24/09/2026 foi possível ler o README, `ocr/models.py`, `ocr/paddle.py`, `config.py`, `cli.py`, `renderers/markdown.py`, `requirements.txt` e a documentação oficial do PP-TableMagic por seus endereços públicos. O acesso à árvore e ao histórico completos da branch e o clone via Git falharam neste ambiente; não foi possível verificar o SHA atual, inspecionar **todos** os arquivos recém-alterados, instalar os pesos, executar o `pytest` nem rodar o comparativo real. **Não se deve transformar requisitos ou hipóteses abaixo em acusações de defeitos já existentes no código atualizado.** Se uma mudança recente já resolveu um ponto, marcar o ticket como corrigido e anexar teste/evidência; não reverter melhorias apenas para seguir este documento. As referências a linhas na branch são mutáveis; registrar e substituir pelo SHA imutável antes da implementação.
 
-## 1. Estado Atual do Projeto
+## 0. Resumo executivo e decisão operacional
 
-### 1.1. Branch e versões de pacotes fixadas
+**Resposta à pergunta:** sim, há riscos relevantes ao comparar as duas versões com o mesmo motor de tabelas. O principal é que **PP-TableMagic não é simplesmente uma etapa de formatação de tabelas**. A pipeline oficial `TableRecognitionPipelineV2` inclui módulos próprios de localização de tabelas, classificação, reconhecimento de estrutura, detecção de células **e OCR**, podendo reprocessar texto em células. Mudar apenas `--ocr-model-profile` no PDFExtractor não demonstra que o OCR executado *dentro* do PP-TableMagic mudou junto. Se o comparativo for executado assim, pode medir duas variantes de OCR externo combinadas com um terceiro OCR interno igual em ambos os braços, ou até medir apenas o OCR interno. A documentação oficial expõe `text_detection_model_name`, `text_recognition_model_name`, `*_model_dir`, `use_ocr_model` e `use_ocr_results_with_table_cells`. A integração deve comprovar a configuração efetivamente carregada em **cada componente e em cada execução**. [PaddleOCR — PP-TableMagic, parâmetros de inicialização](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L588-L670), [opções de inferência e novo reconhecimento nas células](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L696-L730).
 
-```
-paddlepaddle  == 3.3.1
-paddleocr     == 3.7.0
-paddlex       == 3.7.2
-pypdfium2     == 5.13.0
-Pillow        == 12.3.0
-numpy         == 2.3.5
-opencv-contrib-python == 4.10.0.84
-```
+**Achado específico do snapshot acessível:** o perfil `pt` do projeto é `PP-OCRv5_server_det` + `latin_PP-OCRv5_mobile_rec`; o `pt-v6-medium` é `PP-OCRv6_medium_det` + `PP-OCRv6_medium_rec`. Assim, a comparação não é, tecnicamente, “v5 server completo versus v6 medium”. É a comparação de **duas configurações compostas**, e isso precisa aparecer no nome dos braços e no relatório. O snapshot do README ainda declara não implementar modelo aprendido de estrutura de tabelas; não foi possível demonstrar no código acessível que a integração com PP-TableMagic recém-alterada esteja conectada, ativa e testada. Essa situação deve ser **verificada no SHA atual**, não presumida. [Perfis do projeto](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/models.py#L60-L88), [README](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L70-L84).
 
-### 1.2. Perfil OCR atual (`ocr/models.py`)
+**Regra para iniciar a coleta de métricas:** não publicar resultado de precisão/velocidade entre v5 e v6 enquanto não for possível gerar um manifesto comprovando, para cada braço: os nomes e hashes dos pesos de detecção e reconhecimento **fora e dentro do PP-TableMagic**; os mesmos pesos e parâmetros dos modelos de estrutura/células/layout; o mesmo corpus e recortes; a mesma política de fallback; o mesmo ambiente; e nenhuma saída parcial contabilizada como sucesso. Antes disso, rodar apenas *smoke tests* de instalação e integração, explicitamente rotulados como tal.
 
-O único perfil definido é `"pt"` (português / Latin-script):
+### 0.1. Legenda dos achados
 
-| Papel | Nome do modelo (= nome do diretório) | kwarg dir | kwarg name |
-|---|---|---|---|
-| Classificador de orientação do documento | `PP-LCNet_x1_0_doc_ori` | `doc_orientation_classify_model_dir` | `doc_orientation_classify_model_name` |
-| Classificador de orientação de linha de texto | `PP-LCNet_x1_0_textline_ori` | `textline_orientation_model_dir` | `textline_orientation_model_name` |
-| Detecção de texto | `PP-OCRv5_server_det` | `text_detection_model_dir` | `text_detection_model_name` |
-| Reconhecimento de texto (Latin) | `latin_PP-OCRv5_mobile_rec` | `text_recognition_model_dir` | `text_recognition_model_name` |
+- **OBS:** comportamento que foi observado diretamente no snapshot de código ou na documentação oficial acessíveis. **Não** significa erro reproduzido em execução.
+- **COND:** risco condicionado à maneira como o PP-TableMagic tiver sido integrado no SHA novo. O desenvolvedor deve primeiro procurar código/teste correspondente; fechar se comprovadamente coberto.
+- **VAL:** evidência ainda inexistente nesta auditoria. É um requisito de teste, não a alegação de que houve falha.
+- **DEC:** decisão de escopo ou semântica que precisa ser explicitada antes de programar e comparar resultados.
 
-Os modelos ficam em: `<PADDLE_PDX_CACHE_HOME>/official_models/<nome_do_modelo>/`  
-Padrão: `~/.cache/pdfextractor/paddlex/official_models/`
+**P0:** impede interpretar o experimento como comparação válida ou pode causar corrupção silenciosa relevante. **P1:** corrigir/validar antes de rodar o benchmark oficial. **P2:** melhorar reprodutibilidade, manutenção, segurança e operação antes da adoção contínua. As prioridades se referem à **avaliação proposta**, não à gravidade comprovada em produção.
 
-### 1.3. Protocolo OcrEngine (`ocr/engine.py`)
+### 0.2. Quadro inicial do backlog
 
-```python
-class OcrEngine(Protocol):
-    def recognize_page(
-        self,
-        page_image: object,
-        page_index: int,
-        page_bbox: BBox | None = None,
-        *,
-        quality_variants: bool | None = None,
-    ) -> list[OcrToken]: ...
-
-    def recognize_region(
-        self,
-        page_image: object,
-        page_index: int,
-        region_bbox: BBox,
-    ) -> list[OcrToken]: ...
-```
-
-### 1.4. Inicialização PaddleOCR (`ocr/paddle.py` — `_init_ocr`)
-
-Parâmetros obrigatórios passados ao `PaddleOCR()`:
-```python
-{
-    "use_doc_orientation_classify": True,
-    "use_doc_unwarping": False,
-    "use_textline_orientation": True,
-    "enable_mkldnn": False,
-    "text_det_limit_side_len": _det_limit,   # calculado via RGB budget gate
-    "text_det_limit_type": "max",
-    # + *_model_dir kwargs (caminhos absolutos locais)
-    # + *_model_name kwargs (nomes dos modelos)
-    # + quaisquer **options passados pelo usuário
-}
-```
-
-### 1.5. Despacho de API (`_predict`)
-
-```python
-@staticmethod
-def _predict(ocr, input_image):
-    if hasattr(ocr, "predict"):
-        return ocr.predict(input=input_image)   # PaddleOCR 3.x
-    return ocr.ocr(input_image, cls=True)       # legado 2.x
-```
-
-**Importante:** o código atual já despacha para a API 3.x (`.predict()`), que é a usada pelos modelos v6.
-
-### 1.6. Variáveis de ambiente relevantes
-
-| Variável | Padrão | Finalidade |
-|---|---|---|
-| `PADDLE_PDX_CACHE_HOME` | `~/.cache/pdfextractor/paddlex` | Raiz do cache de modelos |
-| `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK` | definida como `"True"` em runtime | Impede descoberta remota de modelos durante extração |
-| `PDFEXTRACTOR_OCR_RGB_BUDGET_MIB` | `"8.0"` | Budget para cálculo de `text_det_limit_side_len` |
-| `PDFEXTRACTOR_OCR_DEBUG_LOG` | não definida | Caminho para log de debug (metadados técnicos) |
-
-### 1.7. Configurações de extração relevantes (`config.py`)
-
-| Campo | Padrão | Relevância |
-|---|---|---|
-| `language` | `"pt"` | Seleciona perfil de modelo |
-| `ocr_quality_policy` | `ADAPTIVE` | baseline / adaptive / exhaustive |
-| `ocr_quality_variants` | `True` | `False` força BASELINE |
-| `ocr_batch_size` | `3` | Máximo de imagens por batch Paddle |
-| `ocr_render_scale` | `2.0` | ~144 DPI para PDF de 72 DPI |
-| `num_threads` | `0` | 0 = auto; -1 = padrão Paddle sem alteração |
-
-### 1.8. Problema residual conhecido
-
-`OCRS-P10-CONTROL` (página 10 do corpus OCR sintético v1) — falha de reconhecimento/detecção documentada em `docs/relatorio-ocr-regression-stabilization.md`. **Não confirmar que a falha ainda existe sem executar a versão atual** — pode ter sido corrigida em commits posteriores ao snapshot de referência.
-
-### 1.9. Proteções inegociáveis (definidas pelo responsável)
-
-1. **Não modificar o upscaling 2× (`ocr/recovery.py`)** — algoritmo, escala, seleção de variantes, orçamento RGB, limites de resolução, transformação e remapeamento de coordenadas, logs e instrumentação são intocáveis. Modelos candidatos devem adaptar-se ao contrato de imagem/resultado existente.
-2. **Não modificar processamento de texto nativo** — leitura, reconstrução de palavras/linhas, colunas, ordenação, montagem, deduplicação, supressão textual ou Content Conservation Ledger.
-3. **Não substituir modelo padrão automaticamente** — perfil v5 permanece padrão até aceitação no Windows Server.
-4. **Não fazer merge automático à `main`** — integração da branch de estabilização à `main` está autorizada neste plano; merge da branch de avaliação exige revisão posterior.
-5. **Integrar apenas tecnologias Paddle aprovadas** — PP-OCRv6, depois PP-TableMagic se justificado, depois PP-StructureV3 apenas se necessário.
-
----
-
-## 2. Descoberta Crítica — Compatibilidade de Versões
-
-### ⚠️ Ponto mais importante da pesquisa
-
-**O ambiente atual (paddleocr==3.7.0, paddlepaddle==3.3.1) já suporta os modelos PP-OCRv6. Não é necessária atualização de pacotes para testar v6.**
-
-Isso simplifica dramaticamente a Fase 1:
-- A "isolação de ambiente" refere-se a **arquivos de modelo separados**, não a um venv Python diferente.
-- O código `_predict()` em `paddle.py` já despacha para `.predict()` (API 3.x), que é exatamente o que v6 usa.
-- O padrão `*_model_dir` + `*_model_name` kwargs usado no perfil atual funciona identicamente para v6.
-- A adição de um perfil `pt-v6-medium` em `models.py` é a mudança de código mínima necessária.
-
-### Risco de versão residual
-
-A documentação oficial confirma PP-OCRv6 como padrão no PaddleOCR 3.7. O projeto já usa 3.7.0. Porém:
-- Verificar se existe paddleocr==3.7.x com correções para v6 específicas antes de iniciar.
-- `pip check` antes de qualquer experimento para confirmar ausência de conflitos de dependências.
-
----
-
-## 3. Pesquisa Técnica — PP-OCRv6
-
-### 3.1. Nomes exatos dos modelos
-
-**Detecção:**
-- `PP-OCRv6_medium_det` (15.5M parâmetros)
-- `PP-OCRv6_small_det`
-- `PP-OCRv6_tiny_det`
-
-**Reconhecimento:**
-- `PP-OCRv6_medium_rec` (34.5M parâmetros, 50 idiomas)
-- `PP-OCRv6_small_rec` (7.7M parâmetros, 50 idiomas)
-- `PP-OCRv6_tiny_rec` (~1.5M parâmetros, 49 idiomas — exclui japonês)
-
-Nota: `PP-OCRv6_medium_rec` é o padrão quando `model_name=None` no PaddleOCR 3.7.
-
-### 3.2. Suporte a CPU
-
-Totalmente suportado. `device="cpu"` funciona em todos os modelos v6.
-
-Parâmetros de aceleração CPU:
-- `enable_mkldnn=True` (padrão upstream, mas o projeto usa `False` — verificar impacto)
-- `mkldnn_cache_capacity=10`
-- `cpu_threads=N`
-
-**Benchmark de desempenho CPU (200 imagens, segundos/imagem):**
-
-| Backend | v6_medium | v6_small | v6_tiny | v5_server (atual) |
+| ID | Prioridade | Tipo | Correção ou verificação | Evidência mínima de encerramento |
 |---|---|---|---|---|
-| PaddlePaddle (Intel Xeon 8350C) | 2.05s | 0.79s | 0.32s | 2.04s |
-| OpenVINO (Intel Xeon 8350C) | 1.40s | 0.59s | 0.20s | 7.30s |
-| ONNX Runtime (Intel Xeon 8350C) | 3.31s | 0.61s | 0.22s | 6.36s |
-
-**Conclusão de performance:** `PP-OCRv6_medium` tem velocidade praticamente idêntica ao `PP-OCRv5_server` no CPU PaddlePaddle padrão (2.05s vs 2.04s), com ganhos de acurácia esperados. `v6_small` é 2.6× mais rápido que v5_server.
-
-### 3.3. Operação offline
-
-Plenamente suportada via parâmetros `*_model_dir` no construtor — exatamente o mesmo padrão já usado pelo projeto.
-
-```python
-ocr = PaddleOCR(
-    text_detection_model_dir="/caminho/local/PP-OCRv6_medium_det",
-    text_detection_model_name="PP-OCRv6_medium_det",
-    text_recognition_model_dir="/caminho/local/PP-OCRv6_medium_rec",
-    text_recognition_model_name="PP-OCRv6_medium_rec",
-    device="cpu",
-)
-```
-
-Com `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK="True"` (já definida pelo projeto), nenhuma tentativa de download ocorre durante extração.
-
-### 3.4. Estrutura de diretório de modelos
-
-Cada diretório de modelo deve conter:
-- `inference.json` — metadados de arquitetura
-- `inference.pdiparams` — pesos do modelo
-- `inference.yml` — configuração (para engine paddle_static)
-- Eventualmente: `.nb`, `.onnx` dependendo do backend
-
-O `_model_is_ready()` do CLI verifica sufixos `.pdmodel`, `.pdiparams`, `.pdparams`, `.pdiparams.info`, `.nb`, `.onnx`, `.bin`, `.pt`.
-
-### 3.5. API de inferência (v6, PaddleOCR 3.x)
-
-```python
-# Instanciação
-ocr = PaddleOCR(
-    text_detection_model_name="PP-OCRv6_medium_det",
-    text_recognition_model_name="PP-OCRv6_medium_rec",
-    use_doc_orientation_classify=True,
-    use_textline_orientation=True,
-    use_doc_unwarping=False,
-    enable_mkldnn=False,  # consistente com configuração atual do projeto
-    device="cpu",
-    # + model_dir kwargs para offline
-)
-
-# Inferência
-result = ocr.predict(input=numpy_array_or_pil_image)
-# result é iterável de objetos Result com .print(), .json, etc.
-```
-
-O despacho `if hasattr(ocr, "predict")` em `paddle.py` captura isso corretamente.
-
-### 3.6. Classificadores de orientação para v6
-
-A pesquisa **não identificou modelos de orientação específicos para v6**. Os modelos atuais `PP-LCNet_x1_0_doc_ori` e `PP-LCNet_x1_0_textline_ori` devem permanecer compatíveis com modelos v6 de OCR. **Verificar empiricamente** se a combinação funciona sem warnings na inicialização.
-
-### 3.7. Localização dos modelos (HuggingFace Hub)
-
-- `PaddlePaddle/PP-OCRv6_medium_det`
-- `PaddlePaddle/PP-OCRv6_medium_rec`
-- `PaddlePaddle/PP-OCRv6_small_det`
-- `PaddlePaddle/PP-OCRv6_small_rec`
-- `PaddlePaddle/PP-OCRv6_tiny_det`
-- `PaddlePaddle/PP-OCRv6_tiny_rec`
-
-Download via `setup-models` com o novo perfil (após implementar suporte a `--language pt-v6-medium` no CLI).
-
-Alternativa se HuggingFace inacessível: `PADDLE_PDX_MODEL_SOURCE="BOS"` para Baidu BOS.
+| C01 | P0 | OBS + COND | Propagar versão real do OCR ao PP-TableMagic e verificar modelos internos | Manifesto e teste que diferenciam pesos internos v5/v6 |
+| C02 | P0 | DEC + COND | Definir se o experimento usa OCR interno do PP-TableMagic ou OCR externo do PDFExtractor | Dois braços com o mesmo desenho, sem OCR oculto |
+| C03 | P0 | OBS + VAL | Identificar corretamente o baseline v5 misto e a variante v6 | Nomes completos de detectores/reconhecedores no relatório |
+| C04 | P0 | COND | Fixar todas as outras peças do PP-TableMagic | Hashes idênticos de estrutura, células, layout e classificadores |
+| C05 | P0 | COND | Separar motor de tabela original versus PP-TableMagic e fallback | Contadores e proveniência por tabela, sem substituição silenciosa |
+| C06 | P0 | COND | Evitar OCR duplo/triplo, resultados duplicados e atribuição incorreta | Proveniência de cada célula e teste de duplicação |
+| C07 | P1 | COND | Adaptador seguro e explícito para saída HTML, células e geometria | `StructuredTable` preserva spans, coordenadas e valores |
+| C08 | P1 | COND | Corrigir transformações de coordenadas recorte → página/PDF | Testes com CropBox, rotação e escala não unitária |
+| C09 | P1 | COND | Política de texto nativo versus OCR de tabela | Casos híbridos sem perda ou conteúdo repetido |
+| C10 | P1 | COND | Desabilitar pré-processamento e reorientações diferentes entre braços | Mesma sequência e parâmetros registrados por página |
+| C11 | P1 | COND | Fixar classificação de tabelas com/sem bordas e roteamento | Mesmas famílias de modelos e decisões auditáveis |
+| C12 | P1 | VAL | Verificar compatibilidade da API oficial com versões instaladas | Teste de importação, inicialização e inferência para os dois braços |
+| C13 | P1 | OBS + COND | Ampliar instalação offline e prontidão para **todos** os modelos de tabela | Status completo e execução sem rede |
+| C14 | P1 | OBS + COND | Isolar cache, configurações globais e processos | Dois braços não alteram o ambiente um do outro |
+| C15 | P1 | COND | Reavaliar memória, workers, encerramento forçado e timeouts | Medições de RSS de pico e recuperação controlada |
+| C16 | P1 | COND | Congelar parâmetros de recorte, DPI, detecção, limiares e retries | Manifestos equivalentes; diferenças justificadas |
+| C17 | P1 | VAL | Criar corpus anotado de tabelas e texto | Ground truth versionado, amostragem e revisão dupla |
+| C18 | P1 | VAL | Medir OCR, estrutura, atribuição de células e saída final separadamente | Métricas por etapa e intervalos de confiança |
+| C19 | P1 | COND | Identificar erros e resultados parciais sem tratá-los como sucesso | Política única de falha, contagem de amostras e exit codes |
+| C20 | P1 | COND | Evitar vazamento de condição entre caches, saída e execução paralela | Isolamento verificável de diretórios e arquivos temporários |
+| C21 | P1 | COND | Validar HTML, serialização Markdown/JSON e células mescladas | Roundtrip estrutural e testes de renderização |
+| C22 | P1 | COND | Controlar recuperação regional e merge de tabelas entre páginas | Resultados rastreáveis sem tabelas inventadas ou omitidas |
+| C23 | P1 | VAL | Estabelecer benchmark pareado e tratamento estatístico | Relatório por documento/tabela, sem métricas incomparáveis |
+| C24 | P1 | VAL | Registrar métricas de custo real e consumo de recursos | P50/P95, cold/warm, RSS, falhas e throughput |
+| C25 | P1 | OBS + COND | Atualizar CLI, API, README e esquema de relatório | Comandos reais validados e documentação por SHA |
+| C26 | P1 | VAL | Adicionar testes unitários, integração, regressão e CI com smoke opcional | Pipeline CI com testes sem e com pesos locais |
+| C27 | P1 | COND | Proteger documentos privados e processar HTML sem execução ativa | Logs minimizados, parser seguro e retenção controlada |
+| C28 | P1 | DEC + VAL | Documentar critério de término, rollback e aprovação | Checklist assinado com evidência por braço |
 
 ---
 
-## 4. Pesquisa Técnica — PP-TableMagic (General Table Recognition v2)
+## 1. Estabelecer a revisão efetiva antes de corrigir qualquer ponto
 
-### 4.1. O que é
+### 1.1. Congelamento da evidência
 
-Pipeline de reconhecimento de tabelas multi-modelo: classificação → estrutura → detecção de células → OCR → HTML.
+O link de uma branch é mutável. O responsável deve registrar a versão exata antes da revisão e deixar os experimentos vinculados a ela. Executar no clone do desenvolvedor:
 
-Classe Python: `TableRecognitionPipelineV2`
-
-```python
-from paddleocr import TableRecognitionPipelineV2
-
-pipeline = TableRecognitionPipelineV2(device="cpu")
-output = pipeline.predict("./tabela.jpg")
-for res in output:
-    res.save_to_html("./output/")
-    res.save_to_xlsx("./output/")
-    res.save_to_json("./output/")
+```bash
+git fetch --all --prune
+git switch feat/paddle-ocrv6-evaluation
+git pull --ff-only
+git rev-parse --verify HEAD
+git status --porcelain=v1
+git log -8 --date=iso-strict --format='%H %ad %s'
+git diff --stat main...HEAD
 ```
 
-### 4.2. Modelos internos (v5 por padrão, não v6)
+Se a nova integração estiver em outra branch ou já tiver sido incorporada à `main`, substituir a branch de exemplo pelo **ref real** e registrar a árvore resultante; não mesclar branches por conveniência durante o benchmark. Guardar SHA, branch, status limpo, diff, tags e artefato de build. Guardar o plano antigo somente como referência histórica, pois mudanças recentes podem ter resolvido ou alterado seus pontos.
 
-| Papel | Modelos disponíveis |
-|---|---|
-| Estrutura de tabela com bordas | `SLANeXt_wired`, `SLANet_plus`, `SLANet` |
-| Estrutura de tabela sem bordas | `SLANeXt_wireless` |
-| Classificação de tabela | `PP-LCNet_x1_0_table_cls` |
-| Detecção de células com bordas | `RT-DETR-L_wired_table_cell_det` |
-| Detecção de células sem bordas | `RT-DETR-L_wireless_table_cell_det` |
-| OCR interno (det) | `PP-OCRv5_server_det` ou mobile |
-| OCR interno (rec) | `PP-OCRv5_server_rec` ou mobile |
+### 1.2. Inspeção obrigatória da integração nova
 
-**Nota:** PP-TableMagic usa modelos v5 internamente, não v6.
+Pesquisar no SHA congelado, sem presumir nomes de arquivos:
 
-### 4.3. Formato de saída
+```bash
+git grep -n -i -E 'tablemagic|TableRecognitionPipelineV2|table_recognition_v2|PP-TableMagic' -- ':!*.lock'
+git grep -n -E 'ocr_model_profile|text_detection_model_name|text_recognition_model_name|use_ocr_model|use_ocr_results_with_table_cells'
+git grep -n -E 'predict\(|predict_iter\(|pred_html|table_res_list|cell_box_list|table_ocr_pred'
+git grep -n -E 'setup-models|models-status|PADDLE_PDX_CACHE_HOME|PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'
+git grep -n -E 'StructuredTable|StructuredCell|rowspan|colspan|render_markdown|content_blocks'
+```
+
+Anexar ao ticket um mapa **arquivo → função → chamada → teste** para: criação de perfis, instalação, prontidão, construção da pipeline, execução em página/recorte, conversão do resultado, resolução de conflito com tabelas nativas, fusão entre páginas, escrita de JSON/Markdown e relatório de benchmark. Não considerar “integração concluída” apenas porque existe importação de `TableRecognitionPipelineV2`.
+
+### 1.3. Prova mínima de que o PP-TableMagic efetivamente executa
+
+Para cada braço, selecionar um PDF com tabela digital e outro digitalizado, ambos conhecidos e permitidos para teste. Gerar uma evidência de execução com: nome e hash do PDF; página; bbox selecionada; hash da imagem entregue ao PP-TableMagic; pipeline inicializada; nomes e paths dos pesos carregados; presença de `table_res_list`; estrutura e texto de ao menos uma tabela; origem e número de células no documento final; tempo da etapa. Não usar só a presença do comando `--table-engine` ou similar como comprovação.
+
+**Aceite de 1.1 a 1.3:** documento com o SHA imutável, diff, inventário do código novo e ao menos um resultado rastreável de PP-TableMagic em cada braço. Na ausência de código e teste de integração, abrir ticket de **implementação**, não marcar a comparação como pronta.
+
+---
+
+## 2. Definição experimental: o que exatamente será comparado
+
+### 2.1. Dois desenhos possíveis, que NÃO podem ser misturados
+
+**Desenho A — OCR interno configurado dentro do PP-TableMagic (mais simples para um comparativo integral de pipelines).** Cada braço instancia o PP-TableMagic com o seu próprio detector e reconhecedor de OCR. Os demais componentes de tabela ficam fixos. O texto fora das tabelas, se também for comparado, deve usar o mesmo perfil correspondente. Se o PP-TableMagic dividir e reconhecer novamente texto por células, essa nova chamada precisa usar **os mesmos pesos OCR declarados para o braço**. Esta modalidade mede o efeito do modelo de OCR no sistema completo, incluindo interações com estrutura e célula.
+
+**Desenho B — estrutura/células do PP-TableMagic com OCR externo controlado pelo PDFExtractor (isola mais fortemente reconhecimento de texto).** O PP-TableMagic fornece a geometria e o texto do braço é atribuído a células pelo código do projeto. **Atenção:** `use_ocr_model=False` não implica automaticamente um mecanismo de injeção de tokens externos, nem garante que a pipeline produzirá estrutura/HTML válido sem OCR; isto precisa ser comprovado na versão exata da biblioteca e, se necessário, por um adaptador de modelos de estrutura/células independente. O relatório deverá descrever com exatidão quais módulos ainda executam reconhecimento, como os spans são preservados e como a atribuição token→célula é feita.
+
+**Proibição metodológica:** não chamar uma execução de “v6 + PP-TableMagic” quando o OCR principal é v6 mas o módulo interno de tabela continua em v5 ou no default desconhecido. Se for intencional comparar **OCR externo v6 + OCR de tabela v5**, nomear essa composição explicitamente e tratá-la como **terceiro experimento**, não como o braço v6 proposto pelo usuário.
+
+### 2.2. Matriz mínima de braços e controles
+
+| Campo | Braço A | Braço B | Regra |
+|---|---|---|---|
+| Identificador sugerido | `v5_serverdet_latinmobilerec_tablemagic` | `v6_mediumdet_mediumrec_tablemagic` | Não abreviar como “v5 server” e “v6” sem manifesto |
+| Detector OCR externo | `PP-OCRv5_server_det` | `PP-OCRv6_medium_det` | Diferentes por desenho |
+| Reconhecedor OCR externo | `latin_PP-OCRv5_mobile_rec` | `PP-OCRv6_medium_rec` | Diferentes por desenho |
+| OCR interno da pipeline de tabela | **Mesmo par do braço A** | **Mesmo par do braço B** | Ou ambos desligados sob Desenho B comprovado |
+| Layout de tabela | Mesmo nome e SHA | Mesmo nome e SHA | Fixar |
+| Classificador de tabela | Mesmo nome e SHA | Mesmo nome e SHA | Fixar |
+| Estrutura wired/wireless | Mesmos nomes e SHAs | Mesmos nomes e SHAs | Fixar |
+| Detector de células wired/wireless | Mesmos nomes e SHAs | Mesmos nomes e SHAs | Fixar |
+| Pré-processamento e orientação | Mesmos parâmetros | Mesmos parâmetros | Fixar e registrar decisões automáticas |
+| Célula: recortar/reconhecer novamente | Igual | Igual | Fixar, documentar custo |
+| Seleção de páginas/regiões | Idêntica para o benchmark de OCR isolado | Idêntica | No E2E, medir diferenças de roteamento separadamente |
+| Corpus e anotação | Exatamente os mesmos | Exatamente os mesmos | Emparelhamento por ID estável |
+| Ambiente, CPU, backend, threads, memória | Igual | Igual | Alternar ordem em rodadas separadas |
+| Política de falha e limites | Igual | Igual | Nunca excluir falhas só de um braço |
+
+**Controle adicional:** executar um teste de isolamento com o **mesmo OCR fixo** nos dois braços e todos os componentes de tabela idênticos; as saídas devem ser equivalentes dentro da tolerância de não determinismo previamente definida. Depois alterar só o OCR. Caso os resultados de tabela mudem já no teste de isolamento, existe variável oculta ou não determinismo a explicar.
+
+### 2.3. Não confundir benchmark oficial com benchmark local
+
+O próprio PaddleOCR adverte que métricas publicadas de modelos v5 e v6 podem vir de conjuntos diferentes e não permitem comparação direta. Os resultados oficiais não substituem uma medição **no mesmo corpus português e nos mesmos PDFs do projeto**. O baseline atual também é misto, não equivalente ao pacote oficial completo v5 server. [Documentação oficial de OCR](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/OCR.en.md), [perfis locais](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/models.py#L60-L88).
+
+### 2.4. Experimentos adicionais, separados do requisito principal
+
+Se houver interesse, executar depois: (i) v5 completo server detector + server recognizer versus v6 medium, para uma comparação de famílias mais próxima de outra referência; (ii) v6 small com o mesmo PP-TableMagic; (iii) OCR externo apenas, com estrutura fixa; (iv) PP-TableMagic isolado em recortes de tabelas; (v) processamento integral do PDF. Nenhum desses deve ser misturado à tabela de resultados do comparativo principal.
+
+---
+## 3. Tickets bloqueadores de validade da comparação
+
+### C01 — Vincular e comprovar o OCR real usado DENTRO do PP-TableMagic
+
+**Prioridade P0; classificação OBS (API oficial) + COND (integração local).**
+
+**Base verificável:** `TableRecognitionPipelineV2` possui parâmetros distintos para `text_detection_model_name`, `text_detection_model_dir`, `text_recognition_model_name`, `text_recognition_model_dir` e uma etapa própria de OCR; sem valores explícitos, usa os defaults da pipeline. A configuração em `ocr/models.py` do PDFExtractor, por sua vez, alimenta o adaptador `PaddleOcrEngine` e **não é, por si só, prova** de propagação ao construtor da pipeline de tabelas. [API oficial](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L623-L670), [modelo local](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/models.py#L36-L88).
+
+**Falha possível:** execução nominal v5/v6 com PP-TableMagic inicializando silenciosamente o mesmo OCR padrão nos dois braços. A aparente evolução da precisão da tabela refletiria o OCR externo, o roteamento ou variação estocástica, não uma comparação válida dos dois pares completos. Outro risco: indicar o modelo v6 por `*_model_name` e, por engano, apontar `*_model_dir` para pesos v5 de mesmo papel funcional.
+
+**Intervenção requerida:**
+
+1. Criar uma configuração imutável de um **braço experimental** contendo os modelos de OCR externo, OCR interno de tabela, orientação, layout, estrutura wired/wireless e células. Não espalhar nomes por strings livres na CLI e no adaptador.
+2. Construir `TableRecognitionPipelineV2` por meio de uma única função que receba o braço; passar explicitamente ambos os `text_*_model_name` e respectivos diretórios. Não pressupor que um parâmetro de língua da pipeline mapeia para o perfil local.
+3. Falhar na inicialização quando modelo/diretório escolhido pelo braço divergir do manifesto ou quando a biblioteca rejeitar uma combinação. Nunca substituir v6 por default v5 sem retornar erro.
+4. Antes do primeiro documento, produzir uma evidência das configurações resolvidas e dos pesos efetivos: modelo, diretório canônico, arquivos, hash SHA-256/manifesto, versão do pacote e ID do processo. Não logar caminho privado do documento ou texto reconhecido quando não necessário.
+5. Garantir que o *reconhecimento adicional por célula* use o OCR do mesmo braço. O parâmetro oficial `use_ocr_results_with_table_cells` tem padrão `True`; portanto, é insuficiente verificar apenas `overall_ocr_res`. [API oficial](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L721-L730).
+6. Se for impossível configurar os modelos v6 de maneira compatível na versão travada, implementar/adaptar a integração com documentação e testes antes da comparação. Não simular suporte alterando apenas rótulos do relatório.
+
+**Testes:** instanciar v5 e v6 com *fakes* que registrem os kwargs; verificar que `text_detection_model_name` e `text_recognition_model_name` divergem como esperado e que o modelo de estrutura não muda; com pesos reais, injetar cache vazio/default não permitido e confirmar falha; registrar no manifesto os quatro nomes dos dois subsistemas; ativar reconhecimento por célula e rastrear o modelo efetivo da segunda passada. **Aceite:** nenhum braço começa a processar se o OCR interno não corresponder ao manifesto ou se a condição experimental não estiver explicitamente marcada como “OCR interno desativado e atribuição externa validada”.
+
+### C02 — Escolher uma arquitetura única para OCR de tabelas e remover ambiguidades de execução
+
+**Prioridade P0; classificação DEC + COND.**
+
+**Decisão inicial obrigatória:** o time deve escolher **Desenho A ou Desenho B** da seção 2.1. Não alternar de modo implícito conforme uma página apresenta texto nativo, OCR com confiança baixa ou tabela visual. Para cada algoritmo, declarar o que produz geometria, o que produz texto, quem associa o texto à célula e qual módulo tem autoridade na saída.
+
+**No Desenho A:** o PP-TableMagic é responsável pela estrutura e pelos textos das células. O OCR externo pode continuar responsável pelo restante da página, mas não deve substituir aleatoriamente células do modelo de tabela. Se houver refinamento das células por OCR externo, criar um **terceiro braço explicitamente composto** e medir o custo adicional, ou desativar refinamento para preservar o desenho principal.
+
+**No Desenho B:** não basta instanciar a pipeline com `use_ocr_model=False`; o resultado sem OCR deve ser avaliado, pois parte do pós-processamento pode exigir tokens. Se o comportamento documentado não for suficiente, usar diretamente os módulos de classificação, estrutura e detecção de células suportados na versão instalada e implementar uma associação independente de tokens às células. O resultado deve preservar `rowspan`/`colspan`, geometria e vazios legítimos. Não acessar classes internas privadas da biblioteca sem teste de compatibilidade e versionamento rígido.
+
+**Contratos de dados sugeridos:** `TableRegion(image, page_bbox, crop_transform, page_index, region_id)`, `TableGeometry(cells, row/column topology, spans, source_model)`, `TableText(tokens, source_ocr_profile, confidence)`, `ResolvedTable(geometry, text_by_cell, provenance, diagnostics)`. Isso é **proposta de design**, não alegação de que essas classes existem.
+
+**Teste de aceite:** alterar o OCR declarado muda apenas os componentes permitidos pelo desenho; ligar/desligar OCR externo não muda textos de células no Desenho A; no Desenho B, o PP-TableMagic não executa reconhecimento implícito, comprovado pela instrumentação de chamadas.
+
+### C03 — Nomear corretamente o baseline v5 e impedir comparação de variantes diferentes sem aviso
+
+**Prioridade P0; classificação OBS.**
+
+O snapshot acessível define `pt` como `PP-OCRv5_server_det` e `latin_PP-OCRv5_mobile_rec`, enquanto v6 medium usa `PP-OCRv6_medium_det` e `PP-OCRv6_medium_rec`. O par v5 é híbrido, e a comparação resulta na mudança simultânea **do detector, do reconhecedor e da família/porte do reconhecedor**. [Código de perfis](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/models.py#L60-L87).
+
+**Correção:** incluir no nome curto dos braços e na legenda de todas as métricas os pares reais de detecção e reconhecimento. Registrar a língua, a cobertura de caracteres e a tabela de símbolos efetiva dos reconhecedores. Não anunciar que “v6 superou v5 server” se o baseline for mobile Latin na etapa de reconhecimento. Se o requisito for uma comparação de família com porte equivalente, adicionar braço `PP-OCRv5_server_det + PP-OCRv5_server_rec` explicitamente, sem substituir o baseline atual de forma retroativa.
+
+**Teste:** um validador rejeita arquivos de resultado com `ocr_family="v5"` sem modelo/versão completos; painéis e exportações leem o manifesto do run, e não deduzem a família de nome de arquivo. **Aceite:** não existe resultado cujo título contradiga os pesos reais.
+
+### C04 — Fixar a versão e os pesos de TODOS os componentes de tabela que não serão comparados
+
+**Prioridade P0; classificação COND.**
+
+A PP-TableMagic compreende, além do OCR, modelos de localização de tabela, classificação, estrutura de tabelas com/sem borda e detecção de células. Modelos diferentes nesses módulos invalidam a atribuição causal do experimento ao OCR. A documentação oficial lista parâmetros separados para estrutura e células wired/wireless, classificação, layout, orientação e unwarping. [Modelos e arquitetura oficiais](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L199-L242), [parâmetros](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L588-L623).
+
+**Correção:** criar um manifesto de artefatos com identificadores e hashes de todos os modelos que não variam e um validador que compare os dois braços, recusando diferenças inesperadas. Fixar também a configuração de `use_e2e_wired_table_rec_model`, `use_e2e_wireless_table_rec_model`, conversão de células para HTML, orientação da tabela e divisão do OCR por células. Impedir downloads automáticos que substituam o “mesmo” nome de modelo por pesos diferentes ao longo de dias.
+
+**Teste:** trocar intencionalmente apenas um hash de detector de células no braço B; o pré voo falha e aponta exatamente o modelo divergente. **Aceite:** hashes e parâmetros de controle são idênticos e constam do relatório para ambos os braços.
+
+### C05 — Tornar explícita a seleção entre tabelas nativas, heurísticas e PP-TableMagic
+
+**Prioridade P0; classificação COND, ancorada na arquitetura anterior observada.**
+
+O PDFExtractor já dispõe de detecção de tabelas nativas, grades vetoriais/rasterizadas, heurísticas sem bordas, OCR regional e montagem de `StructuredTable`. O README descreve cascata determinística e recuperação visual seletiva. Ao adicionar PP-TableMagic é necessário escolher se será usado **em todas as tabelas do corpus experimental** ou somente em certas tabelas candidatas. [README, modos e cascata](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L70-L84), [seletividade e cascata](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L365-L366).
+
+**Risco:** o braço v5 processa uma tabela com grade nativa enquanto v6 ativa o PP-TableMagic porque seu OCR altera uma decisão de confiança. Comparar apenas as saídas do PP-TableMagic, filtrando as tabelas que ele recebeu, introduz viés de seleção. Outro risco é descartar a saída aprendida por uma heurística no pós-processamento sem informar o ocorrido.
+
+**Correção:**
+
+- Executar primeiro um benchmark **table-only com regiões fixadas** e PP-TableMagic forçado, separado do benchmark ponta a ponta.
+- No benchmark ponta a ponta, registrar região candidata, detector que a criou, critérios de aceite, módulo executado, eventual fallback, motivo e identificador final. Preservar ambas as saídas intermediárias de forma controlada para depuração.
+- Se o resultado nativo prevalecer sobre a tabela aprendida, contabilizar como `tablemagic_invoked=true, tablemagic_selected=false`, em vez de afirmar que todas as tabelas “usaram PP-TableMagic”.
+- Fixar regras de roteamento iguais entre braços; reportar também diferenças de roteamento como resultado de E2E, sem interpretá-las como qualidade isolada de OCR.
+
+**Aceite:** todas as tabelas de ground truth entram na contagem de denominador, inclusive as não detectadas, as rejeitadas e as processadas por fallback. A proporção de tabelas efetivamente resolvidas por PP-TableMagic aparece separadamente.
+
+### C06 — Evitar duplicação, conflito de autoridade e “OCR invisível” nas células
+
+**Prioridade P0; classificação COND.**
+
+A saída oficial da pipeline de tabela inclui `overall_ocr_res`, `table_res_list`, `pred_html` e `table_ocr_pred` por tabela. São representações correlacionadas do mesmo conteúdo, não quatro fontes de texto independente a serem concatenadas. A opção de divisão e novo reconhecimento por célula pode produzir textos diferentes da passada global. [Formato exemplificado pelo fornecedor](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L519-L547).
+
+**Correção:** definir uma única autoridade para cada célula: preferir o texto/estrutura final resultante da própria pipeline no Desenho A, com política documentada para vazios e conflitos; preservar `overall_ocr_res` apenas como evidência auxiliar e texto fora das tabelas quando apropriado. No Desenho B, usar o texto externo explicitamente. Nunca concatenar `pred_html` com `overall_ocr_res` dentro da mesma região. Antes de renderizar, marcar tokens consumidos pela tabela, impedir sua reintrodução como prosa e não suprimir tokens que estejam fora de células válidas somente porque sobrepõem a bbox da tabela.
+
+**Teste mínimo:** tabela 2×2 com palavras iguais no corpo do documento; uma célula vazia legítima; duas tabelas sobrepostas na detecção; cabeçalho dividido; linhas externas próximas da borda; tabela com OCR global e por célula discordantes. **Aceite:** cada conteúdo aparece uma vez na saída autorizada; nenhum texto externo é omitido por mera sobreposição de região; discrepâncias são auditáveis.
+
+---
+
+## 4. Adaptação da saída de PP-TableMagic ao modelo de documento
+
+### C07 — Definir um contrato robusto de conversão de estrutura, HTML e células
+
+**Prioridade P1; classificação COND.**
+
+**Risco:** tratar o HTML produzido pela pipeline como uma tabela retangular comum pode perder `rowspan`, `colspan`, células de cabeçalho, vazios, ordem, posição e associação texto→célula. Interpretar o resultado como lista de linhas dividida por `|` é ainda mais frágil. A API oficial entrega `pred_html`, `cell_box_list` e resultados OCR; o projeto deve explicitar que campos usa, sem supor que todo campo está sempre presente em todas as versões. [Saída da pipeline](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L519-L547), [serialização disponível](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L731-L742).
+
+**Correção sugerida:**
+
+1. Encapsular acesso ao objeto PaddleOCR em `TableMagicAdapter` isolado; congelar por teste a forma do resultado da versão instalada. Validar tipo, cardinalidade e presença de dados antes de criar uma tabela.
+2. Fazer parsing HTML com parser de biblioteca confiável, sem executar scripts e sem carregar URLs. Rejeitar conteúdo que exceda limites de nós, profundidade ou tamanho. Nunca converter HTML de tabela com regex.
+3. Expandir a matriz lógica de células considerando ocupação de posições por `rowspan`/`colspan`; preservar a célula original e sua extensão, sem duplicar fisicamente seu texto em todas as posições cobertas.
+4. Separar `semantic_header` (`true`, `false`, `unknown`) de “primeira linha” e de células com tag `th`. Em Markdown simples, usar convenção explicitada para tabelas sem cabeçalho; para spans, preservar HTML seguro ou produzir JSON estruturado com sinalização explícita, sem criar células artificiais.
+5. Associar geometria às células somente após comprovar o contrato/ordem das caixas em `cell_box_list`; se a lista não corresponder univocamente às células HTML, guardar geometria como não resolvida, não inventar correspondência por índice.
+6. Incluir `source_page`, `region_id`, `table_id`, `model_profile`, `source_kind`, `cell_id`, bbox e origem textual nos diagnósticos. Se houver confiança por célula, registrar sua definição, pois scores de módulos diferentes não são intercambiáveis.
+
+**Teste de aceite:** tabela 1×1; sem cabeçalho; cabeçalho em duas linhas; `rowspan=3`; `colspan=4`; combinações de spans; células vazias; texto com `|`, `&`, `<`, `>`, aspas e quebras de linha; HTML inválido; 0/1/N tabelas por imagem; resultado nulo/sem `pred_html`; diferenças entre HTML e caixas. O `StructuredTable` e a saída JSON preservam topologia, texto e proveniência; a saída Markdown declara suas limitações sem perda silenciosa.
+
+### C08 — Implementar e testar transformações geométricas de ponta a ponta
+
+**Prioridade P1; classificação COND.**
+
+O PDFExtractor usa sistema canônico de coordenadas no canto superior esquerdo da página. O PP-TableMagic recebe imagens/recortes e devolve coordenadas em pixels da imagem processada. Se houver rotação, redimensionamento, *padding*, correção de perspectiva, orientação do documento ou da tabela, uma multiplicação direta por `1/render_scale` **não** recupera de modo geral a coordenada correta na página. [README, coordenadas canônicas](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L34-L48), [pipeline oficial admite orientação/unwarping e entrada de imagem](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L693-L730).
+
+**Correção:** representar o pipeline geométrico por uma composição explícita de transformações reversíveis: PDF original → página canônica/CropBox → renderização raster → crop/padding → rotação/orientação/unwarping → coordenadas retornadas. Para transformações não lineares, guardar a malha/mapa inverso ou desativá-las no benchmark de geometria até que haja suporte correto. Não aplicar a transformação PDFium duas vezes. Associar à região as dimensões antes/depois e a matriz (ou o tipo de mapa) efetivamente usada. Retornar bbox e polígonos ao sistema canônico antes de juntar com texto nativo.
+
+**Testes:** página 0/90/180/270°, CropBox com origem deslocada, página não A4, tabela fora do centro, recorte parcial, escala 1, 1,5 e 2, imagem com margem artificial, bbox tocando borda, tabela com texto vertical, coordenadas negativas e caixas degeneradas. Conferir *roundtrip* ida/volta e IoU da bbox retornada com referência conhecida. **Aceite:** a associação texto→célula, ordem de leitura e sobreposição com regiões nativas são geometricamente consistentes em todos os cenários suportados; transformações não suportadas falham de modo explícito.
+
+### C09 — Resolver a autoridade de texto nativo, texto OCR e conteúdo de tabela em PDFs híbridos
+
+**Prioridade P1; classificação COND.**
+
+Em PDFs híbridos, o texto pesquisável pode ser correto, sobreposto, incompleto, invisível ou deslocado. Se a geometria de tabela for aprendida mas seu texto vier de OCR visual, comparar v5/v6 mede o OCR de tabela; se o código substituir todas as células pelo texto nativo, o resultado pode ficar idêntico e mascarar a diferença entre modelos. Em contrapartida, suprimir todos os tokens nativos dentro da bbox da tabela pode perder notas ou subtítulos que não pertencem a células.
+
+**Correção:** adotar política explícita: (a) **benchmark de OCR**, com fonte textual fixada no perfil e texto nativo usado apenas como referência quando apropriado; (b) **modo de produção híbrido**, com confiança/validade do texto nativo e prioridade registradas por célula. Expor campos `raw_native_text`, `raw_tablemagic_text`, `selected_text`, `selection_reason` **somente em artefatos de diagnóstico protegidos**, sem espalhar conteúdo privado em logs; no relatório público usar contadores agregados. Testar vazios, células mescladas, sobrescrito, caracteres invisíveis e texto OCR já embutido no PDF.
+
+**Aceite:** cada célula tem fonte textual inequívoca e não ocorrem substituições não observáveis entre v5 e v6.
+
+### C10 — Padronizar pré-processamento, DPI, orientação e ordem dos operadores
+
+**Prioridade P1; classificação COND.**
+
+A pipeline oficial pode habilitar orientação documental e remoção de deformação, além de orientação de tabela e reprocessamento de OCR por célula; o PDFExtractor já faz renderização, orientação e variantes de recuperação. Aplicar rotações/realce duas vezes ou em ordem diferente entre braços pode alterar fortemente o resultado e os bboxes. [Opções oficiais](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L663-L670), [opções por inferência](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L721-L730), [políticas locais](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/config.py#L21-L32).
+
+**Correção:** fixar e registrar escala de raster, interpolação, conversão RGB/BGR, nitidez, *deskew*, orientação do documento e da tabela, uso de `use_doc_unwarping`, recorte e margem, tratamento de transparência. Produzir para ambos os braços o **mesmo buffer de pixels por amostra** no benchmark de OCR e estrutura isolados e guardar hash desse buffer. No E2E, aceitar divergências geradas pelo modelo, mas registrá-las como parte do efeito sistêmico. Definir qual sistema é responsável por cada rotação e quando se aplica transformada inversa.
+
+**Aceite:** hashes de imagem de entrada idênticos nos braços dos experimentos pareados e transformações recuperáveis nas saídas.
+
+### C11 — Fixar o roteamento entre tabelas com borda e sem borda
+
+**Prioridade P1; classificação COND.**
+
+O PP-TableMagic pode escolher classificadores e modelos de estrutura/células distintos para tabelas com linhas (wired) e sem linhas (wireless). Erro de classificação ou mudança de peso pode tornar o “mesmo PP-TableMagic” uma combinação de modelos diferente. [Arquitetura e modelos](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L199-L242), [parâmetros de modelos específicos](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L595-L614).
+
+**Correção:** para benchmark de OCR isolado, usar a mesma região e roteamento pré-computado/confirmado, caso a API permita; para benchmark E2E, registrar classe escolhida, score, modelo de estrutura, detector de célula, opções E2E ou geometria→HTML, e mudanças por braço. Não forçar o mesmo roteamento em produção só para aumentar comparabilidade, sem avaliar eventual degradação. O relatório deve decompor erro de localização de tabela, erro de tipo de tabela, erro de grade e erro de texto da célula.
+
+**Aceite:** classificação, estrutura e células têm proveniência por tabela e nenhum modelo padrão desconhecido aparece no run.
+
+### C12 — Comprovar compatibilidade real das bibliotecas e dos pesos selecionados
+
+**Prioridade P1; classificação VAL.**
+
+O snapshot do projeto declara `paddlepaddle==3.3.1`, `paddleocr==3.7.0` e `paddlex==3.7.2`; documentação online da branch `main` do PaddleOCR pode refletir **API posterior**, de modo que exemplos da documentação não são garantia de funcionamento nessa combinação exata. [Requirements do projeto](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/requirements.txt#L7-L17), [documentação oficial em evolução](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md).
+
+**Procedimento obrigatório:** em um ambiente limpo e com dependências travadas, confirmar que `from paddleocr import TableRecognitionPipelineV2` funciona; inspecionar a assinatura da classe no **pacote realmente instalado** com `inspect.signature`, sem supor nomes a partir do site; instanciar com todos os parâmetros escolhidos, executar uma imagem sintética e um recorte real permitido, verificar schema de resultado, funcionamento de v5 e v6 e comportamento de `use_ocr_results_with_table_cells`. Se v6 não for suportado como modelo interno pela pipeline nessa versão, documentar a incompatibilidade e preparar upgrade versionado ou adaptador; não fazer *fallback* invisível.
+
+**Critérios:** tabela de compatibilidade `(SO, Python, paddlepaddle, paddleocr, paddlex, OpenCV, modelo, backend, TableMagic)` com `import`, `construct`, `predict`, `export`, `offline`, `memory` e o resultado de cada teste. Versões incompatíveis são excluídas **antes** da rodada principal, com motivo registrado.
+
+---
+## 5. Preparação offline, ambiente, memória e operação
+
+### C13 — Ampliar `setup-models`/`models-status` aos modelos adicionais do PP-TableMagic
+
+**Prioridade P1; classificação OBS + COND.**
+
+No snapshot consultado, `ocr/models.py` define **quatro** nomes por perfil: orientação de documento, orientação de linha, detector e reconhecedor de texto. O código de pré-validação `_resolve_required_local_models()` verifica existência de diretórios não vazios desses quatro modelos. Isso **não estabelece prontidão** para os modelos adicionais de layout, classificação de tabela, estrutura wired/wireless e detecção de células necessários à configuração escolhida do PP-TableMagic. [Perfis locais](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/models.py#L27-L43), [pré-validação](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/paddle.py#L195-L256), [modelos da pipeline oficial](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L588-L626).
+
+**Correção proposta:**
+
+1. Criar manifesto por perfil e por componente: `role`, `model_name`, `version`, `model_path`, `required_files`, `SHA-256`, `license/source`, `optional_if_flag_disabled`, `runtime_compatibility` e `readiness_state`.
+2. Incluir no `setup-models` **somente** os modelos realmente usados pela configuração concreta (p.ex., se `use_layout_detection=False`, registrar por que seu modelo não é necessário). Não carregar pesos enormes apenas por pertencerem genericamente à família PP-TableMagic.
+3. Separar `manifest-ready` de `runtime-smoke-ready`: a verificação leve valida arquivos e metadados; um teste offline opcional carrega pipeline e executa exemplo mínimo. Diretório apenas não vazio ou único arquivo `.pdiparams` não comprova o conjunto íntegro.
+4. Fazer downloads apenas em fase de provisionamento, em diretório temporário com checagem de integridade e promoção atômica. Na execução, `model_dir` explícito para **cada componente**, e detectar qualquer tentativa de consulta/download remoto.
+5. Deixar `models-status` indicar perfil, ambiente e dependências adicionais, por exemplo: `[ok] table_classification: ...`, `[ok] wired_table_structure: ...`, `[missing] wireless_table_cells: ...`, distinguindo componentes desabilitados da configuração.
+6. Verificar eventuais overrides de diretório também na API Python; o status não pode estar `READY` para um cache enquanto o runtime usa outro.
+
+**Testes:** cache sem modelos de tabela; cache com apenas OCR; falta de um modelo wired; falta apenas de modelo desabilitado; diretório com pesos incompletos; troca intencional de SHA; corrida de duas instalações; execução sem DNS/rede; fake que falha se receber URL de modelo. **Aceite:** status e pré-validação convergem e nenhum braço executa com modelo padrão baixado silenciosamente.
+
+### C14 — Evitar interferência entre caches, inicialização e ambiente global
+
+**Prioridade P1; classificação OBS + COND.**
+
+No snapshot, `PaddleOcrEngine` usa variável global `PADDLE_PDX_CACHE_HOME`, e o módulo documenta um `_INIT_LOCK` para serializar alterações de ambiente durante inicialização. Esse lock protege apenas certas janelas de inicialização; o **ambiente do processo** permanece compartilhado entre instâncias. Com modelos adicionais de PP-TableMagic, perfis alternados e processamento paralelo, a chance de configuração implícita aumenta. [Código de OCR local](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/paddle.py#L44-L48), [resolução de cache](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/paddle.py#L258-L274).
+
+**Correção:** preferir paths absolutos e explícitos em todos os construtores. Para o benchmark, executar cada braço em **processo separado** com ambiente imutável definido **antes** do import de Paddle; não alternar `PADDLE_PDX_CACHE_HOME` entre threads. Se precisar compartilhar pesos idênticos de PP-TableMagic, usar artefato imutável apenas para leitura com hash e sem downloads concorrentes; modelos de OCR de cada braço devem ser resolvidos independentemente. O lock de inicialização local não é substituto de isolamento de processo. O relatório registra pid, cache root, diretórios resolvidos e versão do ambiente.
+
+**Teste:** duas instâncias v5/v6 no mesmo processo não podem iniciar inadvertidamente o cache uma da outra; teste determinístico em subprocessos paralelos; cache configurado por env e por argumento; cache inexistente; iniciação e erro de uma das pipelines sem afetar a outra. **Aceite:** provado por manifesto e teste de concorrência que o modelo real corresponde ao braço.
+
+### C15 — Controlar memória de TODOS os módulos, não apenas o orçamento RGB regional
+
+**Prioridade P1; classificação OBS + COND.**
+
+O README menciona um pico aproximado de **10,8 GiB RSS observado em uma validação anterior com detector v5**, além de um limite de **8 MiB por variante RGB** de recuperação regional. Esse limite não controla pesos, tensores internos, modelos simultâneos da pipeline de tabelas, memória de workers, imagens e caches do runtime. A documentação oficial avisa sobre falta de memória e desempenho lento com a pipeline completa. Esses valores do projeto não são medições de PP-TableMagic + v6. [README, orçamento RGB](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L297-L364), [pico relatado para v5](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L429-L446), [aviso da pipeline oficial](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L399-L402).
+
+**Correção:** medir separadamente *cold start*, modelos residentes, pico por etapa, pico do processo e, se houver contêiner, pico do grupo de controle. Executar v5 e v6 **sequencialmente**, encerrando e verificando finalização do worker entre braços para benchmark de memória comparável. Documentar limites de threads, lote, imagens em RAM, número de workers, uso de swap e memória disponível. Se ocorrer encerramento nativo/OOM, capturar status e marcar documento/tabela como falho, jamais classificar como “não havia tabela”. Para uso em serviço, iniciar OCR/tabulação em subprocesso com limite de memória/tempo que proteja o controlador. Não reduzir automaticamente DPI ou trocar modelo sem registrar um novo braço/experimento.
+
+**Teste:** tabela gigante; páginas com múltiplas tabelas; 100 páginas com tabelas; 2 workers; timeout durante análise estrutural; OOM simulado; tarefa cancelada; subproceso encerrado pelo SO; execução repetida 20× para detectar crescimento de memória. **Aceite:** memória por braço mensurável, falhas contabilizadas, controlador íntegro e resultados não corrompidos.
+
+### C16 — Congelar resolução, limites, lotes, scores e regras de recuperação
+
+**Prioridade P1; classificação OBS + COND.**
+
+Os defaults da pipeline oficial de tabela para limite de detecção, reconhecimento e threads podem diferir do adaptador local. `config.py` do projeto define políticas `baseline`, `adaptive`, `exhaustive` e limiares de qualidade; o README descreve múltiplas variantes e OCR seletivo. Comparar perfis com thresholds, DPI, modelo de layout ou número de passadas diferentes introduz variáveis de confusão. [Parâmetros oficiais](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L623-L661), [políticas do projeto](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/config.py#L21-L66).
+
+**Correção:** gerar um `effective_config.json` canônico com TODOS os valores efetivos, inclusive defaults resolvidos e versões dos pacotes. Separar duas perguntas: **(i) efeito do modelo com orçamento idêntico**: mesmo buffer de entrada, escala, limites, backend, número máximo de tentativas e rotações; **(ii) melhor qualidade possível de cada modelo sob a mesma política de produto**: manter as regras funcionais mas admitir diferentes decisões de recuperação, contabilizando custo total. Congelar os limiares inicialmente e executar calibração posterior em conjunto de desenvolvimento independente do conjunto final; nunca ajustar limiares com o conjunto de teste. Se uma versão do modelo não suporta parâmetro fixado, marcar incompatibilidade ou criar experimento paralelo, não substituir silenciosamente.
+
+**Teste:** serialização canônica gera hash igual para configurações de controle; alteração em um único limiar é detectada; relatório conta passadas, imagens e tokens realmente processados; reexecutar 3× evidencia eventuais fontes de não determinismo. **Aceite:** a única diferença não justificada no experimento controlado é o par de modelos OCR.
+
+### C19 — Diferenciar resultado vazio, tabela não encontrada, saída parcial, exceção e interrupção nativa
+
+**Prioridade P1; classificação COND.**
+
+Não misturar `success_no_table`, `table_detected_empty`, `partial_success`, `low_confidence`, `model_missing`, `incompatible_model`, `timeout`, `resource_exhausted` e `process_crash`. Um PDF pode concluir com texto válido e tabela incompleta; o relatório deve contabilizar a falha de tabela mesmo quando a extração do documento retorna sucesso parcial. Em benchmark pareado, não excluir a página problemática de ambos os braços após uma falha de apenas um braço sem relatar a exclusão e manter um denominador fixo para a avaliação.
+
+**Correção:** definir estado do documento, da página, da região e da tabela; preservar ID estável para toda amostra de ground truth; capturar exceções do adaptador, erros de parsing de HTML e código de saída do processo isolado; nunca transformar erro de modelo em tabela vazia nem em OCR com confiança 0. Se houver fallback, registrar `fallback_from`, `fallback_to`, `reason`, `model_invoked` e `selected_source`. Definir comportamento do comando: exit code não zero para falha total; relatório de lote retorna também contagem de falhas parciais e código de status configurável em CI.
+
+**Aceite:** testes simulados de cada falha geram códigos e contagens distintos, e a tabela de resultados inclui todas as amostras elegíveis no denominador apropriado.
+
+### C20 — Impedir contaminação cruzada por caches, saídas, objetos compartilhados e resíduos
+
+**Prioridade P1; classificação COND.**
+
+O uso de um único diretório `output.md` para os dois braços pode sobrescrever saídas, e o reúso de objetos Paddle ou caches de resultados por página pode fazer com que o segundo braço receba tokens, geometrias ou tabela do primeiro. O risco aumenta quando existe cache por hash apenas do PDF, sem incluir modelos e parâmetros.
+
+**Correção:** todo cache de **resultado inferido** deve ser indexado por `(pdf_sha256, page_index, crop_bbox, image_sha256, effective_config_sha256, model_manifest_sha256, pipeline_version)`. O cache de pixels **antes** do OCR pode ser compartilhado se o conteúdo for exatamente o mesmo e imutável; o cache de inferência não. Usar diretórios `run_id/arm_id/`, escrita atômica e arquivo de manifesto; validar colisões e impedir substituição por padrão. Não reusar instância da pipeline ao alterar perfil. Fechar modelos/processos antes da próxima rodada e limpar apenas caches de inferência controlados, não destruir pesos baixados.
+
+**Aceite:** executar na ordem A→B e B→A produz a mesma identificação dos modelos e arquivos sem sobreposição; alterar somente o perfil invalida cache de inferência; hashes dos arquivos de entrada continuam iguais.
+
+---
+
+## 6. Tabelas, corpus, métricas e método científico do benchmark
+
+### C17 — Construir corpus português com ground truth de texto e estrutura de tabelas
+
+**Prioridade P1; classificação VAL.**
+
+**Problema:** nenhum resultado final comparável pode ser inferido apenas de tamanho do texto, número de palavras, aparência do Markdown ou “parece melhor” em poucos PDFs. A referência precisa ser independente dos dois OCRs e incluir **texto e geometria**. O `pdftext report` do snapshot do README é um relatório operacional, não medida de acurácia. [README, relatório operacional](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L263-L272).
+
+**Corpus mínimo recomendado, a dimensionar conforme disponibilidade:** documentos brasileiros com acentos/cedilha, moeda R$, números negativos, separadores brasileiros, datas, CNPJ/CPF fictícios nos dados sintéticos, tabelas contábeis, financeiras, fiscais, administrativas e judiciais; PDFs digitais, scans com OCR embutido, imagens puras e híbridos; tabelas com grade, sem grade, cabeçalho múltiplo, `rowspan`/`colspan`, rodapé, células vazias, colunas estreitas, tabelas divididas entre páginas, texto vertical e páginas rotacionadas; tabelas verdadeiras versus gráficos, diagramas e listas. Incluir documentos com **nenhuma tabela** para medir falso positivo. O número de arquivos deve cobrir variedade, e não apenas total de páginas.
+
+**Anotação por tabela:** `pdf_id`, `page_index`, bbox/polígono, ID lógico entre páginas (se aplicável), tipo de tabela, matriz de células com texto original, coordenadas, `rowspan`, `colspan`, cabeçalho (`yes/no/uncertain`), classe de conteúdo, texto normalizado de referência e status de legibilidade. Anotar trechos fora de tabelas em subconjunto para CER/WER. Para saídas HTML, manter representação semântica estável: DOM/grade canonizados, sem depender de espaços cosméticos do HTML.
+
+**Qualidade da referência:** anotar por duas pessoas em amostra estratificada, adjudicar discordâncias e versionar correções. Não usar saída de v5 ou v6 como verdade, nem extrair “ground truth” do texto oculto do PDF quando ele for sabidamente ruim; permitir referência humana a partir da imagem. Definir política de caracteres ilegíveis e texto ambíguo antes da primeira rodada. Separar `development` e `test` por **documento e origem**, evitando páginas do mesmo PDF em conjuntos distintos; não ajustar limiares no teste.
+
+**Aceite:** manifesto do corpus versionado com hash dos arquivos e licença/consentimento apropriados; todas as tabelas do conjunto de teste têm anotação validada; corpus de regressão público é sintético ou redistribuível, enquanto PDFs privados permanecem fora do repositório.
+
+### C18 — Medir OCR, localização, topologia, texto em células e resultado final separadamente
+
+**Prioridade P1; classificação VAL.**
+
+**Métricas propostas e seus denominadores:**
+
+| Dimensão | Unidade de análise | Medida principal | O que NÃO confundir |
+|---|---|---|---|
+| Texto bruto de OCR | linha ou trecho anotado | CER e WER após normalização definida | Score do OCR não é acurácia |
+| Detecção de regiões de tabela | tabela de ground truth/página | precisão, revocação, F1 em IoU definido | “número de tabelas extraídas” não é recall |
+| Classificação wired/wireless | tabela detectada, com GT | acurácia/matriz de confusão, cobertura | Não medir só tabelas corretamente classificadas |
+| Grade/estrutura | tabela pareada à GT | similaridade estrutural de células, adjacency F1, avaliação HTML canonizado/TEDS quando implementada corretamente | Texto correto não implica grade correta |
+| Texto associado a célula | célula GT pareada | CER/WER por célula, taxa de atribuição correta, vazios corretos | OCR global pode estar correto mas na coluna errada |
+| Cabeçalhos e spans | células/linhas anotadas | precisão/revocação de spans, linha de cabeçalho | Markdown simples pode não representar spans |
+| Qualidade da tabela integral | tabela GT | exatidão de células e topologia, tabela exata quando cabível | Não medir só células não vazias |
+| Documento final | documento/página | omissões, duplicações, ordem de leitura, qualidade Markdown/JSON | Não confundir formatação agradável com integridade |
+| Robustez | todas as amostras elegíveis | taxa de falha, parcial, timeout, OOM, fallback | Falhas não podem desaparecer do denominador |
+| Desempenho | página/tabela/documento | latência e RSS pico | Tempo de modelo isolado não é tempo E2E |
+
+**Regras:** normalizar texto apenas por política fixa e publicada (p.ex., NFC, tratamento explícito de espaços), mantendo também métricas exatas para valores sensíveis. Não eliminar pontuação, sinais, zeros à esquerda, separador decimal ou símbolo monetário quando esses caracteres importam. Apresentar métricas macro por documento e micro por caracteres/células, com pesos explícitos; impedir que um documento gigante domine a conclusão sem informar a agregação. Relatar intervalos de confiança pareados por documento quando tamanho amostral e pressupostos permitirem, não afirmar significância com poucos exemplos.
+
+**Aceite:** scripts determinísticos com testes sobre exemplos construídos para detectar CER/WER incorreto, perda de `rowspan`, célula atribuída à coluna errada, tabela perdida e relatório que indevidamente melhora ao excluir falhas.
+
+### C21 — Preservar semântica na exportação Markdown/JSON/HTML
+
+**Prioridade P1; classificação COND.**
+
+Mesmo quando o PP-TableMagic produz HTML correto, o renderizador do projeto pode remodelar a estrutura. O snapshot anterior do renderizador deve ser conferido no SHA atual, especialmente a hipótese “primeira linha = cabeçalho”, a preservação de spans e o escape de conteúdo. [Renderizador do projeto](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/renderers/markdown.py), [capacidade oficial de exportar HTML/JSON/XLSX](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L731-L742).
+
+**Correção:** conservar uma representação intermediária rica como fonte autoritativa; gerar Markdown apenas na última etapa. Utilizar tabela Markdown simples somente quando a estrutura for retangular, sem mesclas e com semântica de cabeçalho definida; caso contrário, HTML seguro ou representação alternativa explícita. Escapar pipes e quebras, preservar texto Unicode e números sem conversão para `float`, manter identificação de página e origem, evitar script/atributos perigosos no HTML. JSON deve preservar matriz lógica, spans, posições, texto original/normalizado e tipo de fonte.
+
+**Testes:** comparação de estrutura intermediária com exportações, análise reversa de JSON, parse do HTML seguro, Markdown com acentos/pipe/multilinha, tabela sem cabeçalho, spans e células vazias. **Aceite:** nenhuma diferença entre braços nasce somente de regras de serialização aplicadas de forma distinta; erros de saída são relatados separadamente de erros de reconhecimento.
+
+### C22 — Preservar integridade no refinamento regional e em tabelas entre páginas
+
+**Prioridade P1; classificação COND.**
+
+O projeto oferece recuperação regional e fusão lógica de tabelas entre páginas. Uma integração de PP-TableMagic pode reconhecer um fragmento como tabela independente, enquanto o pós-processamento mescla páginas ou repete cabeçalhos. Isso pode alterar número de tabelas, colunas e contagem de células mesmo com OCR idêntico. [README, recuperação e fusão](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L60-L78), [invariantes de montagem](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L391-L403), [fusão entre páginas](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L420-L428).
+
+**Correção:** preservar a tabela física por página, seus `region_id` e `table_id`, a tabela lógica opcional e o mapa de fragmentos. Comparar inicialmente tabelas **físicas antes do merge**; depois medir separadamente o merge. Não fazer OCR na tabela mesclada como se fosse um recorte contínuo sem registrar montagem de imagem e transformações. Em caso de novo OCR regional, marcar o token de origem e se ele substituiu, suplementou ou foi descartado. Bloqueios do orçamento RGB precisam aparecer como evento distinto de OCR vazio.
+
+**Aceite:** casos de tabela sem continuação, continuação real, cabeçalho repetido, colunas alteradas, título entre páginas, páginas ausentes, mistura de orientação e PDF parcialmente processado são reproduzíveis sem perder fragmentos nem duplicar células.
+
+### C23 — Desenhar um benchmark pareado, pré-registrado e com análise não enviesada
+
+**Prioridade P1; classificação VAL.**
+
+**Protocolo:** registrar antes da rodada: hipóteses, corpus, exclusões legítimas, critérios de qualidade primários/secundários, período de medição e orçamento de recursos. O mesmo conjunto de amostras deve ser processado por ambos os braços. Alternar aleatoriamente a ordem de execução por bloco/documento ou rodar A→B e B→A em execuções independentes, para reduzir efeitos de aquecimento/cache; **nunca** compartilhar um objeto Paddle inicializado entre braços. Fixar seed onde houver operações estocásticas e registrar versão e threads, sem supor determinismo absoluto de inferência.
+
+**Análise:** produzir resultados por PDF/tabela e agregações; contabilizar os pares nos quais ambos falham, apenas um falha ou ambos concluem; para acurácia, apresentar análise de casos completos **e** análise de falhas/ausência como erro segundo regra publicada. Evitar inferir superioridade com métricas oficiais de fornecedor ou amostras selecionadas após ver a saída. Se múltiplas métricas, designar uma primária para o objetivo declarado pelo produto e evitar mover o objetivo quando outra métrica parecer melhor.
+
+**Aceite:** scripts reexecutáveis sobre corpus fechado produzem os mesmos IDs e contagens, sem excluir silenciosamente tabela que uma das pipelines não encontrou.
+
+### C24 — Medir latência e custo de recursos de modo útil para decisão de engenharia
+
+**Prioridade P1; classificação VAL.**
+
+**Medidas obrigatórias:** tempo de download/provisionamento (informativo, fora do tempo de inferência), instalação/importação, *cold start* de cada pipeline, *warm start*, leitura PDF, renderização, detecção de tabela, classificação, estrutura, detecção de células, OCR global, OCR por célula, reconstrução/merge, serialização e total E2E. Registrar contagem de chamadas aos modelos, tokens, páginas/tabelas por segundo, memória RSS de pico por processo e memória do contêiner se houver. Separar métricas de execução sequencial e de lote com concorrência. Relatar hardware/CPU, frequência e concorrência em vez de comparar latência medida em máquinas diferentes.
+
+**Teste:** mesma página medida depois de aquecer os dois braços; execução curta com *cold start* separado; 10–20 repetições em amostra de teste operacional para estimar variabilidade, conforme orçamento. Não definir “v6 usa menos memória” sem medir a pipeline completa e seu pico de utilização. **Aceite:** relatório apresenta custo real por documento/tabela e especifica se a medição inclui ou exclui carregamento de pesos.
+
+---
+## 7. Operacionalização, testes automatizados e segurança
+
+### C25 — CLI, API, configuração e documentação devem especificar o mesmo experimento
+
+**Prioridade P1; classificação COND.** Uma opção chamada `--ocr-model-profile` pode afetar apenas o adaptador de texto, sem propagar o perfil ao OCR interno da tabela; a CLI pode divergir da API Python; variáveis de ambiente e defaults da biblioteca podem prevalecer silenciosamente. O repositório atual precisa ser inspecionado nos pontos de criação de `TableRecognitionPipelineV2`, na chamada da pipeline, no instalador de modelos, na validação de perfil e na serialização do relatório. Não se deve inferir o comportamento da branch mais recente somente a partir do nome da opção.
+
+**Contrato proposto:** expor uma configuração de execução imutável, construída em um único ponto, por exemplo `ExperimentConfig(ocr_profile, table_engine, table_ocr_mode, table_structure_profile, cache_root, fallback_policy, quality_policy, preprocessing_profile, output_profile, device, concurrency)`. Validar combinações proibidas na inicialização; propagar o objeto para API, CLI, orquestração, worker, motor de tabela e renderizador; registrar o objeto resolvido no manifesto. Não acoplar o nome do perfil de OCR ao motor de tabela implicitamente: explicitar ambos, mesmo que o CLI forneça um alias para uma combinação permitida.
+
+**Exemplo de contrato desejado, não de sintaxe já verificada na branch:**
+
+```text
+--ocr-model-profile pt                  # PP-OCRv5 selecionado
+--table-engine pp-tablemagic-v2
+--table-ocr-source internal-matched     # OCR da própria pipeline; pesos equivalentes ao braço
+--table-structure-profile table-fixed-01
+--on-table-engine-failure fail          # benchmark primário sem fallback silencioso
+--manifest-out runs/v5/run_manifest.json
+```
+
+Para o outro braço, alterar somente `--ocr-model-profile pt-v6-medium`, os diretórios dos respectivos modelos e os caminhos de saída; manter os demais parâmetros fixos. Não copiar os comandos literalmente até verificar a CLI real: os nomes acima são especificação de interface, não afirmação de que argumentos novos já existem.
+
+**Documentar:** comandos testados de instalação, verificação offline, extração de teste, exportação de resultados, benchmark em lote, limpeza de cache, execução no WSL/Linux/Windows compatível e troubleshooting. Descrever diferenças entre `PP-TableMagic` (pipeline de tabelas) e PP-OCR (OCR de texto), incluindo a possibilidade de OCR interno da pipeline. Indicar como comprovar nos logs os pesos realmente utilizados, não apenas os solicitados. Diferenciar perfis v6 medium/small, o idioma do reconhecedor e os conjuntos de caracteres.
+
+**Testes de aceite:** o mesmo documento invocado via API e CLI com a mesma configuração gera manifestos equivalentes; cada braço loga exatamente os modelos esperados; opção inválida falha antes de abrir o PDF; flags experimentais não alteram a configuração padrão em execuções normais; README e `--help` refletem a API real e o pin de dependências.
+
+### C26 — Estabelecer testes em camadas e controles de regressão na CI
+
+**Prioridade P1; classificação VAL.** A existência de testes do extrator anterior não equivale a cobertura dos novos caminhos de PP-TableMagic, sobretudo reconhecimento de células, importação de spans, integração OCR interno e recuperação após erro. Exigir níveis separados para evitar confundir teste com *mock* e execução real de modelo.
+
+**Camadas mínimas:**
+
+1. **Configuração pura:** resolver perfis v5/v6, invalidar combinações indevidas, impedir uso de cache errado, comprovar que o manifesto acompanha a seleção.
+2. **Contrato de integração:** instanciar um `FakeTablePipeline` que registra argumentos e retorna payloads representativos; garantir que o adaptador consome as chaves corretas, transforma coordenadas e conserva proveniência; marcar explicitamente que o teste não valida PaddleOCR real.
+3. **Testes de adaptação de tabela:** HTML válido/inválido, `<thead>` ausente, `rowspan`/`colspan`, caracteres escapáveis, linhas vazias, células multilinha, ordem de leitura, ausência de `cell_box_list`, caixas inconsistentes, `table_ocr_pred` vazio.
+4. **Integração real curta:** carregar v5 + PP-TableMagic em processo limpo; executar páginas com tabelas; repetir com v6; confirmar modelos de OCR interno ativos no objeto/manifesto; comparar com transcrição conhecida. Esses testes podem depender de um runner com pesos provisionados; CI pública não deve realizar downloads inesperados.
+5. **Regressão E2E:** documentos digitais, digitalizados e híbridos, com e sem tabelas, em todos os modos existentes; comparar com baseline aprovado, incluindo ausência de duplicação, spans e cabeçalhos.
+6. **Resiliência/processos:** modelo ausente, cache parcial, timeout, subprocesso morto, OOM simulado, página corrompida, saída parcial e fallback; validar códigos de saída e denominadores do relatório.
+7. **Benchmark periódico controlado:** conjunto versionado de fixtures não sensíveis, script pareado e diffs de qualidade; pipeline de benchmark distinta da suíte rápida de PR.
+
+**Critério de aceite:** toda alteração de perfil de OCR, motor de tabela, serializador, fusão ou instalador executa os testes diretamente associados. Nenhuma falha de inferência pode ser reclassificada como “tabela vazia” sem um marcador `status` e motivo. A CI deve guardar versões, SHA e logs relevantes, mas não deve publicar conteúdo confidencial dos PDFs de teste.
+
+### C27 — Limitar riscos de segurança, licenciamento e privacidade dos PDFs e modelos
+
+**Prioridade P1 para dados não confiáveis; classificação COND.** PDFs podem acionar bugs em bibliotecas nativas, conter dados pessoais ou exigir restrições de retenção. PP-TableMagic introduz bibliotecas e pesos adicionais, aumentando dependências, superfície de falha e requisitos de distribuição. Nenhuma conclusão de vulnerabilidade específica é possível sem inventário/SBOM e varredura do SHA exato.
+
+**Correções:** executar PDFs enviados por terceiros em workers sem privilégios, com usuário dedicado, diretório temporário privado, quotas de CPU/memória, limite de arquivo e páginas, timeout e bloqueio de rede após provisionar os pesos. Não montar credenciais, HOME com tokens nem repositórios graváveis nos workers de inferência. Validar tipo e tamanho de entrada, tratar PDFs criptografados, garantir limpeza de imagens intermediárias e restringir logs ao mínimo necessário. Se o benchmark contiver documentos internos, manter corpus e transcrições em armazenamento autorizado, com acesso auditável, política de retenção, hash salgado ou identificador não reversível quando cabível; nunca compartilhar exemplos reais em issue pública sem autorização.
+
+**Cadeia de suprimentos:** registrar a licença do código e de cada artefato/modelo, pin de pacotes e hashes das rodas/artefatos quando aplicável, procedência do repositório oficial e política de atualização. Confirmar se a modalidade de distribuição pretendida permite embutir ou baixar automaticamente os pesos. Bloquear downloads de modelos em tempo de execução de produção e de benchmark sem consentimento, preferindo instalação explícita e verificação de checksum.
+
+**Aceite:** teste em sandbox comprova impossibilidade de gravar fora dos diretórios autorizados, ausência de rede em execução offline, truncamento de logs sensíveis, limpeza após falha e documentação de licenças. Esses critérios tratam riscos operacionais; não afirmam ausência de todas as vulnerabilidades.
+
+### C28 — Formalizar critérios de promoção, rollback e compatibilidade
+
+**Prioridade P1; classificação DEC/VAL.** O comparativo só permite alterar o padrão após distinguir ganho de texto, ganho de estrutura e custo adicional da pipeline. A decisão deve depender de critérios escritos antes dos resultados, definidos pelo proprietário do produto para seu corpus e orçamento.
+
+**Processo:** preservar `pt`/PP-OCRv5 como opção reproduzível durante a avaliação; manter perfis v6 isolados; impedir autoatualização de pesos/pacotes; realizar smoke test de instalação limpa e atualização; publicar matriz de compatibilidade de modelos/dependências/SO/dispositivo. Fixar limites objetivos para falhas máximas, omissões de números críticos, regressões de tabelas e custo por documento de acordo com os requisitos de negócio. Fazer validação cega dos pares discordantes. Se a nova configuração for promovida, registrar quem aprovou, versão, dataset, métricas, intervalos, exceções e plano de retorno.
+
+**Rollback:** flag de perfil e cache anterior devem permitir restaurar o comportamento v5 sem converter novamente o corpus ou perder proveniência; resultados antigos devem continuar legíveis com versão explícita do schema. Testar o rollback em instalação limpa e após falha de worker. Não apagar artefatos de benchmark antes da análise e da política de retenção.
+
+**Aceite:** relatório consolidado lista decisões e pendências sem declarar “vencedor” quando faltam dados; uma execução v5 anterior é reexecutável com os mesmos pesos e parâmetros; o modo padrão só muda por decisão formal e testes aprovados.
+
+---
+
+## 8. Modelo de integração proposto para o desenvolvedor
+
+Esta seção é uma **proposta de desenho e pseudocódigo**, não um patch pronto: não foi possível conferir no SHA atual os construtores, os tipos internos do PDFExtractor ou a assinatura local efetiva do PaddleOCR instalado. O desenvolvedor deve adaptar nomes e verificar cada parâmetro na versão de `paddleocr`/`paddlex` fixada no ambiente. É preferível implementar uma integração explícita e testável a acrescentar condições dispersas em `api.py`.
+
+### 8.1. Resolver a configuração antes de inicializar qualquer modelo
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+
+class TableOCRSource(str, Enum):
+    INTERNAL_MATCHED = "internal-matched"
+    EXTERNAL_FROZEN = "external-frozen"
+    # Para experimento exclusivamente estrutural; não gera texto sozinho.
+    DISABLED_STRUCTURE_ONLY = "disabled-structure-only"
+
+@dataclass(frozen=True)
+class ResolvedExperiment:
+    run_id: str
+    git_sha: str
+    ocr_profile: str
+    external_det_model: str
+    external_rec_model: str
+    table_ocr_source: TableOCRSource
+    table_det_model: str | None
+    table_rec_model: str | None
+    table_structure_model: str
+    table_cell_model: str
+    table_classifier_model: str
+    cache_dir: Path
+    device: str
+    fallback_policy: str
+    preproc_profile: str
+    quality_policy: str
+
+
+def resolve_experiment(request, registry) -> ResolvedExperiment:
+    """Pseudocódigo: usar registry verificado da instalação efetiva."""
+    profile = registry.require(request.ocr_profile)
+    table = registry.require_table(request.table_structure_profile)
+
+    if request.table_ocr_source == TableOCRSource.INTERNAL_MATCHED:
+        table_det = profile.det_model
+        table_rec = profile.rec_model
+    elif request.table_ocr_source == TableOCRSource.EXTERNAL_FROZEN:
+        table_det = None
+        table_rec = None
+    else:
+        table_det = None
+        table_rec = None
+
+    if request.benchmark and request.fallback_policy != "fail":
+        raise ValueError("Benchmark primário exige fallback explícito desativado")
+
+    return ResolvedExperiment(
+        run_id=request.run_id,
+        git_sha=request.git_sha,
+        ocr_profile=profile.name,
+        external_det_model=profile.det_model,
+        external_rec_model=profile.rec_model,
+        table_ocr_source=request.table_ocr_source,
+        table_det_model=table_det,
+        table_rec_model=table_rec,
+        table_structure_model=table.structure_model,
+        table_cell_model=table.cell_model,
+        table_classifier_model=table.classifier_model,
+        cache_dir=request.cache_dir,
+        device=request.device,
+        fallback_policy=request.fallback_policy,
+        preproc_profile=request.preproc_profile,
+        quality_policy=request.quality_policy,
+    )
+```
+
+**Ponto crucial:** duas entradas `PP-OCRv5` e `PP-OCRv6` não são suficientes para identificar todos os modelos. Registrar detecção, reconhecimento, orientação, estrutura da tabela, classificação da tabela e detecção de células, incluindo hashes de pesos. O modelo de classificação/orientação do documento, se habilitado, também deve ser constante entre braços e constar do manifesto.
+
+### 8.2. Construir PP-TableMagic com argumentos explícitos
+
+A documentação oficial de `TableRecognitionPipelineV2` apresenta seletores para modelos de detecção/reconhecimento textual, seus diretórios e a opção `use_ocr_model`; `use_ocr_results_with_table_cells` altera o modo de atribuir OCR à estrutura. Consulte a [documentação da pipeline de reconhecimento de tabelas v2](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L588-L730). A documentação upstream da branch `main` pode diferir da versão local efetivamente fixada: confronte assinatura por introspecção e integração real, nunca por suposição.
+
+```python
+# Pseudocódigo de adaptação: conferir parâmetros reais na instalação pinada.
+
+def build_table_pipeline(resolved, model_store, TableRecognitionPipelineV2):
+    common = {
+        # Preencher com nomes/suporte confirmados no paddleocr fixado:
+        "table_structure_model_dir": str(model_store.structure_dir(resolved)),
+        # O nome específico do argumento do modelo de células pode variar
+        # conforme a versão: checar documentação + assinatura local.
+        "use_ocr_model": resolved.table_ocr_source == TableOCRSource.INTERNAL_MATCHED,
+    }
+    if resolved.table_ocr_source == TableOCRSource.INTERNAL_MATCHED:
+        common.update({
+            "text_detection_model_name": resolved.table_det_model,
+            "text_detection_model_dir": str(model_store.det_dir(resolved)),
+            "text_recognition_model_name": resolved.table_rec_model,
+            "text_recognition_model_dir": str(model_store.rec_dir(resolved)),
+        })
+    pipeline = TableRecognitionPipelineV2(**common)
+    model_store.assert_pipeline_identity(pipeline, resolved)
+    return pipeline
+```
+
+**Não copiar o pseudocódigo como patch.** A pipeline pode possuir modelos separados para tabela com/sem linhas, detector de células, classificador de tipo e componentes opcionais de pré-processamento. É obrigatório passar **todos** os pesos necessários pela API realmente disponível, e inspecionar a identidade efetiva do runtime quando a biblioteca não expõe os detalhes de modo confiável. Caso não seja possível garantir o mesmo modelo estrutural em ambos os braços, a comparação passa a ser de **pipelines completas diferentes**, não uma comparação isolada do OCR.
+
+**Modo `EXTERNAL_FROZEN`:** desligar OCR interno não prova que a pipeline consumirá as caixas/transcrições do OCR externo. Se a API não aceitar injeção documentada desses resultados, implementar um adaptador próprio que extraia estrutura e faça associação texto→célula sob um algoritmo explicitamente fixado, ou restringir o experimento a métricas estruturais sem texto. Recusar um relatório rotulado como “PP-TableMagic + PP-OCRv5/v6” caso o OCR utilizado para células seja indeterminado.
+
+### 8.3. Separar resultados brutos do pós-processamento
+
+```text
+input PDF + page_id + SHA256
+   |
+   +--> native evidence ------------------------------+
+   |                                                  |
+   +--> page image (transform recorded)               |
+         |                                            |
+         +--> PP-TableMagic structure                  |
+         |    raw HTML + cell boxes + table boxes      |
+         |                                            |
+         +--> selected OCR path                         |
+              internal matched OR external frozen      |
+              raw text + boxes + confidence + model IDs|
+                        |                              |
+                        v                              |
+                 canonical TableEvidence  <-------------+
+                        |
+                 benchmark raw outputs
+                        |
+             deterministic post-processing
+                        |
+                JSON/HTML/Markdown
+```
+
+Definir interfaces distintas para: `detect_tables`, `recognize_structure`, `recognize_text`, `assign_text_to_cells`, `merge_table_fragments` e `serialize`. Implementar cada fronteira como função pura quando viável, com tipos estruturados e validação, sem duplicar lógica de confiança. Os resultados brutos precisam permanecer imutáveis durante a comparação para permitir reprocessamento com o mesmo serializador e identificar regressões de OCR separadas de regressões de layout.
+
+### 8.4. Representação intermediária obrigatória
+
+Proposta mínima de registro por célula, com esquema de coordenadas e proveniência em campos explícitos:
 
 ```json
 {
-  "table_res_list": [
+  "schema_version": "1.0",
+  "run_id": "v6-medium-tablefixed-20260924-01",
+  "document_id": "doc_0007",
+  "page_index_zero_based": 4,
+  "table_id": "doc_0007:p4:t2",
+  "source_engine": "pp-tablemagic-v2",
+  "physical_table_bbox_px": [90.0, 221.0, 1620.0, 1940.0],
+  "coordinate_system": "rendered_page_px_top_left",
+  "image_width_px": 1700,
+  "image_height_px": 2200,
+  "rotation_degrees": 0,
+  "cells": [
     {
-      "cell_box_list": [[x1,y1,x2,y2], ...],
-      "pred_html": "<html><body><table><tr><td>...</td></tr></table></body></html>",
-      "table_ocr_pred": { "rec_texts": [...], "rec_scores": [...] }
+      "row": 0,
+      "col": 1,
+      "rowspan": 1,
+      "colspan": 2,
+      "bbox_px": [500.0, 224.0, 1120.0, 340.0],
+      "text_raw": "Valor | total",
+      "text_normalized": "Valor | total",
+      "text_provenance": "table_ocr_internal",
+      "ocr_detection_model": "EXACT_MODEL_ID",
+      "ocr_recognition_model": "EXACT_MODEL_ID",
+      "table_structure_model": "FIXED_MODEL_ID",
+      "status": "ok"
     }
-  ]
+  ],
+  "raw_payload_ref": "artifacts/doc_0007_p4_t2_raw.json",
+  "warnings": []
 }
 ```
 
-A saída é HTML, não o contrato de `StructuredTable` do projeto. Seria necessário parser HTML → `StructuredTable` para integração.
+Cada tabela deve indicar se foi encontrada por detecção nativa, por PP-TableMagic, por ambos, ou por fallback, e se o texto de células foi copiado do PDF, produzido pelo OCR de tabela, produzido pelo OCR geral ou fundido. Diferenciar **caixa de tabela** de **caixa de célula** e coordenadas da **página original**, **imagem renderizada**, **recorte** e **imagem após rotação/desentortamento**; cada transformação precisa de matriz e inversa registrada. A identidade do modelo pode ficar no nível de manifesto quando idêntica para todas as células, mas o registro individual deve indicar overrides/fallbacks.
 
-### 4.4. Operação offline
+### 8.5. Manifesto de execução com teste automático de paridade
 
-Para execução sem rede, todos os diretórios de modelo devem ser passados explicitamente. Sem isso, `TableRecognitionPipelineV2` tenta baixar os pesos automaticamente.
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "run-v5-fixedtable-001",
+  "repo": "victorperone/pdfextractor",
+  "ref": "feat/paddle-ocrv6-evaluation",
+  "git_sha": "REPLACE_WITH_REAL_40_CHAR_SHA",
+  "git_dirty": false,
+  "corpus_hash": "SHA256_OF_MANIFEST_OF_INPUTS",
+  "ground_truth_version": "gt-2026-09-frozen",
+  "comparison_design": "internal-matched",
+  "python_version": "PINNED_VERSION",
+  "package_versions": {
+    "paddleocr": "PINNED_VERSION",
+    "paddlepaddle": "PINNED_VERSION",
+    "paddlex": "PINNED_VERSION"
+  },
+  "hardware": {
+    "device": "cpu",
+    "cpu": "RECORDED_CPU",
+    "threads": 4,
+    "memory_limit_bytes": 17179869184
+  },
+  "ocr": {
+    "profile": "pt",
+    "external_det": {"id": "PP-OCRv5_server_det", "sha256": "REAL_HASH"},
+    "external_rec": {"id": "latin_PP-OCRv5_mobile_rec", "sha256": "REAL_HASH"}
+  },
+  "tablemagic": {
+    "pipeline": "TableRecognitionPipelineV2",
+    "use_ocr_model": true,
+    "table_text_det": {"id": "PP-OCRv5_server_det", "sha256": "REAL_HASH"},
+    "table_text_rec": {"id": "latin_PP-OCRv5_mobile_rec", "sha256": "REAL_HASH"},
+    "structure": {"id": "SAME_IN_BOTH_ARMS", "sha256": "REAL_HASH"},
+    "cells": {"id": "SAME_IN_BOTH_ARMS", "sha256": "REAL_HASH"},
+    "table_classifier": {"id": "SAME_IN_BOTH_ARMS", "sha256": "REAL_HASH"}
+  },
+  "preprocessing": {"dpi": 200, "rotation_policy": "frozen", "color_mode": "RGB"},
+  "pipeline": {"quality_policy": "baseline", "fallback": "fail", "table_postprocessing": "frozen"},
+  "input_count": 100,
+  "completed_count": 100,
+  "failed_count": 0,
+  "partial_count": 0,
+  "output_schema_version": "1.0"
+}
+```
+
+Os nomes e valores acima são **ilustrativos**. O manifesto real deve incluir modelo de orientação, classificador de tabelas, modelos de estrutura wired/wireless, diretórios, hashes relevantes, opção de usar OCR por célula, budgets, thresholds, kernel/runtime, flags da CLI e políticas de fallback. A paridade deve ser verificada **pelo programa** antes de computar qualquer métrica: a lista de campos autorizados a diferir deve ser explícita, e qualquer diferença adicional deve bloquear a rotulagem “comparação isolada do OCR”.
 
 ```python
-# Windows Server — ajustar CACHE_V5 para o caminho real
-CACHE_V5 = r"C:\Users\<usuario>\.cache\pdfextractor\paddlex\official_models"
-
-pipeline = TableRecognitionPipelineV2(
-    wired_table_structure_recognition_model_dir=f"{CACHE_V5}/SLANeXt_wired",
-    text_detection_model_dir=f"{CACHE_V5}/PP-OCRv5_server_det",
-    text_recognition_model_dir=f"{CACHE_V5}/latin_PP-OCRv5_mobile_rec",
-    device="cpu",
-    enable_mkldnn=False,
-)
+def assert_paired_manifests(a, b):
+    """Pseudocódigo: adaptar chaves ao manifesto real; fail closed."""
+    allowed_differences = {
+        "run_id", "ocr.profile", "ocr.external_det", "ocr.external_rec",
+        "tablemagic.table_text_det", "tablemagic.table_text_rec",
+        "results_path", "timings", "memory_metrics",
+    }
+    differences = recursive_structured_diff(a, b)
+    disallowed = differences.keys() - allowed_differences
+    if disallowed:
+        raise InvalidComparison(f"Diferenças não permitidas: {sorted(disallowed)}")
+    if a["git_sha"] != b["git_sha"]:
+        raise InvalidComparison("Código distinto entre os braços")
+    if a["corpus_hash"] != b["corpus_hash"]:
+        raise InvalidComparison("Corpus distinto entre os braços")
 ```
 
-**Modelos necessários e status de download:**
-
-| Modelo | Papel | Baixado pelo `setup-models`? |
-|---|---|---|
-| `SLANeXt_wired` | Estrutura de tabela com bordas | ❌ Não — download avulso necessário |
-| `PP-OCRv5_server_det` | Detecção de células (OCR interno) | ✅ Sim — já no cache v5 |
-| `latin_PP-OCRv5_mobile_rec` | Reconhecimento de texto (OCR interno) | ✅ Sim — já no cache v5 |
-| `PP-LCNet_x1_0_table_cls` | Classificação wired/wireless | ❌ Não — download avulso necessário |
-| `RT-DETR-L_wired_table_cell_det` | Detecção de células com bordas | ❌ Não — download avulso necessário |
-
-`SLANeXt_wired`, `PP-LCNet_x1_0_table_cls` e `RT-DETR-L_wired_table_cell_det` não fazem parte do perfil OCR padrão. Devem ser baixados separadamente com rede disponível antes de qualquer execução offline.
-
-### 4.5. Avaliação de risco de integração
-
-**RISCO ALTO.** Classificação baseada na análise abaixo.
-
-#### O que PP-TableMagic substitui — e o que não replica
-
-PP-TableMagic é um pipeline de reconhecimento de tabelas completo, não um componente pontual. Ele substitui os 3 tiers atuais de extração de tabela (detecção vetorial, reconstrução por spans, fallback OCR por região) por um único fluxo multi-modelo baseado em imagem.
-
-| Aspecto | Pipeline atual | PP-TableMagic |
-|---|---|---|
-| Entrada | Vetores PDF + OCR por região | Imagem rasterizada apenas |
-| Saída | `StructuredTable` com contrato completo | HTML — requer parser para integração |
-| `TableCell.tokens` com origem | Preservado (nativo ou OCR) | Não existe — OCR interno próprio |
-| `page_fragments` / `method` / `confidence` | Preservados | Não replicados |
-| Rastreabilidade de token | Mantida via Ledger | Perdida — OCR interno opaco |
-| PDFs com tabelas digitais | 3 tiers funcionam bem | Não indicado — força rasterização |
-| Tabelas rasterizadas com estrutura complexa | Pode falhar na estrutura | Caso de uso principal |
-
-#### Impacto arquitetural
-
-Integrar PP-TableMagic implica adicionar um parser HTML → `StructuredTable` e um ponto de decisão no pipeline para rotear tabelas rasterizadas ao caminho alternativo. Esses dois pontos tocam em `tables/`, `assembly/` e possivelmente `evidence/` — módulos com invariantes documentados.
-
-O risco não é inviabilizante, mas é concreto: o escopo de mudança vai além de "trocar modelo". Requer análise de contrato de integração antes de qualquer código de produção.
-
-#### Riscos operacionais
-
-- **RAM e CPU:** PP-TableMagic inicializa múltiplos submodelos simultaneamente (estrutura + classificação + detecção de célula + OCR). Consumo de RAM em CPU no Windows Server com todos os modelos carregados é desconhecido.
-- **Download avulso:** `SLANeXt_wired` e outros modelos de tabela não são baixados pelo `setup-models` do projeto. Requerem setup manual com rede disponível — se esquecidos, a execução tenta download durante inferência.
-- **Escopo correto:** tabelas digitais (com vetores no PDF) não devem passar por PP-TableMagic — os 3 tiers atuais são superiores. O roteamento correto (raster vs digital) é crítico para não regredir documentos que já funcionam.
-
-#### Quando pode ser considerado
-
-Apenas para tabelas onde **todas** as condições são verdadeiras:
-1. A tabela é 100% rasterizada (sem vetores no PDF)
-2. PP-OCRv6 reconhece o texto mas a estrutura de linhas/colunas está incorreta
-3. Os 3 tiers atuais não recuperam a estrutura
-
-Nunca como caminho padrão para tabelas digitais. Nunca substituindo o pipeline completo.
-
-**Recomendação:** implementar apenas script de avaliação isolado (`eval_tablemagic.py`) para medir viabilidade em casos concretos. Integração requer Gate 4 aprovado e análise de contrato separada.
+Não comparar automaticamente `completed_count` ou métricas de resultado como campos “de entrada”; diferenças de execução são o objeto da medição e precisam constar no relatório. Verificar também a correspondência entre OCR externo e OCR da tabela **dentro de cada braço** e a identidade de todos os modelos estruturais **entre os braços**.
 
 ---
+## 9. Matriz de testes e critérios específicos de aceite
 
-## 5. Pesquisa Técnica — PP-StructureV3
+A tabela é um plano executável de QA. Cada cenário deve indicar `fixture_id`, páginas envolvidas, SHA do PDF, resultado de referência, artefatos brutos v5/v6, manifesto e status. Nos testes de unidade que não envolvam modelo real, usar payloads artificiais e marcar `test_level=unit`; na integração real, anexar os IDs/hash dos modelos carregados. **Nenhum teste isolado substitui o benchmark pareado.**
 
-### 5.1. O que é
+| ID | Cenário / fixture | O que executar | Resultado / asserção de aceite | Tickets |
+|---|---|---|---|---|
+| T01 | PDF digital, sem tabela | Ambos os perfis com PP-TableMagic ativado | Sem tabela fantasma; texto preservado; engine de tabela não altera saída indevidamente | C05, C09 |
+| T02 | PDF digital, tabela simples | Mesma página e recorte nos dois braços | Uma tabela, grade, células e texto rastreáveis; modelo interno identificado | C01, C04, C07 |
+| T03 | PDF digitalizado, tabela simples | Rodar ambos com OCR | Texto por célula correto conforme GT, sem duplicação do OCR externo e interno | C01, C06, C18 |
+| T04 | PDF híbrido, cabeçalho nativo e corpo em imagem | Rodar com política definida | Não perder texto nativo, não duplicar células reconhecidas, registrar origem de cada trecho | C06, C09 |
+| T05 | Tabela sem cabeçalho | Construir resultado e exportar | Renderizador não promove primeira linha a cabeçalho automaticamente | C07, C21 |
+| T06 | Tabela com `rowspan` e `colspan` | Importar payload HTML + caixas | Spans e matriz lógica intactos, sem multiplicar texto ou deslocar células | C07, C21 |
+| T07 | Tabela com células vazias | Processar e exportar | Preservar número e posições de células; vazio legítimo diferente de falha OCR | C07, C18, C19 |
+| T08 | Células numéricas e códigos | Processar GT com `00123`, `-0,08`, `R$ 1.234,56`, `1.000,00` | Zero à esquerda, sinal, vírgulas e moeda preservados; sem conversão numérica destrutiva | C18, C21 |
+| T09 | Texto com `|`, `&`, `<`, `>` e quebra de linha | Exportar Markdown/HTML/JSON | Escape correto; nenhuma execução de HTML ativo; o texto não desloca colunas | C21, C27 |
+| T10 | Duas tabelas próximas na mesma página | Executar detecção e associação | Sem fundir tabelas independentes nem associar tokens da tabela vizinha | C05, C07, C08 |
+| T11 | Tabela sem linhas/bordas (*wireless*) | Executar mesma imagem em ambos | Modelo e política wired/wireless idênticos e logados; estrutura avaliada por GT | C04, C11 |
+| T12 | Tabela com grade (*wired*) | Repetir ambos os braços | Nenhuma troca oculta de família de estrutura/célula entre braços | C04, C11 |
+| T13 | Página rotacionada 90º | Entregar imagem + mapa ao adaptador | Caixas retransformadas dentro da página, leitura sem inversão e sem bbox deslocada | C08, C10 |
+| T14 | PDF com CropBox distinto de MediaBox | Extração em região conhecida | Coordenadas do PDF e do bitmap concordam após transformações | C08 |
+| T15 | Recorte em escala não inteira, com padding | OCR e transformação inversa | Bounding boxes dos tokens e células recuperam posições originais dentro de tolerância anotada | C08, C16 |
+| T16 | Duas páginas com tabela contínua | Comparar tabela física e lógica | Fragmentos preservados; fusão somente quando evidência é suficiente; cabeçalho repetido identificado | C22 |
+| T17 | Tabela semelhante, porém independente, em páginas sucessivas | Aplicar merge entre páginas | Sem fusão falsa; documentar regra e razões de decisão | C22 |
+| T18 | OCR externo v6 e OCR interno fixado em v5 por erro proposital | Inicialização em modo de comparação principal | Rejeitar configuração antes da inferência e explicar conflito no log/manifesto | C01, C02, C25 |
+| T19 | Pesos de estrutura diferentes entre braços por erro proposital | Comparar manifestos | Bloquear rótulo de comparação isolada de OCR | C04, C23 |
+| T20 | Cache de v6 contém somente diretório vazio ou arquivo incompleto | Rodar `models-status` e instalação | Falha prévia à inferência, descrição do arquivo ausente, nenhuma troca silenciosa de peso | C13, C14 |
+| T21 | Execução sem conexão de rede | Usar caches íntegros | Zero downloads; resultado equivalente ao processo com rede, exceto métricas temporais de rede excluídas | C12, C13, C27 |
+| T22 | Um braço encontra tabela, outro não | Executar benchmark completo | Caso permanece no denominador; qualidade/erro de detecção avaliados, não excluídos | C17, C18, C23 |
+| T23 | Exceção Python em apenas uma célula | Injetar falha controlada | Status parcial/falha explícito; nenhuma substituição de célula por string vazia como sucesso | C19 |
+| T24 | Processo nativo interrompido por falta de memória | Limitar memória no worker de teste | Supervisor recebe status, isola processo e contabiliza amostra como falha, sem contaminar próxima rodada | C15, C19 |
+| T25 | Fallback de TableMagic para heurística nativa | Forçar erro sob modo operacional | Fallback identificado por tabela; modo benchmark primário bloqueia fallback ou registra estrato separado | C05, C19 |
+| T26 | Fim de corpus com 1 documento deliberadamente ausente | Executar agregador | Relatório acusa IDs ausentes; `completed + partial + failed` consistente com população | C17, C23 |
+| T27 | Dois workers escrevendo mesmo nome temporário | Rodar simultaneamente em diretórios separados | Isolamento por run/processo; sem arquivo trocado ou artefato sobrescrito | C14, C20 |
+| T28 | Execuções v5→v6 e v6→v5 | Repetir em processos limpos | Modelo carregado não depende da ordem; variância de latência apresentada | C14, C20, C24 |
+| T29 | CLI e API com parâmetros equivalentes | Processar o mesmo PDF | Manifests de entrada equivalentes e saídas iguais dentro de tolerância explicitada | C25, C26 |
+| T30 | Pipeline com `use_ocr_model=False` | Rodar desenho B isolado | Confirmar que não há OCR de tabela oculto e que texto externo é associado por mecanismo testado; caso contrário bloquear desenho B | C02, C06, C12 |
+| T31 | Saída oficial contém `pred_html` mas não `cell_box_list` | Alimentar adaptador | Estado incompleto tratado explicitamente; não inventar coordenadas exatas | C07, C19 |
+| T32 | Saída oficial contém caixas, mas HTML inválido ou conflitante | Alimentar adaptador | Não mascarar inconsistência; erro estrutural reportado e raw salvo | C07, C19, C21 |
+| T33 | Instalação limpa de ambas as versões | Provisionar pesos e dependências pinadas | Hashes e modelos esperados, sem downloads ocultos durante a execução | C12, C13 |
+| T34 | Arquivo com dados sensíveis simulados | Executar worker/logs | Logs não expõem texto de células/PII; temporários removidos mesmo após falha | C27 |
+| T35 | Reverter perfil após rodada v6 | Executar v5 anterior | Mesmo comportamento v5 dentro de tolerância e mesmo schema de saída; rollback documentado | C14, C28 |
+| T36 | Caso controle de OCR interno diferente do externo | Permitir somente como experimento composto explícito | Reportar exatamente os quatro modelos OCR e não agregar como v5/v6 puros | C01, C02, C23 |
 
-Pipeline completo de análise de documento: detecção de layout, OCR, reconhecimento de tabelas, fórmulas, selos, gráficos, leitura multi-coluna. Produz Markdown/Word com estrutura.
+**Testes negativos não dispensáveis:** a configuração incorreta deve falhar de modo observável. Um teste de sucesso com pesos corretos não detecta fallback silencioso para o modelo default. Os testes T18, T19, T20, T23, T24, T26, T31, T32 e T36 comprovam a capacidade de detectar resultados metodologicamente inválidos.
 
-Classe Python: `PPStructureV3`
+### 9.1. Contratos de propriedades sobre tabelas
 
-### 5.2. Suporte a CPU
-
-Suportado. Intel Xeon 8350C: ~3.74 segundos/imagem.
+Sempre que possível, implementar verificações puras independentes de precisão de OCR:
 
 ```python
-from paddleocr import PPStructureV3
-
-pipeline = PPStructureV3(
-    device="cpu",
-    enable_mkldnn=False,      # consistente com projeto
-    use_table_recognition=True,
-    use_formula_recognition=False,   # não funciona com ONNX Runtime
-    use_seal_recognition=False,
-    use_chart_recognition=False,     # VLM de 1.4GB — muito pesado para CPU
-)
+assert table.rows >= 0 and table.cols >= 0
+assert table.page_id in known_pages
+assert all(cell.rowspan >= 1 and cell.colspan >= 1 for cell in table.cells)
+assert all(0 <= cell.row < table.rows for cell in table.cells)
+assert all(0 <= cell.col < table.cols for cell in table.cells)
+assert all(cell.row + cell.rowspan <= table.rows for cell in table.cells)
+assert all(cell.col + cell.colspan <= table.cols for cell in table.cells)
+assert no_overlapping_logical_cell_slots(table.cells)
+assert all(box_is_finite(cell.bbox) for cell in table.cells if cell.bbox)
+assert all(source_is_traceable(cell) for cell in table.cells)
 ```
 
-**Caveat crítico:** fórmulas (`use_formula_recognition=True`) não funcionam com engine ONNX Runtime.
+**Exceções legítimas:** tabelas deliberadamente incompletas podem possuir campo `status=partial` e ausência de determinadas caixas; nesse caso não falsificar coordenadas nem forçar `rowspan=1` para passar na validação. Preservar payload original e motivo de não conformidade. A verificação de não sobreposição opera sobre **slots lógicos** da grade, não sobre geometrias que podem se tocar nas bordas.
 
-**Caveat sobre gráficos:** `PP-Chart2Table` é um VLM de 0.58B parâmetros (1.4GB). Desabilitado por padrão. Muito pesado para CPU de produção.
+### 9.2. Estratégia de fixtures e revisão do ground truth
 
-### 5.3. Formato de saída
-
-JSON com chaves `input_path`, `page_index`, `model_settings`, `layout_det_res` (caixas com labels: `paragraph_title`, `text`, `image`, `table`, `formula`, `seal`), `overall_ocr_res`.
-
-Suporta `.markdown` property e `concatenate_markdown_pages()`.
-
-### 5.4. Avaliação de risco de integração
-
-**RISCO MUITO ALTO.** Classificação baseada na análise abaixo.
-
-#### Por que não é apenas "um modelo melhor de OCR"
-
-PP-OCRv6 (Fases 1–3) substitui apenas os pesos de detecção e reconhecimento. O pipeline permanece intacto: a imagem entra no motor OCR e sai uma lista de tokens com bounding boxes, exatamente como antes. O contrato com o restante do projeto não muda.
-
-PP-StructureV3 é diferente em categoria. Não é um componente do pipeline — é um pipeline alternativo completo, que decide sozinho como segmentar, classificar e extrair o conteúdo de uma página. A comparação:
-
-| Aspecto | PP-OCRv6 (Fases 1–3) | PP-StructureV3 (Fase 5) |
-|---|---|---|
-| O que substitui | Pesos de det + rec apenas | O pipeline inteiro de extração |
-| Entrada/saída do componente | Imagem → tokens com bbox | PDF/imagem → Markdown diretamente |
-| Contrato intermediário | `NativePageEvidence → StructuredDocument` preservado | Não existe — produz saída final direto |
-| Content Conservation Ledger | Preservado integralmente | Não exposto; não existe no PP-StructureV3 |
-| Rastreabilidade por token | Preservada (evidência nativa + OCR) | Não existe |
-| Fusão nativa + OCR | Mantida — diferencial arquitetural | Substituída por extração OCR pura |
-| Risco de regressão | Baixo — só troca pesos | Alto — bypassa toda a arquitetura |
-
-#### Perda do diferencial arquitetural
-
-O projeto tem vantagem estrutural sobre ferramentas genéricas (Docling, MinerU, Adobe Extract, etc.) exatamente porque não extrai só por OCR. Quando o PDF tem texto nativo, ele é lido diretamente; o OCR complementa apenas onde o texto nativo é ausente ou corrompido. Essa fusão produz:
-
-- Conservação fiel de caracteres especiais, formatação e estrutura que OCR puro distorce
-- Ledger de auditoria: cada token tem origem rastreável (nativo ou OCR)
-- Menor taxa de alucinação (OCR nunca substitui texto que já existe com fidelidade)
-
-Usar PP-StructureV3 como caminho principal regressaria a "extrair só por OCR" — o mesmo ponto de partida de qualquer ferramenta genérica. O diferencial deixaria de existir.
-
-#### Riscos operacionais adicionais
-
-- **RAM e CPU:** PP-StructureV3 carrega múltiplos submodelos simultaneamente (layout detection, tabela, OCR interno, opcionalmente fórmula e gráficos). Consumo de RAM em CPU no Windows Server é desconhecido e pode ser proibitivo.
-- **Offline:** alguns submodelos podem tentar auto-download na primeira inicialização mesmo com `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`. Requer verificação isolada com rede bloqueada antes de qualquer uso em produção.
-- **Fórmulas e gráficos:** `use_formula_recognition=True` não funciona com ONNX Runtime (CPU). `use_chart_recognition=True` carrega um VLM de 1.4 GB — inviável para CPU de produção. Qualquer descuido na configuração inicial pode causar falhas difíceis de diagnosticar.
-- **Integração com assembly e ledger:** expor a saída do PP-StructureV3 no formato `StructuredDocument` exigiria um adaptador não trivial, tocando em `assembly/`, `evidence/` e `diagnostics/` — módulos que têm invariantes documentados e não devem ser alterados sem análise cuidadosa.
-
-#### Quando pode ser considerado
-
-Apenas como fallback **pontual** e **opt-in** para páginas específicas onde:
-1. O texto nativo não existe (página 100% rasterizada),
-2. PP-OCRv6 extrai texto mas estrutura de tabela/layout está incorreta, e
-3. PP-TableMagic (Fase 4) não resolveu a estrutura.
-
-Nunca como caminho padrão. Nunca substituindo a fusão nativa+OCR para páginas com texto digital.
-
-**Recomendação:** implementar apenas um script de avaliação isolado (`eval_structurev3.py`) para medir viabilidade em CPU, tempo e qualidade em casos concretos. A decisão de integração exige análise separada, Gate 5 aprovado e autorização explícita.
+Criar `tests/fixtures/tablemagic/` com amostras sintéticas e sem dados privados; armazenar documentos reais com autorização em corpus separado. Para cada arquivo anotar `document_id`, idioma, tipo digital/digitalizado/híbrido, presença de tabelas, classes de tabela, páginas, regiões, número de linhas/colunas, spans, texto original por célula e decisões de leitura. Utilizar coordenadas em sistema único com convenção documentada e converter regiões anotadas em pixels somente quando o DPI de renderização estiver fixado. O arquivo de anotações deve possuir versão, autor/revisor, regras de normalização e histórico das divergências resolvidas. Proibir correção ad hoc do ground truth depois de observar qual modelo foi favorecido sem nova versão e reprocessamento de ambos os braços.
 
 ---
 
-## 6. Requisitos Técnicos para Implementação
+## 10. Procedimento de execução do comparativo sem confundir os braços
 
-### 6.1. Requisito central: offline + CPU-only durante execução
+Os comandos a seguir se destinam ao **desenvolvedor no clone local** e incluem verificações de identidade. Os comandos de teste de PP-TableMagic são intencionalmente apresentados como etapas, não como flags presumidamente existentes no CLI do PDFExtractor. Antes de criar scripts automatizados, conferir `pdftext --help`, os comandos reais de instalação da branch e a assinatura do PP-TableMagic instalado.
 
-- **Internet**: permitida APENAS durante `setup-models` (download de pesos). Bloqueada durante extração de documentos.
-- **CPU**: toda inferência deve funcionar com `device="cpu"`. Sem CUDA, sem GPU, sem drivers especiais.
-- **Offline**: o flag `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK="True"` (já configurado no projeto) garante que nenhum download ocorre durante extração.
-- **Verificação**: testar com rede bloqueada (Windows Firewall rule ou netsh) para confirmar.
-
-### 6.2. Pacotes Python
-
-Conforme descoberta crítica da Seção 2: **não é necessária atualização de versão de pacotes para suportar v6.**
-
-Ambiente de avaliação deve usar exatamente:
-```
-paddlepaddle  == 3.3.1  (sem alteração)
-paddleocr     == 3.7.0  (sem alteração)
-paddlex       == 3.7.2  (sem alteração)
-```
-
-Antes de qualquer experimento, confirmar:
-```bash
-pip check
-python -c "import paddleocr; print(paddleocr.__version__)"
-python -c "import paddle; print(paddle.__version__)"
-```
-
-### 6.3. Modelos a baixar (fase de preparação)
-
-Para o perfil `pt-v6-medium`:
-```
-PP-OCRv6_medium_det
-PP-OCRv6_medium_rec
-PP-LCNet_x1_0_doc_ori        (compartilhado com v5 se mesma versão)
-PP-LCNet_x1_0_textline_ori   (compartilhado com v5 se mesma versão)
-```
-
-Para o perfil `pt-v6-small` (somente se medium aprovado):
-```
-PP-OCRv6_small_det
-PP-OCRv6_small_rec
-```
-
-Destino sugerido: `~/.cache/pdfextractor/paddlex/official_models/` (mesmo root que v5, diretórios separados por nome do modelo).
-
-### 6.4. Memória e hardware mínimo
-
-De acordo com o README atual do projeto: 16 GiB mínimo, 20-24 GiB recomendado para o servidor com OCR. Para v6 medium, o tamanho do modelo é semelhante ao v5_server — expectativa de memória similar.
-
-### 6.5. Python
-
-Python 3.12 (conforme requisito do projeto). Verificar se Python 3.12 tem suporte em wheel para as versões Paddle fixadas no Windows Server 2025. **Atenção:** Python 3.12 em ambiente fresh pode requerer `setuptools wheel` instalados antes de `paddleocr`.
-
-### 6.6. Problema Windows-específico — setuptools
+### Fase 0 — Travar o código e a configuração
 
 ```bash
-pip install setuptools wheel
-# antes de:
-pip install paddleocr
-```
-
-### 6.7. Arquivo de modelo proibido no repositório
-
-`paddle.py` é o nome de um arquivo do próprio projeto (`ocr/paddle.py`). Isso pode causar importações circulares se o módulo for importado em contextos onde o diretório do projeto está no `sys.path` antes dos pacotes instalados. **Verificar se já está tratado** (o projeto usa `src/` layout, que isola isso).
-
----
-
-## 7. Plano de Implementação — Fase a Fase
-
-### Fase 0 — Pré-requisito: consolidar main e criar branch nova
-
-#### 0.1. Verificações antes do merge
-
-```bash
-cd ~/workspace/pdfextractor
-git remote -v
-git fetch origin --prune
-git branch --show-current           # deve ser feat/ocr-regression-stabilization
-git status --short                   # deve estar limpo
-git rev-parse origin/feat/ocr-regression-stabilization
-git rev-parse origin/main
-git log -8 --oneline --decorate origin/feat/ocr-regression-stabilization
-```
-
-**Se o SHA diferir de `5a6ccc202bfffbdbd79121c28ba6d2be376eff9c`:** comparar diferença e confirmar com o responsável que a versão mais recente foi validada. Não assumir aprovação automática de commits novos.
-
-#### 0.2. Gate pré-merge (suíte de testes)
-
-```bash
-python --version   # deve ser >= 3.12
-python -m compileall -q src tests
-python -m pytest -q
-git diff --check
-```
-
-Se `python` apontar para 3.10 ou 3.11: identificar o Python 3.12 do ambiente correto, não aprovar com versão errada.
-
-#### 0.3. Merge da branch de estabilização à main
-
-```bash
-git switch main
-git pull --ff-only origin main
-git merge --no-ff --no-edit origin/feat/ocr-regression-stabilization
-```
-
-Em caso de conflitos: **não resolver automaticamente**. Registrar e consultar responsável. Para abortar: `git merge --abort`.
-
-Após merge bem-sucedido:
-```bash
+set -euo pipefail
+git status --porcelain=v1
 git rev-parse HEAD
-git status --short
-python -m compileall -q src tests
-python -m pytest -q
-git push origin main
+git log -1 --format='%H %cI %s'
+python --version
+python -m pip freeze > benchmark_environment_requirements.txt
+python -m pip check
 ```
 
-#### 0.4. Criar branch de avaliação
+Guardar `git diff --binary` caso haja alterações locais. Para benchmark oficial, recomendar árvore limpa; se não for viável, arquivar patch e marcar o experimento como não equivalente a uma revisão pública reprodutível. Identificar instalação, versão do PaddleOCR e funcionalidade do `TableRecognitionPipelineV2` por teste de importação/assinatura, sem assumir que a documentação web `main` descreve exatamente o pacote instalado.
 
-```bash
-git fetch origin
-git switch main
-git pull --ff-only origin main
-git switch -c feat/paddle-ocrv6-evaluation
-git branch --show-current
-git rev-parse HEAD   # registrar como SHA-base da branch de avaliação
-git status --short
-```
+### Fase 1 — Provisionar e verificar ambos os braços
 
-Se a branch já existir: não sobrescrever, revisar o HEAD e relação com origin/main.
+Provisionar cada conjunto de OCR em diretório isolado e os modelos estruturais de tabela em diretório **de conteúdo imutável e hash fixo**. Compartilhar fisicamente pesos estruturais somente se forem somente leitura e se a identidade ficar registrada; nunca compartilhar arquivos temporários, resultados nem caches que possam ser alterados. O catálogo local de modelos precisa listar todas as dependências transitivas efetivamente usadas pela pipeline, inclusive módulos opcionais habilitados por default.
+
+**Pré-condições verificáveis para v5:** `PP-OCRv5_server_det` e `latin_PP-OCRv5_mobile_rec` localizados, íntegros e usados dentro e fora da pipeline conforme desenho A. **Para v6 medium:** `PP-OCRv6_medium_det` e `PP-OCRv6_medium_rec` íntegros e usados dentro e fora. Para ambos, igualdade byte a byte dos componentes não OCR que se pretende manter fixos.
+
+### Fase 2 — Validar um único PDF por braço antes do corpus
+
+Rodar um documento digital e um digitalizado, com tabelas anotadas. Inspecionar resultado bruto da pipeline, o HTML, número e posições das células, origem do texto e a saída final. Confrontar log/manifesto com o objeto real de pipeline para identificar *defaults* ocultos. Comparar as imagens entregues ao modelo por hash de pixels e transformação; explicar diferenças caso o fluxo E2E use decisões automáticas de página distintas. Não iniciar benchmark de performance enquanto houver download ou compilação inesperada em uma das rodadas.
+
+### Fase 3 — Validar os casos de falha
+
+Executar primeiro T18, T19, T20 e T23; confirmar que o sistema **não** produz relatório “válido” com modelos trocados, pesos ausentes ou saída parcial. Injetar uma queda de worker para confirmar contabilização e isolamento. Se alguma falha for tratada como sucesso ou se não for possível localizar qual OCR produziu determinada célula, bloquear a coleta oficial.
+
+### Fase 4 — Rodar o corpus pareado
+
+Criar lista ordenada e imutável de PDFs e IDs. Para cada documento, executar os dois braços em processos separados, alternando a ordem em blocos controlados. Registrar tempo frio/quente, uso de memória, contagem de páginas e chamadas dos modelos, todas as saídas e todas as falhas. Não fazer fallback para configuração alternativa sem trocar o identificador do experimento ou marcar explicitamente a amostra. Preservar resultados por braço em diretórios diferentes e atomizar a escrita de arquivos temporários para evitar que interrupções criem JSON aparente porém incompleto.
+
+### Fase 5 — Produzir relatório de comparação
+
+O relatório final deve incluir:
+
+- SHA e ambiente, matrix de modelos real carregados, hashes e configuração das pipelines;
+- população total, tabelas GT, tabelas encontradas por cada braço, sucesso, parcial e falha;
+- métricas de texto **fora** e **dentro** das tabelas, estrutura, células, documento completo e processamento;
+- variabilidade por documento e por classe de tabela, tabelas sem linhas, spans, documentos digitalizados e híbridos;
+- desempenho sequencial e picos de memória, incluídas interrupções e custo de carregamento;
+- exemplos de divergência **apenas se autorizados**, com IDs e rastreio para imagens de teste não sensíveis;
+- diferenças que decorreram do OCR versus diferenças causadas por pré-processamento, seleção de tabela ou pós-processamento;
+- limitações, conclusões suportadas pelos dados e decisões ainda abertas, sem omitir resultados contrários.
+
+**Regra de integridade:** números zero representam zero medido; valor não coletado deve ser `null`/`not_measured`; falha é `failed`; ausência legítima de tabela é `no_table_in_gt` ou equivalente. Nunca usar `0.0` como substituto de métrica indisponível ou erro de importação. Se uma tabela foi perdida, não se pode calcular CER apenas sobre as tabelas que a pipeline reconheceu e divulgar o valor como qualidade global sem reportar a cobertura.
 
 ---
 
-### Fase 1 — Validação de compatibilidade de ambiente e modelos v6
+## 11. Ordem recomendada de implementação, dependências e entregáveis
 
-**Objetivo:** confirmar que os modelos v6 funcionam offline, em CPU, no WSL e no Windows Server, sem alterar código do projeto.
+A ordem abaixo é uma sequência de engenharia para este caso de uso; não presume que os 28 tickets ainda estejam abertos na revisão mais recente. Antes de alterar código, cada item deve receber status `já atendido com evidência`, `reproduzido`, `não se aplica ao desenho escolhido` ou `pendente de implementação`.
 
-#### 1.1. Preparação do ambiente Python e de modelos
-
-**Ambiente Python:** criar venv independente `.venv-paddle-v6-eval` na raiz do projeto (adicionar ao `.gitignore` se ainda não coberto). Instalar as mesmas versões fixadas — não atualizar nada.
-
-```bash
-python3.12 -m venv .venv-paddle-v6-eval
-source .venv-paddle-v6-eval/bin/activate
-pip install setuptools wheel          # obrigatório antes de paddleocr no Python 3.12
-pip install paddlepaddle==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-pip install paddleocr==3.7.0 paddlex==3.7.2 pypdfium2==5.13.0 Pillow==12.3.0 \
-            numpy==2.3.5 "opencv-contrib-python==4.10.0.84" pytest==9.1.1
-pip check
-pip freeze > docs/env-v6-eval-freeze.txt   # registrar para reprodutibilidade
-```
-
-**Cache de modelos v6 — completamente separado do v5:**
-```
-~/.cache/pdfextractor/paddlex-v6-eval/official_models/PP-OCRv6_medium_det/
-~/.cache/pdfextractor/paddlex-v6-eval/official_models/PP-OCRv6_medium_rec/
-~/.cache/pdfextractor/paddlex-v6-eval/official_models/PP-LCNet_x1_0_doc_ori/
-~/.cache/pdfextractor/paddlex-v6-eval/official_models/PP-LCNet_x1_0_textline_ori/
-```
-
-**Cache de produção v5 — INTOCÁVEL:**
-```
-~/.cache/pdfextractor/paddlex/official_models/   ← não modificar nada aqui
-```
-
-Os classificadores de orientação existem no cache v5. Para o cache v6-eval: baixar cópias independentes (ou criar symlinks somente se os hashes/versões forem idênticos — verificar antes).
-
-1. Verificar estado dos pacotes no venv de avaliação:
-   ```bash
-   source .venv-paddle-v6-eval/bin/activate
-   pip check
-   pip show paddleocr paddlepaddle paddlex | grep -E "^Name:|^Version:"
-   ```
-
-2. Confirmar caminhos:
-   ```bash
-   ls -la ~/.cache/pdfextractor/paddlex-v6-eval/official_models/
-   ls -la ~/.cache/pdfextractor/paddlex/official_models/   # deve permanecer inalterado
-   ```
-
-3. Baixar modelos v6 via `setup-models` estendido (ou script temporário de validação), **com rede disponível**, em ambiente autorizado. Registrar URLs, hashes, tamanhos.
-
-4. Confirmar que os diretórios de modelo atendem a `_model_is_ready()` (pelo menos um arquivo com sufixo `.pdmodel`, `.pdiparams`, `.pdparams`, `.pdiparams.info`, `.nb`, `.onnx`, `.bin` ou `.pt`).
-
-#### 1.2. Smoke test de compatibilidade (sem modificar código do parser)
-
-Script isolado de teste (não commitar no parser):
-```python
-import os
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-os.environ["PADDLE_PDX_CACHE_HOME"] = os.path.expanduser("~/.cache/pdfextractor/paddlex")
-
-from paddleocr import PaddleOCR
-
-ocr = PaddleOCR(
-    text_detection_model_dir="~/.cache/pdfextractor/paddlex/official_models/PP-OCRv6_medium_det",
-    text_detection_model_name="PP-OCRv6_medium_det",
-    text_recognition_model_dir="~/.cache/pdfextractor/paddlex/official_models/PP-OCRv6_medium_rec",
-    text_recognition_model_name="PP-OCRv6_medium_rec",
-    doc_orientation_classify_model_dir="~/.cache/pdfextractor/paddlex/official_models/PP-LCNet_x1_0_doc_ori",
-    doc_orientation_classify_model_name="PP-LCNet_x1_0_doc_ori",
-    textline_orientation_model_dir="~/.cache/pdfextractor/paddlex/official_models/PP-LCNet_x1_0_textline_ori",
-    textline_orientation_model_name="PP-LCNet_x1_0_textline_ori",
-    use_doc_orientation_classify=True,
-    use_textline_orientation=True,
-    use_doc_unwarping=False,
-    enable_mkldnn=False,
-    device="cpu",
-)
-
-# Uma imagem sintética de 100×100 pixels
-import numpy as np
-img = np.ones((100, 100, 3), dtype=np.uint8) * 255
-result = list(ocr.predict(input=img))
-print("OK — resultado:", result)
-```
-
-Capturar: stdout, stderr, peak RAM, tempo de inicialização, tempo de inferência, warnings de download (qualquer download = **falha do teste de offline**).
-
-#### 1.3. Repetir no Windows Server 2025
-
-Mesmo script em ambiente separado do .venv estável de produção. **Não alterar o ambiente de produção.** Confirmar:
-- Inicialização sem erros de DLL ou módulo
-- Inferência de uma imagem sem crash
-- Zero tentativas de download com rede bloqueada
-- Consumo de memória dentro do esperado
-
-**Gate 1:** documentação de inicialização e inferência de uma imagem, offline, CPU, no WSL **e** no Windows, com logs. Se o Windows falhar (incompatibilidade de wheel, modelo, API), **não iniciar a Fase 2 ou integração**; documentar bloqueio.
-
----
-
-### Fase 2 — Comparação isolada v5/v6 (sem alterar parser)
-
-**Objetivo:** medir ganhos/perdas de detecção e reconhecimento separadamente, no mesmo corpus sintético atual.
-
-#### 2.1. Matriz de comparação
-
-| ID | Detecção | Reconhecimento | Objetivo |
+| Etapa | Dependências | Trabalho | Entregável verificável |
 |---|---|---|---|
-| REF | `PP-OCRv5_server_det` | `latin_PP-OCRv5_mobile_rec` | Baseline atual — referência de comparação |
-| R6 | mesmas caixas do v5 | `PP-OCRv6_medium_rec` | Isolar ganho de reconhecimento sobre crops idênticos |
-| D6 | `PP-OCRv6_medium_det` | mesmo reconhecedor v5 | Isolar ganho de detecção (se API permitir fluxo separado) |
-| V6 | `PP-OCRv6_medium_det` | `PP-OCRv6_medium_rec` | Pipeline v6 completo |
-| V6-S | `PP-OCRv6_small_det` | `PP-OCRv6_small_rec` | Alternativa de custo reduzido (só após medium aprovado) |
+| 0. Congelar revisão | Nenhuma | SHA, diff, inventário de arquivos, arquitetura efetiva de TableMagic, versão do PaddleOCR | Relatório de inspeção do SHA atual e mapa de chamadas |
+| 1. Fechar desenho | Etapa 0 | Decidir A ou B, nomear baseline, fixar pipeline e definir composição dos braços | Especificação formal da matriz de modelos e configuração |
+| 2. Integrar sem ambiguidades | Etapa 1 | C01–C06, C12, C25: injeção explícita de todos os modelos, proveniência e rejeição de estados mistos | Smoke real por braço com manifesto validado |
+| 3. Garantir integridade estrutural | Etapa 2 | C07–C11, C21–C22: geometrias, HTML, spans, autoridade do texto, wired/wireless e fusão | Testes de integração com GT de tabelas complexas |
+| 4. Garantir operação controlada | Etapa 2 | C13–C16, C19–C20, C27: instalação offline, isolamento, limites, política de falha | Runner com códigos de saída, métricas e isolamento |
+| 5. Construir medição independente | Etapas 3 e 4 | C17–C18, C23–C24, C26: corpus, métricas, agregação e benchmark pareado | Pacote reproduzível de resultados e verificador de paridade |
+| 6. Revisão de qualidade e mudança de padrão | Etapa 5 | C28: critérios pré-estabelecidos, revisão de divergências, rollback | Decisão documentada com evidências e testes aprovados |
 
-**Nota sobre combinações:** a tabela é experimental. Verificar se v5 det + v6 rec (linha R6) pode ser instanciado em uma única chamada `PaddleOCR()` ou se exige exportação de crops e chamadas independentes. Se incompatível via `PaddleOCR()` unificado, usar `TextDetection` + `TextRecognition` como módulos separados (`from paddleocr import TextDetection, TextRecognition`).
+### 11.1. Modelo de ticket para abrir no GitHub
 
-#### 2.2. Corpus de comparação
+```markdown
+### Contexto e objetivo
+[Definir que propriedade de comparação ou integridade será garantida.]
 
-Reutilizar `Document_OCR_Stress_V1` (60 páginas, corpus sintético atual). Não criar corpus novo abrangente.
+### Evidência na revisão exata
+- Git SHA: [SHA real]
+- Arquivo e função: [link permalink no SHA]
+- Observação reproduzida ou risco condicional: [OBS/COND/VAL/DEC]
+- Reprodução mínima: [PDF/fixture, comando, manifest, saída]
 
-Cenários prioritários para extração de crops:
-- Português básico com diacríticos
-- Letras ambíguas: `I/l/1`, `O/0`
-- Números de processo, datas, CPF/CNPJ fictícios, valores monetários
-- Fontes pequenas e baixa resolução
-- Paisagem com texto horizontal
-- Regiões rasterizadas em páginas mistas
-- Texto em figuras e tabelas escaneadas
-- **Página 10 (`OCRS-P10-CONTROL`)** — caso de regressão conhecida
-- Casos que v5 já recupera corretamente (para detectar perdas)
+### Comportamento esperado
+[Contrato verificável, sem depender de impressão visual da tabela.]
 
-Origem de cada amostra: separar claramente (a) imagem raster original, (b) crop que o parser v5 fornecia ao motor, (c) variante 2× produzida pelo código estável coletada somente para leitura.
+### Mudança proposta
+[Componentes a tocar, riscos de regressão, opção de migração.]
 
-#### 2.3. Evidências a coletar por amostra/modelo
+### Testes e aceite
+- [ ] Teste de unidade de contrato
+- [ ] Teste de integração com pesos reais quando pertinente
+- [ ] Caso negativo que deve falhar explicitamente
+- [ ] CLI e API mantêm paridade
+- [ ] IDs e hashes dos modelos confirmados
+- [ ] Falhas entram no denominador e permanecem rastreáveis
 
-Para cada combinação amostra × modelo:
-- Identificação da página sintética e versão do manifesto
-- Versão exata do modelo (nome + hash do diretório)
-- Runtime, parâmetros de inicialização
-- Imagem de entrada (sintética, não corporativa) + dimensões
-- Caixas de detecção retornadas
-- Strings reconhecidas e confiança nativa (com nota: scores v5/v6 não são calibrados — não comparar diretamente)
-- Coordenadas remapeadas para espaço PDF
-- Tempo de inicialização, tempo de inferência, peak RAM
-- Warnings de qualquer tipo
-
-#### 2.4. Análise qualitativa
-
-Comparar por marcador fictício conhecido: texto correto/incorreto/ausente, duplicações, alucinações, separação de linhas.  
-**Não resumir a comparação em bytes ou contagem de caracteres.** Melhoria na página 10 não cancela regressão em outras páginas.
-
-**Gate 2:** relatório lado a lado por cenário e modelo. Se nenhuma alternativa superar ou complementar v5 em casos relevantes sem perdas injustificadas, **não integrar v6**; arquivar experimento.
-
----
-
-### Fase 3 — Integração opcional de PP-OCRv6 ao PDFExtractor
-
-**Pré-requisito:** Gates 1 e 2 concluídos com evidência favorável.
-
-#### 3.1. Mudanças de código mínimas necessárias
-
-**`src/structured_pdf_text/cli.py`** — adicionar `--ocr-model-profile` a `extract` (e opcionalmente `inspect`/`report`/`compare`):
-
-```python
-# Na função de setup do parser 'extract':
-extract_parser.add_argument(
-    "--ocr-model-profile",
-    default=None,
-    metavar="PROFILE",
-    help="OCR model profile name (e.g. pt-v6-medium). "
-         "Defaults to the profile matching --language.",
-)
+### Compatibilidade e rollback
+[Comportamento do modo atual, schema, cache e procedimento de retorno.]
 ```
 
-Lógica de resolução de perfil: quando `--ocr-model-profile` está ausente, comportamento atual é preservado (`get_profile(language)`). Quando presente, substitui a seleção de perfil independentemente de `--language`.
+### 11.2. Checklist de liberação do benchmark
 
-```python
-# Resolução no corpo do comando extract:
-profile_name = args.ocr_model_profile or args.language
-profile = get_profile(profile_name)
-```
-
-Estender `setup-models` e `models-status` para aceitar o novo perfil também:
-```bash
-pdftext setup-models --ocr-model-profile pt-v6-medium --cache-home ~/.cache/pdfextractor/paddlex-v6-eval
-pdftext models-status --ocr-model-profile pt-v6-medium --cache-home ~/.cache/pdfextractor/paddlex-v6-eval
-```
-
-**`src/structured_pdf_text/ocr/models.py`** — adicionar perfis v6:
-
-```python
-OcrModelProfile(
-    language="pt-v6-medium",
-    doc_orientation="PP-LCNet_x1_0_doc_ori",
-    textline_orientation="PP-LCNet_x1_0_textline_ori",
-    detection="PP-OCRv6_medium_det",
-    recognition="PP-OCRv6_medium_rec",
-)
-
-# Somente se evidência da Fase 2 justificar:
-OcrModelProfile(
-    language="pt-v6-small",
-    doc_orientation="PP-LCNet_x1_0_doc_ori",
-    textline_orientation="PP-LCNet_x1_0_textline_ori",
-    detection="PP-OCRv6_small_det",
-    recognition="PP-OCRv6_small_rec",
-)
-```
-
-**`src/structured_pdf_text/cli.py`** — estender `setup-models` e `models-status` para aceitar `--language pt-v6-medium`.
-
-**Não alterar:** `ocr/paddle.py`, `ocr/recovery.py`, `ocr/engine.py`, `ocr/quality.py`, `ocr/reconstruct.py`, `config.py` (exceto se necessário para suporte explícito ao parâmetro de perfil), qualquer módulo de texto nativo, assembly, ledger.
-
-#### 3.2. Comportamento esperado após integração mínima
-
-```bash
-# Usuário opta explicitamente pelo v6:
-pdftext extract documento.pdf --mode balanced --language pt-v6-medium
-
-# Padrão permanece v5:
-pdftext extract documento.pdf --mode balanced   # usa pt → v5
-```
-
-Carregamento simultâneo de v5 e v6 em memória: **proibido** (não carregar ambos os motores automaticamente).
-
-Fallback silencioso de v6 para v5 sem registro: **proibido**. Qualquer fallback deve ser explícito e visível em log.
-
-#### 3.3. Tratamento de erros
-
-- Pesos ausentes para o perfil selecionado: `PaddleOcrUnavailable` antes de qualquer inferência.
-- Versão incompatível de API: diagnóstico explícito antes de processar.
-- Falha fatal: continua fatal (não converte em resultado vazio silencioso).
-
-#### 3.4. Testes obrigatórios para integração
-
-**Testes unitários novos (sem download de modelos):**
-- Resolução de perfil por nome (`get_profile("pt-v6-medium")`)
-- Caminhos locais corretos para cada kwarg do perfil v6
-- Erro `PaddleOcrUnavailable` para peso ausente no perfil v6
-- Isolamento de instâncias (v5 e v6 não compartilham estado)
-- Mapeamento de caixas e tokens com coordenadas PDF
-
-**Testes de regressão (sem modificação):**
-- `tests/test_ocr_adaptive_upscale_regressions.py` — sem alteração para acomodar v6
-- Todos os testes existentes de modo `native` e conservação textual
-- `tests/test_paddle_offline.py` — validação de caminhos locais
-
-**End-to-end com pesos locais (CPU, offline):**
-- Página raster, mista, figura, tabela, página 10 — nos dois perfis (v5 e v6-medium)
-- Resultado v5 deve permanecer comparável à referência documentada
-
-**Gate 3:** v6 disponível apenas via seleção explícita (`--language pt-v6-medium`); v5 padrão e funcional; zero regressões em upscaling/texto; execução CPU/offline comprovada.
+- [ ] A revisão efetivamente avaliada tem SHA completo e não depende de branch mutável como identificador.
+- [ ] O desenvolvedor demonstrou execução real do PP-TableMagic, não apenas código importado.
+- [ ] O desenho experimental A ou B foi escolhido e testado em ambos os braços.
+- [ ] Cada OCR externo e cada OCR interno de tabela correspondem ao perfil esperado ou estão inequivocamente desligados sob desenho B.
+- [ ] Todos os modelos de estrutura, células, layout, orientação e classificação que não fazem parte do experimento estão fixos e têm IDs e hashes iguais.
+- [ ] O baseline v5 é descrito pelo par detector/reconhecedor **real**, não por apelido genérico.
+- [ ] O runtime não faz downloads ou troca de modelos não registrados.
+- [ ] Imagens/recortes e parâmetros são iguais no benchmark controlado ou diferenças E2E são medidas separadamente.
+- [ ] Não há mistura não documentada de OCR nativo, OCR externo, OCR interno, OCR por célula e fallback.
+- [ ] Todos os spans, cabeçalhos, células vazias, números e posições são preservados ou erros são capturados e quantificados.
+- [ ] Corpus e ground truth foram congelados antes de inspecionar resultados do comparativo.
+- [ ] Métricas distinguem detecção de tabela, estrutura, associação de texto, OCR bruto e exportação final.
+- [ ] Falhas, ausências, saídas parciais e interrupções são contabilizadas, sem exclusão silenciosa.
+- [ ] Worker, cache, temporários e resultados são separados entre braços e execuções.
+- [ ] Compatibilidade das APIs e dos pesos foi testada na instalação pinada; documentação upstream não foi tomada como prova de compatibilidade local.
+- [ ] Testes negativos (modelo trocado, cache incompleto, falha de worker e manifesto não comparável) realmente bloqueiam publicação.
+- [ ] O resultado permite reexecutar v5 e v6 sobre os mesmos PDFs e gerar o mesmo conjunto de IDs.
+- [ ] Custos de memória e latência são medidos E2E, e não deduzidos do orçamento de um único recorte.
+- [ ] Há política de privacidade, retenção e revisão de licenças adequada ao uso planejado.
+- [ ] Qualquer decisão de mudar o padrão tem critério previamente definido e caminho de rollback testado.
 
 ---
 
-### Fase 4 — Avaliação de PP-TableMagic (apenas se justificado)
+## 12. Referências, rastreabilidade e limites de conclusão
 
-> **RISCO ALTO — ver análise completa na Seção 4.5.**
-> Esta fase só se justifica se o Gate 2 identificar tabelas rasterizadas onde a estrutura permanece incorreta mesmo após extração com v6.
+### 12.1. Fontes do PDFExtractor inspecionadas ou pertinentes à verificação
 
-**Pré-requisito obrigatório:** o diff do Gate 2 (`compare_v5_v6.py`) identificou pelo menos uma página real onde a estrutura de tabela está incorreta (linhas/colunas trocadas, células mescladas perdidas, conteúdo fora de ordem) e v6 OCR puro não corrigiu. Sem esse caso concreto reproduzível, a fase não deve ser iniciada.
+Os links para a branch são **referências de inspeção mutáveis**. O desenvolvedor deve substituí-los por permalinks com o SHA registrado na seção 1 antes de abrir tickets como defeitos confirmados.
 
-#### 4.1. O que esta fase faz (e o que não faz)
+- [Árvore da branch `feat/paddle-ocrv6-evaluation`](https://github.com/victorperone/pdfextractor/tree/feat/paddle-ocrv6-evaluation).
+- [README e declaração da abordagem de tabelas](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L60-L84).
+- [Perfil dos modelos OCR](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/models.py#L60-L88).
+- [Adaptador de OCR](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/ocr/paddle.py).
+- [Configuração](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/config.py).
+- [CLI](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/cli.py).
+- [API de extração e orquestração](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/api.py).
+- [Renderizador Markdown](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/src/structured_pdf_text/renderers/markdown.py).
+- [Declaração de dependências](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/requirements.txt).
+- [README: memória, limites e restrições operacionais](https://github.com/victorperone/pdfextractor/blob/feat/paddle-ocrv6-evaluation/README.md#L297-L364).
 
-**Faz:** executa `scripts/eval_v6/eval_tablemagic.py` sobre imagens das páginas problemáticas identificadas no Gate 2. Avalia se PP-TableMagic recupera a estrutura correta nesses casos específicos. Mede: qualidade estrutural, tempo de inferência, peak RAM em CPU, e ausência de downloads com rede bloqueada.
+### 12.2. Fontes oficiais do PaddleOCR e PP-TableMagic
 
-**Não faz:**
-- Não altera `tables/`, `assembly/`, `evidence/`, `fusion/`, `ledger/` nem qualquer módulo de produção.
-- Não integra PP-TableMagic no pipeline principal.
-- Não substitui os 3 tiers atuais de extração de tabela.
-- Não toca em upscaling 2×, processamento textual nativo, modelos v5, modelos v6.
+- [PaddleOCR, Table Recognition Pipeline V2: arquitetura, parâmetros, entradas e saídas](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md).
+- [Parâmetros de modelo OCR interno da pipeline](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L588-L670).
+- [Configurações `use_ocr_model` e `use_ocr_results_with_table_cells`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L696-L730).
+- [Saída de tabela, HTML e caixas de células](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/table_recognition_v2.en.md#L519-L547).
+- [Documentação oficial de OCR e avisos sobre comparação de métricas](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/OCR.en.md).
 
-#### 4.2. Pré-download de modelos (com rede)
+**Limite de versionamento:** os links upstream acima apontam para `main` da documentação; para instruções executáveis, gerar links que correspondam ao tag ou commit de `paddleocr` e `paddlex` instalados no benchmark, e confirmar nomes efetivos de construtores e parâmetros com introspecção e execução real. A existência de um parâmetro na documentação publicada depois de uma versão não prova que ele está presente na versão pinada localmente.
 
-`SLANeXt_wired` e os modelos de células não fazem parte do `setup-models` do projeto — devem ser baixados manualmente antes de bloquear a rede:
+### 12.3. O que esta auditoria não afirma
 
-```powershell
-# Windows PowerShell — executar com rede disponível
-python -c "
-from paddleocr import TableRecognitionPipelineV2
-# Primeiro acesso baixa os modelos automaticamente para o cache padrão do PaddleX
-TableRecognitionPipelineV2(device='cpu')
-"
-```
+1. **Não afirma** que a revisão recém-alterada ainda tem as lacunas do snapshot anterior; elas devem ser confrontadas com o SHA atual. A ausência de acesso ao clone e ao conjunto completo de arquivos impede um laudo definitivo de todos os novos commits.
+2. **Não afirma** que PP-TableMagic está integrado no SHA atual: a prova necessária é o encadeamento concreto `configuração → criação do motor → execução → adaptação de tabela → saída` e um teste real por braço.
+3. **Não afirma** que v5 ou v6 reconhece melhor português, preserva melhor tabelas ou usa menos memória nesta aplicação; a resposta depende de corpus controlado, hardware e medição com ambos os braços.
+4. **Não afirma** que qualquer parâmetro de pseudocódigo está disponível na versão local do PaddleOCR; esses trechos expressam o contrato exigido e não substituem consulta à assinatura real.
+5. **Não promete** ausência de problemas após a execução do checklist; o documento reúne riscos arquiteturais e pontos auditados possíveis com o acesso disponível, e deve ser complementado por testes e revisão do SHA imutável.
 
-Verificar após download que os diretórios existem em `%USERPROFILE%\.paddlex\official_models\` (cache padrão do PaddleX para modelos de pipeline).
-
-#### 4.3. Execução da avaliação
-
-Script fora do parser, mesmo venv de produção, sem tocar no código:
-
-```powershell
-# Avaliar página específica (imagem PNG extraída do PDF problemático)
-python scripts\eval_v6\eval_tablemagic.py --image output\pagina_com_tabela.png
-
-# Ou avaliar páginas diretamente do PDF (extrai imagens automaticamente)
-python scripts\eval_v6\eval_tablemagic.py `
-    --pdf corpus\Document_AI_V2.pdf `
-    --pages 5,6,7 `
-    --output-dir output\tablemagic_eval
-```
-
-**Nota:** o script (`eval_tablemagic.py`) usa `latin_PP-OCRv5_mobile_rec` (modelo correto do cache v5). Falha explicitamente se qualquer modelo não for encontrado — não tenta download silencioso.
-
-Comparar o HTML produzido por PP-TableMagic com o resultado atual do pipeline para a mesma página.
-
-#### 4.4. Métricas de avaliação
-
-- Células corretas / incorretas / ausentes / inventadas (avaliação manual nos casos problemáticos)
-- Células mescladas: preservadas quando esperadas, não inventadas quando ausentes
-- Preservação de acentos e caracteres especiais em português
-- Tempo de inferência e peak RAM em CPU (viabilidade para produção)
-- Offline confirmado: zero tentativas de download com rede bloqueada
-- Controle negativo: tabelas digitais do mesmo documento não devem regredir
-
-**Gate 4:** integrar PP-TableMagic apenas como opt-in para regiões rasterizadas específicas, apenas se solucionar deficiência estrutural real e o contrato de integração for compatível sem alterar `assembly/`, `ledger/` ou processamento textual nativo.
-
----
-
-### Fase 5 — PP-StructureV3 apenas para lacuna estrutural residual
-
-> **RISCO MUITO ALTO — ver análise completa na Seção 5.4.**
-> Esta fase só se justifica se existir lacuna estrutural concreta não resolvida por v6 + PP-TableMagic.
-
-**Pré-requisito obrigatório:** resultado do Gate 4 identificou pelo menos uma página real onde PP-OCRv6 extrai texto mas a estrutura de tabela/layout permanece incorreta e PP-TableMagic não corrigiu. Sem esse caso concreto reproduzível, a fase não deve ser iniciada.
-
-#### 5.1. O que esta fase faz (e o que não faz)
-
-**Faz:** cria um script de avaliação isolado (`scripts/eval_v6/eval_structurev3.py`) que testa `PPStructureV3` em CPU, offline, sobre imagens de páginas específicas. Mede: tempo de inicialização, RAM, qualidade estrutural, e se não há tentativa de download.
-
-**Não faz:**
-- Não altera `assembly/`, `evidence/`, `fusion/`, `ledger/`, nem qualquer módulo de produção.
-- Não integra PP-StructureV3 no pipeline principal.
-- Não substitui o caminho padrão de extração.
-- Não toca em upscaling 2×, processamento textual nativo, modelos v5.
-
-#### 5.2. Validação antes de qualquer código
-
-Em ambiente isolado (venv de avaliação ou venv de produção com rede bloqueada):
-
-1. Confirmar `device="cpu"` inicializa sem crash (histórico: `0xC0000005` em phi.dll pode reaparecer)
-2. Medir RAM de pico durante inicialização e inferência — PP-StructureV3 carrega múltiplos submodelos
-3. Confirmar `use_formula_recognition=False` é obrigatório (ONNX Runtime não suporta o submodelo de fórmula)
-4. Confirmar `use_chart_recognition=False` — VLM de ~1.4 GB, inviável para CPU de produção
-5. Verificar com rede bloqueada (Firewall / `netsh`) que nenhum download ocorre durante `predict()`
-6. Documentar quais modelos PP-StructureV3 precisa baixar previamente e onde os armazena
-
-```python
-from paddleocr import PPStructureV3
-
-pipeline = PPStructureV3(
-    device="cpu",
-    enable_mkldnn=False,
-    use_table_recognition=True,
-    use_formula_recognition=False,   # obrigatório — não funciona em CPU com ONNX
-    use_seal_recognition=False,
-    use_chart_recognition=False,     # VLM de 1.4 GB — proibido para CPU de produção
-)
-```
-
-#### 5.3. Critérios de decisão do Gate 5
-
-Para encerrar a fase **sem integrar** (decisão esperada):
-- RAM ou tempo em CPU inviáveis para o hardware de produção, **ou**
-- Qualidade estrutural não melhora sobre PP-TableMagic nos casos concretos identificados, **ou**
-- Qualquer tentativa de download detectada com rede bloqueada.
-
-Para considerar integração futura (requer análise separada, fora do escopo desta branch):
-- Melhoria estrutural reproduzível e mensurável nos casos concretos
-- RAM e tempo aceitáveis para produção
-- Zero downloads com rede bloqueada
-- Caminho de integração identificado que não toca em assembly/ledger/evidências nativas
-
-**Gate 5:** fallback opcional com ganhos reproduzíveis, custo operacional aceitável, e zero impacto sobre o pipeline padrão. Se a lacuna não justificar, encerrar avaliação aqui — a branch segue apenas com v6 OCR (e opcionalmente PP-TableMagic).
-
----
-
-### Fase 6 — Validação no Windows Server e política de promoção
-
-#### 6.1. Smoke de instalação Windows (ambiente separado do venv estável)
-
-1. Criar venv novo no Windows Server (não no ambiente de produção)
-2. Instalar `setuptools wheel` antes de paddleocr
-3. Instalar pacotes nas versões exatas fixadas
-4. Confirmar com rede bloqueada (Firewall / netsh) que nenhum download ocorre durante inferência
-5. Executar smoke test de uma imagem com v6-medium
-6. Inspecionar: `pip check`, versão Python, logs de DLL, consumo de memória, eventos do Windows
-
-#### 6.2. Testes de integração Windows
-
-Executar em ordem crescente de escopo:
-
-1. Páginas isoladas do corpus sintético (p. 2, 10, 13-14, 15-16, páginas de tabelas, 46-50)
-2. Grupos pequenos: `baseline` → `adaptive`; `exhaustive` apenas como diagnóstico pontual
-3. Corpus completo (60 páginas) quando cenários curtos passarem
-4. PDFs empresariais: apenas sob autorização do responsável, no servidor autorizado, sem enviar ao desenvolvedor
-
-Para cada execução registrar: perfil/modelos/SHA, política OCR, threads, tempo total/RAM, exit code, caminho de saída.
-
-#### 6.3. O incidente histórico `0xC0000005` (`phi.dll`)
-
-Esta é uma categoria distinta de falha nativa no Windows. Sucesso no WSL, em página isolada ou no corpus sintético **não comprova** que não ocorrerá em documentos extensos. Verificar eventos do Windows e registros durante execução prolongada.
-
-#### 6.4. Rollback
-
-Confirmar rollback explícito: mesmo teste sintético executado no venv v5 original, com perfil v5, produz resultado idêntico à referência documentada. Sem necessidade de restaurar arquivos manualmente.
-
-#### 6.5. Critérios de aceitação para promoção de v6
-
-- Funciona em CPU Windows e WSL, sem rede, com pesos locais; versões/pesos/hash reproduzíveis
-- Perfil v5 estável permanece disponível e **padrão** até autorização explícita de mudança
-- Correções reais de conteúdo demonstradas por exemplos sintéticos
-- Sem alteração funcional em upscaling 2×, orçamento RGB, políticas adaptativas, processamento textual nativo, assembly, ledger, modo `native`
-- Nenhum encerramento nativo relevante ocultado
-- Recursos operacionais viáveis com hardware da empresa
-
-**Conclusão da fase não autoriza merge automático de `feat/paddle-ocrv6-evaluation` à `main`.** Revisão posterior do responsável é obrigatória.
-
----
-
-## 8. Entregáveis e Checkpoints
-
-| Checkpoint | Conteúdo |
-|---|---|
-| A | Merge estabilização + SHA main + SHA base branch nova |
-| B | Runtime e modelos v6 isolados funcionando WSL + Windows (Gate 1) |
-| C | Relatório comparativo v5/v6 por cenário (Gate 2) |
-| D | Perfil v6 integrado como opt-in, testes passando (Gate 3) |
-| E | Avaliação PP-TableMagic — somente se Gate 2 justificar (Gate 4) |
-| F | Avaliação PP-StructureV3 — somente se Gates 2+4 justificarem (Gate 5) |
-| G | Relatório Windows + rollback + ZIP da branch (Gate 6) |
-
-**Por checkpoint, fornecer:**
-- SHA (`git rev-parse HEAD`)
-- `git status --short`
-- Arquivos e contratos afetados
-- Versões de ambiente, modelos e hashes SHA
-- Comandos efetivamente executados (não previstos)
-- Resultados, duração, peak RAM, falhas e limitações
-- Não apresentar testes não executados como aprovados
-
-**Proteção de diff:** antes de qualquer push da branch de avaliação, verificar diff relativo ao SHA-base. Se qualquer função de upscaling 2×, logs, módulos textuais/assembly/ledger ou modelos v5 de produção estiverem alterados: registrar como **bloqueio** e não publicar.
-
----
-
-## 9. Pontos de Decisão e Perguntas em Aberto
-
-### 9.1. Decididos pela pesquisa
-
-| Questão | Resposta |
-|---|---|
-| Atualização de pacotes necessária? | **Não.** paddleocr 3.7.0 já suporta v6. |
-| API `.predict()` funciona com v6? | **Sim.** O despacho em `_predict()` já trata isso. |
-| Padrão de `*_model_dir` kwargs funciona para v6? | **Sim.** Mesmos kwargs, novos nomes. |
-| `device="cpu"` suportado em v6? | **Sim.** Confirmado na documentação oficial. |
-| Download automático durante extração é risco? | **Não**, com `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK="True"` (já configurado). |
-| PaddleOCR-VL funciona em CPU? | **Não.** Não usar PaddleOCR-VL neste projeto. |
-
-### 9.2. A verificar empiricamente
-
-| Questão | Como verificar |
-|---|---|
-| Classificadores de orientação `PP-LCNet_x1_0_*` são compatíveis com v6? | Smoke test da Fase 1 — verificar warnings na inicialização |
-| Combinação v5_det + v6_rec é possível em um único `PaddleOCR()`? | Testar na Fase 2; se não, usar `TextDetection` + `TextRecognition` separados |
-| `enable_mkldnn=False` (padrão do projeto) funciona com v6? | Smoke test; se gerar erro, testar com `True` e documentar |
-| Peak RAM do v6-medium em CPU comparado ao v5_server? | Medir na Fase 1 com `_ocr_proc_mem()` existente |
-| `OCRS-P10-CONTROL` ainda falha na versão atual? | Executar corpus sintético no HEAD atual antes de declarar |
-| Python 3.12 + wheel Paddle no Windows Server 2025? | Gate 1 Windows |
-
-### 9.3. Decisões do responsável — RESPONDIDAS em 23/09/2026
-
-#### Decisão 1 — Cache dos modelos v6
-
-**Cache completamente separado do v5.** Não sobrescrever, renomear, remover nem substituir nenhum modelo existente em `official_models/`.
-
-- Raiz de avaliação v6: `~/.cache/pdfextractor/paddlex-v6-eval/official_models/`
-- Raiz de produção v5 (intocável): `~/.cache/pdfextractor/paddlex/official_models/`
-- A nova branch deverá ter ambiente Python independente (`.venv-paddle-v6-eval`, gitignored) e diretórios explícitos para os pesos v6.
-- Registrar em cada teste o caminho absoluto efetivo de cada modelo utilizado.
-- Após a avaliação, pode-se decidir se v5 e v6 coexistirão sob raiz comum (por enquanto, prioridade é isolamento).
-
-#### Decisão 2 — Convenção CLI
-
-**`--language pt --ocr-model-profile pt-v6-medium`.**
-
-- `--language pt` permanece significando "português" (idioma) sem alterar o modelo padrão.
-- Nova opção `--ocr-model-profile` seleciona o perfil OCR explicitamente.
-- Quando `--ocr-model-profile` não for informado, comportamento atual é preservado (busca o perfil pelo valor de `--language`).
-- **Verificação antes de implementar:** não existe mecanismo equivalente na CLI atual — `--language` mapeia diretamente a `get_profile(language)`. A nova opção precisará ser criada na Fase 3.
-- **Durante Fase 2 (comparação isolada):** nenhuma alteração na CLI principal é necessária.
-- Compatibilidade retroativa: todos os comandos e scripts existentes continuam funcionando sem alteração.
-
-#### Decisão 3 — Escopo da avaliação
-
-**`OCRS-P10-CONTROL` não é o motivador exclusivo.** A avaliação deve abranger ganhos efetivos em documentos reais.
-
-Cenários obrigatórios na comparação:
-- Texto rasterizado, páginas mistas, fontes pequenas
-- Acentos em português, números de processos, datas, valores monetários
-- Tabelas e figuras com texto
-- Casos que v5 já recupera corretamente (controle de regressão)
-- Página 10 permanece no conjunto de testes (verificar se v6 recupera o marcador)
-
-**Proibido:**
-- Implementar regra especial para página 10 ou marcador específico
-- Declarar v6 aprovado apenas porque resolveu `OCRS-P10-CONTROL`
-
-O v6 é uma **alternativa experimental**, não substituição automática do v5.
-
-4. **Existe prazo para a avaliação?** Determina se avaliação sequencial (segura) ou se há pressão para acelerar fases.
-
----
-
-## 10. Riscos e Mitigações
-
-| Risco | Probabilidade | Impacto | Mitigação |
-|---|---|---|---|
-| Classificadores de orientação incompatíveis com v6 | Baixa | Médio | Gate 1: smoke test captura warnings de inicialização |
-| v6 medium mais lento que v5_server em Windows Server | Média | Médio | Benchmark Fase 1; v6_small como alternativa |
-| Crash nativo `0xC0000005` com v6 em documentos longos | Baixa (nova versão) | Alto | Fase 6: teste de corpus completo + verificação de eventos Windows |
-| Dependência de pacote incompatível descoberta ao instalar | Baixa (mesmas versões) | Alto | `pip check` obrigatório antes de cada fase |
-| Regressão em texto nativo por modificação acidental | Baixa | Crítico | Diff de proteção antes de qualquer push; testes de conservação |
-| PP-TableMagic HTML output incompatível com StructuredTable | Alta | Alto | Fase 4 apenas se v6 não resolver; parser HTML adicional necessário |
-| PPStructureV3 muito lento para CPU de produção (~3.74s/img) | Média | Médio | Gate 5: benchmark de viabilidade antes de qualquer integração |
-
----
-
-## 11. Referências Oficiais (Consultadas Durante Elaboração)
-
-- PP-OCRv6 Introduction: https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/algorithm/PP-OCRv6/PP-OCRv6.html
-- PP-OCRv6 arXiv: https://arxiv.org/html/2606.13108v1
-- OCR Pipeline docs: https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/OCR.en.md
-- Text Recognition module: https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/module_usage/text_recognition.en.md
-- PP-TableMagic: https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/table_recognition_v2.html
-- PP-StructureV3: https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/PP-StructureV3.html
-- PaddlePaddle CPU install Windows: https://www.paddlepaddle.org.cn/documentation/docs/en/install/pip/windows-pip_en.html
-- DeepWiki PP-OCRv5/v6: https://deepwiki.com/PaddlePaddle/PaddleOCR/2.1-pp-ocrv5-and-pp-ocrv6-universal-text-recognition
-- PaddleOCR-VL CPU issue: https://github.com/PaddlePaddle/PaddleOCR/issues/16678
-- HuggingFace medium_det: https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_det
-- HuggingFace medium_rec: https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_rec
-
----
-
-## 12. Status de Implementação — Resumo por Fase
-
-> Última atualização: 23/09/2026 — branch `feat/paddle-ocrv6-evaluation` (8 commits sobre main) — Gate 2 APROVADO
-
-### Commits na branch
-
-| SHA | Mensagem |
-|---|---|
-| `7fd5da1` | feat(ocr): add PP-OCRv6 evaluation profiles and --ocr-model-profile flag |
-| `07c63a8` | feat(eval): add PP-OCRv6 evaluation scripts (phases 1, 2, 4) |
-| `49c7a38` | docs: add PP-OCRv6 comparative evaluation plan with implementation status |
-| `a103457` | feat(eval): simplify v6 evaluation scripts and add Windows PowerShell setup |
-| `75426b1` | fix(cli): show exact setup-models command in models-status hint; fix compare script |
-
-### Fase 0 — Pré-requisito: consolidar main e criar branch nova
-
-| Etapa | Status | Observações |
-|---|---|---|
-| 0.1. Verificações pré-merge | ✅ Concluído | Branch `feat/ocr-regression-stabilization` em SHA `5a6ccc2`, SHA-base referência validada |
-| 0.2. Gate pré-merge (testes) | ✅ Concluído | `python -m pytest -q` — 307 testes passando, zero falhas |
-| 0.3. Merge de estabilização à main | ✅ Concluído | Merge realizado em `ee655d4` — merge commit na main |
-| 0.4. Criar branch de avaliação | ✅ Concluído | Branch `feat/paddle-ocrv6-evaluation` criada a partir de `ee655d4` |
-
-**Gate 0:** ✅ Concluído. Nenhuma divergência do plano.
-
----
-
-### Fase 1 — Validação de compatibilidade de ambiente e modelos v6
-
-| Etapa | Status | Observações |
-|---|---|---|
-| 1.1. Download de modelos v6 no Windows Server | ✅ Concluído | `setup_v6_windows.ps1` — todos os 4 modelos baixados no cache v6-eval |
-| 1.2. Smoke test de compatibilidade | ✅ Concluído | Ver resultado abaixo |
-| 1.3. Repetição no Windows Server | ✅ Concluído | Testes executados diretamente no servidor (sem WSL intermediário) |
-
-**Resultado do Smoke Test — 23/09/2026 12:51–13:15 (Windows Server 2025, CPU)**
-
-```
-Perfil  : pt-v6-medium
-Cache   : C:\Users\a_victor.perone\.cache\pdfextractor\paddlex-v6-eval
-Modelos : [ok] PP-LCNet_x1_0_doc_ori | [ok] PP-LCNet_x1_0_textline_ori
-          [ok] PP-OCRv6_medium_det   | [ok] PP-OCRv6_medium_rec
-PDF     : corpus/Document_AI_V2.pdf
-
-[OK] 42 páginas | 14.610 chars | 1474.9s | status: success
-[PASS] Smoke test OK — modelos v6 funcionando offline em CPU.
-```
-
-**Observações:**
-- Warnings inofensivos: `INFO: Could not find files...` (Paddle), `No ccache found` (compilação) — não afetam a execução
-- Nenhuma tentativa de download de rede detectada (`PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True` ativo)
-- Tempo: ~35 s/página em CPU (esperado — v6 medium tem custo similar ao v5_server, conforme benchmarks da Seção 3.2)
-- Cache v5 permanece intocado em `paddlex/official_models/`
-
-**Desvio do plano:** Venv de produção (`.venv`) usado diretamente — `paddleocr==3.7.0` suporta v6 sem atualização, venv isolado desnecessário.
-
-**Gate 1:** ✅ **APROVADO** — PP-OCRv6 medium funciona offline, CPU-only, Windows Server 2025.
-
----
-
-### Fase 2 — Comparação isolada v5/v6
-
-| Etapa | Status | Observações |
-|---|---|---|
-| 2.1. Script de comparação | ✅ Criado | `scripts/eval_v6/compare_v5_v6.py` — posicional PDF, flags `--v6-cache`, `--output-dir` |
-| 2.2. Corpus de comparação | ✅ Definido | `corpus/Document_AI_V2.pdf` (padrão do script) |
-| 2.3. Execução e coleta | ✅ Concluído | Ver resultado abaixo |
-| 2.4. Análise qualitativa | ✅ Concluído | Ver análise por página abaixo |
-
-**Desvio do plano:** Corpus sintético `Document_OCR_Stress_V1` substituído por `corpus/Document_AI_V2.pdf` conforme instrução do responsável. Script aceita qualquer PDF como argumento posicional.
-
----
-
-**Resultado da Execução — 23/09/2026 (Windows Server 2025, CPU)**
-
-```
-PDF   : C:\Users\a_victor.perone\workspace\pdfextractor\corpus\Document_AI_V2.pdf
-Saída : C:\Users\a_victor.perone\workspace\pdfextractor\output\comparativo_v5_v6
-
-  [pt]          26.019 bytes | 2120.0s → v5.md
-  [pt-v6-medium] 25.930 bytes | 1503.0s → v6_pt-v6-medium.md
-
-[≠] +36 / -34 linhas  →  diff salvo em: output\comparativo_v5_v6\diff.txt
-```
-
-**Métricas de execução:**
-
-| Métrica | v5 (`pt`) | v6-medium (`pt-v6-medium`) |
-|---|---|---|
-| Tempo total | 2120.0 s (≈ 35,3 min) | 1503.0 s (≈ 25,1 min) |
-| Velocidade média | ~50,5 s/página | ~35,8 s/página |
-| Tamanho da saída | 26.019 bytes | 25.930 bytes |
-| Linhas de diff | — | +36 / -34 (net +2) |
-| Páginas com diferença | — | 6 (p.12, p.25, p.27, p.28, p.29, p.30) |
-| Rede utilizada | Nenhuma | Nenhuma |
-| Status de saída | `success` | `success` |
-
-**Achado operacional importante:** v6-medium é **29% mais rápido** que v5 neste documento (1503s vs 2120s). Contradiz a previsão do plano (Seção 3.2) de que v6 medium teria custo similar ao v5_server. O risco "v6 mais lento" da Seção 10 não se confirmou.
-
----
-
-**Análise qualitativa por página — excluindo gráficos, fluxogramas e organogramas**
-
-Todas as páginas com texto nativo (p.1–11, p.13–21, p.31–42) são **idênticas** entre v5 e v6. As diferenças ocorrem exclusivamente em páginas rasterizadas.
-
-| Página | Caso de teste | Categoria | v5 | v6-medium | Resultado |
-|---|---|---|---|---|---|
-| 12 | Fórmulas renderizadas (imagem) | OCR em imagem matemática | `eiπ + 1 = 0` (parcial) | `ei+1=0` (parcial) | Empate — ambos erram de forma diferente; esperado para fórmulas como imagem |
-| 25 | Imagem raster com texto e caixas | OCR em imagem não degradada | `StatuS: APROVADO` (capitalização incorreta) | `Status: APROVADO` (correto) | **v6 vence** ✓ |
-| 27 | Baixo contraste — título | OCR degradado — capitalização | `OcR de baixo contraste` | `OCR de baixo contraste` | **v6 vence** ✓ |
-| 27 | Baixo contraste — identificador | OCR degradado — sequência longa | `GS2-SCAN-CoNTRAST-O27` (parcial) | `SD` (perda quase total) | **v5 menos ruim** — v6 perde o identificador inteiro |
-| 27 | Baixo contraste — rodapé | OCR degradado — acento | `NÃo CONFIDENCIAL` | `NÃO CONFIDENCIAL` | **v6 vence** ✓ |
-| 28 | Ruído sintético — título | OCR degradado — capitalização início | `OCR com ruído` (correto) | `oCR com ruído` (errado) | **v5 vence** (minor) |
-| 28 | Ruído sintético — token no corpo | OCR degradado — identificador | `NOIsE-028` (mistura maiúscula/minúscula) | `NOISE-028` (correto) | **v6 vence** ✓ |
-| 28 | Ruído sintético — identificador completo | OCR degradado — código | `GS2-SCA-NOISE-028` (truncado) | `GS2-SCAN-NOISE-028` (correto) | **v6 vence** ✓ |
-| 28 | Ruído sintético — rodapé | OCR degradado — letras perdidas | `NÃ CONFDENCIAL` (letras suprimidas) | `NÃO CONFIDENCIAL` (correto) | **v6 vence** ✓✓ |
-| 28 | Ruído sintético — valor monetário | OCR degradado — formatação | `R$ 1.028,33` (correto) | `R$1.028,33` (sem espaço) | **v5 vence** (minor — formatação) |
-| 29 | Texto inclinado 2,2° — identificadores | OCR com inclinação | `SKEw-029` / `GS2-SCAN-SKEw-029` | `SKEW-029` / `GS2-SCAN-SKEW-029` | **v6 vence** ✓ |
-| 30 | Fonte pequena 6,4pt — ordem de leitura | OCR com fonte minúscula | Página inteira na **ordem inversa** (rodapé primeiro, texto por último) | Ordem correta (topo → base) | **v6 vence** ✓✓✓ — falha crítica corrigida |
-| 30 | Fonte pequena 6,4pt — tabela | OCR com fonte minúscula | Cabeçalho e dados **trocados** (`93,0% \| Percentual` como primeira linha) | Estrutura correta (`Campo \| Valor`) | **v6 vence** ✓✓ |
-
-**Contagem:**
-
-| | v6 vence | v5 vence | Empate |
-|---|---|---|---|
-| Casos avaliados | 9 | 3 (sendo 2 minor) | 1 |
-
----
-
-**Achados críticos:**
-
-1. **Página 30 (fonte pequena) — falha estrutural v5 corrigida por v6:** o v5 inverte completamente a ordem de leitura da página e troca cabeçalho/dados da tabela. O v6 lê na ordem correta. Este é o ganho mais significativo: não é variação de caractere, é recuperação completa da estrutura da página.
-
-2. **Página 28 (ruído) — rodapé:** `NÃ CONFDENCIAL` no v5 indica supressão de letras (`O` e `I`) por ruído sintético. O v6 recupera `NÃO CONFIDENCIAL` corretamente.
-
-3. **Página 27 (baixo contraste) — regressão v6:** o identificador `GS2-SCAN-CoNTRAST-O27` (lido parcialmente pelo v5) é reduzido a `SD` pelo v6. Esta é a única regressão relevante. Contexto: ambos falham nesta página (baixo contraste extremo); v5 captura mais caracteres do identificador, mas ambos ficam abaixo do esperado.
-
-4. **Tabelas nativas (p.13–20) — idênticas:** zero diferença entre v5 e v6 nas tabelas digitais. Confirma que a troca de modelo OCR não afeta o processamento de texto nativo.
-
-5. **Texto nativo (p.1–11, p.31–42) — idêntico:** zero diferença. A fusão nativa+OCR funciona como esperado — o modelo de OCR não é invocado para páginas com texto digital.
-
----
-
-**Gate 2:** ✅ **APROVADO** — v6-medium apresenta melhorias concretas e reproduzíveis em OCR de páginas rasterizadas, especialmente na ordenação de leitura (p.30) e identificação de caracteres em ruído (p.28/29). É também 29% mais rápido. A única regressão (p.27, identificador em baixo contraste extremo) é pontual e em cenário onde ambos os modelos falham. Não há falha estrutural de tabela que justifique PP-TableMagic.
-
----
-
-### Fase 3 — Integração opcional de PP-OCRv6 ao PDFExtractor
-
-| Etapa | Status | Observações |
-|---|---|---|
-| 3.1. Novo perfil `pt-v6-medium` em `ocr/models.py` | ✅ Concluído | Perfis `pt-v6-medium` e `pt-v6-small` adicionados |
-| 3.1. Novo perfil `pt-v6-small` em `ocr/models.py` | ✅ Concluído | Adicionado conforme plano |
-| 3.1. Docstring do módulo `models.py` atualizada | ✅ Concluído | Documenta os três perfis com instruções de uso |
-| 3.1. `--ocr-model-profile` no subcomando `extract` | ✅ Concluído | Resolve perfil via `args.ocr_model_profile or args.language` |
-| 3.1. `--ocr-model-profile` nos subcomandos `inspect`, `report` | ✅ Concluído | Mesma lógica de resolução |
-| 3.1. `--ocr-model-profile` nos subcomandos `setup-models`, `models-status` | ✅ Concluído | Permite baixar e verificar modelos v6 pelo nome do perfil |
-| 3.1. `--cache-home` nos subcomandos `extract`, `inspect`, `report` | ✅ Concluído | Define `PADDLE_PDX_CACHE_HOME` antes de criar o extrator |
-| 3.2. Comportamento padrão preservado (v5 sem alteração) | ✅ Verificado | Sem `--ocr-model-profile`, comportamento idêntico ao anterior |
-| 3.3. Tratamento de erros — perfil inexistente | ✅ Concluído | `get_profile()` levanta `ValueError` com mensagem clara |
-| 3.3. Tratamento de erros — modelos ausentes | ✅ Existente | `PaddleOcrUnavailable` antes de inferência (sem modificação necessária) |
-| 3.4. Testes unitários para v6 | ⏭️ Deferido | Conforme instrução: não focar em testes de software; usar `Document_AI_V2.pdf` para verificar |
-| 3.4. Testes de regressão existentes | ✅ Passando | 307 testes, zero falhas após todas as alterações |
-
-**Desvio do plano:** O plano previa testes unitários em `tests/test_ocr_v6_profile.py`. Conforme instrução do responsável, testes formais foram deferidos em favor de testes funcionais com o PDF real (`corpus/Document_AI_V2.pdf`). Os testes existentes cobrem o caminho crítico de offline/local.
-
-**Desvio menor:** O plano previa que a Fase 3 era posterior ao Gate 2. A integração de código (profiles + CLI) foi adiantada por ser invasividade zero — nenhum comportamento padrão foi alterado, e as flags são opt-in explícito.
-
-**Gate 3:** ✅ **APROVADO** — código integrado, 307 testes passando, validação end-to-end confirmada pelo Smoke Test (Gate 1).
-
----
-
-### Fase 4 — Avaliação de PP-TableMagic
-
-| Etapa | Status | Observações |
-|---|---|---|
-| 4.1. Identificar casos de uso alvo | ✅ Concluído | Gate 2 analisado — nenhuma falha estrutural de tabela identificada |
-| 4.2. Script de avaliação isolada | ✅ Criado | `scripts/eval_v6/eval_tablemagic.py` — aceita imagem ou PDF+páginas |
-| 4.3. Execução e coleta de métricas | ⏭️ Não necessário | Gate 2 não evidenciou falha estrutural que v6 OCR puro não resolve |
-
-**Justificativa:** a análise do Gate 2 mostra que as diferenças de tabela entre v5 e v6 se restringem a caracteres OCR em células (ex.: identificadores com letras erradas) — não há inversão de linhas/colunas, perda de células mescladas ou estrutura perdida. As tabelas nativas (p.13–20) são idênticas. O caso de uso de PP-TableMagic (tabela 100% rasterizada com estrutura incorreta) não apareceu neste corpus.
-
-**Gate 4:** ⏭️ **NÃO APLICÁVEL** — Gate 2 não identificou falha estrutural de tabela que PP-TableMagic precisaria resolver. Script disponível para uso futuro se surgir caso concreto.
-
----
-
-### Fase 5 — PP-StructureV3
-
-| Etapa | Status | Observações |
-|---|---|---|
-| Avaliação | ⏭️ Deferido | Não há evidência de necessidade antes de Gates 2 e 4 |
-
-**Nota:** PP-StructureV3 foi avaliado como **RISCO MUITO ALTO** (Seção 5.4). Não será implementado nesta fase.
-
----
-
-### Fase 6 — Validação no Windows Server e política de promoção
-
-| Etapa | Status | Observações |
-|---|---|---|
-| 6.1. Smoke de instalação Windows | ✅ Concluído | Gate 1 executado: 42 págs, 14.610 chars, 1474.9s, status success |
-| 6.2. Testes de integração Windows | ✅ Concluído | Gate 2 aprovado — v6-medium comparado em 42 páginas, 6 diferenças relevantes analisadas |
-| 6.3. Verificação `0xC0000005` | 🔲 Pendente | Nenhum crash observado no smoke (42 páginas). Monitorar em corpus completo |
-| 6.4. Validação de rollback | 🔲 Pendente | Executar `pdftext extract --language pt` após Gate 2 e comparar com referência |
-| 6.5. Critérios de aceitação | 🔲 Pendente | Aguarda análise do diff Gate 2 e decisão do responsável |
-
----
-
-### Resumo Executivo
-
-| Fase | Planejado | Implementado | Status |
-|---|---|---|---|
-| 0 — Pré-requisito | Merge + branch | Merge `ee655d4`, branch `feat/paddle-ocrv6-evaluation` criada | ✅ |
-| 1 — Compatibilidade v6 | Setup + smoke test | Gate 1 ✅ — 42 págs, offline, CPU, Windows Server 2025, 1474.9s | ✅ |
-| 2 — Comparação v5/v6 | Script + relatório | Gate 2 ✅ — v6 vence em 9/13 casos; 29% mais rápido; p.30 corrigida | ✅ |
-| 3 — Integração CLI/modelos | perfis + `--ocr-model-profile` | 100% implementado — models.py + cli.py, 307 testes passando | ✅ |
-| 4 — PP-TableMagic | Avaliação isolada | Gate 2 não revelou falha estrutural de tabela — fase não necessária | ⏭️ |
-| 5 — PP-StructureV3 | Avaliação condicional | Deferido — risco muito alto (Seção 5.4); Gate 4 não ativado | ⏭️ |
-| 6 — Windows + promoção | Testes + checklist | Smoke aprovado; rollback e critérios de aceitação pendentes | 🔲 |
-
-**Arquivos modificados nesta branch (em relação à main):**
-
-| Arquivo | Tipo de alteração |
-|---|---|
-| `src/structured_pdf_text/ocr/models.py` | Adição de perfis `pt-v6-medium` e `pt-v6-small` |
-| `src/structured_pdf_text/cli.py` | `--ocr-model-profile`, `--cache-home`, hints melhorados |
-| `tests/test_paddle_offline.py` | Correção de regex (mensagem de erro renomeada) |
-| `.gitignore` | Adição de `.venv-paddle-v6-eval/` |
-| `scripts/eval_v6/setup_v6_env.sh` | Setup de ambiente WSL (Linux) |
-| `scripts/eval_v6/setup_v6_windows.ps1` | Setup de modelos v6 para Windows Server |
-| `scripts/eval_v6/smoke_test_v6.py` | Teste de compatibilidade offline+CPU |
-| `scripts/eval_v6/compare_v5_v6.py` | Comparação v5 vs v6 — gera markdowns + diff |
-| `scripts/eval_v6/eval_tablemagic.py` | Avaliação PP-TableMagic (Fase 4, condicional) |
-| `Plano_Comparativo_Paddle.md` | Plano completo com resultados e status por fase |
-
-**Nenhuma alteração nos módulos protegidos:** `ocr/paddle.py`, `ocr/recovery.py`, `ocr/engine.py`, `ocr/quality.py`, `ocr/reconstruct.py`, `config.py`, módulos de texto nativo, assembly, ledger.
-
-**Próximos passos (responsável):**
-1. ✅ Gate 1 concluído
-2. 🔲 Aguardar resultado do `compare_v5_v6.py` → revisar `v5.md`, `v6_pt-v6-medium.md`, `diff.txt`
-3. 🔲 Com base no diff: decidir se v6 traz ganhos reais para os documentos da empresa
-4. 🔲 Se ganhos confirmados: validar rollback (`pdftext extract --language pt` preserva resultado v5)
-5. 🔲 Se falhas estruturais de tabela persistirem: avaliar com `eval_tablemagic.py` (Gate 4)
-6. 🔲 Merge de `feat/paddle-ocrv6-evaluation` à `main` somente após aprovação explícita
+**Conclusão para o desenvolvedor:** a comparação pretendida é tecnicamente possível **desde que** o PP-TableMagic use, em cada braço, OCR interno correspondente ao perfil declarado ou que sua geometria seja integrada a um OCR externo sob um desenho experimental explicitamente validado. Sem essa garantia e sem fixar os demais componentes da pipeline, um resultado rotulado “PP-OCRv5 versus PP-OCRv6 com PP-TableMagic” pode ser metodologicamente ambíguo. Executar o plano por fases, fechar cada ticket com evidência e só então interpretar diferenças de qualidade e desempenho.
