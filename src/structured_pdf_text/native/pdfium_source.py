@@ -136,7 +136,8 @@ class PdfiumNativeEvidenceSource:
         """
         if self._doc is None:
             self.open()
-        assert self._doc is not None
+        if self._doc is None:
+            raise RuntimeError("Document failed to open")
         if page_index < 0 or page_index >= len(self._doc):
             raise IndexError(f"page_index out of range: {page_index}")
 
@@ -230,7 +231,8 @@ class PdfiumNativeEvidenceSource:
         """Render a low-resolution diagnostic image while the document is open."""
         if self._doc is None:
             self.open()
-        assert self._doc is not None
+        if self._doc is None:
+            raise RuntimeError("Document failed to open")
         if page_index < 0 or page_index >= len(self._doc):
             raise IndexError(f"page_index out of range: {page_index}")
         page = self._doc[page_index]

@@ -265,8 +265,6 @@ def _detect_rectangular_grid(paths: list[BBox], limit: BBox) -> _Grid | None:
         bottom = _nearest_edge(path.y1, y_edges, tolerance)
         if None in {left, right, top, bottom}:
             continue
-        assert left is not None and right is not None
-        assert top is not None and bottom is not None
         if right > left and bottom > top:
             cells.add((top, left, bottom, right))
 
