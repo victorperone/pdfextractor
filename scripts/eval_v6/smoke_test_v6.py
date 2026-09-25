@@ -75,9 +75,9 @@ def test_image(cache_home: str, profile: str) -> bool:
         "text_recognition_model_dir": str(root / p.recognition),
         "text_recognition_model_name": p.recognition,
         "use_doc_orientation_classify": True,
-        "use_doc_unwarping": False,
+        "use_doc_unwarping": True,
         "use_textline_orientation": True,
-        "enable_mkldnn": False,
+        "enable_mkldnn": True,
         "device": "cpu",
     }
 

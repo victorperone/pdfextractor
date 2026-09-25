@@ -1,4 +1,16 @@
-# PDFExtractor — Auditoria técnica e plano corretivo para comparar PP-OCRv5 e PP-OCRv6 com PP-TableMagic
+
+# Plano Evoluções e comparativo pdfextractor
+
+1. PaddleOCR PP-OCRv6 medium atual ← baseline 
+2. RapidOCR PP-OCRv6 medium + ONNXRuntime 
+3. RapidOCR PP-OCRv6 medium + OpenVINO 
+4. Tesseract 5 + português 
+5. EasyOCR + português
+
+
+
+
+## PDFExtractor — Auditoria técnica e plano corretivo para comparar PP-OCRv5 e PP-OCRv6 com PP-TableMagic
 
 **Data de referência:** 24/09/2026  
 **Destinatário:** equipe de desenvolvimento e de validação do PDFExtractor  

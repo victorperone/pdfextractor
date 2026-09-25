@@ -213,10 +213,10 @@ def _build_ocr_pipeline(cache: Path, profile: str) -> Any:
         text_recognition_model_name=names["text_recognition"],
         text_recognition_model_dir=str(root / names["text_recognition"]),
         use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
+        use_doc_unwarping=True,
         use_textline_orientation=False,
         device="cpu",
-        enable_mkldnn=False,
+        enable_mkldnn=True,
     )
 
 
@@ -277,7 +277,7 @@ def _tablemagic_page(img_path: Path, tm_pipeline: Any) -> dict[str, Any]:
         output = list(tm_pipeline.predict(
             str(img_path),
             use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
+            use_doc_unwarping=True,
             use_layout_detection=True,
             use_ocr_model=True,
             use_table_orientation_classify=False,

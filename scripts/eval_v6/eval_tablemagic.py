@@ -171,9 +171,9 @@ def pipeline_kwargs(cache_home: Path, profile: str) -> dict[str, Any]:
     names = model_names(profile)
     kwargs: dict[str, Any] = {
         "device": "cpu",
-        "enable_mkldnn": False,
+        "enable_mkldnn": True,
         "use_doc_orientation_classify": False,
-        "use_doc_unwarping": False,
+        "use_doc_unwarping": True,
         "use_layout_detection": False,
         "use_ocr_model": True,
         # use_ocr_results_with_table_cells is intentionally omitted: paddleocr 3.7.0
@@ -378,7 +378,7 @@ def eval_tablemagic_on_image(
         pipeline.predict(
             image_path,
             use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
+            use_doc_unwarping=True,
             use_layout_detection=False,
             use_ocr_model=True,
             use_table_orientation_classify=False,

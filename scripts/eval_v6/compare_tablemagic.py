@@ -173,7 +173,7 @@ def run_profile(
                 pipeline.predict(
                     str(img_path),
                     use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
+                    use_doc_unwarping=True,
                     use_layout_detection=False,
                     use_ocr_model=True,
                     use_table_orientation_classify=False,
@@ -369,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             "use_ocr_model": True,
             "use_ocr_results_with_table_cells": "not_applied_paddleocr_3.7.0_constructor_rejects_argument",
             "use_doc_orientation_classify": False,
-            "use_doc_unwarping": False,
+            "use_doc_unwarping": True,
             "use_layout_detection": False,
             "use_table_orientation_classify": False,
         },

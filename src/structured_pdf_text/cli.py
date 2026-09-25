@@ -727,9 +727,9 @@ def _cmd_setup_models(language: str, cache_home: str | None) -> int:
     root = _local_model_root(resolved_cache)
     options: dict = {
         "use_doc_orientation_classify": True,
-        "use_doc_unwarping": False,
+        "use_doc_unwarping": True,
         "use_textline_orientation": True,
-        "enable_mkldnn": False,
+        "enable_mkldnn": True,
         **profile.name_kwargs,
     }
 

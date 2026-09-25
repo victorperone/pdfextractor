@@ -824,9 +824,9 @@ class PaddleOcrEngine:
 
         options = {
             "use_doc_orientation_classify": True,
-            "use_doc_unwarping": False,
+            "use_doc_unwarping": True,
             "use_textline_orientation": True,
-            "enable_mkldnn": False,
+            "enable_mkldnn": True,
             # Detection limit aligned to RGB budget — overridable via self.options.
             "text_det_limit_side_len": _det_limit,
             "text_det_limit_type": "max",
