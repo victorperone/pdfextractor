@@ -806,7 +806,7 @@ class PaddleOcrEngine:
         ] = "True"
 
         # Derive the detection limit from the RGB budget so that scale variants
-        # within budget are processed at full resolution by PP-OCRv5_server_det.
+        # within budget are processed at full resolution by the configured detector.
         # The default 960 px limit makes all variants produce the same ~625×960
         # tensor, making upscaling pointless for detection.  We use √2 * base
         # (A4 aspect ratio) to accommodate the long side of portrait documents.

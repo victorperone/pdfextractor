@@ -230,7 +230,16 @@ def assemble_document(
         for page in pages
         for warning in page.diagnostics.warnings
     )
-    status = ExtractionStatus.PARTIAL_SUCCESS if warnings else ExtractionStatus.SUCCESS
+    failed_pages = sum(bool(page.diagnostics.facts.get("failed")) for page in pages)
+    partial_pages = any(page.diagnostics.facts.get("partial") for page in pages)
+    if pages and failed_pages == len(pages):
+        status = ExtractionStatus.FAILURE
+    elif failed_pages or partial_pages:
+        status = ExtractionStatus.PARTIAL_SUCCESS
+    else:
+        # Warning text can describe a recoverable or optional issue; it is
+        # preserved in the report without automatically degrading the run.
+        status = ExtractionStatus.SUCCESS
     native_pages = sum(1 for page in pages if page.diagnostics.strategy == PageStrategy.NATIVE)
     mixed_pages = sum(1 for page in pages if page.diagnostics.strategy == PageStrategy.MIXED)
     ocr_pages = sum(1 for page in pages if page.diagnostics.strategy == PageStrategy.OCR_CANDIDATE)

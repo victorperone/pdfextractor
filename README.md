@@ -70,8 +70,7 @@ The current code covers:
 - document-level diagnostics, page boundaries and repeated header/footer
   signatures with configurable reading-text filtering
 - Markdown rendering with page sections and structured table blocks
-- per-page stage timings, document assembly timing and cooperative timeout
-  handling with partial-document status
+- per-page stage timings and document assembly timing
 - isolated native-page failure placeholders so later pages can still be read
 - quality-first OCR variant selection with page-edge orientation coherence
 - hybrid OCR lines assigned to visual table regions and excluded from duplicate
@@ -133,8 +132,8 @@ This downloads the four required models to
 
 - `PP-LCNet_x1_0_doc_ori` — document orientation classifier
 - `PP-LCNet_x1_0_textline_ori` — text-line orientation classifier
-- `PP-OCRv5_server_det` — text detection
-- `latin_PP-OCRv5_mobile_rec` — text recognition (Latin script)
+- `PP-OCRv6_medium_det` — text detection (default)
+- `PP-OCRv6_medium_rec` — text recognition (default)
 
 ### Step 2 — Verify readiness
 
@@ -150,8 +149,8 @@ OCR model home:
 
 [ok] PP-LCNet_x1_0_doc_ori
 [ok] PP-LCNet_x1_0_textline_ori
-[ok] PP-OCRv5_server_det
-[ok] latin_PP-OCRv5_mobile_rec
+[ok] PP-OCRv6_medium_det
+[ok] PP-OCRv6_medium_rec
 
 Offline OCR readiness: READY
 ```
@@ -161,6 +160,7 @@ Offline OCR readiness: READY
 ```bash
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
+  --ocr-model-profile pt \
   --output markdown \
   -o documento.md
 ```
@@ -185,6 +185,7 @@ python -m structured_pdf_text.cli models-status
 
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
+  --ocr-model-profile pt \
   --output markdown \
   -o documento.md
 '
@@ -228,20 +229,23 @@ pdftext extract documento.pdf --output raw
 pdftext extract documento.pdf --output json
 
 # OCR-assisted extraction (requires setup-models)
-pdftext extract documento.pdf --mode balanced --output markdown
-pdftext extract documento.pdf --mode balanced --ocr-quality-policy adaptive
-pdftext extract documento.pdf --mode balanced --ocr-quality-policy baseline
-pdftext extract documento.pdf --mode balanced --ocr-quality-policy exhaustive
-pdftext extract documento.pdf --mode balanced --output json
-pdftext extract documento.pdf --mode ocr --output reading
-pdftext extract documento.pdf --best --output markdown -o output.md
+pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy adaptive
+pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy baseline
+pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy exhaustive
+pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output json
+pdftext extract documento.pdf --mode ocr --ocr-model-profile pt --output reading
+pdftext extract documento.pdf --best --ocr-model-profile pt --output markdown -o output.md
 
 # Inspection and diagnostics
 pdftext inspect documento.pdf --page 1
 pdftext inspect documento.pdf --page 1 --raw-page-json
+# Native overlay is the default and needs no OCR models
 pdftext overlay documento.pdf --page 1 --out page-1.png
+# OCR-capable overlay requires an explicit profile
+pdftext overlay documento.pdf --page 1 --out page-1.png --mode balanced --ocr-model-profile pt
 pdftext report corpus/*.pdf --mode native
-pdftext report corpus/*.pdf --mode balanced --merge-cross-page-tables
+pdftext report corpus/*.pdf --mode balanced --ocr-model-profile pt --merge-cross-page-tables
 pdftext report corpus/*.pdf --mode native --workers 2
 pdftext compare documento.pdf --adapters structured-native pdfium-raw pymupdf
 
@@ -251,12 +255,15 @@ pdftext setup-models --language pt
 pdftext models-status
 ```
 
-`--mode balanced` and `--ocr-quality-policy` are independent choices: the
-quality policy selects the OCR path used by a mode, rather than being an
-alternative mode. `exhaustive` runs every eligible quality variant and emits
-an informational resource-use warning; it does not automatically reduce OCR
-quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter. On CPU/WSL
-the adapter disables MKL-DNN/OneDNN for compatibility. Models are loaded from
+`--mode` selects the extraction strategy; `--ocr-model-profile` selects the
+models. Commands that can invoke OCR require an explicit profile via
+`--ocr-model-profile` or an explicit `--language` value. In the API and model
+management commands, `pt` is the default; its public alias `pt-v6-medium` also
+selects PP-OCRv6 medium. `pt-v5` selects PP-OCRv5 only when explicitly requested. `--ocr-quality-policy` is independent: it
+selects the OCR variant strategy. `exhaustive` emits an informational
+resource-use warning and does not automatically reduce OCR quality. The
+`balanced` and `ocr` modes use the optional PaddleOCR adapter. On CPU/WSL the
+adapter disables MKL-DNN/OneDNN for compatibility. Models are loaded from
 explicit local paths; remote model-source checks are disabled at runtime.
 Model paths and behaviour can be overridden through `PaddleOcrEngine`
 constructor options.
@@ -275,15 +282,30 @@ consensus decisions in `page.diagnostics.facts`.
 
 Performance diagnostics are available in `page.diagnostics.facts` under
 `timings_ms` and `ocr_passes`, and in `document.diagnostics.facts` under
-`total_ms` and `assemble_ms`. A cooperative document budget can be set with
-`SecurityLimits(document_timeout_seconds=...)`; when reached, the result is
-returned as `partial_success` with processed page boundaries preserved.
+`total_ms` and `assemble_ms`. The application does not impose execution
+timeouts. A long-running OCR, I/O, or external dependency call can remain
+blocked until it completes, the user cancels it, or the operating
+system/dependency fails. Elapsed time and progress continue to be recorded.
+
+Rasterization preserves the requested scale when the resulting dimensions are
+within `max_render_pixels`. It reduces scale only when PDFium's rounded pixel
+dimensions would exceed that limit; reductions are recorded in page
+diagnostics under `render_limit_reductions`.
+
+Successful complete extraction returns exit code `0`, including recoverable
+non-degrading warnings. Partial extraction and operation failure return
+non-zero codes while retaining diagnostic output where possible. Usage errors
+return `2`.
 
 Corpus reports include p50/p95/p99 page latency split by extraction strategy,
-current/peak RSS, PDFium document/page/textpage acquisitions and an explicitly
-labelled estimate of adapter-visible FFI calls. The estimate is intended to
-decide whether a future native batch extension is justified; it is not
-presented as an internal PDFium profiler.
+current and peak RSS in bytes for the Python process, PDFium document/page/textpage
+acquisitions and an explicitly labelled estimate of adapter-visible FFI calls.
+Memory metrics identify their source and process scope; unavailable metrics are
+null, never fabricated as 0.
+The peak is the OS high-water mark for the Python process since process start,
+not a sum of subprocesses or a per-document resettable peak. The FFI estimate
+is intended to decide whether a future native batch extension is justified; it
+is not presented as an internal PDFium profiler.
 
 `pdftext report` runs the real extractor over multiple corpus PDFs and emits
 JSON with per-document and per-page strategies, escalation reasons, OCR
@@ -293,9 +315,14 @@ text against the original PDF.
 
 `pdftext compare` runs the built-in extractor views and optional PyMuPDF
 reference adapter, reporting text size, timing, repeated lines, accented words
-and pairwise normalized coverage. The selected reference is explicitly marked
-as observational rather than ground truth; use `--include-text` when the full
-outputs are needed for manual review.
+and pairwise normalized coverage. It reports a non-zero exit status when the
+requested reference is unavailable, fewer than two valid results exist, or any
+requested adapter fails. It never substitutes another adapter as reference;
+diagnostic results may still be printed. The reference is observational, not
+ground truth; use `--include-text` for manual review. To compare explicit OCR
+profiles, run `pdftext compare documento.pdf --adapters structured-balanced
+pdfium-raw pymupdf --ocr-model-profile pt` and repeat with
+`--ocr-model-profile pt-v5`. Neither invocation changes profiles silently.
 
 The raw native page dump preserves PDFium character index, Unicode, geometry,
 origin, angle, font metadata, fill/stroke RGBA, text render mode, generated/
@@ -309,7 +336,9 @@ Normal extraction keeps `native_evidence=None` to avoid retaining hundreds of
 thousands of low-level PDFium objects in long documents. Set
 `ExtractorConfig(retain_native_evidence=True)` when an in-memory evidence audit
 is required; `inspect --raw-page-json` does this automatically and processes
-only the requested page. `overlay --page` is likewise page-targeted.
+only the requested page. `overlay --page` is likewise page-targeted. Overlay
+uses native extraction by default; OCR-capable modes require
+`--ocr-model-profile` and never impose `balanced` implicitly.
 
 OCR variants are batched in bounded groups inside one model process. The
 default batch size is 3 and can be changed with `--ocr-batch-size`; use
@@ -461,8 +490,8 @@ kernel or cgroup OOM kill requires future OCR worker isolation.
 
 ### Memory guidance
 
-The current PP-OCRv5 server detector can have a high peak memory footprint
-during full-page OCR at the normal render scale. The observed validation peak
+OCR detectors can have a high peak memory footprint during full-page OCR at the
+normal render scale. The observed validation peak
 was approximately 10.8 GiB RSS.
 
 Provisional guidance:

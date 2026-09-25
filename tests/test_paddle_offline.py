@@ -128,15 +128,15 @@ def test_missing_model_raises_before_paddleocr(
 _EXPECTED_NAME_TO_DIR_KEY = {
     "PP-LCNet_x1_0_doc_ori": "doc_orientation_classify_model_dir",
     "PP-LCNet_x1_0_textline_ori": "textline_orientation_model_dir",
-    "PP-OCRv5_server_det": "text_detection_model_dir",
-    "latin_PP-OCRv5_mobile_rec": "text_recognition_model_dir",
+    "PP-OCRv6_medium_det": "text_detection_model_dir",
+    "PP-OCRv6_medium_rec": "text_recognition_model_dir",
 }
 
 _NAME_KEYS = {
     "PP-LCNet_x1_0_doc_ori": "doc_orientation_classify_model_name",
     "PP-LCNet_x1_0_textline_ori": "textline_orientation_model_name",
-    "PP-OCRv5_server_det": "text_detection_model_name",
-    "latin_PP-OCRv5_mobile_rec": "text_recognition_model_name",
+    "PP-OCRv6_medium_det": "text_detection_model_name",
+    "PP-OCRv6_medium_rec": "text_recognition_model_name",
 }
 
 

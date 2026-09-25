@@ -6,15 +6,11 @@ in PROFILES; all consumers derive their configuration from here automatically.
 
 Supported profiles
 ------------------
-- "pt"           : Portuguese / Latin-script documents (PP-OCRv5 server det + mobile rec).
-                   Default production profile. Stable, validated on Windows Server 2025.
-- "pt-v6-medium" : PP-OCRv6 medium models — experimental evaluation only.
-                   Higher accuracy target; same CPU throughput as v5-server.
-                   Requires models in a separate cache directory from v5.
-                   Select via: --ocr-model-profile pt-v6-medium --cache-home <v6-cache>
-- "pt-v6-small"  : PP-OCRv6 small models — experimental evaluation only.
-                   Lower memory footprint, ~2.6× faster than v5-server on CPU.
-                   Select via: --ocr-model-profile pt-v6-small --cache-home <v6-cache>
+- "pt"           : Portuguese / Latin-script documents (PP-OCRv6 medium).
+                   Default profile for commands that permit implicit selection.
+- "pt-v6-medium" : Explicit alias for the same PP-OCRv6 medium profile.
+- "pt-v5"        : PP-OCRv5 rollback profile, only when explicitly selected.
+- "pt-v6-small"  : PP-OCRv6 small profile.
 
 Notes
 -----
@@ -74,9 +70,8 @@ PROFILES: dict[str, OcrModelProfile] = {
         detection="PP-OCRv6_medium_det",
         recognition="PP-OCRv6_medium_rec",
     ),
-    # ── Rollback profile (PP-OCRv5 server) ──────────────────────────────────
-    # Use --language pt-v5 to revert to v5 models; requires pointing
-    # --cache-home at the v5 backup cache (paddlex-v5-backup).
+    # ── Explicit rollback profile (PP-OCRv5 server) ─────────────────────────
+    # Use --ocr-model-profile pt-v5 to select v5 explicitly.
     "pt-v5": OcrModelProfile(
         language="pt-v5",
         doc_orientation="PP-LCNet_x1_0_doc_ori",
@@ -84,7 +79,7 @@ PROFILES: dict[str, OcrModelProfile] = {
         detection="PP-OCRv5_server_det",
         recognition="latin_PP-OCRv5_mobile_rec",
     ),
-    # ── Experimental profiles (PP-OCRv6 small) ──────────────────────────────
+    # ── PP-OCRv6 small profile ───────────────────────────────────────────────
     "pt-v6-small": OcrModelProfile(
         language="pt-v6-small",
         doc_orientation="PP-LCNet_x1_0_doc_ori",
@@ -94,6 +89,9 @@ PROFILES: dict[str, OcrModelProfile] = {
     ),
 }
 
+# Public identifier for the default v6 medium profile. This is an alias to
+# the same immutable configuration, so model names and cache paths cannot drift.
+PROFILES["pt-v6-medium"] = PROFILES["pt"]
 SUPPORTED_LANGUAGES = frozenset(PROFILES)
 
 
@@ -113,6 +111,6 @@ def get_profile(language: str) -> OcrModelProfile:
         raise ValueError(
             f"No local OCR profile configured for '{language}'. "
             f"Supported profiles: {supported}. "
-            f"Use --ocr-model-profile to select an experimental profile."
+            f"Choose one of the listed profiles explicitly with --ocr-model-profile."
         )
     return profile

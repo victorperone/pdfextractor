@@ -195,9 +195,12 @@ def _totals(documents: list[dict[str, object]]) -> dict[str, object]:
         strategy_counts.update(document["strategy_counts"])
         reason_counts.update(document["reason_counts"])
     peak_values = [
-        int(memory.get("peak_rss_bytes", 0))
+        int(value)
         for document in documents
         if isinstance((memory := document.get("memory")), dict)
+        and isinstance((value := memory.get("peak_rss_bytes")), int)
+        and not isinstance(value, bool)
+        and value >= 0
     ]
     return {
         "documents": len(documents),
@@ -206,7 +209,7 @@ def _totals(documents: list[dict[str, object]]) -> dict[str, object]:
         "warnings": sum(len(document["warnings"]) for document in documents),
         "strategy_counts": dict(sorted(strategy_counts.items())),
         "reason_counts": dict(sorted(reason_counts.items())),
-        "max_worker_peak_rss_bytes": max(peak_values, default=0),
+        "max_worker_peak_rss_bytes": max(peak_values) if peak_values else None,
     }
 
 

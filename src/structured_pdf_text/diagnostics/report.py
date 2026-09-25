@@ -27,7 +27,7 @@ def document_report(document: StructuredDocument) -> str:
         f"ocr_pages={document.diagnostics.ocr_pages}",
         f"total_ms={document.diagnostics.facts.get('total_ms', '?')}",
         f"assemble_ms={document.diagnostics.facts.get('assemble_ms', '?')}",
-        f"timed_out={document.diagnostics.facts.get('timed_out', False)}",
+        f"memory={document.diagnostics.facts.get('memory', {})}",
         f"repeated_regions={len(document.diagnostics.facts.get('repeated_headers_footers', {}))}",
     ]
     for page in document.pages:

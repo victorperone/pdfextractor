@@ -1,13 +1,9 @@
 from __future__ import annotations
 
+import math
 import time
-from dataclasses import asdict, replace
-
-try:
-    import resource as _resource
-except ImportError:
-    _resource = None  # type: ignore[assignment]
 from collections.abc import Callable
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +39,8 @@ from .errors import (
     raise_if_resource_exhausted,
 )
 from .evidence.complexity import ComplexityAnalyzer
+from .memory import process_memory_snapshot
+from .ocr.models import get_profile
 from .evidence.decision import assess_region_recovery
 from .fusion.token_fusion import fuse_native_and_ocr
 from .layout.engine import NativeHeuristicLayoutEngine
@@ -82,6 +80,7 @@ class PdfTextExtractor:
         if ocr_engine is not None:
             self.ocr_engine = ocr_engine
         elif _ocr_enabled(self.config):
+            get_profile(self.config.language)
             from .ocr.paddle import PaddleOcrEngine
 
             self.ocr_engine = PaddleOcrEngine(
@@ -130,7 +129,6 @@ class PdfTextExtractor:
         document_start = time.perf_counter()
         memory_start = _process_memory_snapshot()
         document_warnings: list[str] = []
-        timed_out = False
         source = PdfiumNativeEvidenceSource(path, config=self.config, password=password)
         open_start = time.perf_counter()
         with source:
@@ -140,13 +138,6 @@ class PdfTextExtractor:
                 raise RuntimeError("source.open() did not return a DocumentContext")
             page_indices = _selected_page_indices(self.config.page_indices, context.page_count)
             for page_index in page_indices:
-                timeout = self.config.security_limits.document_timeout_seconds
-                if timeout is not None and time.perf_counter() - document_start >= timeout:
-                    timed_out = True
-                    document_warnings.append(
-                        f"Document timeout reached before page {page_index + 1}"
-                    )
-                    break
                 start = time.perf_counter()
                 if progress_callback is not None:
                     progress_callback(len(pages) + 1, len(page_indices))
@@ -170,17 +161,34 @@ class PdfTextExtractor:
                     continue
                 timings["native_extract_ms"] = (time.perf_counter() - native_start) * 1000
                 warnings: list[str] = []
+                partial_reasons: list[str] = []
+                render_limit_diagnostics: dict[str, dict[str, Any]] = {}
+
+                def safe_render_scale(stage: str, requested_scale: float) -> float:
+                    effective = _safe_complexity_scale(
+                        native_page.bbox.width,
+                        native_page.bbox.height,
+                        self.config.security_limits.max_render_pixels,
+                        requested_scale,
+                    )
+                    if effective < requested_scale:
+                        render_limit_diagnostics[stage] = {
+                            "reason": "max_render_pixels",
+                            "maximum_pixels": self.config.security_limits.max_render_pixels,
+                            "requested_scale": requested_scale,
+                            "effective_scale": effective,
+                            "resulting_width_pixels": math.ceil(native_page.bbox.width * effective),
+                            "resulting_height_pixels": math.ceil(native_page.bbox.height * effective),
+                        }
+                    return effective
+
                 rendered_page = None
                 render_start = time.perf_counter()
                 if self.config.enable_complexity_render:
                     try:
                         rendered_page = source.render_page(
                             page_index,
-                            scale=_safe_complexity_scale(
-                                native_page.bbox.area,
-                                self.config.security_limits.max_render_pixels,
-                                self.config.complexity_render_scale,
-                            ),
+                            scale=safe_render_scale("complexity", self.config.complexity_render_scale),
                         )
                     except FatalExtractionError:
                         raise
@@ -350,11 +358,7 @@ class PdfTextExtractor:
                         ):
                             ocr_image = source.render_page(
                                 page_index,
-                                scale=_safe_complexity_scale(
-                                    native_page.bbox.area,
-                                    self.config.security_limits.max_render_pixels,
-                                    self.config.ocr_render_scale,
-                                ),
+                                scale=safe_render_scale("ocr", self.config.ocr_render_scale),
                             )
                     except FatalExtractionError:
                         raise
@@ -371,12 +375,16 @@ class PdfTextExtractor:
                         warnings.append(
                             f"OCR render unavailable: {type(exc).__name__}: {exc}"
                         )
+                        if mode == ExtractionMode.OCR or page_ocr_requested:
+                            partial_reasons.append("page_ocr_unavailable")
                     else:
                         timings["render_ocr_ms"] = (
                             time.perf_counter() - ocr_render_start
                         ) * 1000
                         if self.ocr_engine is None:
                             warnings.append("OCR requested but no OCR engine was configured")
+                            if mode == ExtractionMode.OCR or page_ocr_requested:
+                                partial_reasons.append("page_ocr_unavailable")
                         else:
                             ocr_start = time.perf_counter()
                             try:
@@ -438,6 +446,8 @@ class PdfTextExtractor:
                                 warnings.append(
                                     f"OCR unavailable: {type(exc).__name__}: {exc}"
                                 )
+                                if mode == ExtractionMode.OCR or page_ocr_requested:
+                                    partial_reasons.append("page_ocr_unavailable")
 
                             if region_ocr_requested:
                                 for region in selected_regions:
@@ -447,6 +457,7 @@ class PdfTextExtractor:
                                             "OCR region recovery produced no usable tokens "
                                             f"for {region.region_id}"
                                         )
+                                        partial_reasons.append("ocr_region_recovery_unavailable")
                             for attempt_error in ocr_attempt_errors:
                                 warnings.append(
                                     f"OCR optional attempt unavailable: {attempt_error}"
@@ -461,11 +472,7 @@ class PdfTextExtractor:
                         try:
                             ocr_image = source.render_page(
                                 page_index,
-                                scale=_safe_complexity_scale(
-                                    native_page.bbox.area,
-                                    self.config.security_limits.max_render_pixels,
-                                    self.config.ocr_render_scale,
-                                ),
+                                scale=safe_render_scale("ocr", self.config.ocr_render_scale),
                             )
                         except FatalExtractionError:
                             raise
@@ -479,6 +486,8 @@ class PdfTextExtractor:
                             warnings.append(
                                 f"Figure OCR render unavailable: {type(exc).__name__}: {exc}"
                             )
+                            if figure_ocr_requested:
+                                partial_reasons.append("figure_ocr_unavailable")
 
                 if figure_ocr_requested and self.ocr_engine is not None and ocr_image is not None:
                     figure_start = time.perf_counter()
@@ -620,6 +629,7 @@ class PdfTextExtractor:
                     warnings.append(
                         f"Native table detection unavailable: {type(exc).__name__}: {exc}"
                     )
+                    partial_reasons.append("native_table_detection_unavailable")
                 table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] = {}
                 visual_table = None
                 if not tables and rendered_page is not None and (
@@ -646,6 +656,8 @@ class PdfTextExtractor:
                         warnings.append(
                             f"Visual table detection unavailable: {type(exc).__name__}: {exc}"
                         )
+                        if self.config.enable_tables or mode in {ExtractionMode.BALANCED, ExtractionMode.OCR}:
+                            partial_reasons.append("visual_table_detection_unavailable")
                     if visual_table is not None:
                         try:
                             refined = _refine_visual_table_ocr(
@@ -918,6 +930,9 @@ class PdfTextExtractor:
                         "table_construction_diagnostics": table_construction_facts,
                         "table_geometry_validation": table_validation_facts,
                         "timings_ms": timings,
+                        "render_limit_reductions": render_limit_diagnostics,
+                        "partial": bool(partial_reasons),
+                        "partial_reasons": sorted(set(partial_reasons)),
                         **complexity.facts,
                     },
                 )
@@ -943,8 +958,6 @@ class PdfTextExtractor:
                 page_count=context.page_count,
                 pdfium_version=context.pdfium_version,
             )
-        if timed_out:
-            document_warnings.append("Extraction stopped cooperatively at the document timeout")
         assemble_start = time.perf_counter()
         document = assemble_document(
             pages=pages,
@@ -968,30 +981,19 @@ class PdfTextExtractor:
         }
         document.diagnostics.facts["native_source_calls"] = source.metrics_snapshot()
         document.diagnostics.facts["num_threads"] = _resolve_num_threads(self.config.num_threads)
-        document.diagnostics.facts["timed_out"] = timed_out
+        if self.ocr_engine is not None:
+            profile = get_profile(self.config.language)
+            document.diagnostics.facts["ocr_profile"] = self.config.language
+            document.diagnostics.facts["ocr_models"] = {
+                "detection": profile.detection,
+                "recognition": profile.recognition,
+            }
         return document
 
 
-def _process_memory_snapshot() -> dict[str, int]:
-    """Read current and peak resident memory for this Linux/WSL process."""
-    current_rss = 0
-    try:
-        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
-            if line.startswith("VmRSS:"):
-                current_rss = int(line.split()[1]) * 1024
-                break
-    except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        pass
-    peak_rss = None
-    if _resource is not None:
-        try:
-            peak_rss = int(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss) * 1024
-        except Exception:
-            pass
-    return {
-        "current_rss_bytes": current_rss,
-        "peak_rss_bytes": peak_rss,
-    }
+def _process_memory_snapshot() -> dict[str, Any]:
+    """Return process RSS metrics with explicit units and collection source."""
+    return process_memory_snapshot()
 
 
 def _quality_to_dict(value: Any) -> dict[str, Any] | None:
@@ -1277,11 +1279,34 @@ def _same_ocr_hypothesis_position(first: OcrToken, second: OcrToken) -> bool:
     )
 
 
-def _safe_complexity_scale(page_area: float, max_pixels: int, requested_scale: float) -> float:
-    scale = max(0.05, float(requested_scale))
-    if page_area <= 0 or max_pixels <= 0:
+def _safe_complexity_scale(
+    page_width: float,
+    page_height: float,
+    max_pixels: int,
+    requested_scale: float,
+) -> float:
+    """Preserve requested resolution unless PDFium's ceil-rounded raster exceeds its cap."""
+    scale = max(0.0, float(requested_scale))
+    if page_width <= 0 or page_height <= 0 or max_pixels <= 0 or scale == 0:
         return scale
-    return min(scale, (max_pixels / page_area) ** 0.5)
+
+    def raster_pixels(candidate: float) -> int:
+        return math.ceil(page_width * candidate) * math.ceil(page_height * candidate)
+
+    if raster_pixels(scale) <= max_pixels:
+        return scale
+
+    scale = min(scale, math.sqrt(max_pixels / (page_width * page_height)))
+    # PDFium rounds each side upward. Find the largest representable scale
+    # whose actual integer raster dimensions satisfy the configured cap.
+    low, high = 0.0, scale
+    for _ in range(64):
+        candidate = (low + high) / 2.0
+        if raster_pixels(candidate) <= max_pixels:
+            low = candidate
+        else:
+            high = candidate
+    return low
 
 
 def _selected_page_indices(page_indices: tuple[int, ...] | None, page_count: int) -> list[int]:

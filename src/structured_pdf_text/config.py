@@ -82,15 +82,11 @@ class SecurityLimits:
             any page is read.
         max_render_pixels: Maximum total pixels for a single rendered page
             image; oversized renders are rejected to cap memory usage.
-        document_timeout_seconds: Cooperative timeout for the full extraction.
-            When elapsed, the result is returned as ``partial_success`` with
-            all fully processed pages included.  ``None`` disables the timeout.
     """
 
     max_pages: int = 5000
     max_file_size_bytes: int = 1_000_000_000
     max_render_pixels: int = 100_000_000
-    document_timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

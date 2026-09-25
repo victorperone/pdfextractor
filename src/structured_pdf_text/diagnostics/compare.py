@@ -91,6 +91,8 @@ class StructuredPdfTextAdapter:
                 "tables": len(document.tables),
                 "warnings": list(document.diagnostics.warnings),
                 "pdfium_version": document.metadata.pdfium_version,
+                "ocr_profile": document.diagnostics.facts.get("ocr_profile"),
+                "ocr_models": document.diagnostics.facts.get("ocr_models"),
             },
         )
 
@@ -232,20 +234,44 @@ def compare_extractors(
                 )
             )
 
-    successful = {item.adapter: item for item in extractions if item.status == "success"}
-    reference_name = reference if reference in successful else next(iter(successful), None)
-    reference_output = successful.get(reference_name) if reference_name else None
+    successful = {
+        item.adapter: item for item in extractions if item.status == "success"
+    }
+    reference_output = successful.get(reference)
+    comparable = reference_output is not None and len(successful) >= 2
+    all_succeeded = len(successful) == len(requested)
+    if comparable and all_succeeded:
+        comparison_status = "success"
+        comparison_error = None
+    elif comparable:
+        comparison_status = "partial_success"
+        comparison_error = "one or more requested adapters did not complete successfully"
+    else:
+        comparison_status = "failure"
+        if reference not in requested:
+            comparison_error = f"requested reference '{reference}' was not selected among adapters"
+        elif reference_output is None:
+            reference_result = next((item for item in extractions if item.adapter == reference), None)
+            reason = reference_result.error if reference_result is not None else "not selected"
+            comparison_error = f"requested reference '{reference}' is unavailable: {reason}"
+        else:
+            comparison_error = "fewer than two valid adapter results are available"
     results = [
         _extraction_entry(item, reference_output, include_text=include_text)
         for item in extractions
     ]
     return {
         "path": str(Path(path)),
-        "reference": reference_name,
+        "status": comparison_status,
+        "valid": comparison_status == "success",
+        "requested_reference": reference,
+        "effective_reference": reference if comparable else None,
+        "reference": reference if comparable else None,
+        "error": comparison_error,
         "warning": (
             "comparison reference is observational, not ground truth"
-            if reference_name is not None
-            else "no comparison adapter completed successfully"
+            if comparable
+            else "diagnostic results are not a valid comparison"
         ),
         "results": results,
     }

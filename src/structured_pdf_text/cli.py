@@ -56,15 +56,18 @@ def main(argv: list[str] | None = None) -> int:
     extract_parser.add_argument("pdf", type=Path)
     extract_parser.add_argument("--output", choices=["reading", "raw", "json", "markdown"], default="reading")
     extract_parser.add_argument("--mode", choices=[mode.value for mode in ExtractionMode], default=ExtractionMode.NATIVE.value)
-    extract_parser.add_argument("--language", default="pt")
+    extract_parser.add_argument(
+        "--language", default=None,
+        help="Explicit OCR profile name; required for OCR modes if --ocr-model-profile is omitted",
+    )
     extract_parser.add_argument(
         "--ocr-model-profile",
         default=None,
         metavar="PROFILE",
         help=(
             "OCR model profile to use (e.g. pt-v6-medium). "
-            "When omitted, the profile matching --language is used. "
-            "Experimental profiles require --cache-home pointing to the v6 eval cache."
+            "Required for OCR modes unless --language explicitly names a profile. "
+            "PP-OCRv6 is the default profile; PP-OCRv5 remains available as pt-v5."
         ),
     )
     extract_parser.add_argument(
@@ -126,19 +129,22 @@ def main(argv: list[str] | None = None) -> int:
         "--cache-home",
         default=None,
         metavar="DIR",
-        help="Override the OCR model cache directory (required when using experimental profiles)",
+        help="Override the OCR model cache directory",
     )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
     inspect_parser.add_argument("pdf", type=Path)
     inspect_parser.add_argument("--page", type=int, default=None, help="1-based page number")
     inspect_parser.add_argument("--mode", choices=[mode.value for mode in ExtractionMode], default=ExtractionMode.NATIVE.value)
-    inspect_parser.add_argument("--language", default="pt")
+    inspect_parser.add_argument(
+        "--language", default=None,
+        help="Explicit OCR profile name; required for OCR modes if --ocr-model-profile is omitted",
+    )
     inspect_parser.add_argument(
         "--ocr-model-profile",
         default=None,
         metavar="PROFILE",
-        help="OCR model profile to use (e.g. pt-v6-medium). Overrides --language for model selection.",
+        help="OCR model profile; required for OCR modes unless --language explicitly names one.",
     )
     inspect_parser.add_argument(
         "--cache-home",
@@ -162,6 +168,18 @@ def main(argv: list[str] | None = None) -> int:
     overlay_parser.add_argument("--page", type=int, required=True, help="1-based page number")
     overlay_parser.add_argument("--out", type=Path, required=True)
     overlay_parser.add_argument("--scale", type=float, default=2.0)
+    overlay_parser.add_argument(
+        "--mode", choices=("native", "balanced", "ocr"), default="native",
+        help="Extraction mode; native is the default and does not use OCR",
+    )
+    overlay_parser.add_argument(
+        "--ocr-model-profile", default=None, metavar="PROFILE",
+        help="Explicit OCR profile required for balanced or ocr modes",
+    )
+    overlay_parser.add_argument(
+        "--cache-home", default=None, metavar="DIR",
+        help="Override the OCR model cache directory",
+    )
 
     report_parser = subparsers.add_parser(
         "report",
@@ -173,12 +191,15 @@ def main(argv: list[str] | None = None) -> int:
         choices=[mode.value for mode in ExtractionMode],
         default=ExtractionMode.NATIVE.value,
     )
-    report_parser.add_argument("--language", default="pt")
+    report_parser.add_argument(
+        "--language", default=None,
+        help="Explicit OCR profile name; required for OCR modes if --ocr-model-profile is omitted",
+    )
     report_parser.add_argument(
         "--ocr-model-profile",
         default=None,
         metavar="PROFILE",
-        help="OCR model profile to use (e.g. pt-v6-medium). Overrides --language for model selection.",
+        help="OCR model profile; required for OCR modes unless --language explicitly names one.",
     )
     report_parser.add_argument(
         "--cache-home",
@@ -236,7 +257,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=("structured-native", "structured-balanced", "pdfium-raw", "pymupdf"),
         default="pymupdf",
     )
-    compare_parser.add_argument("--language", default="pt")
+    compare_parser.add_argument("--language", default=None, help="Explicit OCR profile when an OCR adapter is selected")
+    compare_parser.add_argument(
+        "--ocr-model-profile", default=None, metavar="PROFILE",
+        help="Explicit OCR profile required when structured-balanced is selected",
+    )
     compare_parser.add_argument(
         "--include-text",
         action="store_true",
@@ -288,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.ocr_batch_size < 1:
             print("--ocr-batch-size must be at least 1", file=sys.stderr)
             return 2
-        profile_name = args.ocr_model_profile or args.language
+        profile_name = args.ocr_model_profile or args.language or "pt"
         if args.best:
             config = best_extraction_config(language=profile_name)
         else:
@@ -303,12 +328,18 @@ def main(argv: list[str] | None = None) -> int:
                 num_threads=args.threads,
             )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
+        if _mode_requires_ocr(config.mode) and args.ocr_model_profile is None and args.language is None:
+            print("--ocr-model-profile is required when the selected mode can use OCR", file=sys.stderr)
+            return 2
         if _mode_requires_ocr(config.mode):
             try:
                 validate_local_ocr_models(
                     language=config.language,
                     cache_home=args.cache_home,
                 )
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
             except PaddleOcrUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 print(
@@ -349,17 +380,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = document.reading_text
         if args.output_file is not None:
-            args.output_file.parent.mkdir(parents=True, exist_ok=True)
-            args.output_file.write_text(result, encoding="utf-8")
+            try:
+                args.output_file.parent.mkdir(parents=True, exist_ok=True)
+                args.output_file.write_text(result, encoding="utf-8")
+            except OSError as exc:
+                print(f"Could not write output file: {exc}", file=sys.stderr)
+                return 1
         else:
             print(result)
-        return 0
+        return 1 if document.diagnostics.status.value != "success" else 0
 
     if args.command == "inspect":
         if args.page is not None and args.page < 1:
             print(f"Invalid page: {args.page}", file=sys.stderr)
             return 2
-        profile_name = args.ocr_model_profile or args.language
+        profile_name = args.ocr_model_profile or args.language or "pt"
         config = ExtractorConfig(
             mode=args.mode,
             language=profile_name,
@@ -368,9 +403,19 @@ def main(argv: list[str] | None = None) -> int:
             page_indices=(args.page - 1,) if args.page is not None else None,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
+        if _mode_requires_ocr(config.mode) and args.ocr_model_profile is None and args.language is None:
+            print("--ocr-model-profile is required when the selected mode can use OCR", file=sys.stderr)
+            return 2
         if _mode_requires_ocr(config.mode):
+            if args.ocr_model_profile is None:
+                print("--ocr-model-profile is required when the selected mode can use OCR", file=sys.stderr)
+                return 2
             try:
+                get_profile(config.language)
                 validate_local_ocr_models(language=config.language, cache_home=args.cache_home)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
             except PaddleOcrUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 print(
@@ -395,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             page = document.pages[0]
             if args.raw_page_json and page.native_evidence is not None:
                 print(dump_native_page_json(page.native_evidence))
-                return 0
+                return 1 if document.diagnostics.status.value != "success" else 0
             reasons = ",".join(reason.value for reason in page.diagnostics.reasons) or "none"
             print(
                 f"page={args.page} strategy={page.diagnostics.strategy.value} "
@@ -410,27 +455,43 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  - {warning}")
         else:
             print(document_report(document))
-        return 0
+        return 1 if document.diagnostics.status.value != "success" else 0
 
     if args.command == "overlay":
         index = args.page - 1
         if index < 0:
             print(f"Invalid page: {args.page}", file=sys.stderr)
             return 2
-        # overlay always uses BALANCED which can trigger OCR.
-        try:
-            validate_local_ocr_models(language="pt")
-        except PaddleOcrUnavailable as exc:
-            print(str(exc), file=sys.stderr)
+        mode = ExtractionMode(args.mode)
+        if mode == ExtractionMode.NATIVE and args.ocr_model_profile is not None:
+            print("--ocr-model-profile cannot be used with --mode native", file=sys.stderr)
+            return 2
+        if mode != ExtractionMode.NATIVE and args.ocr_model_profile is None:
             print(
-                "Run: pdftext setup-models",
+                f"--ocr-model-profile is required with --mode {mode.value}",
                 file=sys.stderr,
             )
-            return 1
+            return 2
+        if args.ocr_model_profile is not None:
+            profile_name = args.ocr_model_profile or args.language or "pt"
+            try:
+                get_profile(profile_name)
+                validate_local_ocr_models(language=profile_name)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            except PaddleOcrUnavailable as exc:
+                print(str(exc), file=sys.stderr)
+                print(
+                    f"Run: pdftext setup-models --ocr-model-profile {profile_name}",
+                    file=sys.stderr,
+                )
+                return 1
         try:
             document = PdfTextExtractor(
                 ExtractorConfig(
-                    mode=ExtractionMode.BALANCED,
+                    mode=mode,
+                    language=args.ocr_model_profile or "pt",
                     page_indices=(index,),
                 )
             ).extract(args.pdf)
@@ -448,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.ocr_batch_size < 1:
             print("--ocr-batch-size must be at least 1", file=sys.stderr)
             return 2
-        profile_name = args.ocr_model_profile or args.language
+        profile_name = args.ocr_model_profile or args.language or "pt"
         config = ExtractorConfig(
             mode=args.mode,
             language=profile_name,
@@ -463,8 +524,15 @@ def main(argv: list[str] | None = None) -> int:
             print("--workers must be at least 1", file=sys.stderr)
             return 2
         if _mode_requires_ocr(config.mode):
+            if args.ocr_model_profile is None:
+                print("--ocr-model-profile is required when the selected mode can use OCR", file=sys.stderr)
+                return 2
             try:
+                get_profile(config.language)
                 validate_local_ocr_models(language=config.language, cache_home=args.cache_home)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
             except PaddleOcrUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 print(
@@ -483,17 +551,28 @@ def main(argv: list[str] | None = None) -> int:
             _print_fatal_extraction_error(exc)
             return 1
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        return 0
+        return 1 if any(
+            document.get("status") != "success"
+            for document in report.get("documents", [])
+        ) else 0
 
     if args.command == "compare":
         ocr_adapters = {"structured-balanced"}
         if any(adapter in ocr_adapters for adapter in args.adapters):
+            if args.ocr_model_profile is None and args.language is None:
+                print("An explicit --ocr-model-profile or --language is required when structured-balanced is selected", file=sys.stderr)
+                return 2
+            profile_name = args.ocr_model_profile or args.language or "pt"
             try:
-                validate_local_ocr_models(language=args.language)
+                get_profile(profile_name)
+                validate_local_ocr_models(language=profile_name)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
             except PaddleOcrUnavailable as exc:
                 print(str(exc), file=sys.stderr)
                 print(
-                    "Run: pdftext setup-models",
+                    f"Run: pdftext setup-models --ocr-model-profile {profile_name}",
                     file=sys.stderr,
                 )
                 return 1
@@ -502,21 +581,21 @@ def main(argv: list[str] | None = None) -> int:
                 args.pdf,
                 args.adapters,
                 reference=args.reference,
-                language=args.language,
+                language=args.ocr_model_profile or args.language or "pt",
                 include_text=args.include_text,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
         print(json.dumps(comparison, ensure_ascii=False, indent=2))
-        return 0
+        return 0 if comparison.get("status") == "success" else 1
 
     if args.command == "setup-models":
-        profile_name = args.ocr_model_profile or args.language
+        profile_name = args.ocr_model_profile or args.language or "pt"
         return _cmd_setup_models(profile_name, args.cache_home)
 
     if args.command == "models-status":
-        profile_name = args.ocr_model_profile or args.language
+        profile_name = args.ocr_model_profile or args.language or "pt"
         return _cmd_models_status(profile_name, args.cache_home)
 
     return 2
