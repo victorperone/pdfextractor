@@ -144,7 +144,7 @@ def _render_page_legacy(
                 continue
             fallback = "\n".join(
                 line.text.rstrip()
-                for line in region.native_lines
+                for line in _legacy_region_lines(region)
                 if line.text.strip()
             ).strip()
             if fallback:
@@ -155,7 +155,7 @@ def _render_page_legacy(
             prefix = "#" * region.heading_level
             title_text = " ".join(
                 line.text.strip()
-                for line in region.native_lines
+                for line in _legacy_region_lines(region)
                 if line.text.strip()
             )
             if title_text:
@@ -164,7 +164,7 @@ def _render_page_legacy(
 
         body = "\n".join(
             line.text.rstrip()
-            for line in region.native_lines
+            for line in _legacy_region_lines(region)
             if line.text.strip()
         ).strip()
         if body:
@@ -177,6 +177,45 @@ def _render_page_legacy(
             f"{rendered}"
         )
     return page_parts
+
+
+def _legacy_region_lines(region) -> list:
+    """Return a region's native and OCR lines in reading order.
+
+    The canonical assembler normally turns OCR evidence into content blocks.
+    Older or externally constructed pages can reach the Markdown fallback
+    before that happens, so include OCR-only lines here as well. Figure OCR
+    uses the same overlap rule as the canonical reading-order path to avoid
+    rendering a native/OCR duplicate twice.
+    """
+    if not region.ocr_lines:
+        return list(region.native_lines)
+
+    from copy import copy
+
+    from structured_pdf_text.document import RegionKind
+    from structured_pdf_text.text.reading_order import order_lines_in_region
+
+    lines = list(region.native_lines)
+    seen_line_ids = {line.line_id for line in lines if line.line_id is not None}
+    for line in region.ocr_lines:
+        if line.line_id is not None and line.line_id in seen_line_ids:
+            continue
+        if region.kind == RegionKind.FIGURE and any(
+            line.bbox.iou(existing.bbox) >= 0.20 for existing in lines
+        ):
+            continue
+        lines.append(line)
+        if line.line_id is not None:
+            seen_line_ids.add(line.line_id)
+
+    # Reuse the canonical region ordering rules on a shallow copy so OCR lines
+    # participate without mutating the page's source evidence.
+    ordered_region = copy(region)
+    ordered_region.native_lines = lines
+    ordered_region.ocr_lines = []
+    ordered_lines, _ = order_lines_in_region(ordered_region)
+    return ordered_lines
 
 
 def _region_has_renderable_table(region, page_index, rendered_tables) -> bool:

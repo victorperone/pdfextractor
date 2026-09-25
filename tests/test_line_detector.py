@@ -21,6 +21,7 @@ from structured_pdf_text.text.line_detector import (
     _mark_ghost_punctuation_candidates,
     _merge_script_lines,
     _reconcile_with_textpage,
+    _collapse_spaced_capital_runs,
     reconstruct_native_lines,
 )
 
@@ -441,3 +442,19 @@ def test_reconciliation_does_not_replace_when_no_good_match() -> None:
 
     assert result[0].text == "Conteúdo original"
     assert result[0].text_override is None
+
+
+def test_wide_standalone_spaced_capital_stamp_is_rejoined() -> None:
+    stamp = _text_line("R A S C U N H O", width=240.0, height=24.0)
+
+    result = _collapse_spaced_capital_runs([stamp])
+
+    assert result[0].text == "RASCUNHO"
+
+
+def test_compact_acronym_sequence_is_not_rejoined() -> None:
+    acronym = _text_line("U S A I D", width=42.0, height=10.0)
+
+    result = _collapse_spaced_capital_runs([acronym])
+
+    assert result[0].text == "U S A I D"

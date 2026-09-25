@@ -63,7 +63,11 @@ from .tables.validation import (
 from .tables.text_tracks import assess_borderless_region
 from .tables.text_join import join_table_tokens
 from .text.line_detector import lines_to_text, reconstruct_native_lines, spacing_diagnostics
-from .visibility import characters_occluded, detect_opaque_occlusion_boxes
+from .visibility import (
+    characters_inside_page,
+    characters_occluded,
+    detect_opaque_occlusion_boxes,
+)
 from .geometry import BBox
 
 
@@ -206,13 +210,14 @@ class PdfTextExtractor:
                 timings["complexity_ms"] = (time.perf_counter() - complexity_start) * 1000
                 visibility_start = time.perf_counter()
 
-                # Occlusion/redaction detection is intentionally experimental
-                # and disabled by default. A dark opaque region can be
-                # legitimate document design (for example reversed text,
-                # dark table cells, banners or labels), so it must not remove
-                # native characters unless explicitly enabled.
+                # Exclude glyphs outside the visible page and characters covered
+                # by solid, visually uniform objects. The pixel check rejects
+                # banners/cells that contain readable reversed text.
+                visible_characters, outside_page_character_count = characters_inside_page(
+                    native_page.characters,
+                    native_page.bbox,
+                )
                 opaque_occlusion_boxes: list[BBox] = []
-                visible_characters = list(native_page.characters)
                 redacted_character_count = 0
 
                 if self.config.enable_experimental_occlusion_redaction:
@@ -221,7 +226,7 @@ class PdfTextExtractor:
                         rendered_page,
                     )
                     visible_characters, redacted_character_count = characters_occluded(
-                        native_page.characters,
+                        visible_characters,
                         opaque_occlusion_boxes,
                     )
 
@@ -234,8 +239,7 @@ class PdfTextExtractor:
                 # may just have removed. Never reconcile against that
                 # unfiltered textpage after any character was suppressed.
                 textpage_reconciliation_disabled_for_redaction = (
-                    self.config.enable_experimental_occlusion_redaction
-                    and redacted_character_count > 0
+                    (redacted_character_count > 0 or outside_page_character_count > 0)
                 )
 
                 textpage_for_reconciliation = (
@@ -615,7 +619,14 @@ class PdfTextExtractor:
                     regions = [ocr_region]
                 table_start = time.perf_counter()
                 try:
-                    tables = detect_tables_native(native_page, regions)
+                    tables = detect_tables_native(
+                        native_page,
+                        regions,
+                        # Geometry confines recovery to the assigned cell.
+                        # Covered cells are blanked immediately afterward.
+                        allow_textpage_recovery=outside_page_character_count == 0,
+                    )
+                    _clear_occluded_table_cells(tables, opaque_occlusion_boxes)
                 except FatalExtractionError:
                     raise
                 except Exception as exc:
@@ -808,6 +819,7 @@ class PdfTextExtractor:
                             _bbox_to_dict(box) for box in opaque_occlusion_boxes
                         ],
                         "redacted_native_characters": redacted_character_count,
+                        "outside_page_native_characters": outside_page_character_count,
                         "layout_engine": type(self.layout_engine).__name__ if len(regions) > 0 else None,
                         "ocr_requested": ocr_any_requested,
                         "ocr_outcome": ocr_outcome,
@@ -943,10 +955,8 @@ class PdfTextExtractor:
                         regions=regions,
                         tables=tables,
                         diagnostics=diagnostics,
-                        # Raw output reflects the reconstructed native
-                        # evidence. Experimental visual occlusion filtering,
-                        # when enabled, has already been applied before
-                        # native_lines were built.
+                        # Raw output reflects reconstructed native evidence
+                        # after page-boundary and visual-occlusion filtering.
                         raw_text=lines_to_text(native_lines),
                         native_evidence=(
                             native_page if self.config.retain_native_evidence else None
@@ -2132,6 +2142,19 @@ def _layout_regions_if_requested(
             details=_process_memory_snapshot(),
         )
         return [f"Layout detection unavailable: {type(exc).__name__}: {exc}"]
+
+
+def _clear_occluded_table_cells(tables: list[Any], boxes: list[BBox]) -> None:
+    """Remove all cell text where an opaque visual object covers the cell."""
+    if not boxes:
+        return
+    for table in tables:
+        for cell in table.cells:
+            if cell.bbox is None:
+                continue
+            if any(cell.bbox.overlap_ratio(box) >= 0.05 for box in boxes):
+                cell.text = ""
+                cell.tokens.clear()
 
 
 def _bbox_to_dict(box: BBox) -> dict[str, float]:

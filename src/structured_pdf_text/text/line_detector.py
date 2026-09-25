@@ -14,6 +14,7 @@ writing direction. The key decisions made here are:
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from dataclasses import dataclass, replace
 from statistics import median
@@ -97,6 +98,10 @@ def reconstruct_native_lines(
     lines.sort(key=lambda line: (line.bbox.y0, line.bbox.x0))
     if extracted_text:
         lines = _reconcile_with_textpage(lines, extracted_text)
+        lines = _remove_reconciled_punctuation_fragments(lines)
+        lines = _remove_joined_prefix_duplicates(lines)
+    lines = _mark_identifier_continuations(lines)
+    lines = _collapse_spaced_capital_runs(lines)
     lines = _mark_ghost_punctuation_candidates(lines)
     lines = _merge_script_lines(lines)
     return lines
@@ -178,10 +183,11 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
                 best_index, best_score = index, score
         if best_index is not None and best_score >= 0.92:
             candidate = candidates[best_index]
-            should_replace = (
-                best_score < 1.0
-                or _needs_textpage_spacing_recovery(line.text, candidate)
-            )
+            # When alphanumeric content matches exactly, PDFium's text-page
+            # line is a safe source for spacing and punctuation as well. This
+            # repairs glyphs split into overlapping native fragments (e.g.
+            # SQL operators) without changing the character sequence.
+            should_replace = candidate != line.text
             if should_replace:
                 output[line_index] = TextLine(
                     tokens=line.tokens,
@@ -203,6 +209,119 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
         else:
             output[line_index] = line
     return [line for line in output if line is not None]
+
+
+def _remove_reconciled_punctuation_fragments(lines: list[TextLine]) -> list[TextLine]:
+    """Drop punctuation-only overlap fragments already represented by a text-page line."""
+    result: list[TextLine] = []
+    for line in lines:
+        if _compact(line.text) or not line.text.strip():
+            result.append(line)
+            continue
+        duplicate = any(
+            other is not line
+            and other.text_override is not None
+            and line.bbox.overlap_ratio(other.bbox) >= 0.35
+            and _native_orders_overlap(line, other)
+            for other in lines
+        )
+        if not duplicate:
+            result.append(line)
+    return result
+
+
+def _native_orders_overlap(first: TextLine, second: TextLine) -> bool:
+    if None in (first.native_order_min, first.native_order_max, second.native_order_min, second.native_order_max):
+        return False
+    return (
+        first.native_order_min <= second.native_order_max + 1
+        and second.native_order_min <= first.native_order_max + 1
+    )
+
+
+def _remove_joined_prefix_duplicates(lines: list[TextLine]) -> list[TextLine]:
+    """Remove a duplicated prefix fragment when PDFium also returns its full joined line."""
+    removed: set[int] = set()
+    for index, line in enumerate(lines[:-1]):
+        if not line.join_next_without_space:
+            continue
+        prefix = _compact(line.text)
+        if not prefix:
+            continue
+        for following in lines[index + 1 : index + 3]:
+            candidate = _compact(following.text)
+            vertical_gap = following.bbox.y0 - line.bbox.y1
+            if (
+                candidate.startswith(prefix)
+                and 0 <= vertical_gap <= max(line.bbox.height, following.bbox.height) * 1.5
+                and _native_orders_overlap(line, following)
+            ):
+                removed.add(id(line))
+                break
+    return [line for line in lines if id(line) not in removed]
+
+
+def _mark_identifier_continuations(lines: list[TextLine]) -> list[TextLine]:
+    """Join wrapped uppercase alphanumeric identifiers split at a visual line end."""
+    result = list(lines)
+    for index, (line, following) in enumerate(zip(result, result[1:])):
+        if line.join_next_without_space or following.join_next_without_space:
+            continue
+        left = line.text.rstrip().rsplit(None, 1)[-1] if line.text.strip() else ""
+        right = following.text.lstrip().split(None, 1)[0] if following.text.strip() else ""
+        left_match = re.search(r"([A-Z0-9]{5,})$", left)
+        right_match = re.match(r"([A-Z0-9]{5,})", right)
+        if left_match is None or right_match is None:
+            continue
+        left = left_match.group(1)
+        right = right_match.group(1)
+        if not (any(char.isalpha() for char in left) and any(char.isdigit() for char in left)):
+            continue
+        if not (any(char.isalpha() for char in right) and any(char.isdigit() for char in right)):
+            continue
+        if len(left) + len(right) < 18:
+            continue
+        vertical_gap = following.bbox.y0 - line.bbox.y1
+        same_indent = abs(line.bbox.x0 - following.bbox.x0) <= max(15.0, line.bbox.height * 1.5)
+        line_reaches_right_edge = line.bbox.x1 >= following.bbox.x1 + 30.0
+        if (
+            0 <= vertical_gap <= max(line.bbox.height, following.bbox.height) * 1.5
+            and same_indent
+            and line_reaches_right_edge
+            and _native_orders_adjacent(line, following)
+        ):
+            result[index] = replace(line, join_next_without_space=True)
+    return result
+
+
+def _collapse_spaced_capital_runs(lines: list[TextLine]) -> list[TextLine]:
+    """Join a standalone, strongly tracked uppercase word into one token.
+
+    This targets stamp-like lines serialized as ``R A S C U N H O``. The
+    complete-line, minimum-length, and wide-geometry checks avoid changing
+    ordinary acronym sequences embedded in prose.
+    """
+    pattern = re.compile(r"(?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ]\s+){4,}[A-ZÁÉÍÓÚÂÊÔÃÕÇ]")
+    result: list[TextLine] = []
+    for line in lines:
+        text = line.text.strip()
+        compact = "".join(text.split())
+        if (
+            pattern.fullmatch(text)
+            and 5 <= len(compact) <= 16
+            and line.bbox.height > 0
+            and line.bbox.width / line.bbox.height >= 5.0
+        ):
+            result.append(replace(line, text_override=compact))
+        else:
+            result.append(line)
+    return result
+
+
+def _native_orders_adjacent(first: TextLine, second: TextLine) -> bool:
+    if first.native_order_max is None or second.native_order_min is None:
+        return False
+    return 0 <= second.native_order_min - first.native_order_max <= 4
 
 
 def _is_ghost_punctuation_line(line: TextLine) -> bool:

@@ -109,8 +109,8 @@ class ExtractorConfig:
         enable_complexity_render: Render a downscaled page image for
             complexity analysis.  Disabling skips the ink-ratio signal.
         enable_experimental_occlusion_redaction: Remove native text visually
-            covered by opaque objects.  Disabled by default — guarantees are
-            not yet sufficient for all PDF layouts.
+            covered by solid opaque objects. Enabled by default and guarded by
+            rendered-pixel uniformity checks.
         complexity_render_scale: Scale factor for complexity analysis renders
             (default 0.5 × OCR render scale).
         ocr_render_scale: Scale factor applied when rendering pages for OCR
@@ -144,11 +144,9 @@ class ExtractorConfig:
     merge_cross_page_tables: bool = False
     enable_complexity_render: bool = True
 
-    # Experimental safety feature. Disabled by default because visually
-    # occluded native text cannot yet be removed with sufficient guarantees
-    # across arbitrary PDF layouts such as dark banners, reversed text,
-    # highlighted cells, and other legitimate opaque backgrounds.
-    enable_experimental_occlusion_redaction: bool = False
+    # Visual filtering is enabled by default. Solid object boxes must also
+    # pass rendered-pixel uniformity checks before their covered text is cut.
+    enable_experimental_occlusion_redaction: bool = True
 
     complexity_render_scale: float = 0.5
     ocr_render_scale: float = 2.0
@@ -211,7 +209,7 @@ def best_extraction_config(
         merge_cross_page_tables=True,
         preserve_headers_footers=preserve_headers,
         ocr_quality_variants=True,
-        enable_experimental_occlusion_redaction=False,
+        enable_experimental_occlusion_redaction=True,
     )
 
 

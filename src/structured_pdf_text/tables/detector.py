@@ -71,6 +71,8 @@ class _Grid:
 def detect_tables_native(
     page: NativePageEvidence,
     regions: list[LayoutRegion] | None = None,
+    *,
+    allow_textpage_recovery: bool = True,
 ) -> list[StructuredTable]:
     """Run strict, relaxed and borderless deterministic table tiers."""
     candidates = [region for region in (regions or []) if region.kind == RegionKind.TABLE]
@@ -124,9 +126,10 @@ def detect_tables_native(
         )
         if borderless is not None:
             tables.append(borderless)
-    for table in tables:
-        for cell in table.cells:
-            cell.text = recover_cell_text(cell.text, page.extracted_text)
+    if allow_textpage_recovery:
+        for table in tables:
+            for cell in table.cells:
+                cell.text = recover_cell_text(cell.text, page.extracted_text)
     return tables
 
 
@@ -402,7 +405,7 @@ def _table_from_grid(
                     rowspan=rs,
                     colspan=cs,
                     bbox=bbox,
-                    text=join_table_tokens(tokens),
+                    text=_cell_text_preserving_vertical_lines(lines, tokens),
                     tokens=tokens,
                     confidence=0.95 if tokens else 0.85,
                 )
@@ -423,6 +426,32 @@ def _table_from_grid(
         confidence=grid.coherence,
         method=TableMethod.STRICT_GRID,
     )
+
+
+def _cell_text_preserving_vertical_lines(
+    lines: list[TextLine],
+    tokens: list,
+) -> str:
+    """Keep narrow, vertically stacked glyph runs legible in table output.
+
+    Cell assignment is still entirely geometry based. This only changes how
+    an already-assigned column of glyphs is serialized, using explicit line
+    breaks so it is not flattened into an ordinary horizontal word.
+    """
+    visible = [token for token in tokens if token.text.strip()]
+    single_glyphs = [token for token in visible if len(token.text.strip()) == 1]
+    if len(single_glyphs) >= 5:
+        median_width = median(token.bbox.width for token in single_glyphs)
+        median_height = median(token.bbox.height for token in single_glyphs)
+        centers_x = [token.bbox.cx for token in single_glyphs]
+        centers_y = [token.bbox.cy for token in single_glyphs]
+        vertical_span = max(centers_y) - min(centers_y)
+        narrow_column = max(centers_x) - min(centers_x) <= max(4.0, median_width * 2.5)
+        vertically_spaced = vertical_span >= median_height * 4.0
+        if narrow_column and vertically_spaced and len(single_glyphs) >= len(visible) * 0.7:
+            ordered = sorted(single_glyphs, key=lambda token: (token.bbox.cy, token.bbox.cx))
+            return "<br>".join(token.text.strip() for token in ordered)
+    return join_table_tokens(tokens)
 
 
 def _segment_exists_at_x(

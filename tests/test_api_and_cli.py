@@ -43,41 +43,42 @@ def test_cli_overlay(tmp_path, capsys):
     assert out.exists()
 
 
-def test_experimental_occlusion_redaction_is_disabled_by_default():
+def test_experimental_occlusion_redaction_is_enabled_by_default():
     config = ExtractorConfig()
 
-    assert config.enable_experimental_occlusion_redaction is False
+    assert config.enable_experimental_occlusion_redaction is True
 
 
-def test_best_profile_does_not_enable_experimental_occlusion_redaction():
+def test_best_profile_enables_experimental_occlusion_redaction():
     config = best_extraction_config()
 
-    assert config.enable_experimental_occlusion_redaction is False
+    assert config.enable_experimental_occlusion_redaction is True
 
 
-def test_default_extraction_does_not_run_occlusion_redaction(
+def test_default_extraction_runs_occlusion_redaction(
     tmp_path,
     monkeypatch,
 ):
-    pdf = _two_line_pdf(tmp_path / "visibility-default-off.pdf")
+    pdf = _two_line_pdf(tmp_path / "visibility-default-on.pdf")
 
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError(
-            "Experimental occlusion detection must not run by default"
-        )
+    calls = []
+
+    def stub_detect_opaque_occlusion_boxes(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
 
     monkeypatch.setattr(
         api_module,
         "detect_opaque_occlusion_boxes",
-        fail_if_called,
+        stub_detect_opaque_occlusion_boxes,
     )
 
     result = PdfTextExtractor().extract(pdf)
 
     facts = result.pages[0].diagnostics.facts
 
-    assert facts["experimental_occlusion_redaction_enabled"] is False
-    assert facts["textpage_reconciliation_disabled_for_redaction"] is False
+    assert calls
+    assert facts["experimental_occlusion_redaction_enabled"] is True
     assert facts["opaque_occlusion_boxes"] == []
     assert facts["redacted_native_characters"] == 0
 

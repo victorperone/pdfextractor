@@ -28,8 +28,8 @@ from structured_pdf_text.document import (
     StructuredTable,
 )
 from structured_pdf_text.assemble.content import assemble_page_content
-from structured_pdf_text.assemble.content import _build_reading_text, _reindex_blocks
-from structured_pdf_text.assemble.conservation import record_content_conservation
+from structured_pdf_text.assemble.content import _build_reading_text, _normalized_lines_text, _reindex_blocks
+from structured_pdf_text.assemble.conservation import line_identity, record_content_conservation
 from structured_pdf_text.assemble.repeated_regions import detect_repeated_headers_footers, repeated_line_keys
 from structured_pdf_text.layout.heading import assign_heading_levels
 from structured_pdf_text.geometry import BBox
@@ -129,6 +129,8 @@ def assemble_document(
     for page in pages:
         result = assemble_page_content(page)
         blocks = list(result.blocks)
+        if not preserve_headers_footers:
+            blocks = _split_mixed_repeated_blocks(blocks, page, repeated)
         _apply_repeated_suppression(
             blocks,
             page,
@@ -317,6 +319,74 @@ def _line_in_top_band(line_bbox: BBox, page_bbox: BBox, rotation: int) -> bool:
     # 0° or unknown: canonical top-left, y grows down
     limit = page_bbox.y0 + page_bbox.height * fraction
     return line_bbox.y0 <= limit
+
+
+def _split_mixed_repeated_blocks(
+    blocks: list,
+    page: StructuredPage,
+    repeated: dict[str, list[int]],
+) -> list:
+    """Separate repeated edge lines from body lines before block suppression.
+
+    Content assembly may group a running header with the first body line.
+    Splitting only confirmed line-level furniture lets the header be omitted
+    without discarding the body text or weakening conservation accounting.
+    """
+    if not repeated:
+        return blocks
+
+    keys_by_line = repeated_line_keys(page)
+    repeated_ids = {
+        line_id
+        for line_id, key in keys_by_line.items()
+        if page.page_index in repeated.get(key, ())
+    }
+    if not repeated_ids:
+        return blocks
+
+    lines_by_id = {
+        line_identity(line): line
+        for region in page.regions
+        for line in [*region.native_lines, *region.ocr_lines]
+    }
+    splittable = {
+        ContentKind.TEXT, ContentKind.TITLE, ContentKind.CAPTION,
+        ContentKind.HEADER, ContentKind.FOOTER, ContentKind.FOOTNOTE,
+        ContentKind.MARGINALIA, ContentKind.UNKNOWN,
+    }
+    result: list = []
+    for block in blocks:
+        if block.kind not in splittable or len(block.line_ids) < 2:
+            result.append(block)
+            continue
+        statuses = [line_id in repeated_ids for line_id in block.line_ids]
+        if all(status == statuses[0] for status in statuses):
+            result.append(block)
+            continue
+
+        runs: list[tuple[bool, list[str]]] = []
+        for line_id, is_repeated in zip(block.line_ids, statuses):
+            if not runs or runs[-1][0] != is_repeated:
+                runs.append((is_repeated, [line_id]))
+            else:
+                runs[-1][1].append(line_id)
+        for run_index, (_, line_ids) in enumerate(runs, start=1):
+            source_lines = [lines_by_id[line_id] for line_id in line_ids if line_id in lines_by_id]
+            text = _normalized_lines_text(source_lines)
+            if not source_lines or not text:
+                continue
+            segment = dataclasses.replace(
+                block,
+                block_id=f"{block.block_id}:repeat-split-{run_index}",
+                bbox=BBox.union_all([line.bbox for line in source_lines]),
+                text=text,
+                line_ids=list(line_ids),
+                list_items=[],
+                suppressed=False,
+                suppression_reason=None,
+            )
+            result.append(segment)
+    return result
 
 
 def _apply_repeated_suppression(
