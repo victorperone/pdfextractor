@@ -30,7 +30,7 @@ Usage:
     python scripts/eval_v6/compare_hybrid.py corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf \\
         --v5-cache ~/.cache/pdfextractor/paddlex \\
         --v6-cache ~/.cache/pdfextractor/paddlex-v6-eval \\
-        --confidence-threshold 0.70 \\
+        --confidence-threshold 0.85 \\
         --output-dir output/compare_hybrid
 """
 from __future__ import annotations
@@ -540,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--confidence-threshold", type=float, default=DEFAULT_THRESHOLD,
-        help="Confiança mínima de OCR abaixo da qual o TableMagic é ativado (padrão: 0.70).",
+        help="Confiança mínima de OCR abaixo da qual o TableMagic é ativado (padrão: 0.85).",
     )
     parser.add_argument("--pages", help="Páginas 1-based, ex: 1,3-5,7")
     parser.add_argument("--output-dir", type=Path, default=Path("output/compare_hybrid"))

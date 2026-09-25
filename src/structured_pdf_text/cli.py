@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="PROFILE",
         help=(
-            "OCR model profile to use (e.g. pt-v6-medium). "
+            "OCR model profile to use (e.g. pt). "
             "Required for OCR modes unless --language explicitly names a profile. "
             "PP-OCRv6 is the default profile; PP-OCRv5 remains available as pt-v5."
         ),
@@ -278,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="PROFILE",
         help=(
-            "OCR model profile to download (e.g. pt-v6-medium). "
+            "OCR model profile to download (e.g. pt). "
             "When omitted, uses the profile matching --language. "
             "Use --cache-home to store v6 models in a separate directory from v5."
         ),
@@ -299,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         "--ocr-model-profile",
         default=None,
         metavar="PROFILE",
-        help="OCR model profile to check (e.g. pt-v6-medium). When omitted, uses --language.",
+        help="OCR model profile to check (e.g. pt). When omitted, uses --language.",
     )
     models_status_parser.add_argument(
         "--cache-home",

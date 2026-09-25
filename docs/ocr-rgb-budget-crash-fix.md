@@ -28,7 +28,7 @@ variants therefore produced:
 
 ### Why upscaling worsens the crash
 
-PaddleOCR's detection model (`PP-OCRv5_server_det`) caps the **detection
+PaddleOCR's detection model (`PP-OCRv5_server_det`, agora perfil de rollback `pt-v5`) caps the **detection
 tensor** to `limit_side_len=960 px` on the long side.  All three variants
 therefore produce a similar ~625 × 960 detection tensor.
 
@@ -86,7 +86,7 @@ automatically.
 
 ### 2 — Detection limit aligned with budget in `paddle.py`
 
-The `PP-OCRv5_server_det` detection model previously capped all inputs to
+The `PP-OCRv5_server_det` detection model (agora perfil de rollback `pt-v5`) previously capped all inputs to
 960 px on the long side, making the 1.0×, 1.5× and 2.0× variants produce
 **identical** detection tensors (~625 × 960) regardless of input size.
 Upscaling therefore had no effect on detection quality.

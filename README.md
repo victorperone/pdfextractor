@@ -258,12 +258,14 @@ pdftext models-status
 `--mode` selects the extraction strategy; `--ocr-model-profile` selects the
 models. Commands that can invoke OCR require an explicit profile via
 `--ocr-model-profile` or an explicit `--language` value. In the API and model
-management commands, `pt` is the default; its public alias `pt-v6-medium` also
-selects PP-OCRv6 medium. `pt-v5` selects PP-OCRv5 only when explicitly requested. `--ocr-quality-policy` is independent: it
-selects the OCR variant strategy. `exhaustive` emits an informational
-resource-use warning and does not automatically reduce OCR quality. The
-`balanced` and `ocr` modes use the optional PaddleOCR adapter. On CPU/WSL the
-adapter disables MKL-DNN/OneDNN for compatibility. Models are loaded from
+management commands, `pt` is the default and selects PP-OCRv6 medium
+(`pt-v6-medium` is a supported alias for backward compatibility). `pt-v5`
+selects PP-OCRv5 only when explicitly requested. `--ocr-quality-policy` is
+independent: it selects the OCR variant strategy. `exhaustive` emits an
+informational resource-use warning and does not automatically reduce OCR
+quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter.
+The adapter runs with MKL-DNN/OneDNN and document unwarping (UVDoc) enabled;
+both have been confirmed working on Windows Server 2025. Models are loaded from
 explicit local paths; remote model-source checks are disabled at runtime.
 Model paths and behaviour can be overridden through `PaddleOcrEngine`
 constructor options.

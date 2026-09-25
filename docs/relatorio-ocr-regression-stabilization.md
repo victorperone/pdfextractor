@@ -12,7 +12,7 @@ Validação executada em 22/09/2026 no WSL, sem commit, push ou merge.
 | Python local | `3.10.12` (o projeto declara `>=3.12`; lacuna do ambiente) |
 | PaddlePaddle / PaddleOCR / PaddleX | `3.3.1 / 3.7.0 / 3.7.2` |
 | PDFium / Pillow / pytest | `pypdfium2 5.13.0 / 10.3.0 / 9.1.1` |
-| Modelos | `PP-LCNet_x1_0_doc_ori`, `PP-LCNet_x1_0_textline_ori`, `PP-OCRv5_server_det`, `latin_PP-OCRv5_mobile_rec` |
+| Modelos | `PP-LCNet_x1_0_doc_ori`, `PP-LCNet_x1_0_textline_ori`, `PP-OCRv5_server_det`, `latin_PP-OCRv5_mobile_rec` (perfil `pt-v5`; desde 2026-09-24 o default de produção é PP-OCRv6 medium, perfil `pt`) |
 | Estado dos modelos | `Offline OCR readiness: READY` |
 | Corpus | 60 páginas; PDF SHA-256 `be42cdfe9ee3f161b3ed04a0eb2edbaf41b5ae1dd06755b1be8df564b6d8f15d` |
 
