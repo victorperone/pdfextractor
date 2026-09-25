@@ -504,3 +504,12 @@ Provisional guidance:
 These values are provisional and will be revisited after the planned 1000-page
 endurance benchmark. The runtime does not automatically lower text-detection
 resolution or switch to a lower-quality OCR profile when memory is scarce.
+
+
+## License
+
+This project is licensed under the Apache License 2.0.
+See the [LICENSE](LICENSE) file for details.
+
+This project uses third-party components, including PaddleOCR, which remain
+subject to their respective licenses.
