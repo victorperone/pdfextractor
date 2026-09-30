@@ -51,10 +51,8 @@ def build_ocr_backend(config: "ExtractorConfig") -> OCRBackend:
             return TesseractBackend(config)
 
         case "easyocr":
-            raise UnsupportedOCREngine(
-                "Engine 'easyocr' is planned for Phase 7. "
-                "See Plano_Comparativo_Paddle.md §20."
-            )
+            from structured_pdf_text.ocr.backends.easyocr import EasyOCRBackend
+            return EasyOCRBackend(config)
 
         case _:
             raise UnsupportedOCREngine(

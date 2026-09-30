@@ -37,10 +37,29 @@
 | 4 | **Fase 4 — RapidOCR ONNX** | `backends/rapidocr.py` (runtime=onnxruntime), 32/32 OK, 88.2s (~2.76s/pág) — modelos PP-OCRv4 embutidos (CF-2) | ✅ |
 | 5 | **Fase 5 — RapidOCR OpenVINO** | `backends/rapidocr.py` (runtime=openvino), openvino==2024.4.0 | ✅ |
 | 6 | **Fase 6 — Tesseract** | `backends/tesseract.py`, TSV parser, PSM 3 + OEM 1, v5.5.3 | ✅ |
-| 7 | **Fase 7 — EasyOCR** | `backends/easyocr.py`, PyTorch CPU, modelos offline, benchmark | ⬜ |
+| 7 | **Fase 7 — EasyOCR** | `backends/easyocr.py`, PyTorch CPU, modelos latin_g2 (~700MB download) | ✅ |
 | 8 | **Fase 8 — E2E** | confidence policies calibradas por engine, pipeline completo, TableMagic auditado | ⬜ |
 
 > **Como marcar:** substituir `⬜` por `✅` ao concluir cada etapa.
+
+### Baseline Tesseract (Fase 6 — run `tesseract-por-psm3-oem1-001`)
+
+| Métrica | Valor |
+|---|---|
+| git SHA | `b901b2fca2cfc133392fce85d1d1b5339bcd12f6` |
+| Páginas avaliadas | 32 (scan OCR puro, pp. 72–103) |
+| Páginas OK / falhas | 32 / 0 |
+| CER / WER | — (sem referência; comparar na Fase 8) |
+| Tempo total | 18.5 s (~0.58 s/página) |
+| Tesseract | v5.5.3.20260724 |
+| Tessdata | `C:\Program Files\Tesseract-OCR\tessdata\` (lang: `por`) |
+| PSM / OEM | 3 / 1 (auto page seg + LSTM only) |
+| Token level | word (42–65 tokens/página) |
+| Render scale | 2.0 (144 DPI) |
+
+> **Velocidade:** mais rápido que RapidOCR OpenVINO (0.63 s/pág). Token counts mais ricos pois Tesseract opera em nível de palavra (vs linha do RapidOCR).
+
+---
 
 ### Baseline RapidOCR OpenVINO (Fase 5 — run `rapidocr-openvino-001`)
 
