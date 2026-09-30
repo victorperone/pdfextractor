@@ -42,6 +42,25 @@
 
 > **Como marcar:** substituir `⬜` por `✅` ao concluir cada etapa.
 
+### Baseline EasyOCR (Fase 7 — run `easyocr-pt-cpu-001`)
+
+| Métrica | Valor |
+|---|---|
+| git SHA | `965cf785e8a1000f7bd4d3ebd64535d0f0818975` |
+| Páginas avaliadas | 32 (scan OCR puro, pp. 72–103) |
+| Páginas OK / falhas | 32 / 0 |
+| CER / WER | — (sem referência; comparar na Fase 8) |
+| Tempo total | 173.1 s (~5.4 s/página) |
+| easyocr | 1.7.2 |
+| torch | 2.14.0+cpu |
+| Modelos | craft_mlt_25k.pth (det) + latin_g2 (rec, ~700 MB, baixado automaticamente) |
+| Token level | line (12–34 tokens/página) |
+| Render scale | 2.0 (144 DPI) |
+
+> **CF-3:** EasyOCR atualiza numpy para 2.5.x (incompatível com openvino 2024.4.0 que exige `<2.1.0`). Corrigir com `pip install "numpy==2.0.2"` após todos os installs.
+
+---
+
 ### Baseline Tesseract (Fase 6 — run `tesseract-por-psm3-oem1-001`)
 
 | Métrica | Valor |

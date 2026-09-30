@@ -13,7 +13,6 @@
 pypdfium2>=5.0
 Pillow>=10.0
 psutil>=5.9
-numpy==2.0.2             # pinado: openvino 2024.4.0 exige numpy<2.1.0
 
 # Fase 1-3: Paddle (baseline)
 paddlepaddle==3.3.1
@@ -28,8 +27,17 @@ onnxruntime==1.30.0
 openvino==2024.4.0
 # rapidocr-openvino==1.4.4  ← instalar separado com --no-deps (ver nota acima)
 
-# Fase 7: EasyOCR (PyTorch CPU — ainda não implementado)
-# easyocr>=1.7
+# Fase 7: EasyOCR (PyTorch CPU)
+torch==2.14.0+cpu   # via: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.29.0+cpu
+easyocr==1.7.2
+
+# ATENÇÃO — conflito de numpy:
+# EasyOCR atualiza numpy para 2.5.x; openvino 2024.4.0 exige numpy<2.1.0.
+# Após instalar tudo, fixar numpy:
+#   pip install "numpy==2.0.2"
+# numpy 2.0.2 é compatível com: openvino 2024.4.0, easyocr 1.7.2, paddlex 3.7.2, torch 2.14.0
+numpy==2.0.2
 
 # Tesseract (Fase 6): executável externo — NÃO é pacote Python
 # Instalar: https://github.com/UB-Mannheim/tesseract/wiki

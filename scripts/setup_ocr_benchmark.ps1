@@ -35,11 +35,16 @@ pip install "openvino==2024.4.0"
 # usamos --no-deps para manter openvino==2024.4.0 que tem suporte a Python 3.12
 pip install "rapidocr-openvino==1.4.4" --no-deps
 
-# --- 4. EasyOCR (Fase 7 — instalar antes de confirmar disponibilidade) ---
-# Descomentado quando Fase 7 for implementada
-# Write-Host ""
-# Write-Host "[4/4] EasyOCR..." -ForegroundColor Yellow
-# pip install "easyocr>=1.7"
+# --- 4. EasyOCR + PyTorch CPU ---
+Write-Host ""
+Write-Host "[4/5] PyTorch CPU + EasyOCR..." -ForegroundColor Yellow
+pip install torch==2.14.0+cpu torchvision==0.29.0+cpu --index-url https://download.pytorch.org/whl/cpu
+pip install "easyocr==1.7.2"
+
+# --- 5. Fixar numpy (conflito: easyocr atualiza para 2.5.x; openvino exige <2.1.0) ---
+Write-Host ""
+Write-Host "[5/5] Fixando numpy==2.0.2 (compatível com openvino + easyocr + paddlex)..." -ForegroundColor Yellow
+pip install "numpy==2.0.2"
 
 # --- Verificação final ---
 Write-Host ""
