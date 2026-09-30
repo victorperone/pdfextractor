@@ -111,54 +111,70 @@ def _patch_torch_for_paddle() -> None:
     """Inject a minimal torch stub so modelscope doesn't crash with DLL 0xC0000139.
 
     paddleocr → modelscope → torch (module-level import). On Windows, the CPU
-    torch DLL installed by EasyOCR can fail at DLL load time with a fatal
-    0xC0000139 (entry-point not found) before Python can catch anything.
-    PaddlePaddle never actually uses PyTorch; only modelscope probes it.
-    Stubbing torch in sys.modules before paddleocr is imported prevents the
-    DLL from being loaded at all, while keeping PaddlePaddle fully functional.
+    torch DLL installed by EasyOCR fails at DLL load time (0xC0000139) before
+    Python can catch anything. PaddlePaddle never actually uses PyTorch; only
+    modelscope probes it at import time.
+
+    The stub uses a self-extending ModuleType subclass that:
+    - Sets __spec__ (required — modelscope raises ValueError if None)
+    - Auto-creates child stub modules on first attribute access
+    - Supports context-manager protocol (needed for torch.no_grad())
     """
     import sys
     import types
+    import importlib.machinery
 
     if "torch" in sys.modules:
         return  # already loaded or previously stubbed
 
-    def _stub(name: str) -> types.ModuleType:
-        m = types.ModuleType(name)
-        m.__version__ = "0.0.0+stub"
-        return m
+    class _TorchStub(types.ModuleType):
+        """Self-extending stub module: any attribute access returns another stub."""
 
-    # Sub-packages that modelscope and paddleocr probe at import time
-    _subpackages = [
-        "torch.nn", "torch.nn.functional", "torch.nn.modules",
-        "torch.optim", "torch.optim.lr_scheduler",
-        "torch.utils", "torch.utils.data", "torch.utils.data.dataloader",
-        "torch.distributed", "torch.multiprocessing",
-        "torch.cuda", "torch.cuda.amp",
-        "torch.backends", "torch.backends.cudnn",
-        "torch.jit", "torch.autograd", "torch.autograd.function",
-        "torch.hub",
-    ]
-    for name in _subpackages:
-        sys.modules[name] = _stub(name)
+        def __init__(self, name: str) -> None:
+            super().__init__(name)
+            self.__spec__ = importlib.machinery.ModuleSpec(name, None, origin="stub")
+            self.__package__ = name.rsplit(".", 1)[0] if "." in name else name
+            self.__path__: list[str] = []  # mark as a package so sub-imports work
+            self.__version__ = "0.0.0+stub"
 
-    cuda_stub = sys.modules["torch.cuda"]
-    cuda_stub.is_available = lambda: False          # type: ignore[attr-defined]
-    cuda_stub.device_count = lambda: 0              # type: ignore[attr-defined]
+        def __getattr__(self, name: str) -> "_TorchStub":
+            child_name = f"{self.__name__}.{name}"
+            if child_name in sys.modules:
+                child = sys.modules[child_name]
+            else:
+                child = _TorchStub(child_name)
+                sys.modules[child_name] = child
+            object.__setattr__(self, name, child)
+            return child  # type: ignore[return-value]
 
-    cudnn_stub = sys.modules["torch.backends.cudnn"]
-    cudnn_stub.enabled = False                       # type: ignore[attr-defined]
-    cudnn_stub.version = lambda: 0                   # type: ignore[attr-defined]
+        # Context-manager support (torch.no_grad(), torch.inference_mode(), …)
+        def __call__(self, *args, **kwargs) -> "_TorchStub":
+            return self
 
-    torch_stub = _stub("torch")
-    torch_stub.cuda = cuda_stub                      # type: ignore[attr-defined]
-    torch_stub.backends = sys.modules["torch.backends"]  # type: ignore[attr-defined]
-    torch_stub.Tensor = object                       # type: ignore[attr-defined]
-    torch_stub.device = str                          # type: ignore[attr-defined]
-    torch_stub.float32 = "float32"                   # type: ignore[attr-defined]
-    torch_stub.float16 = "float16"                   # type: ignore[attr-defined]
-    torch_stub.int64 = "int64"                       # type: ignore[attr-defined]
-    torch_stub.no_grad = lambda f=None: (f if f else lambda g: g)  # type: ignore[attr-defined]
+        def __enter__(self) -> "_TorchStub":
+            return self
+
+        def __exit__(self, *_) -> bool:
+            return False
+
+        def __bool__(self) -> bool:
+            return False
+
+        def __iter__(self):
+            return iter([])
+
+    torch_stub = _TorchStub("torch")
+
+    # Override known probed attributes so callers get sensible values
+    torch_stub.cuda.is_available = lambda: False          # type: ignore[attr-defined]
+    torch_stub.cuda.device_count = lambda: 0              # type: ignore[attr-defined]
+    torch_stub.backends.cudnn.enabled = False             # type: ignore[attr-defined]
+    torch_stub.backends.cudnn.version = lambda: 0         # type: ignore[attr-defined]
+    torch_stub.Tensor = object                            # type: ignore[attr-defined]
+    torch_stub.device = str                               # type: ignore[attr-defined]
+    torch_stub.float32 = "float32"                        # type: ignore[attr-defined]
+    torch_stub.float16 = "float16"                        # type: ignore[attr-defined]
+    torch_stub.int64 = "int64"                            # type: ignore[attr-defined]
 
     sys.modules["torch"] = torch_stub
 
