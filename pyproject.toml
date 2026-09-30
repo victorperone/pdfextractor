@@ -35,10 +35,13 @@ ocr-rapidocr-onnx = [
     "onnxruntime>=1.18",
 ]
 # Fase 5: RapidOCR com OpenVINO (Intel CPU)
-# Instalar: pip install "structured-pdf-text[ocr-rapidocr-openvino]"
+# ATENÇÃO: instalar em duas etapas (constraint conflitante do rapidocr-openvino):
+#   pip install openvino==2024.4.0
+#   pip install rapidocr-openvino==1.4.4 --no-deps
+# openvino 2024.4.0 é a versão mais estável com suporte a Python 3.12 Windows.
 ocr-rapidocr-openvino = [
-    "rapidocr-openvino>=1.3.0",
-    "openvino>=2024.0",
+    "rapidocr-openvino==1.4.4",
+    "openvino>=2024.2.0,<2025.0.0",
 ]
 # Fase 6: Tesseract (executável externo obrigatório: tesseract 5.x + por.traineddata)
 # Sem dependência Python adicional (usa subprocess)

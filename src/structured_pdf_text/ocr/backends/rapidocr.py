@@ -1,12 +1,15 @@
-"""RapidOCR ONNX backend — OCRBackend implementation using rapidocr-onnxruntime.
+"""RapidOCR backends — OCRBackend implementations for ONNX Runtime and OpenVINO.
 
-Uses models bundled with rapidocr-onnxruntime 1.x (PP-OCRv4 variants).
+Both runtimes use the same Python API (RapidOCR class) and bundled models.
+The only difference is the underlying inference package:
+  - rapidocr-onnxruntime 1.x  → runtime="onnxruntime"
+  - rapidocr-openvino 1.x     → runtime="openvino"
 
 CF-2: Direct PP-OCRv6 ONNX export from Paddle is blocked on Windows by a DLL
-incompatibility between paddle2onnx 2.x and PaddlePaddle 3.3.1. When CF-2 is
-resolved, set environment variables to override the built-in models:
-    RAPIDOCR_DET_MODEL=/path/to/det.onnx
-    RAPIDOCR_REC_MODEL=/path/to/rec.onnx
+incompatibility (paddle2onnx 2.x + PaddlePaddle 3.3.1). Both backends use the
+PP-OCRv4 models bundled in their respective packages. Override with env vars:
+    RAPIDOCR_DET_MODEL=/path/to/det.onnx (or .xml for OpenVINO)
+    RAPIDOCR_REC_MODEL=/path/to/rec.onnx (or .xml for OpenVINO)
 """
 from __future__ import annotations
 
@@ -36,15 +39,27 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _import_rapidocr() -> type:
-    try:
-        from rapidocr_onnxruntime import RapidOCR  # type: ignore
-        return RapidOCR
-    except ImportError as exc:
-        raise ImportError(
-            "rapidocr-onnxruntime is not installed. "
-            'Install with: pip install "structured-pdf-text[ocr-rapidocr-onnx]"'
-        ) from exc
+def _import_rapidocr(runtime: str) -> type:
+    """Import RapidOCR from the appropriate runtime package."""
+    if runtime == "openvino":
+        try:
+            from rapidocr_openvino import RapidOCR  # type: ignore
+            return RapidOCR
+        except ImportError as exc:
+            raise ImportError(
+                "rapidocr-openvino is not installed. "
+                "Install with: pip install openvino==2024.4.0 && "
+                'pip install "rapidocr-openvino==1.4.4" --no-deps'
+            ) from exc
+    else:
+        try:
+            from rapidocr_onnxruntime import RapidOCR  # type: ignore
+            return RapidOCR
+        except ImportError as exc:
+            raise ImportError(
+                "rapidocr-onnxruntime is not installed. "
+                'Install with: pip install "structured-pdf-text[ocr-rapidocr-onnx]"'
+            ) from exc
 
 
 def _to_numpy(image: object):
@@ -58,7 +73,6 @@ def _to_numpy(image: object):
 
 
 def _extract_raw(out: Any) -> Any:
-    """Normalize the return value of engine(image) to a raw result list."""
     if isinstance(out, tuple) and len(out) >= 1:
         return out[0]
     if hasattr(out, "__iter__") and not isinstance(out, (str, bytes)):
@@ -96,7 +110,8 @@ def _result_to_ocr_tokens(raw: Any, source_engine: str) -> list[OCRToken]:
 
 
 def _result_to_pipeline_tokens(
-    raw: Any, page_index: int, language: str, offset_x: float = 0.0, offset_y: float = 0.0
+    raw: Any, page_index: int, language: str,
+    offset_x: float = 0.0, offset_y: float = 0.0,
 ) -> list[OcrToken]:
     if not raw:
         return []
@@ -127,17 +142,22 @@ def _result_to_pipeline_tokens(
     return tokens
 
 
-class RapidOCROnnxBackend:
-    """OCRBackend using rapidocr-onnxruntime with built-in PP-OCRv4 models.
+class RapidOCRBackend:
+    """OCRBackend using RapidOCR with either onnxruntime or OpenVINO.
+
+    runtime="onnxruntime" → rapidocr-onnxruntime (engine key: "rapidocr-onnx")
+    runtime="openvino"    → rapidocr-openvino    (engine key: "rapidocr-openvino")
 
     Satisfies both OCRBackend (benchmark) and OcrEngine (pipeline) protocols.
     """
 
-    def __init__(self, config: "ExtractorConfig") -> None:
+    def __init__(self, config: "ExtractorConfig", runtime: str = "onnxruntime") -> None:
         self._config = config
         self._language = config.language
+        self._runtime = runtime
+        self._engine_key = "rapidocr-onnx" if runtime == "onnxruntime" else "rapidocr-openvino"
 
-        RapidOCR = _import_rapidocr()
+        RapidOCR = _import_rapidocr(runtime)
         kwargs: dict[str, Any] = {}
         det_path = os.environ.get("RAPIDOCR_DET_MODEL")
         rec_path = os.environ.get("RAPIDOCR_REC_MODEL")
@@ -157,15 +177,17 @@ class RapidOCROnnxBackend:
     @property
     def identity(self) -> OCRBackendIdentity:
         profile = "custom-onnx" if self._det_model else "builtin"
+        pkg_name = "rapidocr-onnxruntime" if self._runtime == "onnxruntime" else "rapidocr-openvino"
+        runtime_pkg = "onnxruntime" if self._runtime == "onnxruntime" else "openvino"
         return OCRBackendIdentity(
-            engine="rapidocr-onnx",
-            runtime="onnxruntime",
+            engine=self._engine_key,
+            runtime=self._runtime,
             profile=profile,
             language=self._language,
             device="cpu",
             package_versions={
-                "rapidocr-onnxruntime": _package_version("rapidocr-onnxruntime"),
-                "onnxruntime": _package_version("onnxruntime"),
+                pkg_name: _package_version(pkg_name),
+                runtime_pkg: _package_version(runtime_pkg),
             },
             artifact_hashes={},
         )
@@ -191,7 +213,7 @@ class RapidOCROnnxBackend:
             img = _to_numpy(request.image)
             out = self._engine(img)
             raw = _extract_raw(out)
-            tokens = tuple(_result_to_ocr_tokens(raw, "rapidocr-onnx"))
+            tokens = tuple(_result_to_ocr_tokens(raw, self._engine_key))
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
         except Exception as exc:
@@ -238,10 +260,8 @@ class RapidOCROnnxBackend:
     ) -> list[OcrToken]:
         try:
             img = _to_numpy(page_image)
-            x0 = int(region_bbox.x0)
-            y0 = int(region_bbox.y0)
-            x1 = int(region_bbox.x1)
-            y1 = int(region_bbox.y1)
+            x0, y0 = int(region_bbox.x0), int(region_bbox.y0)
+            x1, y1 = int(region_bbox.x1), int(region_bbox.y1)
             crop = img[y0:y1, x0:x1]
             out = self._engine(crop)
             return _result_to_pipeline_tokens(
@@ -257,7 +277,7 @@ class RapidOCROnnxBackend:
 
     def healthcheck(self) -> str:
         try:
-            _import_rapidocr()
+            _import_rapidocr(self._runtime)
             return "ready"
         except ImportError:
             return "missing"
@@ -266,3 +286,7 @@ class RapidOCROnnxBackend:
 
     def close(self) -> None:
         pass
+
+
+# Convenience aliases used by factory.py
+RapidOCROnnxBackend = RapidOCRBackend

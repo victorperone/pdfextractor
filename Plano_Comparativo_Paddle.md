@@ -34,13 +34,31 @@
 | 1 | **Fase 1 — Contrato** | `contracts.py`, `factory.py`, `registry.py`, fake backend, testes de contrato verdes | ✅ |
 | 2 | **Fase 2 — Migrar Paddle** | `backends/paddle.py`, output idêntico ao baseline (diff zero no corpus) | ✅ |
 | 3 | **Fase 3 — Benchmark RAW** | script de CER/WER, manifesto JSON com hash de modelos e corpus | ✅ |
-| 4 | **Fase 4 — RapidOCR ONNX** | `backends/rapidocr.py` (runtime=onnxruntime), benchmark RAW e E2E | ✅ |
-| 5 | **Fase 5 — RapidOCR OpenVINO** | `backends/rapidocr.py` (runtime=openvino), benchmark | ⬜ |
+| 4 | **Fase 4 — RapidOCR ONNX** | `backends/rapidocr.py` (runtime=onnxruntime), 32/32 OK, 88.2s (~2.76s/pág) — modelos PP-OCRv4 embutidos (CF-2) | ✅ |
+| 5 | **Fase 5 — RapidOCR OpenVINO** | `backends/rapidocr.py` (runtime=openvino), openvino==2024.4.0 | ✅ |
 | 6 | **Fase 6 — Tesseract** | `backends/tesseract.py`, TSV parser, PSM policy, benchmark | ⬜ |
 | 7 | **Fase 7 — EasyOCR** | `backends/easyocr.py`, PyTorch CPU, modelos offline, benchmark | ⬜ |
 | 8 | **Fase 8 — E2E** | confidence policies calibradas por engine, pipeline completo, TableMagic auditado | ⬜ |
 
 > **Como marcar:** substituir `⬜` por `✅` ao concluir cada etapa.
+
+### Baseline RapidOCR ONNX (Fase 4 — run `rapidocr-onnx-builtin-001`)
+
+| Métrica | Valor |
+|---|---|
+| git SHA | `abf1bec5710da30f74ec837929cba0805b50c1e6` |
+| Páginas avaliadas | 32 (scan OCR puro, pp. 72–103) |
+| Páginas OK / falhas | 32 / 0 |
+| CER / WER | — (sem referência na run; comparar com corpus completo) |
+| Tempo total | 88.2 s (~2.76 s/página) |
+| rapidocr-onnxruntime | 1.4.4 |
+| onnxruntime | 1.30.0 |
+| Modelos | embutidos no pacote (PP-OCRv4 — CF-2 bloqueia PP-OCRv6) |
+| Render scale | 2.0 (144 DPI) |
+
+> **Velocidade:** 34× mais rápido que Paddle sem oneDNN (94 s/página). Token counts menores que Paddle refletem diferença de modelo (PP-OCRv4 vs PP-OCRv6) — CER/WER a calcular na Fase 8 com referência completa.
+
+---
 
 ### Baseline Paddle (Fase 3 — run `20260930-092314-paddle`)
 
