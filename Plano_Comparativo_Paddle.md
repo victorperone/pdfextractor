@@ -36,11 +36,29 @@
 | 3 | **Fase 3 — Benchmark RAW** | script de CER/WER, manifesto JSON com hash de modelos e corpus | ✅ |
 | 4 | **Fase 4 — RapidOCR ONNX** | `backends/rapidocr.py` (runtime=onnxruntime), 32/32 OK, 88.2s (~2.76s/pág) — modelos PP-OCRv4 embutidos (CF-2) | ✅ |
 | 5 | **Fase 5 — RapidOCR OpenVINO** | `backends/rapidocr.py` (runtime=openvino), openvino==2024.4.0 | ✅ |
-| 6 | **Fase 6 — Tesseract** | `backends/tesseract.py`, TSV parser, PSM policy, benchmark | ⬜ |
+| 6 | **Fase 6 — Tesseract** | `backends/tesseract.py`, TSV parser, PSM 3 + OEM 1, v5.5.3 | ✅ |
 | 7 | **Fase 7 — EasyOCR** | `backends/easyocr.py`, PyTorch CPU, modelos offline, benchmark | ⬜ |
 | 8 | **Fase 8 — E2E** | confidence policies calibradas por engine, pipeline completo, TableMagic auditado | ⬜ |
 
 > **Como marcar:** substituir `⬜` por `✅` ao concluir cada etapa.
+
+### Baseline RapidOCR OpenVINO (Fase 5 — run `rapidocr-openvino-001`)
+
+| Métrica | Valor |
+|---|---|
+| git SHA | `abf1bec5710da30f74ec837929cba0805b50c1e6` |
+| Páginas avaliadas | 32 (scan OCR puro, pp. 72–103) |
+| Páginas OK / falhas | 32 / 0 |
+| CER / WER | — (sem referência; comparar na Fase 8) |
+| Tempo total | 20.1 s (~0.63 s/página) |
+| rapidocr-openvino | 1.4.4 |
+| openvino | 2024.4.0 |
+| Modelos | embutidos no pacote (PP-OCRv4 — CF-2) |
+| Render scale | 2.0 (144 DPI) |
+
+> **Velocidade:** 4.4× mais rápido que RapidOCR ONNX (2.76 s/pág) e 149× mais rápido que Paddle sem oneDNN (94 s/pág).
+
+---
 
 ### Baseline RapidOCR ONNX (Fase 4 — run `rapidocr-onnx-builtin-001`)
 
