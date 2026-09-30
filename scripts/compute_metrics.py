@@ -639,14 +639,18 @@ def compute_integrity_metrics(
     total_lines = hyp.count("\n") + 1
     page_num_leakage = round(min(1.0, standalone_nums / max(total_lines, 1)), 4)
 
-    # Failure Rate: pages in ref with content that have empty hypothesis output
+    # Failure Rate: among attempted pages (present in hyp), how many came out empty
+    # despite having content in the reference. Partial runs are not penalized for
+    # pages that were never attempted.
+    attempted = set(hyp_pages.keys())
     n_ref_with_content = sum(
-        1 for v in ref_pages.values()
-        if _strip_page_header(v).strip()
+        1 for pn, v in ref_pages.items()
+        if pn in attempted and _strip_page_header(v).strip()
     )
     n_hyp_empty = sum(
         1 for pn, rv in ref_pages.items()
-        if _strip_page_header(rv).strip()
+        if pn in attempted
+        and _strip_page_header(rv).strip()
         and not _strip_page_header(hyp_pages.get(pn, "")).strip()
     )
     failure_rate = round(n_hyp_empty / n_ref_with_content, 4) if n_ref_with_content > 0 else 0.0
@@ -911,8 +915,11 @@ def main() -> int:
                 page_conditions[int(pn)] = ", ".join(conds[:2])
 
     # --- Compute per-page metrics (diagnostics) + accumulate for micro-average ---
+    # Only evaluate pages present in both hypothesis and reference.
+    # Pages not extracted (e.g. in a partial smoke test) are not penalized here;
+    # failure_rate in compute_integrity_metrics accounts for them separately.
     per_page_results: list[dict] = []
-    all_page_nums = sorted(ref_pages.keys())
+    all_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
 
     # Accumulators for group 1 micro-average (weighted by ref length)
     _t_chars_norm = _t_edits_norm = 0
@@ -999,14 +1006,15 @@ def main() -> int:
         "omission_rate": round(_t_D / _t_words, 6),
     }
 
-    # --- Groups 2, 3, 4, 5: full-document Markdown ---
+    # --- Groups 2, 3, 4, 5: full-document Markdown (evaluated pages only) ---
+    eval_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
     hyp_full_body = "\n\n".join(
-        _strip_page_header(hyp_pages.get(pn, ""))
-        for pn in sorted(ref_pages.keys())
+        _strip_page_header(hyp_pages[pn])
+        for pn in eval_page_nums
     )
     ref_full_body = "\n\n".join(
         _strip_page_header(ref_pages[pn])
-        for pn in sorted(ref_pages.keys())
+        for pn in eval_page_nums
     )
 
     if not args.quiet:

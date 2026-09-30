@@ -218,11 +218,17 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    # Expand globs (needed on Windows where the shell doesn't expand them)
+    # Expand globs using the glob module, which handles both relative and absolute
+    # paths (Path.glob() rejects absolute patterns in Python ≥ 3.12).
     paths: list[Path] = []
     for pattern in args.metrics:
-        expanded = list(Path(".").glob(pattern)) or [Path(pattern)]
-        paths.extend(p for p in expanded if p.exists())
+        if "*" in pattern or "?" in pattern:
+            matched = [Path(m) for m in glob.glob(pattern)]
+            paths.extend(m for m in matched if m.exists())
+        else:
+            p = Path(pattern)
+            if p.exists():
+                paths.append(p)
     paths = sorted(set(paths))
 
     if not paths:
