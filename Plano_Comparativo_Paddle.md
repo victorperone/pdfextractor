@@ -33,7 +33,7 @@
 | P4-pre | **Pré-Fase 4 — validar ONNX export PP-OCRv6** | `paddle2onnx` exporta det + rec sem erro; RapidOCR carrega o ONNX | ⬜ |
 | 1 | **Fase 1 — Contrato** | `contracts.py`, `factory.py`, `registry.py`, fake backend, testes de contrato verdes | ✅ |
 | 2 | **Fase 2 — Migrar Paddle** | `backends/paddle.py`, output idêntico ao baseline (diff zero no corpus) | ✅ |
-| 3 | **Fase 3 — Benchmark RAW** | script de CER/WER, manifesto JSON com hash de modelos e corpus | ⬜ |
+| 3 | **Fase 3 — Benchmark RAW** | script de CER/WER, manifesto JSON com hash de modelos e corpus | ✅ |
 | 4 | **Fase 4 — RapidOCR ONNX** | `backends/rapidocr.py` (runtime=onnxruntime), benchmark RAW e E2E | ⬜ |
 | 5 | **Fase 5 — RapidOCR OpenVINO** | `backends/rapidocr.py` (runtime=openvino), benchmark | ⬜ |
 | 6 | **Fase 6 — Tesseract** | `backends/tesseract.py`, TSV parser, PSM policy, benchmark | ⬜ |
