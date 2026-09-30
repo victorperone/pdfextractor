@@ -44,21 +44,36 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _find_model_files(model_dir: Path) -> tuple[Path, Path] | None:
-    """Return (pdmodel, pdiparams) inside a PaddleX model directory.
+    """Return (model_graph_file, pdiparams) inside a PaddleX model directory.
 
-    PaddleX 3.x names them ``inference.pdmodel`` / ``inference.pdiparams`` or
-    ``model.pdmodel`` / ``model.pdiparams``.  Tries both conventions.
+    PaddleX 3.x / PaddlePaddle 3.x (PIR format — new):
+        inference.json   + inference.pdiparams   ← graph in JSON/PIR
+    PaddleX 2.x / older (classic format):
+        inference.pdmodel + inference.pdiparams
+        model.pdmodel     + model.pdiparams
     """
     for stem in ("inference", "model"):
-        pdmodel = model_dir / f"{stem}.pdmodel"
         pdiparams = model_dir / f"{stem}.pdiparams"
-        if pdmodel.is_file() and pdiparams.is_file():
-            return pdmodel, pdiparams
-    # Fallback: any .pdmodel + .pdiparams pair
-    pdmodels = list(model_dir.glob("*.pdmodel"))
-    pdiparams = list(model_dir.glob("*.pdiparams"))
-    if pdmodels and pdiparams:
-        return pdmodels[0], pdiparams[0]
+        if not pdiparams.is_file():
+            continue
+        # Prefer .pdmodel (classic), fall back to .json (PIR)
+        for ext in (".pdmodel", ".json"):
+            candidate = model_dir / f"{stem}{ext}"
+            if candidate.is_file():
+                return candidate, pdiparams
+    # Broad fallback: any .pdmodel/.json + .pdiparams
+    pdiparams_list = list(model_dir.glob("*.pdiparams"))
+    if not pdiparams_list:
+        return None
+    pdiparams = pdiparams_list[0]
+    for pattern in ("*.pdmodel", "*.json"):
+        matches = [
+            f for f in model_dir.glob(pattern)
+            # Exclude README and config files that are not the model graph
+            if f.stem in ("inference", "model") or f.suffix == ".pdmodel"
+        ]
+        if matches:
+            return matches[0], pdiparams
     return None
 
 
@@ -94,15 +109,20 @@ def _export_model_to_onnx(
     pair = _find_model_files(model_dir)
     if pair is None:
         print(
-            f"  [FAIL] No .pdmodel / .pdiparams found in {model_dir}.\n"
-            f"         Conteúdo do diretório:\n"
+            f"  [FAIL] Arquivo de grafo do modelo não encontrado em {model_dir}.\n"
+            f"         Esperado: inference.pdmodel (formato clássico) ou inference.json (PIR/PaddleX 3.x)\n"
+            f"         Conteúdo do diretório:"
         )
-        for f in sorted(model_dir.iterdir()):
-            print(f"           {f.name}")
+        if model_dir.is_dir():
+            for f in sorted(model_dir.iterdir()):
+                print(f"           {f.name}")
+        else:
+            print(f"           [diretório não existe: {model_dir}]")
         return False
 
-    pdmodel, pdiparams = pair
-    print(f"  pdmodel   : {pdmodel.name}")
+    model_file, pdiparams = pair
+    fmt = "PIR/JSON (PaddleX 3.x)" if model_file.suffix == ".json" else "clássico (.pdmodel)"
+    print(f"  model_file: {model_file.name}  [{fmt}]")
     print(f"  pdiparams : {pdiparams.name}")
 
     try:
@@ -120,7 +140,7 @@ def _export_model_to_onnx(
         t0 = time.perf_counter()
         paddle2onnx.export(
             model_dir=str(model_dir),
-            model_filename=pdmodel.name,
+            model_filename=model_file.name,
             params_filename=pdiparams.name,
             save_file=str(output_onnx),
             opset_version=opset,
@@ -132,6 +152,12 @@ def _export_model_to_onnx(
         return True
     except Exception as exc:
         print(f"  [FAIL] Erro na exportação: {exc}")
+        if model_file.suffix == ".json":
+            print(
+                "  Dica: se o erro mencionar 'not support' ou 'invalid format',\n"
+                "  o paddle2onnx instalado pode não suportar o formato PIR (PaddleX 3.x).\n"
+                "  Verifique: pip show paddle2onnx  (requer >=2.0 para PIR)"
+            )
         return False
 
 
