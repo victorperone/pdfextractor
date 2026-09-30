@@ -11,6 +11,7 @@ add the benchmarking contract without touching any existing code paths.
 from __future__ import annotations
 
 import os
+import platform
 import time
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,12 @@ class PaddleOCRBackend:
 
         self._config = config
         get_profile(config.language)
+        # PaddlePaddle's oneDNN (MKL-DNN) backend has known compatibility issues
+        # on Windows with certain PIR attribute types (ArrayAttribute<DoubleAttribute>)
+        # in PaddlePaddle 3.x. Disable it on Windows to avoid runtime_error on all
+        # OCR pages. Can be overridden by setting PADDLE_ENABLE_MKLDNN=1.
+        _default_mkldnn = platform.system() != "Windows"
+        _enable_mkldnn = os.environ.get("PADDLE_ENABLE_MKLDNN", "1" if _default_mkldnn else "0") == "1"
         self._engine = PaddleOcrEngine(
             language=config.language,
             num_threads=_resolve_num_threads(config.num_threads),
@@ -64,6 +71,7 @@ class PaddleOCRBackend:
             quality_variants=config.ocr_quality_variants,
             quality_policy=effective_ocr_quality_policy(config).value,
             quality_thresholds=config.ocr_quality_thresholds,
+            enable_mkldnn=_enable_mkldnn,
         )
 
     # ------------------------------------------------------------------
