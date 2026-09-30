@@ -220,6 +220,34 @@ network controls.
 pytest
 ```
 
+## Benchmark comparativo de engines OCR
+
+O projeto inclui um pipeline de benchmark E2E que avalia cinco engines OCR
+(PaddleOCR, RapidOCR ONNX, RapidOCR OpenVINO, Tesseract 5, EasyOCR) em
+cinco grupos de métricas: texto (CER/WER), estrutura Markdown, tabelas,
+ordem e integridade, e dados críticos.
+
+Consulte o guia completo em [`docs/benchmark_engines.md`](docs/benchmark_engines.md).
+
+### Execução rápida (Windows PowerShell)
+
+```powershell
+# Smoke test — 5 páginas, todas as engines
+.\scripts\run_benchmark.ps1
+
+# Documento completo
+.\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
+```
+
+Scripts envolvidos:
+
+| Script | Função |
+|---|---|
+| `scripts/evaluate_e2e.py` | Extrai PDF com uma engine; salva Markdown + manifesto |
+| `scripts/compute_metrics.py` | Calcula métricas contra ground truth |
+| `scripts/compare_engines.py` | Gera tabela comparativa de todas as engines |
+| `scripts/run_benchmark.ps1` | Orquestra as três etapas sequencialmente |
+
 ## CLI examples
 
 ```bash
