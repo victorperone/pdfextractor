@@ -260,6 +260,7 @@ def main() -> int:
     t0 = time.perf_counter()
     document = None
     error_msg: str | None = None
+    error_details: dict = {}
 
     try:
         extractor = PdfTextExtractor(config)
@@ -267,8 +268,16 @@ def main() -> int:
         page_times.append(time.perf_counter() - _tick[0])  # last page
     except Exception as exc:
         error_msg = str(exc)
+        if hasattr(exc, "details") and exc.details:
+            error_details = dict(exc.details)
+        if exc.__cause__ is not None:
+            error_details.setdefault("cause_type", type(exc.__cause__).__name__)
+            error_details.setdefault("cause_message", str(exc.__cause__))
         if not args.quiet:
             print(f"\n  ERROR: {exc}", file=sys.stderr)
+            if error_details:
+                for k, v in error_details.items():
+                    print(f"  {k}: {v}", file=sys.stderr)
 
     elapsed_s = time.perf_counter() - t0
 
@@ -286,6 +295,7 @@ def main() -> int:
             "pdf_sha256": _sha256_file(args.pdf),
             "status": "error",
             "error": error_msg,
+            "error_details": error_details,
             "elapsed_s": round(elapsed_s, 3),
             "page_count": 0,
             "pages": [],
