@@ -30,11 +30,11 @@
 | # | Etapa | Entregáveis principais | Status |
 |---|---|---|---|
 | 0 | **Etapa zero — freeze baseline** | `git sha`, `pip freeze`, golden baseline output do corpus | ✅ |
-| P4-pre | **Pré-Fase 4 — validar ONNX export PP-OCRv6** | `paddle2onnx` exporta det + rec sem erro; RapidOCR carrega o ONNX | ⬜ |
+| P4-pre | **Pré-Fase 4 — validar ONNX export PP-OCRv6** | RapidOCR funcional com modelos embutidos (Caminho B); CF-2 bloqueia export paddle2onnx no Windows | ✅ |
 | 1 | **Fase 1 — Contrato** | `contracts.py`, `factory.py`, `registry.py`, fake backend, testes de contrato verdes | ✅ |
 | 2 | **Fase 2 — Migrar Paddle** | `backends/paddle.py`, output idêntico ao baseline (diff zero no corpus) | ✅ |
 | 3 | **Fase 3 — Benchmark RAW** | script de CER/WER, manifesto JSON com hash de modelos e corpus | ✅ |
-| 4 | **Fase 4 — RapidOCR ONNX** | `backends/rapidocr.py` (runtime=onnxruntime), benchmark RAW e E2E | ⬜ |
+| 4 | **Fase 4 — RapidOCR ONNX** | `backends/rapidocr.py` (runtime=onnxruntime), benchmark RAW e E2E | ✅ |
 | 5 | **Fase 5 — RapidOCR OpenVINO** | `backends/rapidocr.py` (runtime=openvino), benchmark | ⬜ |
 | 6 | **Fase 6 — Tesseract** | `backends/tesseract.py`, TSV parser, PSM policy, benchmark | ⬜ |
 | 7 | **Fase 7 — EasyOCR** | `backends/easyocr.py`, PyTorch CPU, modelos offline, benchmark | ⬜ |
@@ -3795,3 +3795,37 @@ python scripts\benchmark_raw_ocr.py ...
 (restaura oneDNN — resultará em erro se PIR incompatível, mas permite testar a flag)
 
 **Status:** ⬜ Diferida — implementar após conclusão de todas as engines (Fase 7)
+
+---
+
+## CF-2 — Exportação paddle2onnx bloqueada no Windows (DLL incompatibility)
+
+**Problema:**  
+`paddle2onnx 2.1.0` instala mas falha ao carregar sua extensão nativa no Windows com:
+
+```
+Windows fatal exception: code 0xc0000139 (STATUS_ENTRYPOINT_NOT_FOUND)
+DLL load failed while importing paddle2onnx_cpp2py_export: The specified procedure could not be found.
+```
+
+**Causa raiz:**  
+Incompatibilidade de ABI entre `paddle2onnx 2.x` (compilado contra uma versão específica das DLLs do PaddlePaddle) e `PaddlePaddle 3.3.1` instalado no servidor. A função exportada pela DLL do paddle2onnx não existe na versão das DLLs do PaddlePaddle presente no `PATH` / venv.
+
+**Impacto:**  
+- Exportação direta de PP-OCRv6 (PaddleX 3.7.2) para ONNX não é possível na configuração atual do servidor
+- `backends/rapidocr.py` (Fase 4) usa os modelos embutidos do `rapidocr-onnxruntime 1.4.4` (PP-OCRv4 variants) em vez de PP-OCRv6
+
+**Workaround atual:**  
+P4-pre aprovado via Caminho B — `rapidocr-onnxruntime` funcional com modelos embutidos.  
+Modelos podem ser sobrescritos por variáveis de ambiente:
+```powershell
+$env:RAPIDOCR_DET_MODEL = "path\to\det.onnx"
+$env:RAPIDOCR_REC_MODEL = "path\to\rec.onnx"
+```
+
+**Caminhos para resolver (em ordem de preferência):**
+1. Baixar ONNX PP-OCRv6 pré-compilados do repositório RapidOCR (ModelScope / HuggingFace)
+2. Exportar em ambiente Linux/WSL onde o conflito de DLL não existe
+3. Aguardar `paddle2onnx` publicar wheel compatível com PaddlePaddle 3.3.1 no Windows
+
+**Status:** ⬜ Diferida — usar modelos embutidos do rapidocr enquanto aguarda resolução
