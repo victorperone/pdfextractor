@@ -99,6 +99,7 @@ def _strip_page_header(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _lev_distance(a: list, b: list) -> int:
+    """Compute Levenshtein edit distance between two token sequences using O(n) space DP."""
     la, lb = len(a), len(b)
     if la == 0:
         return lb
@@ -198,6 +199,11 @@ def _wer(hyp: str, ref: str) -> float:
 
 
 def compute_text_metrics(hyp: str, ref: str) -> dict:
+    """Compute all Group 1 text-quality metrics.
+
+    Returns a dict with cer_raw, cer_normalized, cer_text_only, wer, word_accuracy,
+    substitution_rate, deletion_rate, insertion_rate, omission_rate.
+    """
     ref_n = _normalize(ref)
     ref_words = ref_n.split()
     N_chars = len(ref_n) or 1
@@ -287,6 +293,7 @@ def _block_type_sequence(text: str) -> list[str]:
 
 
 def _f1(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
+    """Compute (precision, recall, F1) from counts."""
     p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
@@ -298,6 +305,11 @@ def _count_by_type(seq: list[str]) -> Counter:
 
 
 def compute_structure_metrics(hyp: str, ref: str) -> dict:
+    """Compute Group 2 Markdown structure metrics on the full document body.
+
+    Evaluates headings (F1, level accuracy, text CER), block types (F1),
+    paragraph boundaries, list detection, and AST-level similarity via LCS.
+    """
     ref_headings = _parse_headings(ref)
     hyp_headings = _parse_headings(hyp)
 
@@ -409,6 +421,7 @@ def _normalize_cell(text: str) -> str:
 
 
 def _cell_cer(hyp_cell: str, ref_cell: str) -> float:
+    """Compute character error rate for a single table cell."""
     ref_n = _normalize_cell(ref_cell)
     if not ref_n:
         return 0.0
@@ -416,6 +429,11 @@ def _cell_cer(hyp_cell: str, ref_cell: str) -> float:
 
 
 def compute_table_metrics(hyp: str, ref: str) -> dict:
+    """Compute Group 3 GFM table metrics on the full document body.
+
+    Evaluates table detection F1, row/column F1, dimension accuracy,
+    cell exact match, cell CER, cell alignment accuracy, and table structure similarity.
+    """
     ref_tables = _parse_md_tables(ref)
     hyp_tables = _parse_md_tables(hyp)
 
@@ -539,6 +557,11 @@ def compute_integrity_metrics(
     hyp_pages: dict[int, str],
     ref_pages: dict[int, str],
 ) -> dict:
+    """Compute Group 4 order and integrity metrics on the full document.
+
+    Evaluates reading order accuracy (LCS of blocks), duplicate content/block rate,
+    header/footer/page-number leakage, failure rate, and invalid Markdown rate.
+    """
     # Reading Order Accuracy: LCS of block sequences / ref length
     ref_blocks = _extract_text_blocks(ref)
     hyp_blocks = _extract_text_blocks(hyp)
@@ -669,6 +692,7 @@ _PROC_RE = re.compile(r"\d{7}[-\s.]?\d{2}[-\s.]?\d{4}[-\s.]?\d{1}[-\s.]?\d{2}[-\
 
 
 def _exact_match_rate(hyp: str, ref: str, pattern: re.Pattern) -> float:
+    """Fraction of regex matches in ref that also appear in hyp."""
     ref_vals = set(pattern.findall(ref))
     if not ref_vals:
         return 1.0
@@ -678,6 +702,11 @@ def _exact_match_rate(hyp: str, ref: str, pattern: re.Pattern) -> float:
 
 
 def compute_critical_data_metrics(hyp: str, ref: str) -> dict:
+    """Compute Group 5 critical data exact-match metrics on the full document.
+
+    Checks preservation of numbers, dates, currency values (R$), and identifiers
+    (CPF, CNPJ, process numbers) via regex set intersection.
+    """
     identifiers_ref = set(_CPF_RE.findall(ref)) | set(_CNPJ_RE.findall(ref)) | set(_PROC_RE.findall(ref))
     identifiers_hyp = set(_CPF_RE.findall(hyp)) | set(_CNPJ_RE.findall(hyp)) | set(_PROC_RE.findall(hyp))
     id_rate = round(
@@ -701,6 +730,7 @@ def _mean(vals: list[float]) -> float:
 
 
 def aggregate_page_metrics(per_page: list[dict]) -> dict:
+    """Compute mean, median, and worst value for each numeric metric across all per-page results."""
     if not per_page:
         return {}
 
@@ -722,6 +752,7 @@ def aggregate_page_metrics(per_page: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 def _parse_pages(text: str) -> dict[int, str]:
+    """Split a Markdown document into a dict of {1-based page number → page text}, handling both '## Página 1' and '## Página 001 |' formats."""
     pattern = re.compile(
         r"^##\s+P[áa]gina\s+0*(\d+)",
         re.MULTILINE | re.IGNORECASE,
@@ -739,6 +770,7 @@ def _parse_pages(text: str) -> dict[int, str]:
 
 
 def _load_reference_from_manifesto(manifesto_path: Path) -> dict[int, str]:
+    """Load per-page expected_markdown from the corpus manifesto JSON, returning {page_number → expected_markdown}."""
     with open(manifesto_path, encoding="utf-8") as f:
         data = json.load(f)
     pages: dict[int, str] = {}
@@ -760,6 +792,7 @@ def _build_error_report(
     per_page: list[dict],
     summary: dict,
 ) -> str:
+    """Generate a Markdown error report listing global summary and the 20 worst pages by CER."""
     lines = [
         f"# Relatório de Erros — {engine}",
         f"Run: {run_id}",
@@ -809,6 +842,7 @@ def _build_error_report(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    """Entry point: compare extracted Markdown against ground truth and save metrics JSON + error report."""
     ap = argparse.ArgumentParser(
         description="Compute E2E quality metrics (Fase 8)."
     )

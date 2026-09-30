@@ -85,11 +85,13 @@ _LOWER_IS_BETTER = {
 
 
 def _load_metrics(path: Path) -> dict:
+    """Load a metrics JSON file produced by compute_metrics.py."""
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def _get_value(data: dict, group: str, key: str) -> float | None:
+    """Safely retrieve a nested metric value from a metrics dict, returning None if absent."""
     group_data = data.get(group, {})
     val = group_data.get(key)
     if val is None:
@@ -98,6 +100,7 @@ def _get_value(data: dict, group: str, key: str) -> float | None:
 
 
 def _fmt(val: float | None) -> str:
+    """Format a float metric value to 4 decimal places, or '—' if None."""
     if val is None:
         return "—"
     return f"{val:.4f}"
@@ -115,6 +118,11 @@ def _best_engine(values: dict[str, float | None], key: str) -> str | None:
 
 
 def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
+    """Render a Markdown comparison table from a list of (engine_name, metrics_dict) pairs.
+
+    Each metric row highlights the best engine value in bold and indicates
+    direction (↑ higher is better / ↓ lower is better).
+    """
     engines = [name for name, _ in all_data]
     engine_headers = " | ".join(f"**{e}**" for e in engines)
 
@@ -193,6 +201,7 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
 
 
 def main() -> int:
+    """Entry point: aggregate multiple metrics JSON files and write a side-by-side comparison table."""
     ap = argparse.ArgumentParser(
         description="Generate comparison table from engine metrics JSONs (Fase 8)."
     )

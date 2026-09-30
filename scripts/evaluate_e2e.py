@@ -41,6 +41,7 @@ if str(_SRC) not in sys.path:
 
 
 def _git_sha() -> str:
+    """Return the current git commit SHA, or 'unknown' on failure."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
@@ -50,6 +51,7 @@ def _git_sha() -> str:
 
 
 def _git_dirty() -> bool:
+    """Return True if the working tree has uncommitted changes."""
     try:
         out = subprocess.check_output(
             ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
@@ -60,6 +62,7 @@ def _git_dirty() -> bool:
 
 
 def _sha256_file(path: Path) -> str:
+    """Compute the SHA-256 hex digest of a file in streaming chunks."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -92,6 +95,7 @@ def _parse_page_sections(md_text: str) -> dict[int, str]:
 
 
 def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None):
+    """Build an ExtractorConfig for the given engine and extraction mode."""
     from structured_pdf_text.config import (
         ExtractionMode,
         best_extraction_config,
@@ -104,6 +108,7 @@ def _build_config(engine: str, mode: str, language: str, page_indices: tuple | N
 
 
 def _parse_pages_arg(pages_arg: str) -> tuple[int, ...]:
+    """Convert a page range string ('1-5' or '1,3,5') to a tuple of 0-based page indices."""
     indices: list[int] = []
     for part in pages_arg.split(","):
         part = part.strip()
@@ -116,6 +121,7 @@ def _parse_pages_arg(pages_arg: str) -> tuple[int, ...]:
 
 
 def main() -> int:
+    """Entry point: extract a PDF with one OCR engine and save Markdown + run manifest."""
     ap = argparse.ArgumentParser(
         description="Run pdfextractor E2E pipeline and save output (Fase 8)."
     )

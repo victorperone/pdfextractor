@@ -7,7 +7,7 @@
 #   .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 
 param(
-    [string]$Pages      = "1-5",
+    [string]$Pages      = "77-82",
     [switch]$AllPages,
     [string]$RunSuffix  = "smoke",
     [string]$Corpus     = "C:\Users\a_victor.perone\workspace\pdfextractor\corpus\Corpus_Stress_OCR_Markdown_V4.pdf",
