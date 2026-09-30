@@ -1,0 +1,268 @@
+"""RapidOCR ONNX backend — OCRBackend implementation using rapidocr-onnxruntime.
+
+Uses models bundled with rapidocr-onnxruntime 1.x (PP-OCRv4 variants).
+
+CF-2: Direct PP-OCRv6 ONNX export from Paddle is blocked on Windows by a DLL
+incompatibility between paddle2onnx 2.x and PaddlePaddle 3.3.1. When CF-2 is
+resolved, set environment variables to override the built-in models:
+    RAPIDOCR_DET_MODEL=/path/to/det.onnx
+    RAPIDOCR_REC_MODEL=/path/to/rec.onnx
+"""
+from __future__ import annotations
+
+import os
+import time
+from typing import TYPE_CHECKING, Any
+
+from structured_pdf_text.document import OcrToken, SourceKind
+from structured_pdf_text.geometry import BBox
+from structured_pdf_text.ocr.contracts import (
+    OCRBackendIdentity,
+    OCRCapabilities,
+    OCRRequest,
+    OCRResult,
+    OCRToken,
+)
+
+if TYPE_CHECKING:
+    from structured_pdf_text.config import ExtractorConfig
+
+
+def _package_version(name: str) -> str:
+    try:
+        from importlib.metadata import version
+        return version(name)
+    except Exception:
+        return "unknown"
+
+
+def _import_rapidocr() -> type:
+    try:
+        from rapidocr_onnxruntime import RapidOCR  # type: ignore
+        return RapidOCR
+    except ImportError as exc:
+        raise ImportError(
+            "rapidocr-onnxruntime is not installed. "
+            'Install with: pip install "structured-pdf-text[ocr-rapidocr-onnx]"'
+        ) from exc
+
+
+def _to_numpy(image: object):
+    import numpy as np
+    if isinstance(image, np.ndarray):
+        return image
+    arr = np.array(image)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    return arr
+
+
+def _extract_raw(out: Any) -> Any:
+    """Normalize the return value of engine(image) to a raw result list."""
+    if isinstance(out, tuple) and len(out) >= 1:
+        return out[0]
+    if hasattr(out, "__iter__") and not isinstance(out, (str, bytes)):
+        return out
+    return None
+
+
+def _result_to_ocr_tokens(raw: Any, source_engine: str) -> list[OCRToken]:
+    if not raw:
+        return []
+    tokens = []
+    for item in raw:
+        if len(item) < 2:
+            continue
+        bbox_pts, text = item[0], item[1]
+        confidence = float(item[2]) if len(item) > 2 and item[2] is not None else None
+
+        import numpy as np
+        if isinstance(bbox_pts, np.ndarray):
+            bbox_pts = bbox_pts.tolist()
+
+        xs = [float(p[0]) for p in bbox_pts]
+        ys = [float(p[1]) for p in bbox_pts]
+        polygon = tuple((float(p[0]), float(p[1])) for p in bbox_pts)
+        tokens.append(OCRToken(
+            text=str(text),
+            polygon_px=polygon,
+            bbox_px=(min(xs), min(ys), max(xs), max(ys)),
+            confidence_native=confidence,
+            confidence_scale="0..1",
+            level="line",
+            source_engine=source_engine,
+        ))
+    return tokens
+
+
+def _result_to_pipeline_tokens(
+    raw: Any, page_index: int, language: str, offset_x: float = 0.0, offset_y: float = 0.0
+) -> list[OcrToken]:
+    if not raw:
+        return []
+    tokens = []
+    for item in raw:
+        if len(item) < 2:
+            continue
+        bbox_pts, text = item[0], item[1]
+        confidence = float(item[2]) if len(item) > 2 and item[2] is not None else 1.0
+
+        import numpy as np
+        if isinstance(bbox_pts, np.ndarray):
+            bbox_pts = bbox_pts.tolist()
+
+        xs = [float(p[0]) + offset_x for p in bbox_pts]
+        ys = [float(p[1]) + offset_y for p in bbox_pts]
+        try:
+            bbox = BBox(min(xs), min(ys), max(xs), max(ys))
+        except Exception:
+            continue
+        tokens.append(OcrToken(
+            text=str(text),
+            bbox=bbox,
+            confidence=confidence,
+            language=language,
+            source=SourceKind.OCR_PAGE,
+        ))
+    return tokens
+
+
+class RapidOCROnnxBackend:
+    """OCRBackend using rapidocr-onnxruntime with built-in PP-OCRv4 models.
+
+    Satisfies both OCRBackend (benchmark) and OcrEngine (pipeline) protocols.
+    """
+
+    def __init__(self, config: "ExtractorConfig") -> None:
+        self._config = config
+        self._language = config.language
+
+        RapidOCR = _import_rapidocr()
+        kwargs: dict[str, Any] = {}
+        det_path = os.environ.get("RAPIDOCR_DET_MODEL")
+        rec_path = os.environ.get("RAPIDOCR_REC_MODEL")
+        if det_path:
+            kwargs["det_model_path"] = det_path
+        if rec_path:
+            kwargs["rec_model_path"] = rec_path
+
+        self._engine = RapidOCR(**kwargs)
+        self._det_model = det_path
+        self._rec_model = rec_path
+
+    # ------------------------------------------------------------------
+    # OCRBackend — identity and capabilities
+    # ------------------------------------------------------------------
+
+    @property
+    def identity(self) -> OCRBackendIdentity:
+        profile = "custom-onnx" if self._det_model else "builtin"
+        return OCRBackendIdentity(
+            engine="rapidocr-onnx",
+            runtime="onnxruntime",
+            profile=profile,
+            language=self._language,
+            device="cpu",
+            package_versions={
+                "rapidocr-onnxruntime": _package_version("rapidocr-onnxruntime"),
+                "onnxruntime": _package_version("onnxruntime"),
+            },
+            artifact_hashes={},
+        )
+
+    @property
+    def capabilities(self) -> OCRCapabilities:
+        return OCRCapabilities(
+            detection=True,
+            recognition=True,
+            line_orientation=False,
+            page_orientation=False,
+            quadrilateral_boxes=True,
+            per_token_confidence=True,
+        )
+
+    # ------------------------------------------------------------------
+    # OCRBackend — canonical recognize method (for benchmarking)
+    # ------------------------------------------------------------------
+
+    def recognize(self, request: OCRRequest) -> OCRResult:
+        t0 = time.perf_counter()
+        try:
+            img = _to_numpy(request.image)
+            out = self._engine(img)
+            raw = _extract_raw(out)
+            tokens = tuple(_result_to_ocr_tokens(raw, "rapidocr-onnx"))
+            text = " ".join(t.text for t in tokens)
+            status = "ok" if tokens else "no_text"
+        except Exception as exc:
+            return OCRResult(
+                status="runtime_error",
+                tokens=(),
+                text="",
+                engine_identity=self.identity,
+                elapsed_total_s=time.perf_counter() - t0,
+                warnings=(str(exc),),
+            )
+        return OCRResult(
+            status=status,
+            tokens=tokens,
+            text=text,
+            engine_identity=self.identity,
+            elapsed_total_s=time.perf_counter() - t0,
+        )
+
+    # ------------------------------------------------------------------
+    # OcrEngine protocol — consumed by recovery.py / pipeline
+    # ------------------------------------------------------------------
+
+    def recognize_page(
+        self,
+        page_image: object,
+        page_index: int,
+        page_bbox: "BBox | None" = None,
+        *,
+        quality_variants: bool | None = None,
+    ) -> list[OcrToken]:
+        try:
+            img = _to_numpy(page_image)
+            out = self._engine(img)
+            return _result_to_pipeline_tokens(_extract_raw(out), page_index, self._language)
+        except Exception:
+            return []
+
+    def recognize_region(
+        self,
+        page_image: object,
+        page_index: int,
+        region_bbox: "BBox",
+    ) -> list[OcrToken]:
+        try:
+            img = _to_numpy(page_image)
+            x0 = int(region_bbox.x0)
+            y0 = int(region_bbox.y0)
+            x1 = int(region_bbox.x1)
+            y1 = int(region_bbox.y1)
+            crop = img[y0:y1, x0:x1]
+            out = self._engine(crop)
+            return _result_to_pipeline_tokens(
+                _extract_raw(out), page_index, self._language,
+                offset_x=float(x0), offset_y=float(y0),
+            )
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def healthcheck(self) -> str:
+        try:
+            _import_rapidocr()
+            return "ready"
+        except ImportError:
+            return "missing"
+        except Exception:
+            return "unknown"
+
+    def close(self) -> None:
+        pass

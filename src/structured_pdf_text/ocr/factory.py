@@ -38,11 +38,14 @@ def build_ocr_backend(config: "ExtractorConfig") -> OCRBackend:
             from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
             return PaddleOCRBackend(config)
 
-        case "rapidocr-onnx" | "rapidocr-openvino":
+        case "rapidocr-onnx":
+            from structured_pdf_text.ocr.backends.rapidocr import RapidOCROnnxBackend
+            return RapidOCROnnxBackend(config)
+
+        case "rapidocr-openvino":
             raise UnsupportedOCREngine(
-                f"Engine {engine!r} is planned for Phase 4/5 of the OCR "
-                "comparison roadmap. Run the P4-pre ONNX export validation "
-                "first (see Plano_Comparativo_Paddle.md §68.2)."
+                "Engine 'rapidocr-openvino' is planned for Phase 5. "
+                "See Plano_Comparativo_Paddle.md."
             )
 
         case "tesseract":
