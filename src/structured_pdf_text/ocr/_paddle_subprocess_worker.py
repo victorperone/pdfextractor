@@ -37,8 +37,9 @@ import platform
 import sys
 from pathlib import Path
 
-# Allow running as a standalone script: add src/ to path
-_SRC = Path(__file__).parent.parent.parent.parent
+# Add src/ to path so structured_pdf_text is importable when the package
+# is not installed in the venv (dev mode via sys.path in the parent script).
+_SRC = Path(__file__).parent.parent.parent  # .../src/
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
