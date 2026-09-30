@@ -35,7 +35,7 @@
 | CF-1 | oneDNN desabilitado no Windows (bug PIR API Paddle 3.x) — restaurar via `FLAGS_enable_pir_api=False` | ⬜ |
 | CF-2 | `paddle2onnx` DLL incompatível (0xC0000139) — RapidOCR usa PP-OCRv4 embutido em vez de PP-OCRv6 | ⬜ |
 | CF-3 | numpy conflict: EasyOCR atualiza para 2.5.x, quebra openvino<2.1.0 — fix: `pip install "numpy==2.0.2"` | ✅ |
-| CF-4 | **Paddle crash ao coexistir com EasyOCR no mesmo venv** — `paddleocr` importa `modelscope` que importa `torch` (instalado pelo EasyOCR); conflito de DLL 0xC0000139 no Windows. Workaround: benchmark de Paddle em venv separado, ou desinstalar EasyOCR antes de rodar Paddle. | ⬜ |
+| CF-4 | **Paddle crash ao coexistir com EasyOCR no mesmo venv** — `paddleocr` importa `modelscope` que importa `torch` (EasyOCR) causando DLL 0xC0000139 no Windows. Fix: stub de `torch` injetado em `sys.modules` em `evaluate_e2e.py` antes do import do paddleocr — PaddlePaddle não usa PyTorch, apenas o modelscope faz probe. | ✅ |
 
 ---
 

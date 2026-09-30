@@ -107,6 +107,62 @@ def _build_config(engine: str, mode: str, language: str, page_indices: tuple | N
     return config
 
 
+def _patch_torch_for_paddle() -> None:
+    """Inject a minimal torch stub so modelscope doesn't crash with DLL 0xC0000139.
+
+    paddleocr → modelscope → torch (module-level import). On Windows, the CPU
+    torch DLL installed by EasyOCR can fail at DLL load time with a fatal
+    0xC0000139 (entry-point not found) before Python can catch anything.
+    PaddlePaddle never actually uses PyTorch; only modelscope probes it.
+    Stubbing torch in sys.modules before paddleocr is imported prevents the
+    DLL from being loaded at all, while keeping PaddlePaddle fully functional.
+    """
+    import sys
+    import types
+
+    if "torch" in sys.modules:
+        return  # already loaded or previously stubbed
+
+    def _stub(name: str) -> types.ModuleType:
+        m = types.ModuleType(name)
+        m.__version__ = "0.0.0+stub"
+        return m
+
+    # Sub-packages that modelscope and paddleocr probe at import time
+    _subpackages = [
+        "torch.nn", "torch.nn.functional", "torch.nn.modules",
+        "torch.optim", "torch.optim.lr_scheduler",
+        "torch.utils", "torch.utils.data", "torch.utils.data.dataloader",
+        "torch.distributed", "torch.multiprocessing",
+        "torch.cuda", "torch.cuda.amp",
+        "torch.backends", "torch.backends.cudnn",
+        "torch.jit", "torch.autograd", "torch.autograd.function",
+        "torch.hub",
+    ]
+    for name in _subpackages:
+        sys.modules[name] = _stub(name)
+
+    cuda_stub = sys.modules["torch.cuda"]
+    cuda_stub.is_available = lambda: False          # type: ignore[attr-defined]
+    cuda_stub.device_count = lambda: 0              # type: ignore[attr-defined]
+
+    cudnn_stub = sys.modules["torch.backends.cudnn"]
+    cudnn_stub.enabled = False                       # type: ignore[attr-defined]
+    cudnn_stub.version = lambda: 0                   # type: ignore[attr-defined]
+
+    torch_stub = _stub("torch")
+    torch_stub.cuda = cuda_stub                      # type: ignore[attr-defined]
+    torch_stub.backends = sys.modules["torch.backends"]  # type: ignore[attr-defined]
+    torch_stub.Tensor = object                       # type: ignore[attr-defined]
+    torch_stub.device = str                          # type: ignore[attr-defined]
+    torch_stub.float32 = "float32"                   # type: ignore[attr-defined]
+    torch_stub.float16 = "float16"                   # type: ignore[attr-defined]
+    torch_stub.int64 = "int64"                       # type: ignore[attr-defined]
+    torch_stub.no_grad = lambda f=None: (f if f else lambda g: g)  # type: ignore[attr-defined]
+
+    sys.modules["torch"] = torch_stub
+
+
 def _parse_pages_arg(pages_arg: str) -> tuple[int, ...]:
     """Convert a page range string ('1-5' or '1,3,5') to a tuple of 0-based page indices."""
     indices: list[int] = []
@@ -160,6 +216,11 @@ def main() -> int:
     if not args.pdf.exists():
         print(f"ERROR: PDF not found: {args.pdf}", file=sys.stderr)
         return 1
+
+    # Stub torch BEFORE any paddleocr import to avoid DLL crash on Windows (CF-4).
+    # Must run before PdfTextExtractor is imported, which triggers lazy paddleocr load.
+    if args.engine == "paddle":
+        _patch_torch_for_paddle()
 
     try:
         from structured_pdf_text.api import PdfTextExtractor
