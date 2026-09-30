@@ -168,6 +168,12 @@ class ExtractorConfig:
     # 0 = auto-detect (os.cpu_count()); -1 = leave Paddle's own default unchanged
     num_threads: int = 0
 
+    # OCR engine selection — new fields, both with defaults so existing code
+    # that constructs ExtractorConfig without these args continues to work.
+    # "paddle" is the baseline; future phases add "rapidocr-onnx", "tesseract", etc.
+    ocr_engine: str = "paddle"
+    ocr_runtime: str = "paddle_static"
+
     def normalized_mode(self) -> ExtractionMode:
         if isinstance(self.mode, ExtractionMode):
             return self.mode

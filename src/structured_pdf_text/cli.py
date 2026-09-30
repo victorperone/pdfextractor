@@ -131,6 +131,27 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="Override the OCR model cache directory",
     )
+    extract_parser.add_argument(
+        "--ocr-engine",
+        default="paddle",
+        metavar="ENGINE",
+        help=(
+            "OCR engine to use: paddle (default), rapidocr-onnx, rapidocr-openvino, "
+            "tesseract, easyocr. Phases 4-7 add the non-Paddle backends."
+        ),
+    )
+    extract_parser.add_argument(
+        "--ocr-runtime",
+        default=None,
+        metavar="RUNTIME",
+        help="OCR runtime override (e.g. onnxruntime, openvino). Defaults per engine.",
+    )
+    extract_parser.add_argument(
+        "--ocr-profile",
+        default=None,
+        metavar="PROFILE",
+        help="OCR model profile override (e.g. ppocrv6-medium). Defaults per engine.",
+    )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
     inspect_parser.add_argument("pdf", type=Path)
@@ -326,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
                 preserve_headers_footers=not args.omit_repeated_headers_footers,
                 merge_cross_page_tables=args.merge_cross_page_tables,
                 num_threads=args.threads,
+                ocr_engine=args.ocr_engine,
             )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if _mode_requires_ocr(config.mode) and args.ocr_model_profile is None and args.language is None:

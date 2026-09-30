@@ -84,17 +84,8 @@ class PdfTextExtractor:
         if ocr_engine is not None:
             self.ocr_engine = ocr_engine
         elif _ocr_enabled(self.config):
-            get_profile(self.config.language)
-            from .ocr.paddle import PaddleOcrEngine
-
-            self.ocr_engine = PaddleOcrEngine(
-                language=self.config.language,
-                num_threads=_resolve_num_threads(self.config.num_threads),
-                ocr_batch_size=self.config.ocr_batch_size,
-                quality_variants=self.config.ocr_quality_variants,
-                quality_policy=effective_ocr_quality_policy(self.config).value,
-                quality_thresholds=self.config.ocr_quality_thresholds,
-            )
+            from .ocr.factory import build_ocr_backend
+            self.ocr_engine = build_ocr_backend(self.config)
         else:
             self.ocr_engine = None
 
