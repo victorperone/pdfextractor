@@ -7,11 +7,27 @@ add the benchmarking contract without touching any existing code paths.
 
 ``recovery.py`` and the rest of the pipeline continue to see exactly the same
 ``OcrEngine``-compatible interface they always have.
+
+CF-4 (Windows DLL isolation):
+  When ``torch`` (installed by EasyOCR) is present in the same venv,
+  PaddlePaddle DLLs collide with torch's DLLs at load time (0xC0000139).
+  To fix this without requiring separate venvs, the backend detects the
+  conflict at construction time and transparently routes all OCR calls
+  through a long-lived subprocess (_paddle_subprocess_worker.py) that runs
+  in a clean process with no torch DLLs loaded.  One subprocess is spawned
+  per PaddleOCRBackend instance; it keeps the model in memory for the
+  entire extraction, so model load cost is paid once.
 """
 from __future__ import annotations
 
+import base64
+import importlib.util
+import io
+import json
 import os
 import platform
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +43,8 @@ from structured_pdf_text.ocr.contracts import (
     OCRResult,
     OCRToken,
 )
+
+_WORKER_SCRIPT = Path(__file__).parent.parent / "_paddle_subprocess_worker.py"
 
 
 def _resolve_num_threads(num_threads: int) -> int:
@@ -45,6 +63,16 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+def _has_torch_conflict() -> bool:
+    """True when torch is findable in this venv on Windows (DLL conflict with paddle)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return importlib.util.find_spec("torch") is not None
+    except Exception:
+        return False
+
+
 class PaddleOCRBackend:
     """OCRBackend implementation backed by PaddleOcrEngine.
 
@@ -54,7 +82,6 @@ class PaddleOCRBackend:
 
     def __init__(self, config: ExtractorConfig) -> None:
         from structured_pdf_text.ocr.models import get_profile
-        from structured_pdf_text.ocr.paddle import PaddleOcrEngine
 
         self._config = config
         get_profile(config.language)
@@ -64,15 +91,118 @@ class PaddleOCRBackend:
         # OCR pages. Can be overridden by setting PADDLE_ENABLE_MKLDNN=1.
         _default_mkldnn = platform.system() != "Windows"
         _enable_mkldnn = os.environ.get("PADDLE_ENABLE_MKLDNN", "1" if _default_mkldnn else "0") == "1"
-        self._engine = PaddleOcrEngine(
-            language=config.language,
-            num_threads=_resolve_num_threads(config.num_threads),
-            ocr_batch_size=config.ocr_batch_size,
-            quality_variants=config.ocr_quality_variants,
-            quality_policy=effective_ocr_quality_policy(config).value,
-            quality_thresholds=config.ocr_quality_thresholds,
-            enable_mkldnn=_enable_mkldnn,
+
+        self._subprocess_config: dict | None = None
+        self._worker_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+
+        if _has_torch_conflict():
+            # Subprocess mode (CF-4): torch DLLs would crash paddle at import time.
+            # Store config and defer all OCR work to a clean subprocess.
+            self._subprocess_config = {
+                "language": config.language,
+                "num_threads": _resolve_num_threads(config.num_threads),
+                "ocr_batch_size": config.ocr_batch_size,
+                "quality_variants": config.ocr_quality_variants,
+                "quality_policy": effective_ocr_quality_policy(config).value,
+                "quality_thresholds": config.ocr_quality_thresholds,
+                "mkldnn": _enable_mkldnn,
+            }
+            self._engine = None
+        else:
+            # Direct mode: no DLL conflict — import and use paddle in-process.
+            from structured_pdf_text.ocr.paddle import PaddleOcrEngine
+
+            self._engine = PaddleOcrEngine(
+                language=config.language,
+                num_threads=_resolve_num_threads(config.num_threads),
+                ocr_batch_size=config.ocr_batch_size,
+                quality_variants=config.ocr_quality_variants,
+                quality_policy=effective_ocr_quality_policy(config).value,
+                quality_thresholds=config.ocr_quality_thresholds,
+                enable_mkldnn=_enable_mkldnn,
+            )
+
+    # ------------------------------------------------------------------
+    # Subprocess worker management (CF-4)
+    # ------------------------------------------------------------------
+
+    def _ensure_worker(self) -> None:
+        """Start the subprocess worker if not already running."""
+        if self._worker_proc is not None and self._worker_proc.poll() is None:
+            return  # still alive
+
+        self._worker_proc = subprocess.Popen(
+            [sys.executable, str(_WORKER_SCRIPT)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            bufsize=1,  # line-buffered
         )
+        # Send init request
+        init_req = {"method": "init", **self._subprocess_config}  # type: ignore[arg-type]
+        response = self._worker_send(init_req)
+        if response.get("status") != "ok":
+            raise RuntimeError(
+                f"Paddle worker init failed: {response.get('error')}"
+            )
+
+    def _worker_send(self, request: dict) -> dict:
+        """Send one JSONL request to the worker and return the parsed response."""
+        assert self._worker_proc is not None
+        assert self._worker_proc.stdin is not None
+        assert self._worker_proc.stdout is not None
+
+        line = json.dumps(request, ensure_ascii=False) + "\n"
+        self._worker_proc.stdin.write(line.encode())
+        self._worker_proc.stdin.flush()
+
+        response_line = self._worker_proc.stdout.readline()
+        if not response_line:
+            raise RuntimeError("Paddle worker closed unexpectedly")
+        return json.loads(response_line)
+
+    def _call_subprocess(
+        self,
+        method: str,
+        image: Any,
+        page_index: int,
+        region_bbox: BBox | None = None,
+    ) -> list[OcrToken]:
+        """Serialize image, send to worker, deserialize OcrToken list."""
+        from PIL import Image
+
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        image_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        req: dict[str, Any] = {
+            "method": method,
+            "image_b64": image_b64,
+            "page_index": page_index,
+        }
+        if region_bbox is not None:
+            req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
+
+        self._ensure_worker()
+        response = self._worker_send(req)
+
+        if response.get("status") != "ok":
+            raise RuntimeError(response.get("error", "unknown subprocess error"))
+
+        tokens: list[OcrToken] = []
+        for item in response.get("tokens", []):
+            x0, y0, x1, y1 = item["bbox"]
+            tokens.append(
+                OcrToken(
+                    text=item["text"],
+                    confidence=float(item["confidence"]),
+                    bbox=BBox(x0, y0, x1, y1),
+                    source_kind=SourceKind.OCR,
+                )
+            )
+        return tokens
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -82,7 +212,7 @@ class PaddleOCRBackend:
     def identity(self) -> OCRBackendIdentity:
         return OCRBackendIdentity(
             engine="paddle",
-            runtime="paddle_static",
+            runtime="paddle_subprocess" if self._subprocess_config else "paddle_static",
             profile=self._config.language,
             language=self._config.language,
             device="cpu",
@@ -111,16 +241,22 @@ class PaddleOCRBackend:
 
     def recognize(self, request: OCRRequest) -> OCRResult:
         t0 = time.perf_counter()
-        warnings: list[str] = []
 
         try:
-            if request.input_kind == "region" and request.region_id is not None:
-                page_bbox = BBox(0.0, 0.0, 1.0, 1.0)
-                tokens = self._engine.recognize_region(
-                    request.image, request.page_index, page_bbox
+            if self._subprocess_config is not None:
+                method = (
+                    "recognize_region"
+                    if request.input_kind == "region" and request.region_id is not None
+                    else "recognize_page"
+                )
+                region = BBox(0.0, 0.0, 1.0, 1.0) if method == "recognize_region" else None
+                tokens = self._call_subprocess(method, request.image, request.page_index, region)
+            elif request.input_kind == "region" and request.region_id is not None:
+                tokens = self._engine.recognize_region(  # type: ignore[union-attr]
+                    request.image, request.page_index, BBox(0.0, 0.0, 1.0, 1.0)
                 )
             else:
-                tokens = self._engine.recognize_page(
+                tokens = self._engine.recognize_page(  # type: ignore[union-attr]
                     request.image, request.page_index
                 )
         except Exception as exc:
@@ -157,23 +293,33 @@ class PaddleOCRBackend:
         *,
         quality_variants: bool | None = None,
     ) -> list[OcrToken]:
-        return self._engine.recognize_page(
-            page_image,
-            page_index,
-            page_bbox,
-            quality_variants=quality_variants,
+        if self._subprocess_config is not None:
+            return self._call_subprocess("recognize_page", page_image, page_index)
+        return self._engine.recognize_page(  # type: ignore[union-attr]
+            page_image, page_index, page_bbox, quality_variants=quality_variants
         )
 
     def recognize_region(
         self, page_image: object, page_index: int, region_bbox: BBox
     ) -> list[OcrToken]:
-        return self._engine.recognize_region(page_image, page_index, region_bbox)
+        if self._subprocess_config is not None:
+            return self._call_subprocess("recognize_region", page_image, page_index, region_bbox)
+        return self._engine.recognize_region(page_image, page_index, region_bbox)  # type: ignore[union-attr]
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        if self._subprocess_config is not None:
+            # In subprocess mode: send a lightweight ping to the worker
+            try:
+                self._ensure_worker()
+                resp = self._worker_send({"method": "healthcheck"})
+                return "ready" if resp.get("status") == "ok" else "unknown"
+            except Exception:
+                return "unknown"
+
         from structured_pdf_text.ocr.paddle import validate_local_ocr_models
 
         try:
@@ -187,13 +333,25 @@ class PaddleOCRBackend:
             return "unknown"
 
     def close(self) -> None:
-        pass
+        if self._worker_proc is not None:
+            try:
+                self._worker_proc.stdin.write(b"QUIT\n")  # type: ignore[union-attr]
+                self._worker_proc.stdin.flush()  # type: ignore[union-attr]
+                self._worker_proc.wait(timeout=10)
+            except Exception:
+                self._worker_proc.kill()
+            finally:
+                self._worker_proc = None
 
     # ------------------------------------------------------------------
     # Forward diagnostic attributes accessed by api.py
     # ------------------------------------------------------------------
 
     def __getattr__(self, name: str) -> Any:
+        if self._engine is None:
+            raise AttributeError(
+                f"'{type(self).__name__}' in subprocess mode has no attribute '{name}'"
+            )
         return getattr(self._engine, name)
 
 

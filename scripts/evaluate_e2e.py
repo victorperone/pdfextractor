@@ -107,78 +107,6 @@ def _build_config(engine: str, mode: str, language: str, page_indices: tuple | N
     return config
 
 
-def _patch_torch_for_paddle() -> None:
-    """Inject a minimal torch stub so modelscope doesn't crash with DLL 0xC0000139.
-
-    paddleocr → modelscope → torch (module-level import). On Windows, the CPU
-    torch DLL installed by EasyOCR fails at DLL load time (0xC0000139) before
-    Python can catch anything. PaddlePaddle never actually uses PyTorch; only
-    modelscope probes it at import time.
-
-    The stub uses a self-extending ModuleType subclass that:
-    - Sets __spec__ (required — modelscope raises ValueError if None)
-    - Auto-creates child stub modules on first attribute access
-    - Supports context-manager protocol (needed for torch.no_grad())
-    """
-    import sys
-    import types
-    import importlib.machinery
-
-    if "torch" in sys.modules:
-        return  # already loaded or previously stubbed
-
-    class _TorchStub(types.ModuleType):
-        """Self-extending stub module: any attribute access returns another stub."""
-
-        def __init__(self, name: str) -> None:
-            super().__init__(name)
-            self.__spec__ = importlib.machinery.ModuleSpec(name, None, origin="stub")
-            self.__package__ = name.rsplit(".", 1)[0] if "." in name else name
-            self.__path__: list[str] = []  # mark as a package so sub-imports work
-            self.__version__ = "0.0.0+stub"
-
-        def __getattr__(self, name: str) -> "_TorchStub":
-            child_name = f"{self.__name__}.{name}"
-            if child_name in sys.modules:
-                child = sys.modules[child_name]
-            else:
-                child = _TorchStub(child_name)
-                sys.modules[child_name] = child
-            object.__setattr__(self, name, child)
-            return child  # type: ignore[return-value]
-
-        # Context-manager support (torch.no_grad(), torch.inference_mode(), …)
-        def __call__(self, *args, **kwargs) -> "_TorchStub":
-            return self
-
-        def __enter__(self) -> "_TorchStub":
-            return self
-
-        def __exit__(self, *_) -> bool:
-            return False
-
-        def __bool__(self) -> bool:
-            return False
-
-        def __iter__(self):
-            return iter([])
-
-    torch_stub = _TorchStub("torch")
-
-    # Override known probed attributes so callers get sensible values
-    torch_stub.cuda.is_available = lambda: False          # type: ignore[attr-defined]
-    torch_stub.cuda.device_count = lambda: 0              # type: ignore[attr-defined]
-    torch_stub.backends.cudnn.enabled = False             # type: ignore[attr-defined]
-    torch_stub.backends.cudnn.version = lambda: 0         # type: ignore[attr-defined]
-    torch_stub.Tensor = object                            # type: ignore[attr-defined]
-    torch_stub.device = str                               # type: ignore[attr-defined]
-    torch_stub.float32 = "float32"                        # type: ignore[attr-defined]
-    torch_stub.float16 = "float16"                        # type: ignore[attr-defined]
-    torch_stub.int64 = "int64"                            # type: ignore[attr-defined]
-
-    sys.modules["torch"] = torch_stub
-
-
 def _parse_pages_arg(pages_arg: str) -> tuple[int, ...]:
     """Convert a page range string ('1-5' or '1,3,5') to a tuple of 0-based page indices."""
     indices: list[int] = []
@@ -232,11 +160,6 @@ def main() -> int:
     if not args.pdf.exists():
         print(f"ERROR: PDF not found: {args.pdf}", file=sys.stderr)
         return 1
-
-    # Stub torch BEFORE any paddleocr import to avoid DLL crash on Windows (CF-4).
-    # Must run before PdfTextExtractor is imported, which triggers lazy paddleocr load.
-    if args.engine == "paddle":
-        _patch_torch_for_paddle()
 
     try:
         from structured_pdf_text.api import PdfTextExtractor
