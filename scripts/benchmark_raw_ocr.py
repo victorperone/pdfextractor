@@ -209,11 +209,8 @@ def run_benchmark(
             pil_image, png_bytes = _render_page(pdf_path, page_index, render_scale)
             image_hash = _sha256_bytes(png_bytes)
 
-            import numpy as np
-            image_np = np.array(pil_image)
-
             request = OCRRequest(
-                image=image_np,
+                image=pil_image,
                 image_sha256=image_hash,
                 document_id=pdf_path.stem,
                 page_index=page_index,
@@ -235,7 +232,6 @@ def run_benchmark(
             token_count = 0
             warnings = [str(exc)]
             errors += 1
-            elapsed = time.perf_counter() - t0
             if verbose:
                 print(f"  [FAIL] page {page_num}: {exc}", file=sys.stderr)
         else:
