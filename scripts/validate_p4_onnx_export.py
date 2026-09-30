@@ -204,20 +204,44 @@ def _validate_with_onnxruntime(onnx_path: Path, label: str) -> dict:
         return result
 
 
+def _import_rapidocr() -> tuple[type | None, str]:
+    """Try to import RapidOCR from either the new or old package.
+
+    Returns (RapidOCR class or None, api_variant string).
+    rapidocr-onnxruntime 1.x  → import rapidocr_onnxruntime
+    rapidocr 3.x (newer)      → import rapidocr
+    """
+    # New package (rapidocr>=3.x — not yet on PyPI as of 2026-09)
+    try:
+        from rapidocr import RapidOCR  # type: ignore
+        return RapidOCR, "new"
+    except ImportError:
+        pass
+    # Legacy package (rapidocr-onnxruntime 1.x — latest 1.4.4)
+    try:
+        from rapidocr_onnxruntime import RapidOCR  # type: ignore
+        return RapidOCR, "legacy"
+    except ImportError:
+        pass
+    return None, "none"
+
+
 def _validate_with_rapidocr(det_onnx: Path, rec_onnx: Path) -> dict:
     """Run RapidOCR on a synthetic test image with the given ONNX models."""
     print(f"\n[RAPIDOCR] det={det_onnx.name}  rec={rec_onnx.name}")
-    result = {"status": "fail", "tokens": 0, "elapsed_s": None}
+    result = {"status": "fail", "tokens": 0, "elapsed_s": None, "api": None}
 
-    try:
-        from rapidocr import RapidOCR  # type: ignore
-    except ImportError:
+    RapidOCR, api = _import_rapidocr()
+    if RapidOCR is None:
         print(
             "  [SKIP] rapidocr-onnxruntime não está instalado.\n"
-            "         pip install rapidocr-onnxruntime>=3.9"
+            "         pip install rapidocr-onnxruntime"
         )
         result["status"] = "skip"
         return result
+
+    result["api"] = api
+    print(f"  API: {api}")
 
     try:
         import numpy as np
@@ -236,24 +260,28 @@ def _validate_with_rapidocr(det_onnx: Path, rec_onnx: Path) -> dict:
 
         t0 = time.perf_counter()
         out = engine(img)
-        elapsed = time.perf_counter() - t0
+        elapsed_wall = time.perf_counter() - t0
 
-        # RapidOCR 3.x returns (result, elapse) or RapidOCRResult
-        if hasattr(out, "elapse"):
-            raw_result = out
-            elapsed = getattr(out, "elapse", elapsed)
-        elif isinstance(out, tuple):
+        # Handle both old (tuple) and new (object) return formats
+        if isinstance(out, tuple) and len(out) == 2:
+            # Legacy: (result_list, elapse_float)
             raw_result, elapsed = out
+            elapsed = float(elapsed) if elapsed else elapsed_wall
+        elif hasattr(out, "elapse"):
+            # New API object
+            raw_result = out
+            elapsed = float(out.elapse) if out.elapse else elapsed_wall
         else:
             raw_result = out
+            elapsed = elapsed_wall
 
         tokens = len(raw_result) if raw_result else 0
         result["status"] = "ok"
         result["tokens"] = tokens
         result["elapsed_s"] = round(elapsed, 3)
         print(f"  [OK] Inferência concluída em {elapsed:.2f}s — {tokens} token(s)")
-        if tokens > 0:
-            print(f"  Exemplo: {raw_result[0] if raw_result else '—'}")
+        if tokens > 0 and raw_result:
+            print(f"  Exemplo: {raw_result[0]}")
         return result
     except Exception as exc:
         print(f"  [FAIL] {exc}")
