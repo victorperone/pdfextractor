@@ -29,7 +29,7 @@
 
 | # | Etapa | Entregáveis principais | Status |
 |---|---|---|---|
-| 0 | **Etapa zero — freeze baseline** | `git sha`, `pip freeze`, golden baseline output do corpus | ⬜ |
+| 0 | **Etapa zero — freeze baseline** | `git sha`, `pip freeze`, golden baseline output do corpus | ✅ |
 | P4-pre | **Pré-Fase 4 — validar ONNX export PP-OCRv6** | `paddle2onnx` exporta det + rec sem erro; RapidOCR carrega o ONNX | ⬜ |
 | 1 | **Fase 1 — Contrato** | `contracts.py`, `factory.py`, `registry.py`, fake backend, testes de contrato verdes | ✅ |
 | 2 | **Fase 2 — Migrar Paddle** | `backends/paddle.py`, output idêntico ao baseline (diff zero no corpus) | ✅ |
@@ -41,6 +41,28 @@
 | 8 | **Fase 8 — E2E** | confidence policies calibradas por engine, pipeline completo, TableMagic auditado | ⬜ |
 
 > **Como marcar:** substituir `⬜` por `✅` ao concluir cada etapa.
+
+### Baseline Paddle (Fase 3 — run `20260930-092314-paddle`)
+
+| Métrica | Valor |
+|---|---|
+| git SHA | `421f8db3280c870e3ef5866fcca6365d7bbe447a` |
+| Páginas avaliadas | 32 (scan OCR puro, pp. 72–103) |
+| Páginas OK / falhas | 32 / 0 |
+| CER médio (strict) | 0.4106 |
+| CER mediano | 0.3707 |
+| WER médio (strict) | 0.4786 |
+| WER mediano | 0.4667 |
+| Tempo total | 3018 s (~94 s/página) |
+| PaddlePaddle | 3.3.1 |
+| PaddleOCR | 3.7.0 |
+| PaddleX | 3.7.2 |
+| oneDNN | desabilitado (bug Windows — `ArrayAttribute<DoubleAttribute>`) |
+| Render scale | 2.0 (144 DPI) |
+
+> **Nota sobre velocidade:** oneDNN desabilitado em Windows devido a incompatibilidade com PIR API do PaddlePaddle 3.x.
+> Correção possível via `FLAGS_enable_pir_api=False`, diferida para após implementação de todas as engines.
+> Override manual: variável de ambiente `PADDLE_ENABLE_MKLDNN=1`.
 
 ---
 
@@ -3717,3 +3739,59 @@ As páginas 96, 97, 99 e 116 são as únicas que acionaram o limiar de confianç
 5. **Recomendação — limiar diferenciado por perfil**: se o v6 for promovido como perfil padrão, o limiar de confiança deverá ser reduzido para ~0,80–0,85 para compensar a tendência de sobreconfiança, garantindo que páginas como 99 e 116 continuem a activar TableMagic.
 
 6. **Gate 6 (decisão de promoção)**: o v6 é superior em velocidade, mas apresenta risco de qualidade regressiva em páginas com rotação/degradação severa. Antes de promover, é necessário validar o texto produzido para as páginas 99 e 116 em ambos os perfis e definir se o limiar ajustado resolve a divergência.
+
+---
+
+# Correções Futuras Identificadas
+
+## CF-1 — Restaurar aceleração oneDNN no Windows (PaddlePaddle 3.x / PIR API)
+
+**Problema:**  
+Em Windows, PaddlePaddle 3.3.1 com oneDNN (`enable_mkldnn=True`) falha durante a inferência com:
+
+```
+(Unimplemented) ConvertPirAttribute2RuntimeAttribute not support
+[pir::ArrayAttribute<pir::DoubleAttribute>]
+(at ..\paddle\fluid\framework\new_executor\instruction\onednn\onednn_instruction.cc:118)
+```
+
+**Causa raiz:**  
+A nova API PIR (Paddle Intermediate Representation) do PaddlePaddle 3.x não suporta a conversão de `ArrayAttribute<DoubleAttribute>` para execução no backend oneDNN (MKL-DNN). Isso afeta todos os modelos PP-OCRv6 na plataforma Windows.
+
+**Workaround atual:**  
+`backends/paddle.py` detecta `platform.system() == "Windows"` e passa `enable_mkldnn=False` para o `PaddleOcrEngine`. Isso desabilita a aceleração oneDNN e faz a inferência rodar em CPU puro — correto, mas lento (~94 s/página vs ~1,5 s/página com oneDNN).
+
+**Impacto:**  
+- Benchmark: ~50 min para 32 páginas (aceitável — roda raramente)
+- Produção: ~94 s/página OCR no servidor Windows — **inaceitável para volumes grandes**
+
+**Correção proposta:**  
+Antes de inicializar o PaddleOCR, desabilitar a PIR API para restaurar a compatibilidade com oneDNN:
+
+```python
+# Em paddle.py → _init_ocr(), antes de PaddleOCR(**options)
+import sys
+if sys.platform == "win32":
+    try:
+        import paddle
+        paddle.set_flags({"FLAGS_enable_pir_api": 0})
+    except Exception:
+        pass
+```
+
+**Riscos:**  
+- Desabilitar PIR pode ter efeitos colaterais em PaddlePaddle 3.x (PIR é o novo padrão)
+- Requer ciclos de teste no servidor Windows antes de ativar em produção
+- A variável `FLAGS_enable_pir_api` pode não estar disponível em todas as versões
+
+**Pré-requisito para implementar:**  
+Confirmar no servidor que `paddle.set_flags({"FLAGS_enable_pir_api": 0})` + `enable_mkldnn=True` produz OCR correto e sem erros antes de integrar.
+
+**Override manual temporário (para testes):**  
+```powershell
+$env:PADDLE_ENABLE_MKLDNN = "1"
+python scripts\benchmark_raw_ocr.py ...
+```
+(restaura oneDNN — resultará em erro se PIR incompatível, mas permite testar a flag)
+
+**Status:** ⬜ Diferida — implementar após conclusão de todas as engines (Fase 7)

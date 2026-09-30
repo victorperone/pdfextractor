@@ -27,6 +27,33 @@ ocr = [
     "paddlex[ocr]>=3.7",
     "psutil>=5.9",
 ]
+# Fase 4: RapidOCR com ONNX Runtime (CPU)
+# Instalar: pip install "structured-pdf-text[ocr-rapidocr-onnx]"
+# Requer também: pip install paddle2onnx  (para exportar modelos Paddle → ONNX)
+ocr-rapidocr-onnx = [
+    "rapidocr-onnxruntime>=3.9",
+    "onnxruntime>=1.18",
+]
+# Fase 5: RapidOCR com OpenVINO (Intel CPU)
+# Instalar: pip install "structured-pdf-text[ocr-rapidocr-openvino]"
+ocr-rapidocr-openvino = [
+    "rapidocr-openvino>=3.9",
+    "openvino>=2024.0",
+]
+# Fase 6: Tesseract (executável externo obrigatório: tesseract 5.x + por.traineddata)
+# Sem dependência Python adicional (usa subprocess)
+# Fase 7: EasyOCR (PyTorch CPU)
+# Instalar: pip install "structured-pdf-text[ocr-easyocr]"
+ocr-easyocr = [
+    "easyocr>=1.7",
+]
+# P4-pre: Validação de exportação ONNX
+# Instalar: pip install "structured-pdf-text[p4-pre]"
+p4-pre = [
+    "paddle2onnx>=1.2",
+    "onnxruntime>=1.18",
+    "rapidocr-onnxruntime>=3.9",
+]
 
 [project.scripts]
 pdftext = "structured_pdf_text.cli:main"
