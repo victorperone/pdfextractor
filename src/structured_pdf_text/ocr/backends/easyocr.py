@@ -159,12 +159,9 @@ def _run_easyocr(
 ) -> list[Any]:
     """Run EasyOCR using detect/recognize split with optimized parameters.
 
-    Applies CLAHE preprocessing to the grayscale fed into the recognition
-    stage.  Falls back to the unified readtext() call if the split fails
-    (e.g., API version mismatch or missing dependency).
-
-    canvas_size is set to max(image_height, image_width) so CRAFT never
-    downscales the input image for detection.
+    Falls back to unified readtext() if the split fails (e.g. API version
+    mismatch).  canvas_size is set to max(h, w) so CRAFT never downscales
+    the input for detection.
     """
     import numpy as np
     arr = np.asarray(img)
@@ -173,12 +170,11 @@ def _run_easyocr(
 
     # --- Stage 1: text detection (CRAFT) ---
     try:
+        mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
         horizontal_list, free_list = reader.detect(
             arr,
             canvas_size=canvas_size,
-            mag_ratio=1.5,
-            # Keep detection thresholds at defaults; tuning these requires
-            # per-corpus evaluation and is left as a future benchmark task.
+            mag_ratio=mag_ratio,
         )
     except Exception:
         horizontal_list, free_list = None, None
@@ -190,22 +186,17 @@ def _run_easyocr(
             decoder="beamsearch",
             beamWidth=beamwidth,
             canvas_size=canvas_size,
-            mag_ratio=1.5,
+            mag_ratio=mag_ratio,
             adjust_contrast=adjust_contrast,
             allowlist=allowlist,
             blocklist=blocklist,
             workers=workers,
         )
 
-    # --- Stage 2: recognition (CRNN + CTC) with CLAHE-enhanced grayscale ---
-    grey = _clahe_grey(arr)
-    if grey is None:
-        # OpenCV unavailable — pass original array; EasyOCR converts internally
-        grey = arr
-
+    # --- Stage 2: recognition (CRNN + CTC) ---
     try:
         return reader.recognize(
-            grey,
+            arr,
             horizontal_list=horizontal_list,
             free_list=free_list,
             decoder="beamsearch",
@@ -224,7 +215,7 @@ def _run_easyocr(
             decoder="beamsearch",
             beamWidth=beamwidth,
             canvas_size=canvas_size,
-            mag_ratio=1.5,
+            mag_ratio=mag_ratio,
             adjust_contrast=adjust_contrast,
             allowlist=allowlist,
             blocklist=blocklist,
@@ -313,7 +304,7 @@ class EasyOCRBackend:
         # --- env-var configuration ---
         self._beamwidth = max(1, int(os.environ.get("EASYOCR_BEAMWIDTH", "10")))
         self._workers = max(0, int(os.environ.get("EASYOCR_WORKERS", str(_default_workers()))))
-        self._adjust_contrast = 1.0
+        self._adjust_contrast = float(os.environ.get("EASYOCR_ADJUST_CONTRAST", "0.5"))
         allowlist_env = os.environ.get("EASYOCR_ALLOWLIST", "")
         self._allowlist: str | None = allowlist_env if allowlist_env else None
         blocklist_env = os.environ.get("EASYOCR_BLOCKLIST", "")
