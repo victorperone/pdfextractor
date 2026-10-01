@@ -9,40 +9,40 @@ No GPU is used (gpu=False). Models are cached locally after first download.
 
 Environment variables
 ---------------------
-EASYOCR_MODULE_PATH      Path to model cache directory (default: ~/.EasyOCR/model/)
-EASYOCR_RECOG_NETWORK    Recognition model name (default: '' → EasyOCR default = latin_g2)
-                         Use 'latin_g1' for the older, larger model.
-EASYOCR_BEAMWIDTH        Beam width for beamsearch decoder (default: 10, min: 1)
-EASYOCR_WORKERS          DataLoader workers for recognition.
-                         Default: auto — 0 on Windows (spawn safety), half of
-                         cpu_count() capped at 4 on Linux/macOS.
-                         Override only if the auto-detection is wrong.
-EASYOCR_ALLOWLIST        Character allowlist applied to all recognition calls.
-                         Example: '0123456789.,R$%()-/ '  for financial documents.
-                         Default: unset (no restriction).
-EASYOCR_BLOCKLIST        Character blocklist applied to all recognition calls.
-                         Default: unset (no restriction).
-                         Note: do NOT set 'OoIl' globally — 'o' and 'O' are common
-                         Portuguese letters.  Use EASYOCR_ALLOWLIST instead for
-                         digit-only deployments.
+EASYOCR_MODULE_PATH        Path to model cache directory (default: ~/.EasyOCR/model/)
+EASYOCR_RECOG_NETWORK      Recognition model name (default: '' → EasyOCR default = latin_g2)
+                           Use 'latin_g1' for the older, larger model.
+EASYOCR_BEAMWIDTH          Beam width for beamsearch decoder (default: 10, min: 1)
+EASYOCR_WORKERS            DataLoader workers for recognition.
+                           Default: auto — 0 on Windows (spawn safety), half of
+                           cpu_count() capped at 4 on Linux/macOS.
+                           Override only if the auto-detection is wrong.
+EASYOCR_ADJUST_CONTRAST    EasyOCR internal contrast multiplier for recognition crops.
+                           Default: 0.5 (EasyOCR default).  Range: 0.0–1.0.
+                           Higher values help very low-contrast scans but degrade
+                           already-good pages — do not raise above 0.7.
+EASYOCR_MAG_RATIO          Input magnification factor before CRAFT detection.
+                           Default: 1.2.  Higher values improve small-text recall
+                           but generate more false positives on dense pages.
+EASYOCR_ALLOWLIST          Character allowlist applied to all recognition calls.
+                           Example: '0123456789.,R$%()-/ '  for financial documents.
+                           Default: unset (no restriction).
+EASYOCR_BLOCKLIST          Character blocklist applied to all recognition calls.
+                           Default: unset (no restriction).
+                           Note: do NOT set 'OoIl' globally — 'o' and 'O' are common
+                           Portuguese letters.  Use EASYOCR_ALLOWLIST instead for
+                           digit-only deployments.
 
-Optimization notes (Fase 9)
-----------------------------
-- CLAHE preprocessing: local contrast enhancement applied before OCR using
-  cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).  Skipped silently if
-  OpenCV is unavailable.
-- Detect/recognize split: uses reader.detect() + reader.recognize() instead
-  of the unified readtext().  This allows different parameter sets for the
-  two stages and feeds a CLAHE-enhanced grayscale to the recognition stage.
+Optimization notes
+------------------
+- Detect/recognize split: uses reader.detect() + reader.recognize() instead of
+  the unified readtext().  The 3-channel image array is passed to both stages so
+  EasyOCR can apply its own internal preprocessing correctly.
   Falls back to readtext() on any API incompatibility.
 - canvas_size: set to max(image_height, image_width) so CRAFT never downscales
   the input.  This fixes detection loss on pages rendered at higher DPI.
-- mag_ratio=1.5: magnifies input before CRAFT detection, improving recall on
-  small text (table cells, footnotes).
 - decoder='beamsearch': CTC beamsearch instead of greedy; reduces substitution
   errors on ambiguous characters at the cost of ~20-40% extra inference time.
-- adjust_contrast=1.0: stronger contrast recovery for low-contrast regions
-  (desbotado text, gray headers, scanned documents).
 """
 from __future__ import annotations
 
