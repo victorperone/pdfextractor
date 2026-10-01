@@ -3,10 +3,44 @@
 EasyOCR downloads models on first use to ~/.EasyOCR/model/:
   - craft_mlt_25k.pth  (detection, ~41 MB)
   - latin_g2.pth       (recognition for Portuguese, ~666 MB)
+  - latin_g1.pth       (alternative recognition model, larger, ~800 MB)
 
 No GPU is used (gpu=False). Models are cached locally after first download.
-Override model directory via environment variable:
-    EASYOCR_MODULE_PATH=/path/to/easyocr/model/dir
+
+Environment variables
+---------------------
+EASYOCR_MODULE_PATH      Path to model cache directory (default: ~/.EasyOCR/model/)
+EASYOCR_RECOG_NETWORK    Recognition model name (default: '' → EasyOCR default = latin_g2)
+                         Use 'latin_g1' for the older, larger model.
+EASYOCR_BEAMWIDTH        Beam width for beamsearch decoder (default: 10, min: 1)
+EASYOCR_WORKERS          DataLoader workers for recognition (default: 0)
+                         Set >0 for ~30% CPU speedup on Linux; keep 0 on Windows.
+EASYOCR_ALLOWLIST        Character allowlist applied to all recognition calls.
+                         Example: '0123456789.,R$%()-/ '  for financial documents.
+                         Default: unset (no restriction).
+EASYOCR_BLOCKLIST        Character blocklist applied to all recognition calls.
+                         Default: unset (no restriction).
+                         Note: do NOT set 'OoIl' globally — 'o' and 'O' are common
+                         Portuguese letters.  Use EASYOCR_ALLOWLIST instead for
+                         digit-only deployments.
+
+Optimization notes (Fase 9)
+----------------------------
+- CLAHE preprocessing: local contrast enhancement applied before OCR using
+  cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).  Skipped silently if
+  OpenCV is unavailable.
+- Detect/recognize split: uses reader.detect() + reader.recognize() instead
+  of the unified readtext().  This allows different parameter sets for the
+  two stages and feeds a CLAHE-enhanced grayscale to the recognition stage.
+  Falls back to readtext() on any API incompatibility.
+- canvas_size: set to max(image_height, image_width) so CRAFT never downscales
+  the input.  This fixes detection loss on pages rendered at higher DPI.
+- mag_ratio=1.5: magnifies input before CRAFT detection, improving recall on
+  small text (table cells, footnotes).
+- decoder='beamsearch': CTC beamsearch instead of greedy; reduces substitution
+  errors on ambiguous characters at the cost of ~20-40% extra inference time.
+- adjust_contrast=1.0: stronger contrast recovery for low-contrast regions
+  (desbotado text, gray headers, scanned documents).
 """
 from __future__ import annotations
 
@@ -56,7 +90,7 @@ def _import_easyocr():
         ) from exc
 
 
-def _to_numpy(image: object):
+def _to_numpy(image: object) -> "Any":
     import numpy as np
     if isinstance(image, np.ndarray):
         return image
@@ -64,6 +98,119 @@ def _to_numpy(image: object):
     if arr.ndim == 2:
         arr = np.stack([arr, arr, arr], axis=-1)
     return arr
+
+
+def _clahe_grey(img: "Any") -> "Any | None":
+    """Convert image to CLAHE-enhanced grayscale for recognition stage.
+
+    Returns a uint8 grayscale numpy array, or None if OpenCV is unavailable.
+    CLAHE (clipLimit=2.0, tileGridSize=8×8) applies local contrast enhancement
+    without affecting high-contrast regions significantly.
+    """
+    try:
+        import cv2
+        import numpy as np
+        arr = np.asarray(img)
+        if arr.ndim == 3:
+            # Try RGB→gray first; fall back to BGR→gray
+            try:
+                gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            except Exception:
+                gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        elif arr.ndim == 2:
+            gray = arr.astype(np.uint8)
+        else:
+            return None
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        return clahe.apply(gray)
+    except Exception:
+        return None
+
+
+def _run_easyocr(
+    reader: "Any",
+    img: "Any",
+    *,
+    beamwidth: int,
+    adjust_contrast: float,
+    allowlist: "str | None",
+    blocklist: "str | None",
+    workers: int,
+) -> list[Any]:
+    """Run EasyOCR using detect/recognize split with optimized parameters.
+
+    Applies CLAHE preprocessing to the grayscale fed into the recognition
+    stage.  Falls back to the unified readtext() call if the split fails
+    (e.g., API version mismatch or missing dependency).
+
+    canvas_size is set to max(image_height, image_width) so CRAFT never
+    downscales the input image for detection.
+    """
+    import numpy as np
+    arr = np.asarray(img)
+    h, w = arr.shape[:2]
+    canvas_size = max(h, w)
+
+    # --- Stage 1: text detection (CRAFT) ---
+    try:
+        horizontal_list, free_list = reader.detect(
+            arr,
+            canvas_size=canvas_size,
+            mag_ratio=1.5,
+            # Keep detection thresholds at defaults; tuning these requires
+            # per-corpus evaluation and is left as a future benchmark task.
+        )
+    except Exception:
+        horizontal_list, free_list = None, None
+
+    if horizontal_list is None:
+        # Fallback: unified readtext with optimised params
+        return reader.readtext(
+            arr,
+            decoder="beamsearch",
+            beamWidth=beamwidth,
+            canvas_size=canvas_size,
+            mag_ratio=1.5,
+            adjust_contrast=adjust_contrast,
+            allowlist=allowlist,
+            blocklist=blocklist,
+            workers=workers,
+        )
+
+    # --- Stage 2: recognition (CRNN + CTC) with CLAHE-enhanced grayscale ---
+    grey = _clahe_grey(arr)
+    if grey is None:
+        # OpenCV unavailable — pass original array; EasyOCR converts internally
+        grey = arr
+
+    try:
+        return reader.recognize(
+            grey,
+            horizontal_list=horizontal_list,
+            free_list=free_list,
+            decoder="beamsearch",
+            beamWidth=beamwidth,
+            workers=workers,
+            detail=1,
+            paragraph=False,
+            adjust_contrast=adjust_contrast,
+            allowlist=allowlist,
+            blocklist=blocklist,
+        )
+    except Exception:
+        # Fallback: unified readtext without the split
+        return reader.readtext(
+            arr,
+            decoder="beamsearch",
+            beamWidth=beamwidth,
+            canvas_size=canvas_size,
+            mag_ratio=1.5,
+            adjust_contrast=adjust_contrast,
+            allowlist=allowlist,
+            blocklist=blocklist,
+            workers=workers,
+        )
 
 
 def _result_to_ocr_tokens(raw: list[Any], source_engine: str) -> list[OCRToken]:
@@ -135,6 +282,8 @@ class EasyOCRBackend:
 
     Satisfies both OCRBackend (benchmark) and OcrEngine (pipeline) protocols.
     Models are downloaded to ~/.EasyOCR/model/ on first use (~700 MB total).
+
+    See module docstring for all tunable environment variables.
     """
 
     def __init__(self, config: "ExtractorConfig") -> None:
@@ -142,13 +291,28 @@ class EasyOCRBackend:
         self._language = config.language
         self._langs = _LANG_MAP.get(config.language, ["pt"])
 
+        # --- env-var configuration ---
+        self._beamwidth = max(1, int(os.environ.get("EASYOCR_BEAMWIDTH", "10")))
+        self._workers = max(0, int(os.environ.get("EASYOCR_WORKERS", "0")))
+        self._adjust_contrast = 1.0
+        allowlist_env = os.environ.get("EASYOCR_ALLOWLIST", "")
+        self._allowlist: str | None = allowlist_env if allowlist_env else None
+        blocklist_env = os.environ.get("EASYOCR_BLOCKLIST", "")
+        self._blocklist: str | None = blocklist_env if blocklist_env else None
+
+        # --- reader init ---
         easyocr_mod = _import_easyocr()
         module_path = os.environ.get("EASYOCR_MODULE_PATH")
+        recog_network = os.environ.get("EASYOCR_RECOG_NETWORK", "")
+
         kwargs: dict[str, Any] = {"gpu": False, "verbose": False}
         if module_path:
             kwargs["model_storage_directory"] = module_path
+        if recog_network:
+            kwargs["recog_network"] = recog_network
 
         self._reader = easyocr_mod.Reader(self._langs, **kwargs)
+        self._recog_network = recog_network or "latin_g2"
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -188,7 +352,15 @@ class EasyOCRBackend:
         t0 = time.perf_counter()
         try:
             img = _to_numpy(request.image)
-            raw = self._reader.readtext(img)
+            raw = _run_easyocr(
+                self._reader,
+                img,
+                beamwidth=self._beamwidth,
+                adjust_contrast=self._adjust_contrast,
+                allowlist=self._allowlist,
+                blocklist=self._blocklist,
+                workers=self._workers,
+            )
             tokens = tuple(_result_to_ocr_tokens(raw, "easyocr"))
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
@@ -223,7 +395,15 @@ class EasyOCRBackend:
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
         img = _to_numpy(page_image)
-        raw = self._reader.readtext(img)
+        raw = _run_easyocr(
+            self._reader,
+            img,
+            beamwidth=self._beamwidth,
+            adjust_contrast=self._adjust_contrast,
+            allowlist=self._allowlist,
+            blocklist=self._blocklist,
+            workers=self._workers,
+        )
         return _result_to_pipeline_tokens(raw, page_index, self._language)
 
     def recognize_region(
@@ -236,7 +416,15 @@ class EasyOCRBackend:
         x0, y0 = int(region_bbox.x0), int(region_bbox.y0)
         x1, y1 = int(region_bbox.x1), int(region_bbox.y1)
         crop = img[y0:y1, x0:x1]
-        raw = self._reader.readtext(crop)
+        raw = _run_easyocr(
+            self._reader,
+            crop,
+            beamwidth=self._beamwidth,
+            adjust_contrast=self._adjust_contrast,
+            allowlist=self._allowlist,
+            blocklist=self._blocklist,
+            workers=self._workers,
+        )
         return _result_to_pipeline_tokens(
             raw, page_index, self._language,
             offset_x=float(x0), offset_y=float(y0),

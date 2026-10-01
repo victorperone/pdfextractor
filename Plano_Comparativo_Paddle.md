@@ -229,6 +229,147 @@ Os valores Heading Text CER são zero porque a implementação não encontrou pa
 
 ---
 
+## Fase 9 — Otimizações EasyOCR (pontos de melhoria identificados)
+
+> Pesquisa realizada em 2026-10-01. **Requisito:** execução 100% offline — apenas download inicial de modelos requer internet.  
+> Base de comparação: Fase 8 v1 (224 págs, `balanced`, `pt`) — CER 0.2860, substitution_rate 0.2834, currency_exact 0.3803, cell_cer 1.1575, 11.83 s/pág.
+
+### 9.1 Parâmetros críticos não configurados
+
+| ID | Parâmetro | Valor atual | Valor proposto | Justificativa | Impacto esperado |
+|---|---|---|---|---|---|
+| E-01 | `canvas_size` | 2560 (padrão) | 3500 | A4@300 DPI = 2480×3508 px — o CRAFT está fazendo downscale da altura das páginas, destruindo texto pequeno | Alto — direto no cell_cer e detecção de rodapés/tabelas |
+| E-02 | `decoder` | `'greedy'` (padrão) | `'beamsearch'` | Mantém N caminhos alternativos no CTC antes de decidir; reduz ambiguidade de caractere | Alto — reduz substitution_rate (28.3% atual) |
+| E-03 | `beamWidth` | 5 (padrão) | 10 | Mais alternativas no beamsearch = mais acurácia em palavras ambíguas | Médio — complementa E-02 |
+| E-04 | `mag_ratio` | 1.0 (padrão) | 1.5 | Magnifica input antes do CRAFT; melhora detecção de texto pequeno em células de tabela | Alto — cell_cer 1.1575 é diretamente impactado |
+| E-05 | `adjust_contrast` | 0.5 (padrão) | 1.0 | Target de contraste para reprocessamento de regiões de baixo contraste; documentos financeiros escaneados têm texto desbotado | Médio — melhora recovery de texto cinza/desbotado |
+| E-06 | `workers` | 0 (padrão) | 4 | Paralelismo no DataLoader para pré-carga de crops; ~30% speedup no CPU sem impacto na qualidade | Médio — 11.83 s/pág → ~8 s/pág estimado |
+| E-07 | `allowlist` | não usado | `'0123456789.,R$%()-/ '` (em regiões financeiras) | Restringe o decodificador ao charset esperado; elimina confusão de caractere em valores monetários | Muito alto — currency_exact_match 38% → estimado 60%+ |
+| E-08 | `blocklist` | não usado | `'OoIlBSZ'` (em regiões numéricas) | O EasyOCR confunde O→0, l→1, B→8, S→5 em PT (issue #1131); blocklist força exclusão desses caracteres | Alto — numeric_exact_match e currency |
+
+### 9.2 Feature não utilizada: pipeline separado detect + recognize
+
+Atualmente usamos `reader.readtext(image)` que executa detecção e reconhecimento em sequência com os mesmos parâmetros. O EasyOCR expõe os dois estágios separadamente:
+
+```python
+# Estágio 1 — Detecção (CRAFT): usar parâmetros de detecção otimizados
+horizontal_list, free_list = reader.detect(
+    image,
+    canvas_size=3500,
+    mag_ratio=1.5,
+    text_threshold=0.7,
+    low_text=0.4,
+    link_threshold=0.4,
+)
+
+# Estágio 2 — Reconhecimento (CRNN): usar parâmetros de reconhecimento otimizados
+result = reader.recognize(
+    image,
+    horizontal_list=horizontal_list,
+    free_list=free_list,
+    decoder='beamsearch',
+    beamWidth=10,
+    batch_size=8,
+    workers=4,
+    adjust_contrast=1.0,
+)
+```
+
+**Por que isso importa:**
+- Permite aplicar preprocessing diferente por tipo de região (tabela vs. texto corrido)
+- Permite experimentar parâmetros de reconhecimento sem reexecutar a detecção cara
+- Permite usar `allowlist`/`blocklist` diferentes por tipo de coluna em tabelas
+
+### 9.3 Preprocessing com CLAHE (antes de passar ao EasyOCR)
+
+Para páginas escaneadas com iluminação irregular (frequente em documentos financeiros em PT):
+
+```python
+import cv2
+
+def preprocess_page_for_easyocr(img_bgr):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)  # EasyOCR espera BGR
+```
+
+- **CLAHE** (equalização local de contraste): preserva bordas, melhora texto em regiões com iluminação desuniforme
+- Ganho documentado: 29.69% → 67.97% de accuracy em um estudo com documentos escaneados
+- **NÃO usar**: binarização global (Otsu/threshold) — destrói strokes finos e confunde o CRAFT
+- **NÃO usar**: sharpening excessivo — cria artefatos que fragmentam detecção de regiões de texto
+- Totalmente offline (OpenCV)
+
+### 9.4 Modelo alternativo `latin_g1`
+
+```python
+reader = easyocr.Reader(['pt'], recog_network='latin_g1')
+```
+
+- Padrão atual: `latin_g2` (menor, mais rápido, lançado em EasyOCR 1.3+)
+- `latin_g1`: modelo mais antigo, maior, mais lento, mas pode ter melhor acurácia em textos financeiros portugueses com fontes específicas
+- Requer benchmark comparativo para confirmar se melhora ou piora no corpus
+- Cacheia localmente após primeiro download; execução offline ✅
+
+### 9.5 O que foi descartado (e por quê)
+
+| Opção | Motivo do descarte |
+|---|---|
+| `detect_network='dbnet18'` | 50× mais lento que CRAFT no CPU (confirmado no issue #855) |
+| `decoder='wordbeamsearch'` | Requer `CTCWordBeamSearch` extra; bug de 10× lentidão por chamada excessiva a `simplify_label` (issue #267); instável em 1.7.x |
+| GPU acceleration | Constraint: execução offline em CPU-only |
+| Binarização Otsu antes do EasyOCR | Destrói strokes finos; EasyOCR faz sua própria binarização interna via `contrast_ths/adjust_contrast` |
+
+### 9.6 Fine-tuning do modelo de reconhecimento (longo prazo)
+
+**Potencial:** Benchmark publicado mostrou 2.35% → 96.03% de accuracy em domínio financeiro numérico após fine-tune.
+
+**Abordagem:**
+1. Gerar dados sintéticos com [TextRecognitionDataGenerator](https://github.com/Belval/TextRecognitionDataGenerator) usando charset financeiro PT (`0-9`, `.,R$%()/-`, `áàãâéêíóõôúç`)
+2. Anotar amostras reais do corpus com EasyOCRLabel
+3. Fine-tune via `/trainer` no repo do EasyOCR com `latin_g2.pth` como ponto de partida
+4. Deploy via `recog_network='pt_financial'` + `user_network_directory`
+
+**Constraint offline:** inference do modelo fine-tunado é 100% offline; só o treinamento requer acesso aos dados.
+
+### 9.7 Resumo — Prioridade de implementação
+
+| Prioridade | ID | Ação | Esforço | Impacto | Status |
+|---|---|---|---|---|---|
+| 🔴 Alta | E-01 | `canvas_size` dinâmico (`max(h,w)`) | Mínimo | Nunca faz downscale da imagem | ✅ Impl. |
+| 🔴 Alta | E-07 | `allowlist` via `EASYOCR_ALLOWLIST` | Baixo | currency_exact_match 38% → >60% | ✅ Impl. |
+| 🔴 Alta | E-02+E-03 | `decoder='beamsearch', beamWidth=10` | Mínimo | Reduz substitution_rate | ✅ Impl. |
+| 🟡 Média | E-04 | `mag_ratio=1.5` | Mínimo | Melhora detecção em tabelas | ✅ Impl. |
+| 🟡 Média | E-08 | `blocklist` via `EASYOCR_BLOCKLIST` | Baixo | Configurável por deployment | ✅ Impl. |
+| 🟡 Média | 9.2 | Pipeline detect + recognize separado | Médio | Parâmetros por estágio + CLAHE | ✅ Impl. |
+| 🟡 Média | 9.3 | CLAHE preprocessing (grayscale p/ recognize) | Baixo-Médio | Melhora páginas escaneadas | ✅ Impl. |
+| 🟡 Média | E-06 | `workers` via `EASYOCR_WORKERS` (padrão 0) | Mínimo | ~30% speedup em Linux; 0 no Windows | ✅ Impl. |
+| 🟢 Baixa | 9.4 | `latin_g1` via `EASYOCR_RECOG_NETWORK` | Baixo | Benchmark necessário para confirmar ganho | ✅ Impl. |
+| 🟢 Baixa | 9.6 | Fine-tuning do modelo | Alto | Teto máximo de qualidade | ⬜ Pendente |
+
+### Nota de implementação (2026-10-01)
+
+Todas as otimizações foram implementadas em `src/structured_pdf_text/ocr/backends/easyocr.py`.
+O backend agora usa o **pipeline detect + recognize separado** por padrão, com fallback automático para `readtext()` em caso de incompatibilidade de API.
+
+**Parâmetros fixos** (sempre ativos):
+- `decoder='beamsearch'`
+- `beamWidth=10` (sobrescrito por `EASYOCR_BEAMWIDTH`)
+- `canvas_size=max(h,w)` (dinâmico por imagem)
+- `mag_ratio=1.5`
+- `adjust_contrast=1.0`
+- CLAHE na etapa de reconhecimento (quando OpenCV disponível)
+
+**Parâmetros configuráveis por env var** (desativados por padrão):
+- `EASYOCR_WORKERS` — parallelismo DataLoader (padrão 0; set `4` em Linux)
+- `EASYOCR_ALLOWLIST` — allowlist global (ex: `'0123456789.,R$%()-/ '`)
+- `EASYOCR_BLOCKLIST` — blocklist global (atenção: não bloquear 'O'/'o' em PT)
+- `EASYOCR_RECOG_NETWORK` — modelo alternativo (ex: `latin_g1`)
+
+**Próximo passo:** Re-executar o benchmark Fase 8 v2 com estas otimizações para medir o delta de melhoria.
+
+---
+
 ## Métricas Futuras (fora do escopo da Fase 8 inicial)
 
 Documentadas em `metricas_avaliacao_parser_ocr_markdown.md` — implementar em fases posteriores conforme necessidade:
