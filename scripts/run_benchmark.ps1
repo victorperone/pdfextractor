@@ -72,8 +72,8 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " Tabela comparativa" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-$metricsFiles = Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" -ErrorAction SilentlyContinue |
-    ForEach-Object { $_.FullName }
+$metricsFiles = @(Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.FullName })
 
 if ($metricsFiles) {
     python scripts\compare_engines.py @metricsFiles --output "$OutDir\comparison_${RunSuffix}.md"
