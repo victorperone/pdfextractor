@@ -1,25 +1,25 @@
-"""Smoke test de compatibilidade PP-OCRv6 — Fase 1.
+"""PP-OCRv6 compatibility smoke test — Phase 1.
 
-Confirma que os modelos v6 inicializam e rodam offline em CPU,
-sem nenhuma tentativa de download de rede.
+Confirms that v6 models initialize and run offline on CPU,
+without any network download attempts.
 
-Uso:
-    # Verificação rápida (imagem sintética):
+Usage:
+    # Quick check (synthetic image):
     python scripts/eval_v6/smoke_test_v6.py \\
         --cache-home ~/.cache/pdfextractor/paddlex-v6-eval
 
-    # Com documento real (recomendado — usa o venv de produção):
+    # With a real document (recommended — uses the production venv):
     python scripts/eval_v6/smoke_test_v6.py \\
         --cache-home ~/.cache/pdfextractor/paddlex-v6-eval \\
         --pdf corpus/Document_AI_V2.pdf
 
-    # No Windows (PowerShell):
+    # On Windows (PowerShell):
     python scripts\\eval_v6\\smoke_test_v6.py `
         --cache-home "$env:USERPROFILE\\.cache\\pdfextractor\\paddlex-v6-eval" `
         --pdf corpus\\Document_AI_V2.pdf
 
-Nota: quando --pdf é fornecido, o teste de imagem sintética é pulado
-para evitar carregar os modelos duas vezes na memória.
+Note: when --pdf is provided, the synthetic image test is skipped
+to avoid loading the models twice into memory.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def check_models(cache_home: str, profile: str) -> bool:
 
 
 def test_image(cache_home: str, profile: str) -> bool:
-    """Carrega PaddleOCR diretamente e roda inferência numa imagem sintética."""
+    """Load PaddleOCR directly and run inference on a synthetic image."""
     _add_src()
     from structured_pdf_text.ocr.models import get_profile
     from structured_pdf_text.ocr.runtime_policy import resolve_paddle_runtime_policy
@@ -93,7 +93,7 @@ def test_image(cache_home: str, profile: str) -> bool:
 
 
 def test_pdf(pdf: Path, cache_home: str, profile: str) -> bool:
-    """Extrai o PDF via PdfTextExtractor com o perfil v6."""
+    """Extract the PDF via PdfTextExtractor with the v6 profile."""
     _add_src()
     os.environ["PADDLE_PDX_CACHE_HOME"] = str(Path(cache_home).expanduser().resolve())
 
@@ -127,7 +127,7 @@ def main() -> int:
         return 1
 
     if args.pdf:
-        # PDF fornecido: pula imagem sintética para não carregar modelos duas vezes
+        # PDF provided: skip synthetic image to avoid loading models twice
         if not args.pdf.exists():
             print(f"[FAIL] PDF não encontrado: {args.pdf}")
             return 1
@@ -135,7 +135,7 @@ def main() -> int:
         if not test_pdf(args.pdf, cache_home, args.profile):
             return 1
     else:
-        # Sem PDF: usa imagem sintética como verificação rápida
+        # No PDF: use synthetic image as a quick check
         print("Testando com imagem sintética...")
         if not test_image(cache_home, args.profile):
             return 1

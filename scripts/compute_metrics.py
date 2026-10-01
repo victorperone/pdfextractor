@@ -5,11 +5,11 @@ Compute E2E metrics — Fase 8.
 Compares extracted Markdown against the reference ground truth and computes
 the minimum metric set (section 50 of metricas_avaliacao_parser_ocr_markdown.md):
 
-  Grupo 1 — Texto
-  Grupo 2 — Estrutura Markdown
-  Grupo 3 — Tabelas
-  Grupo 4 — Ordem e integridade
-  Grupo 5 — Dados críticos
+  Group 1 — Text
+  Group 2 — Markdown Structure
+  Group 3 — Tables
+  Group 4 — Order and Integrity
+  Group 5 — Critical Data
 
 Pages are processed in parallel using ProcessPoolExecutor (one worker per
 CPU core). On a 12-core machine this reduces wall-clock time from ~60 min to
@@ -1033,7 +1033,7 @@ def main() -> int:
             if not args.quiet:
                 print(f"\r  {done}/{total_pages} páginas processadas...", end="", flush=True)
     if not args.quiet:
-        print()  # quebra de linha após o progresso
+        print()  # newline after progress output
 
     results.sort(key=lambda r: r["pn"])
 

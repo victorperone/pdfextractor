@@ -1,30 +1,30 @@
 """P4-pre: Validate PP-OCRv6 ONNX export for RapidOCR compatibility.
 
-Executa em duas fases sequenciais:
-  Fase A — Exportar modelos Paddle → ONNX  (requer paddle2onnx)
-  Fase B — Validar ONNX com onnxruntime e RapidOCR
+Runs in two sequential phases:
+  Phase A — Export Paddle models → ONNX  (requires paddle2onnx)
+  Phase B — Validate ONNX with onnxruntime and RapidOCR
 
-Uso (servidor — PowerShell):
+Usage (server — PowerShell):
     python scripts\\validate_p4_onnx_export.py `
         --onnx-dir output\\onnx_models
 
-Parâmetros opcionais:
-    --cache-home   Diretório do cache PaddleX (padrão: ~/.cache/pdfextractor/paddlex)
-    --language     Perfil de modelos (padrão: pt → PP-OCRv6 medium)
-    --skip-export  Pular a exportação e ir direto à validação (ONNX já existentes)
-    --onnx-det     Caminho ONNX de detecção já existente (bypassa exportação do det)
-    --onnx-rec     Caminho ONNX de reconhecimento já existente (bypassa exportação do rec)
+Optional parameters:
+    --cache-home   PaddleX cache directory (default: ~/.cache/pdfextractor/paddlex)
+    --language     Model profile (default: pt → PP-OCRv6 medium)
+    --skip-export  Skip export and go directly to validation (existing ONNX)
+    --onnx-det     Path to existing detection ONNX (bypasses det export)
+    --onnx-rec     Path to existing recognition ONNX (bypasses rec export)
 
-Exemplos:
-    # Exportar + validar tudo:
+Examples:
+    # Export + validate everything:
     python scripts\\validate_p4_onnx_export.py --onnx-dir output\\onnx_models
 
-    # Só validar ONNX pré-existentes (baixados do hub RapidOCR):
+    # Validate pre-existing ONNX only (downloaded from RapidOCR hub):
     python scripts\\validate_p4_onnx_export.py `
         --onnx-dir output\\onnx_models `
         --skip-export
 
-    # Usar ONNX já existentes específicos:
+    # Use specific pre-existing ONNX:
     python scripts\\validate_p4_onnx_export.py `
         --onnx-det path\\to\\det.onnx `
         --onnx-rec path\\to\\rec.onnx
@@ -354,9 +354,9 @@ def _validate_rapidocr_builtin() -> dict:
         return result
 
     try:
-        engine = RapidOCR()  # usa modelos embutidos do pacote
+        engine = RapidOCR()  # uses built-in package models
         img = np.full((200, 600, 3), 255, dtype=np.uint8)
-        img[70:130, 50:550] = 30  # bloco escuro simula área de texto
+        img[70:130, 50:550] = 30  # dark block simulates text area
 
         t0 = time.perf_counter()
         out = engine(img)

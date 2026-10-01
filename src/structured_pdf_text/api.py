@@ -1041,11 +1041,11 @@ def _image_profile_to_dict(value: Any) -> dict[str, Any] | None:
 
 
 def _resolve_num_threads(num_threads: int) -> int:
-    """Resolve o número efetivo de threads para o motor OCR.
+    """Resolve the effective number of threads for the OCR engine.
 
-    0  → auto: usa os.cpu_count() com fallback 2
-    -1 → não configurar (deixar PaddlePaddle decidir)
-    n  → usar exatamente n (mínimo 1)
+    0  → auto: uses os.cpu_count() with fallback 2
+    -1 → do not configure (let PaddlePaddle decide)
+    n  → use exactly n (minimum 1)
     """
     import os
     if num_threads == -1:

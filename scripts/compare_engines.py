@@ -33,7 +33,7 @@ from pathlib import Path
 # Metric groups to display, in order
 _METRICS: list[tuple[str, str, str]] = [
     # (display_name, group_key, metric_key)
-    # Grupo 1 — Texto
+    # Group 1 — Text
     ("CER Raw",               "grupo1_texto",                 "cer_raw"),
     ("CER Normalized",        "grupo1_texto",                 "cer_normalized"),
     ("CER Text Only",         "grupo1_texto",                 "cer_text_only"),
@@ -43,7 +43,7 @@ _METRICS: list[tuple[str, str, str]] = [
     ("Deletion Rate",         "grupo1_texto",                 "deletion_rate"),
     ("Insertion Rate",        "grupo1_texto",                 "insertion_rate"),
     ("Omission Rate",         "grupo1_texto",                 "omission_rate"),
-    # Grupo 2 — Estrutura Markdown
+    # Group 2 — Markdown Structure
     ("Heading F1",            "grupo2_estrutura_markdown",    "heading_f1"),
     ("Heading Level Acc.",    "grupo2_estrutura_markdown",    "heading_level_accuracy"),
     ("Heading Text CER",      "grupo2_estrutura_markdown",    "heading_text_cer"),
@@ -51,7 +51,7 @@ _METRICS: list[tuple[str, str, str]] = [
     ("Paragraph Boundary F1", "grupo2_estrutura_markdown",    "paragraph_boundary_f1"),
     ("List Detection F1",     "grupo2_estrutura_markdown",    "list_detection_f1"),
     ("Markdown AST Sim.",     "grupo2_estrutura_markdown",    "markdown_ast_similarity"),
-    # Grupo 3 — Tabelas
+    # Group 3 — Tables
     ("Table F1",              "grupo3_tabelas",               "table_f1"),
     ("Row F1",                "grupo3_tabelas",               "row_f1"),
     ("Column F1",             "grupo3_tabelas",               "column_f1"),
@@ -60,7 +60,7 @@ _METRICS: list[tuple[str, str, str]] = [
     ("Cell CER",              "grupo3_tabelas",               "cell_cer"),
     ("Cell Alignment Acc.",   "grupo3_tabelas",               "cell_alignment_accuracy"),
     ("Table Structure Sim.",  "grupo3_tabelas",               "table_structure_similarity"),
-    # Grupo 4 — Ordem e integridade
+    # Group 4 — Order and Integrity
     ("Reading Order Acc.",    "grupo4_ordem_integridade",     "reading_order_accuracy"),
     ("Duplicate Content",     "grupo4_ordem_integridade",     "duplicate_content_rate"),
     ("Header Leakage",        "grupo4_ordem_integridade",     "header_leakage_rate"),
@@ -68,7 +68,7 @@ _METRICS: list[tuple[str, str, str]] = [
     ("Page# Leakage",         "grupo4_ordem_integridade",     "page_number_leakage_rate"),
     ("Failure Rate",          "grupo4_ordem_integridade",     "failure_rate"),
     ("Invalid Markdown",      "grupo4_ordem_integridade",     "invalid_markdown_rate"),
-    # Grupo 5 — Dados críticos
+    # Group 5 — Critical Data
     ("Numeric Exact Match",   "grupo5_dados_criticos",        "numeric_exact_match"),
     ("Date Exact Match",      "grupo5_dados_criticos",        "date_exact_match"),
     ("Currency Exact Match",  "grupo5_dados_criticos",        "currency_exact_match"),

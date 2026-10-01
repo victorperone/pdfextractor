@@ -221,52 +221,52 @@ network controls.
 pytest
 ```
 
-## Benchmark comparativo de engines OCR
+## Comparative benchmark of OCR engines
 
-O projeto inclui um pipeline de benchmark E2E que avalia cinco engines OCR
-(PaddleOCR, RapidOCR ONNX, RapidOCR OpenVINO, Tesseract 5, EasyOCR) em
-cinco grupos de métricas: texto (CER/WER), estrutura Markdown, tabelas,
-ordem e integridade, e dados críticos.
+The project includes an E2E benchmark pipeline that evaluates five OCR engines
+(PaddleOCR, RapidOCR ONNX, RapidOCR OpenVINO, Tesseract 5, EasyOCR) across
+five metric groups: text (CER/WER), Markdown structure, tables,
+order and integrity, and critical data.
 
-Consulte o guia completo em [`docs/benchmark_engines.md`](docs/benchmark_engines.md).
+See the full guide at [`docs/benchmark_engines.md`](docs/benchmark_engines.md).
 
-### Execução rápida (Windows PowerShell)
+### Quick start (Windows PowerShell)
 
 ```powershell
-# Smoke test — 5 páginas, todas as engines
+# Smoke test — 5 pages, all engines
 .\scripts\run_benchmark.ps1
 
-# Documento completo
+# Full document
 .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 
-# Engine individual ou subconjunto
+# Single engine or subset
 .\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix "v2"
 .\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
 ```
 
-### Execução rápida (Linux / WSL)
+### Quick start (Linux / WSL)
 
 ```bash
-# Preparar os runtimes OCR no .venv e o Tesseract no prefixo local
+# Prepare OCR runtimes in .venv and Tesseract in the local prefix
 scripts/setup_ocr_benchmark.sh
 
-# Smoke test — páginas 77–81 do Document AI V3
+# Smoke test — pages 77–81 of Document AI V3
 scripts/run_benchmark.sh --run-suffix wsl-smoke
 
-# Documento completo
+# Full document
 scripts/run_benchmark.sh --run-suffix wsl-v1 --all-pages
 ```
 
-Scripts envolvidos:
+Scripts involved:
 
-| Script | Função |
+| Script | Function |
 |---|---|
-| `scripts/evaluate_e2e.py` | Extrai PDF com uma engine; salva Markdown + manifesto |
-| `scripts/compute_metrics.py` | Calcula métricas contra ground truth |
-| `scripts/compare_engines.py` | Gera tabela comparativa de todas as engines |
-| `scripts/run_benchmark.ps1` | Orquestra as três etapas sequencialmente no Windows |
-| `scripts/setup_ocr_benchmark.sh` | Instala os runtimes e modelos necessários no WSL |
-| `scripts/run_benchmark.sh` | Orquestra as três etapas sequencialmente em Linux/WSL |
+| `scripts/evaluate_e2e.py` | Extracts PDF with one engine; saves Markdown + manifest |
+| `scripts/compute_metrics.py` | Computes metrics against ground truth |
+| `scripts/compare_engines.py` | Generates comparative table of all engines |
+| `scripts/run_benchmark.ps1` | Orchestrates the three steps sequentially on Windows |
+| `scripts/setup_ocr_benchmark.sh` | Installs the required runtimes and models on WSL |
+| `scripts/run_benchmark.sh` | Orchestrates the three steps sequentially on Linux/WSL |
 
 ## CLI examples
 

@@ -1,8 +1,8 @@
 # setup_ocr_benchmark.ps1
-# Instalação reprodutível do ambiente de benchmark OCR (Windows PowerShell)
+# Reproducible OCR benchmark environment setup (Windows PowerShell)
 #
-# Testado em: Windows Server 2025, Python 3.12.10, AMD64
-# Tesseract: v5.5.3 com tessdata por
+# Tested on: Windows Server 2025, Python 3.12.10, AMD64
+# Tesseract: v5.5.3 with tessdata por
 #
 # Uso:
 #   cd C:\Users\...\workspace\pdfextractor
@@ -26,13 +26,13 @@ Write-Host ""
 Write-Host "[2/4] RapidOCR + ONNX Runtime..." -ForegroundColor Yellow
 pip install "rapidocr-onnxruntime==1.4.4" "onnxruntime==1.30.0"
 
-# --- 3. RapidOCR OpenVINO (instalação em duas etapas — constraint conflitante) ---
+# --- 3. RapidOCR OpenVINO (two-step install — conflicting constraint) ---
 Write-Host ""
 Write-Host "[3/4] RapidOCR + OpenVINO 2024.4.0..." -ForegroundColor Yellow
-# openvino exige numpy<2.1.0; instalar antes para resolver conflito
+# openvino requires numpy<2.1.0; install first to resolve conflict
 pip install "openvino==2024.4.0"
-# rapidocr-openvino declara openvino<=2024.0.0 (sem wheel cp312 win64)
-# usamos --no-deps para manter openvino==2024.4.0 que tem suporte a Python 3.12
+# rapidocr-openvino declares openvino<=2024.0.0 (no cp312 win64 wheel)
+# use --no-deps to keep openvino==2024.4.0 which supports Python 3.12
 pip install "rapidocr-openvino==1.4.4" --no-deps
 
 # --- 4. EasyOCR + PyTorch CPU ---
@@ -41,14 +41,14 @@ Write-Host "[4/5] PyTorch CPU + EasyOCR..." -ForegroundColor Yellow
 pip install torch==2.14.0+cpu torchvision==0.29.0+cpu --index-url https://download.pytorch.org/whl/cpu
 pip install "easyocr==1.7.2"
 
-# --- 5. Fixar numpy (conflito: easyocr atualiza para 2.5.x; openvino exige <2.1.0) ---
+# --- 5. Pin numpy (conflict: easyocr upgrades to 2.5.x; openvino requires <2.1.0) ---
 Write-Host ""
-Write-Host "[5/5] Fixando numpy==2.0.2 (compatível com openvino + easyocr + paddlex)..." -ForegroundColor Yellow
+Write-Host "[5/5] Pinning numpy==2.0.2 (compatible with openvino + easyocr + paddlex)..." -ForegroundColor Yellow
 pip install "numpy==2.0.2"
 
-# --- Verificação final ---
+# --- Final verification ---
 Write-Host ""
-Write-Host "=== Verificando instalações ===" -ForegroundColor Cyan
+Write-Host "=== Verifying installations ===" -ForegroundColor Cyan
 
 $checks = @(
     @("PaddlePaddle",           "import paddle; print(paddle.__version__)"),
@@ -73,32 +73,32 @@ foreach ($check in $checks) {
 }
 
 Write-Host ""
-Write-Host "Verificando Tesseract (executável do sistema)..." -ForegroundColor Yellow
+Write-Host "Checking Tesseract (system executable)..." -ForegroundColor Yellow
 try {
     $tessVer = (tesseract --version 2>&1 | Select-String "tesseract").ToString().Trim()
     Write-Host "  OK  $tessVer" -ForegroundColor Green
     $tessLangs = tesseract --list-langs 2>&1 | Out-String
     if ($tessLangs -match "por") {
-        Write-Host "  OK  tessdata: por (Português) disponível" -ForegroundColor Green
+        Write-Host "  OK  tessdata: por (Portuguese) available" -ForegroundColor Green
     } else {
-        Write-Host "  FAIL tessdata 'por' não encontrado — baixe em:" -ForegroundColor Red
+        Write-Host "  FAIL tessdata 'por' not found — download from:" -ForegroundColor Red
         Write-Host "       https://github.com/tesseract-ocr/tessdata_best/raw/main/por.traineddata" -ForegroundColor Red
-        Write-Host "       Copiar para: C:\Program Files\Tesseract-OCR\tessdata\" -ForegroundColor Red
+        Write-Host "       Copy to: C:\Program Files\Tesseract-OCR\tessdata\" -ForegroundColor Red
     }
 } catch {
-    Write-Host "  FAIL Tesseract não encontrado no PATH" -ForegroundColor Red
-    Write-Host "       Instale de: https://github.com/UB-Mannheim/tesseract/wiki" -ForegroundColor Red
+    Write-Host "  FAIL Tesseract not found in PATH" -ForegroundColor Red
+    Write-Host "       Install from: https://github.com/UB-Mannheim/tesseract/wiki" -ForegroundColor Red
 }
 
 Write-Host ""
-Write-Host "=== Setup completo ===" -ForegroundColor Cyan
-Write-Host "Execute o benchmark E2E com:"
-Write-Host "  # Smoke test — 5 páginas, todas as engines"
+Write-Host "=== Setup complete ===" -ForegroundColor Cyan
+Write-Host "Run the E2E benchmark with:"
+Write-Host "  # Smoke test — 5 pages, all engines"
 Write-Host "  .\scripts\run_benchmark.ps1"
 Write-Host ""
-Write-Host "  # Documento completo"
+Write-Host "  # Full document"
 Write-Host "  .\scripts\run_benchmark.ps1 -RunSuffix v2 -AllPages"
 Write-Host ""
-Write-Host "  # Engine individual"
+Write-Host "  # Single engine"
 Write-Host "  .\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix v2"
 Write-Host "  .\scripts\run_benchmark.ps1 -Engine rapidocr-onnx -AllPages -RunSuffix v2"

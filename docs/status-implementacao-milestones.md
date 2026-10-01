@@ -1,46 +1,47 @@
-# Status de implementação frente ao plano do MVP
+# Implementation status against the MVP plan
 
-Data da auditoria: 2026-09-13  
-Documento de referência: `plano-mvp-extrator-estruturado-texto-pdf.md`
+Audit date: 2026-09-13  
+Reference document: `plano-mvp-extrator-estruturado-texto-pdf.md`
 
-Esta matriz compara funcionalidades executáveis, não apenas a existência de
-arquivos ou interfaces. `Parcial` significa que existe uma fatia funcional,
-mas ao menos um item explicitamente previsto no milestone ainda não está
-coberto de forma geral.
+This matrix compares executable functionality, not just the existence of
+files or interfaces. `Partial` means that a functional slice exists, but at
+least one item explicitly planned in the milestone is not yet covered in
+general.
 
-| Milestone | Status | Implementado | Lacunas verificadas |
+| Milestone | Status | Implemented | Verified gaps |
 |---|---|---|---|
-| M0 — baseline e corpus | Implementado | CLI, corpus local, runner, tempos, relatório operacional e adaptadores `structured-*`, `pdfium-raw` e PyMuPDF opcional | categorização e casos de ouro crescem junto com o corpus empresarial |
-| M1 — native evidence | Implementado | coordenadas, índice/Unicode, fonte/tamanho/peso/ângulo, cores, render mode, flags experimentais, origem, imagens, paths, matrizes/MCIDs, anotações/appearance streams, structure tree, capabilities e dump JSON | ampliar atributos somente quando novas APIs estáveis do PDFium justificarem |
-| M2 — reconstrução nativa | Implementado | normalização conservadora, deduplicação, orientação, linhas, espaços, pontuação/glifos de baseline, palavras, ordem nativa e overlay | refinamentos futuros de qualidade não bloqueiam o milestone |
-| M3 — complexity analyzer | Implementado | cobertura textual/visual, imagem dominante, Unicode ruim, duplicação, tinta visível, vetores, anotações, tabelas/colunas e relatório de decisão | pesos dos sinais continuam heurísticos e devem ser calibrados em corpus empresarial |
-| M4 — layout regions | Implementado | protocolo substituível, engine heurística, render low-res, normalização, atribuição de linhas e overlay | um modelo aprendido pode ser plugado depois, sem mudança de domínio |
-| M5 — reading order | Implementado | grafo ponderado de regiões, bandas de largura total, consistência da ordem nativa, colunas somente em prosa, grupos rotacionados e semântica básica | calibrar pesos com novos layouts empresariais |
-| M6 — OCR e scans | Implementado | PaddleOCR local, português, render, tokens, coordenadas, confiança, rotações e variantes | modelos alternativos permanecem opcionais pela interface |
-| M7 — OCR seletivo e fusion | Implementado | `RegionQuality`, decisão local após layout, OCR de crop, promoção por área/contagem, page OCR, alinhamento, deduplicação, conflitos, proveniência e refinador regional genérico | calibrar thresholds com o corpus empresarial sem alterar a cascata |
-| M8 — tabelas determinísticas | Implementado | paths, strict grid, relaxed grid, células, confiança, text tracks sem borda e `ProseVsTableClassifier` com rejeição de prosa e código | calibrar confiança e spans complexos com novas tabelas empresariais |
-| M9 — fallback visual | Implementado | interface de engine, backend OpenCV, estrutura visual, OCR de crop, mapeamento de células/spans e rejeição de gráficos/diagramas sem suporte textual | modelo visual aprendido pode substituir o backend sem alterar o pipeline |
-| M10 — tabelas entre páginas | Implementado | assinatura, geometria real das bordas, cabeçalhos, trilhas X, largura, tipos de célula, títulos intervenientes, marcadores, fragments, merge e decisões positivas/negativas auditáveis | calibrar pesos para sequências empresariais com mais de dois fragmentos |
-| M11 — assembly/renderers | Implementado | documento estruturado, raw/reading text, JSON, Markdown, política de cabeçalho/rodapé e limites de página | renderizações adicionais são evolução pós-MVP |
-| M12 — performance/hardening | Implementado | tempos por estágio/estratégia, p50/p95/p99, RSS/pico, evidência nativa opt-in, diagnóstico por página direcionado, aquisições e estimativa FFI, timeout, limites, cache, reuso, batching e multiprocessing por documento | Rust/PyO3 e isolamento permanecem opções futuras condicionadas às medições, como definido no plano |
+| M0 — baseline and corpus | Implemented | CLI, local corpus, runner, timings, operational report, and `structured-*`, `pdfium-raw`, and optional PyMuPDF adapters | categorization and gold cases grow together with the corporate corpus |
+| M1 — native evidence | Implemented | coordinates, index/Unicode, font/size/weight/angle, colors, render mode, experimental flags, origin, images, paths, matrices/MCIDs, annotations/appearance streams, structure tree, capabilities, and JSON dump | expand attributes only when new stable PDFium APIs justify it |
+| M2 — native reconstruction | Implemented | conservative normalization, deduplication, orientation, lines, spaces, punctuation/baseline glyphs, words, native order, and overlay | future quality refinements do not block the milestone |
+| M3 — complexity analyzer | Implemented | text/visual coverage, dominant image, bad Unicode, duplication, visible ink, vectors, annotations, tables/columns, and decision report | signal weights remain heuristic and should be calibrated on corporate corpus |
+| M4 — layout regions | Implemented | replaceable protocol, heuristic engine, low-res render, normalization, line assignment, and overlay | a learned model can be plugged in later, without domain change |
+| M5 — reading order | Implemented | weighted region graph, full-width bands, native order consistency, columns only in prose, rotated groups, and basic semantics | calibrate weights with new corporate layouts |
+| M6 — OCR and scans | Implemented | local PaddleOCR, Portuguese, render, tokens, coordinates, confidence, rotations, and variants | alternative models remain optional via the interface |
+| M7 — selective OCR and fusion | Implemented | `RegionQuality`, local decision after layout, crop OCR, promotion by area/count, page OCR, alignment, deduplication, conflicts, provenance, and generic regional refiner | calibrate thresholds with the corporate corpus without changing the cascade |
+| M8 — deterministic tables | Implemented | paths, strict grid, relaxed grid, cells, confidence, borderless text tracks, and `ProseVsTableClassifier` with prose and code rejection | calibrate confidence and complex spans with new corporate tables |
+| M9 — visual fallback | Implemented | engine interface, OpenCV backend, visual structure, crop OCR, cell/span mapping, and rejection of charts/diagrams without text support | a learned visual model can replace the backend without changing the pipeline |
+| M10 — cross-page tables | Implemented | signature, real border geometry, headers, X tracks, width, cell types, intervening titles, markers, fragments, merge, and auditable positive/negative decisions | calibrate weights for corporate sequences with more than two fragments |
+| M11 — assembly/renderers | Implemented | structured document, raw/reading text, JSON, Markdown, header/footer policy, and page limits | additional renderings are post-MVP evolution |
+| M12 — performance/hardening | Implemented | timings per stage/strategy, p50/p95/p99, RSS/peak, opt-in native evidence, targeted per-page diagnostics, FFI acquisitions/estimate, timeout, limits, cache, reuse, batching, and per-document multiprocessing | Rust/PyO3 and isolation remain future options conditioned on measurements, as defined in the plan |
 
-## Ordem de conclusão das lacunas
+## Gap closure order
 
-1. ~~Refinador OCR genérico por região e integração com tabelas/figuras.~~
-2. ~~Adaptadores comparativos do M0.~~
-3. ~~Grafo de reading order e consistência nativa do M5.~~
-4. ~~Decisão automática por região do M7.~~
-5. ~~Text tracks sem borda do M8.~~
-6. ~~Explicabilidade adicional do M10.~~
-7. ~~Métricas restantes do M12.~~
-8. ~~Evidência PDFium adicional do M1 oferecida pela binding atual.~~
+1. ~~Generic per-region OCR refiner and integration with tables/figures.~~
+2. ~~Comparative adapters from M0.~~
+3. ~~Reading order graph and native consistency from M5.~~
+4. ~~Automatic per-region decision from M7.~~
+5. ~~Borderless text tracks from M8.~~
+6. ~~Additional explainability from M10.~~
+7. ~~Remaining metrics from M12.~~
+8. ~~Additional PDFium evidence from M1 offered by the current binding.~~
 
-Nenhum item acima exige contrariar as decisões do documento original. A etapa
-de qualidade adaptativa adicionou `OcrQualityPolicy` (`baseline`, `adaptive` e
-`exhaustive`), avaliação ponderada por caracteres, perfil visual, consenso
-espacial, tipografia nativa em `TextToken`, listas estruturadas, ordenação de
-formulários/figura-caption e classificação conservadora de conteúdo decorativo.
-Os diagnósticos dessas decisões ficam em `page.diagnostics.facts`. O corpus de
-validação citado no plano não está neste checkout; a validação executada aqui é
-sintética e baseada nos testes do projeto. Os backends permanecem substituíveis
-e texto nativo confiável continua sendo a evidência principal.
+None of the items above requires contradicting the decisions in the original
+document. The adaptive quality stage added `OcrQualityPolicy` (`baseline`,
+`adaptive`, and `exhaustive`), character-weighted evaluation, visual profile,
+spatial consensus, native typography in `TextToken`, structured lists,
+form/figure-caption ordering, and conservative classification of decorative
+content. The diagnostics for these decisions are in `page.diagnostics.facts`.
+The validation corpus referenced in the plan is not in this checkout; the
+validation performed here is synthetic and based on the project's tests.
+Backends remain replaceable and reliable native text continues to be the
+primary evidence.

@@ -1,41 +1,41 @@
-# Benchmark Comparativo de Engines OCR
+# OCR Engine Comparative Benchmark
 
-Este documento descreve o sistema de benchmark E2E (end-to-end) implementado na
-Fase 8 do projeto. O benchmark avalia a qualidade de extração de texto e estrutura
-Markdown de cinco engines OCR diferentes, usando um corpus de stress test com
-ground truth manual.
-
----
-
-## Motivação
-
-O projeto suporta múltiplas engines OCR através do contrato `OCRBackend`
-(`src/structured_pdf_text/ocr/contracts.py`). Cada engine tem características
-distintas de velocidade, qualidade e dependências. O benchmark permite:
-
-- comparar objetivamente a qualidade de extração de texto (CER, WER)
-- avaliar a fidelidade da estrutura Markdown gerada (headings, tabelas, listas)
-- identificar quais condições de digitalização (baixa DPI, ruído, rotação) cada
-  engine lida melhor
-- quantificar trade-offs entre velocidade e qualidade para decisão de deploy
+This document describes the E2E (end-to-end) benchmark system implemented in
+Phase 8 of the project. The benchmark evaluates the quality of text extraction and
+Markdown structure from five different OCR engines, using a stress test corpus with
+manual ground truth.
 
 ---
 
-## Engines Avaliadas
+## Motivation
 
-| Engine | Modo | Backend | Velocidade (corpus 32p) | Dependências |
+The project supports multiple OCR engines through the `OCRBackend` contract
+(`src/structured_pdf_text/ocr/contracts.py`). Each engine has distinct characteristics
+in terms of speed, quality, and dependencies. The benchmark enables:
+
+- objectively comparing the quality of text extraction (CER, WER)
+- evaluating the fidelity of the generated Markdown structure (headings, tables, lists)
+- identifying which scanning conditions (low DPI, noise, rotation) each
+  engine handles better
+- quantifying trade-offs between speed and quality for deployment decisions
+
+---
+
+## Evaluated Engines
+
+| Engine | Mode | Backend | Speed (32p corpus) | Dependencies |
 |---|---|---|---|---|
-| **PaddleOCR** | `paddle` | PaddlePaddle | ~94 s/pág | `paddlepaddle`, `paddleocr` |
-| **RapidOCR ONNX** | `rapidocr-onnx` | ONNX Runtime | ~2,76 s/pág | `rapidocr-onnxruntime` |
-| **RapidOCR OpenVINO** | `rapidocr-openvino` | Intel OpenVINO | ~0,63 s/pág | `rapidocr-openvino` |
-| **Tesseract 5** | `tesseract` | subprocess + TSV | ~0,58 s/pág | `tesseract` (binário) |
-| **EasyOCR** | `easyocr` | PyTorch CPU | ~5,4 s/pág | `easyocr`, `torch` |
+| **PaddleOCR** | `paddle` | PaddlePaddle | ~94 s/page | `paddlepaddle`, `paddleocr` |
+| **RapidOCR ONNX** | `rapidocr-onnx` | ONNX Runtime | ~2.76 s/page | `rapidocr-onnxruntime` |
+| **RapidOCR OpenVINO** | `rapidocr-openvino` | Intel OpenVINO | ~0.63 s/page | `rapidocr-openvino` |
+| **Tesseract 5** | `tesseract` | subprocess + TSV | ~0.58 s/page | `tesseract` (binary) |
+| **EasyOCR** | `easyocr` | PyTorch CPU | ~5.4 s/page | `easyocr`, `torch` |
 
-> Os tempos acima são de um benchmark RAW em 32 páginas densas (pp. 72–103 do
-> corpus). O benchmark E2E completo inclui páginas nativas (sem OCR), o que
-> reduz o tempo total significativamente para engines rápidas.
+> The times above are from a RAW benchmark on 32 dense pages (pp. 72–103 of
+> the corpus). The full E2E benchmark includes native pages (without OCR), which
+> significantly reduces the total time for fast engines.
 
-### Seleção de Engine na API
+### Engine Selection in the API
 
 ```python
 from structured_pdf_text.api import PdfTextExtractor
@@ -44,48 +44,48 @@ from dataclasses import replace
 
 config = best_extraction_config(language="pt", preserve_headers=False)
 
-# Trocar engine:
-config = replace(config, ocr_engine="tesseract")   # ou "rapidocr-onnx", "easyocr", etc.
+# Switch engine:
+config = replace(config, ocr_engine="tesseract")   # or "rapidocr-onnx", "easyocr", etc.
 
 extractor = PdfTextExtractor(config)
 document = extractor.extract("documento.pdf")
 ```
 
-### Seleção de Engine na CLI
+### Engine Selection in the CLI
 
-Use `--ocr-engine` no comando `pdftext extract`:
+Use `--ocr-engine` in the `pdftext extract` command:
 
 ```bash
-# PaddleOCR (padrão — requer setup-models)
+# PaddleOCR (default — requires setup-models)
 pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output markdown
 
-# Tesseract (requer binário tesseract no PATH)
+# Tesseract (requires tesseract binary in PATH)
 pdftext extract documento.pdf --mode balanced --ocr-engine tesseract --output markdown
 
-# RapidOCR ONNX (sem download de modelos)
+# RapidOCR ONNX (no model download required)
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-onnx --output markdown
 
 # RapidOCR OpenVINO
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-openvino --output markdown
 
-# EasyOCR (baixa modelos no primeiro uso)
+# EasyOCR (downloads models on first use)
 pdftext extract documento.pdf --mode balanced --ocr-engine easyocr --output markdown
 ```
 
-Engines não-Paddle não usam `--ocr-model-profile`.  O `--mode balanced` mantém
-a lógica de fallback (native-first → OCR apenas em páginas que precisam).
+Non-Paddle engines do not use `--ocr-model-profile`. The `--mode balanced` maintains
+the fallback logic (native-first → OCR only on pages that need it).
 
 ---
 
-## Instalação das Engines
+## Engine Installation
 
-O script `scripts/setup_ocr_benchmark.ps1` automatiza a instalação no Windows.
+The script `scripts/setup_ocr_benchmark.ps1` automates installation on Windows.
 
 ```powershell
 .\scripts\setup_ocr_benchmark.ps1
 ```
 
-### Instalação Manual
+### Manual Installation
 
 ```powershell
 # PaddleOCR
@@ -94,7 +94,7 @@ pip install paddlepaddle paddleocr
 # RapidOCR ONNX
 pip install rapidocr-onnxruntime
 
-# RapidOCR OpenVINO (instalar sem dependências para evitar conflito com numpy)
+# RapidOCR OpenVINO (install without dependencies to avoid numpy conflict)
 pip install openvino
 pip install rapidocr-openvino --no-deps
 
@@ -102,248 +102,248 @@ pip install rapidocr-openvino --no-deps
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install easyocr
 
-# Corrigir conflito de numpy (CF-3)
+# Fix numpy conflict (CF-3)
 pip install "numpy==2.0.2"
 ```
 
 ---
 
-## Problemas Conhecidos
+## Known Issues
 
-| ID | Descrição | Status |
+| ID | Description | Status |
 |---|---|---|
-| CF-1 | **oneDNN desabilitado por padrão em CPU** — Paddle 3.x pode falhar no caminho PIR/oneDNN em Linux/WSL e Windows. `PADDLE_ENABLE_MKLDNN=1` é opt-in explícito; `FLAGS_enable_pir_api=False` permanece aplicado no Windows. | Política segura no runtime |
-| CF-2 | **DLL incompatível `paddle2onnx`** — Incompatibilidade 0xC0000139 no Windows. RapidOCR usa PP-OCRv4 embutido em vez de converter modelos Paddle. | Contornado |
-| CF-3 | **Conflito de numpy** — EasyOCR força numpy ≥ 2.5.x; OpenVINO < 2.1.0 requer numpy < 2.x. Fix: `pip install "numpy==2.0.2"` | ✅ Aplicado |
+| CF-1 | **oneDNN disabled by default on CPU** — Paddle 3.x may fail on the PIR/oneDNN path on Linux/WSL and Windows. `PADDLE_ENABLE_MKLDNN=1` is explicit opt-in; `FLAGS_enable_pir_api=False` remains applied on Windows. | Safe runtime policy |
+| CF-2 | **Incompatible DLL `paddle2onnx`** — 0xC0000139 incompatibility on Windows. RapidOCR uses the built-in PP-OCRv4 instead of converting Paddle models. | Worked around |
+| CF-3 | **numpy conflict** — EasyOCR forces numpy ≥ 2.5.x; OpenVINO < 2.1.0 requires numpy < 2.x. Fix: `pip install "numpy==2.0.2"` | ✅ Applied |
 
 ---
 
-## Grupos de Métricas
+## Metric Groups
 
-O benchmark calcula cinco grupos de métricas sobre o **documento Markdown
-completo** (não por página individual). O array `per_page` no JSON de saída
-contém as métricas por página para diagnóstico.
+The benchmark computes five metric groups over the **complete Markdown document**
+(not per individual page). The `per_page` array in the output JSON contains
+per-page metrics for diagnostics.
 
-### Grupo 1 — Texto
+### Group 1 — Text
 
-Mede a fidelidade do texto extraído em relação ao ground truth.
+Measures the fidelity of the extracted text against the ground truth.
 
-| Métrica | Descrição |
+| Metric | Description |
 |---|---|
-| `cer_raw` | CER sem normalização, preservando diferenças de Markdown, espaços e quebras de linha. |
-| `cer_normalized` | Character Error Rate após normalização (NFC, CRLF→LF, espaços). Principal métrica de qualidade OCR. |
-| `cer_text_only` | CER com Markdown removido — isola erro de reconhecimento do erro de estruturação. |
-| `wer` | Word Error Rate — sensível a erros de segmentação de palavras. |
+| `cer_raw` | CER without normalization, preserving Markdown differences, spaces, and line breaks. |
+| `cer_normalized` | Character Error Rate after normalization (NFC, CRLF→LF, spaces). Primary OCR quality metric. |
+| `cer_text_only` | CER with Markdown removed — isolates recognition error from structuring error. |
+| `wer` | Word Error Rate — sensitive to word segmentation errors. |
 | `word_accuracy` | 1 − WER |
-| `substitution_rate` | Taxa de palavras substituídas por outra errada. |
-| `deletion_rate` | Taxa de palavras omitidas. |
-| `insertion_rate` | Taxa de palavras inseridas indevidamente. |
-| `omission_rate` | Igual ao deletion_rate (conteúdo perdido). |
+| `substitution_rate` | Rate of words substituted by an incorrect one. |
+| `deletion_rate` | Rate of omitted words. |
+| `insertion_rate` | Rate of incorrectly inserted words. |
+| `omission_rate` | Same as deletion_rate (lost content). |
 
-> **Cálculo**: micro-average ponderado pelo comprimento da referência em cada
-> página — equivalente a comparar o documento inteiro sem o custo quadrático do
-> Levenshtein sobre milhões de caracteres.
+> **Calculation**: micro-average weighted by reference length per page — equivalent
+> to comparing the entire document without the quadratic cost of Levenshtein over
+> millions of characters.
 
-### Grupo 2 — Estrutura Markdown
+### Group 2 — Markdown Structure
 
-Avalia se a estrutura do documento (headings, blocos, listas) foi preservada.
+Evaluates whether the document structure (headings, blocks, lists) was preserved.
 
-| Métrica | Descrição |
+| Metric | Description |
 |---|---|
-| `heading_f1` | F1 de detecção de headings por texto normalizado. |
-| `heading_level_accuracy` | Fração de headings detectados com nível correto (#, ##, ###). |
-| `heading_text_cer` | CER médio do texto dos headings detectados. |
-| `block_f1` | F1 de tipos de bloco (heading, paragraph, table, list, code) como multiset. |
-| `paragraph_boundary_f1` | F1 de limites de parágrafo (proxy: contagem de parágrafos). |
-| `list_detection_f1` | F1 de detecção de blocos de lista. |
-| `markdown_ast_similarity` | LCS da sequência de tipos de bloco / comprimento máximo — similidade estrutural global. |
+| `heading_f1` | F1 for heading detection by normalized text. |
+| `heading_level_accuracy` | Fraction of detected headings with the correct level (#, ##, ###). |
+| `heading_text_cer` | Average CER of the text in detected headings. |
+| `block_f1` | F1 of block types (heading, paragraph, table, list, code) as a multiset. |
+| `paragraph_boundary_f1` | F1 of paragraph boundaries (proxy: paragraph count). |
+| `list_detection_f1` | F1 for list block detection. |
+| `markdown_ast_similarity` | LCS of block type sequence / maximum length — global structural similarity. |
 
-> **Cálculo**: computed sobre o Markdown completo concatenado (sem os cabeçalhos
-> sintéticos `## Página N` adicionados pelo renderer).
+> **Calculation**: computed over the full concatenated Markdown (excluding the synthetic
+> `## Página N` headers added by the renderer).
 
-### Grupo 3 — Tabelas
+### Group 3 — Tables
 
-Avalia a fidelidade de tabelas GFM (pipe tables) extraídas.
+Evaluates the fidelity of extracted GFM tables (pipe tables).
 
-| Métrica | Descrição |
+| Metric | Description |
 |---|---|
-| `table_f1` | F1 de detecção de tabelas (contagem). |
-| `row_f1` | F1 de linhas dentro de tabelas emparelhadas por posição. |
-| `column_f1` | F1 de colunas dentro de tabelas emparelhadas. |
-| `table_dimension_accuracy` | Fração de tabelas com dimensão exata (N linhas × M colunas). |
-| `cell_exact_match` | Fração de células com conteúdo idêntico à referência (posição [linha, coluna]). |
-| `cell_cer` | CER médio por célula. |
-| `cell_alignment_accuracy` | Fração de células no posição [linha, coluna] correta. |
-| `table_structure_similarity` | Média geométrica de row_f1 e col_f1. |
+| `table_f1` | F1 for table detection (count). |
+| `row_f1` | F1 of rows within tables matched by position. |
+| `column_f1` | F1 of columns within matched tables. |
+| `table_dimension_accuracy` | Fraction of tables with exact dimensions (N rows × M columns). |
+| `cell_exact_match` | Fraction of cells with content identical to the reference (position [row, column]). |
+| `cell_cer` | Average CER per cell. |
+| `cell_alignment_accuracy` | Fraction of cells at the correct [row, column] position. |
+| `table_structure_similarity` | Geometric mean of row_f1 and col_f1. |
 
-### Grupo 4 — Ordem e Integridade
+### Group 4 — Order and Integrity
 
-Avalia problemas estruturais que não dependem de qualidade OCR.
+Evaluates structural issues that do not depend on OCR quality.
 
-| Métrica | Descrição |
+| Metric | Description |
 |---|---|
-| `reading_order_accuracy` | LCS dos blocos de texto na ordem do documento / total de blocos ref. |
-| `block_order_accuracy` | Mesmo proxy de reading_order_accuracy. |
-| `duplicate_content_rate` | Fração de parágrafos repetidos no documento extraído. |
-| `duplicate_block_rate` | Fração de tipos de bloco repetidos consecutivamente. |
-| `header_leakage_rate` | Fração de páginas cujo primeiro bloco é idêntico em > 35% das páginas (cabeçalho vazando). |
-| `footer_leakage_rate` | Idem para o último bloco (rodapé). |
-| `page_number_leakage_rate` | Taxa de linhas contendo apenas um número (número de página vazando). |
-| `failure_rate` | Fração de páginas com conteúdo na referência que geraram saída vazia. |
-| `invalid_markdown_rate` | Fração de páginas com Markdown mal-formado (fences não fechados, tabelas quebradas). |
+| `reading_order_accuracy` | LCS of text blocks in document order / total reference blocks. |
+| `block_order_accuracy` | Same proxy as reading_order_accuracy. |
+| `duplicate_content_rate` | Fraction of repeated paragraphs in the extracted document. |
+| `duplicate_block_rate` | Fraction of consecutively repeated block types. |
+| `header_leakage_rate` | Fraction of pages whose first block is identical in > 35% of pages (header leaking). |
+| `footer_leakage_rate` | Same for the last block (footer). |
+| `page_number_leakage_rate` | Rate of lines containing only a number (page number leaking). |
+| `failure_rate` | Fraction of pages with content in the reference that produced empty output. |
+| `invalid_markdown_rate` | Fraction of pages with malformed Markdown (unclosed fences, broken tables). |
 
-### Grupo 5 — Dados Críticos
+### Group 5 — Critical Data
 
-Avalia preservação de entidades estruturadas com semântica específica, via
-regex sobre o documento completo.
+Evaluates the preservation of structured entities with specific semantics, via
+regex over the full document.
 
-| Métrica | Descrição |
+| Metric | Description |
 |---|---|
-| `numeric_exact_match` | Fração de números (inteiros, decimais, percentuais) da referência encontrados na hipótese. |
-| `date_exact_match` | Fração de datas (dd/mm/aaaa e variantes) preservadas. |
-| `currency_exact_match` | Fração de valores monetários (R$) preservados. |
-| `identifier_exact_match` | Fração de CPF, CNPJ e números de processo preservados. |
+| `numeric_exact_match` | Fraction of numbers (integers, decimals, percentages) from the reference found in the hypothesis. |
+| `date_exact_match` | Fraction of dates (dd/mm/yyyy and variants) preserved. |
+| `currency_exact_match` | Fraction of monetary values (R$) preserved. |
+| `identifier_exact_match` | Fraction of CPF, CNPJ, and case numbers preserved. |
 
 ---
 
-## Pipeline de Scripts
+## Scripts Pipeline
 
 ```
 PDF + Ground Truth
        │
        ▼
 ┌─────────────────────┐
-│  evaluate_e2e.py    │  Extrai com a engine escolhida; salva Markdown + manifesto
+│  evaluate_e2e.py    │  Extracts with the chosen engine; saves Markdown + manifest
 └──────────┬──────────┘
            │  extracted_{engine}_{run_id}.md
            │  manifesto_e2e_{engine}_{run_id}.json
            ▼
 ┌─────────────────────┐
-│  compute_metrics.py │  Compara contra ground truth; calcula os 5 grupos de métricas
+│  compute_metrics.py │  Compares against ground truth; computes the 5 metric groups
 └──────────┬──────────┘
            │  metrics_{engine}_{run_id}.json
            │  errors_{engine}_{run_id}.md
            ▼
 ┌─────────────────────┐
-│  compare_engines.py │  Agrega JSONs de todas as engines; gera tabela comparativa
+│  compare_engines.py │  Aggregates JSONs from all engines; generates comparison table
 └──────────┬──────────┘
            │  comparison_{suffix}.md
            ▼
-       Resultado
+       Result
 ```
 
 ---
 
-## Como Executar
+## How to Run
 
-### Pré-requisito
+### Prerequisite
 
 ```powershell
-pip install "numpy==2.0.2"   # CF-3: corrige conflito EasyOCR/OpenVINO
+pip install "numpy==2.0.2"   # CF-3: fixes EasyOCR/OpenVINO conflict
 ```
 
-### Smoke Test — 5 Páginas, Todas as Engines
+### Smoke Test — 5 Pages, All Engines
 
 ```powershell
 .\scripts\run_benchmark.ps1
 ```
 
-Parâmetros padrão: páginas 77–81, sufixo `smoke`.
+Default parameters: pages 77–81, suffix `smoke`.
 
-### Documento Completo
+### Full Document
 
 ```powershell
 .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 ```
 
-### Engine Individual ou Subconjunto (PowerShell)
+### Single Engine or Subset (PowerShell)
 
-Use o parâmetro `-Engine` para limitar a execução a uma ou mais engines:
+Use the `-Engine` parameter to limit execution to one or more engines:
 
 ```powershell
-# Uma engine — completo
+# Single engine — full
 .\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix "v2"
 
-# Duas engines — completo
+# Two engines — full
 .\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
 
-# Uma engine — smoke test
+# Single engine — smoke test
 .\scripts\run_benchmark.ps1 -Engine paddle -RunSuffix "v2-smoke"
 ```
 
-A tabela comparativa (`compare_engines.py`) é gerada com as engines que concluíram
-com sucesso. Se apenas uma engine foi executada, a tabela contém uma única coluna.
+The comparison table (`compare_engines.py`) is generated with the engines that completed
+successfully. If only one engine was run, the table contains a single column.
 
-### Engine Individual (Linux / WSL)
+### Single Engine (Linux / WSL)
 
-Use `--engines` para o runner Bash:
+Use `--engines` for the Bash runner:
 
 ```bash
-# Uma engine — completo
+# Single engine — full
 scripts/run_benchmark.sh --engines tesseract --all-pages --run-suffix wsl-v2
 
-# Duas engines — smoke test
+# Two engines — smoke test
 scripts/run_benchmark.sh --engines "easyocr,tesseract" --run-suffix wsl-smoke
 ```
 
 ### Linux / WSL
 
 ```bash
-# Instalar runtimes OCR no .venv e Tesseract em um prefixo sem sudo
+# Install OCR runtimes in .venv and Tesseract in a prefix without sudo
 scripts/setup_ocr_benchmark.sh
 
-# Smoke test no corpus Document AI V3 (páginas 77–81)
+# Smoke test on Document AI V3 corpus (pages 77–81)
 scripts/run_benchmark.sh --run-suffix wsl-smoke
 
-# Documento completo
+# Full document
 scripts/run_benchmark.sh --run-suffix wsl-v1 --all-pages
 ```
 
-O runner Bash usa `corpus/Document_AI_V3.pdf`, `corpus/Document_AI_V3.md` e
-`corpus/Document_AI_V3_MANIFESTO.json` por padrão. O Markdown fornece o texto
-referência; o manifesto fornece metadados por página. Os dois podem ser
-sobrescritos com `--pdf`, `--reference` e `--manifesto`.
+The Bash runner uses `corpus/Document_AI_V3.pdf`, `corpus/Document_AI_V3.md`, and
+`corpus/Document_AI_V3_MANIFESTO.json` by default. The Markdown provides the reference
+text; the manifest provides per-page metadata. Both can be overridden with `--pdf`,
+`--reference`, and `--manifesto`.
 
-### Engine Individual (PowerShell, linha única)
+### Single Engine (PowerShell, single line)
 
 ```powershell
-# Extração
+# Extraction
 python scripts\evaluate_e2e.py "corpus\Corpus_Stress_OCR_Markdown_V4.pdf" --engine tesseract --pages 1-5 --run-id smoke-tesseract --output-dir output\fase8
 
-# Métricas
+# Metrics
 python scripts\compute_metrics.py --hypothesis output\fase8\extracted_tesseract_smoke-tesseract.md --manifesto "corpus\Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json" --engine tesseract --run-id smoke-tesseract --output-dir output\fase8
 
-# Tabela comparativa (após rodar múltiplas engines)
+# Comparison table (after running multiple engines)
 python scripts\compare_engines.py output\fase8\metrics_*_smoke-*.json --output output\fase8\comparison_smoke.md
 ```
 
-### Parâmetros do Script PowerShell
+### PowerShell Script Parameters
 
-| Parâmetro | Padrão | Descrição |
+| Parameter | Default | Description |
 |---|---|---|
-| `-Engine` | `""` (todas) | Engine(s) a executar. Aceita uma engine (`tesseract`) ou lista CSV (`"easyocr,tesseract"`). Omitir executa as cinco engines. |
-| `-Pages` | `"77-81"` | Intervalo de páginas para smoke test |
-| `-AllPages` | (switch) | Processar documento completo |
-| `-RunSuffix` | `"smoke"` | Sufixo dos arquivos de saída |
-| `-Corpus` | *(caminho padrão)* | Caminho do PDF |
-| `-Manifesto` | *(caminho padrão)* | Caminho do manifesto JSON |
-| `-OutDir` | `"output\fase8"` | Diretório de saída |
+| `-Engine` | `""` (all) | Engine(s) to run. Accepts a single engine (`tesseract`) or CSV list (`"easyocr,tesseract"`). Omitting runs all five engines. |
+| `-Pages` | `"77-81"` | Page range for smoke test |
+| `-AllPages` | (switch) | Process full document |
+| `-RunSuffix` | `"smoke"` | Output file suffix |
+| `-Corpus` | *(default path)* | PDF path |
+| `-Manifesto` | *(default path)* | JSON manifest path |
+| `-OutDir` | `"output\fase8"` | Output directory |
 
 ---
 
-## Arquivos de Saída
+## Output Files
 
-Todos os arquivos são salvos em `output/fase8/` por padrão.
+All files are saved to `output/fase8/` by default.
 
-| Arquivo | Gerado por | Conteúdo |
+| File | Generated by | Content |
 |---|---|---|
-| `extracted_{engine}_{run_id}.md` | `evaluate_e2e.py` | Markdown extraído pelo pipeline E2E |
-| `manifesto_e2e_{engine}_{run_id}.json` | `evaluate_e2e.py` | Metadados do run (git SHA, engine identity, tempo por página) |
-| `metrics_{engine}_{run_id}.json` | `compute_metrics.py` | Todos os grupos de métricas + array `per_page` |
-| `errors_{engine}_{run_id}.md` | `compute_metrics.py` | Relatório de erros: 20 piores páginas por CER |
-| `comparison_{suffix}.md` | `compare_engines.py` | Tabela comparativa lado a lado de todas as engines |
+| `extracted_{engine}_{run_id}.md` | `evaluate_e2e.py` | Markdown extracted by the E2E pipeline |
+| `manifesto_e2e_{engine}_{run_id}.json` | `evaluate_e2e.py` | Run metadata (git SHA, engine identity, time per page) |
+| `metrics_{engine}_{run_id}.json` | `compute_metrics.py` | All metric groups + `per_page` array |
+| `errors_{engine}_{run_id}.md` | `compute_metrics.py` | Error report: 20 worst pages by CER |
+| `comparison_{suffix}.md` | `compare_engines.py` | Side-by-side comparison table of all engines |
 
-### Estrutura do JSON de Métricas
+### Metrics JSON Structure
 
 ```json
 {
@@ -375,78 +375,77 @@ Todos os arquivos são salvos em `output/fase8/` por padrão.
 
 ---
 
-## Performance do Pipeline de Scripts
+## Script Pipeline Performance
 
-### compute_metrics.py — processamento paralelo
+### compute_metrics.py — parallel processing
 
-O cálculo de métricas usa `ProcessPoolExecutor` para processar cada página em
-paralelo (um worker por core de CPU). As páginas são independentes entre si,
-então os resultados são idênticos à versão sequencial.
+Metric calculation uses `ProcessPoolExecutor` to process each page in
+parallel (one worker per CPU core). Pages are independent of each other,
+so the results are identical to the sequential version.
 
-| Condição | Tempo (224 páginas) |
+| Condition | Time (224 pages) |
 |---|---|
-| Sequencial (antes de Fase 9) | ~60 min |
-| Paralelo — 12 cores | ~10 min |
+| Sequential (before Phase 9) | ~60 min |
+| Parallel — 12 cores | ~10 min |
 
-No Windows, o `ProcessPoolExecutor` usa o método de início `spawn`. A função
-worker `_process_page` precisa ser picklable (definida em nível de módulo, fora
-de `main()`), o que é garantido pela implementação atual.
+On Windows, `ProcessPoolExecutor` uses the `spawn` start method. The worker
+function `_process_page` must be picklable (defined at module level, outside
+`main()`), which is guaranteed by the current implementation.
 
 ---
 
-## Corpus de Teste
+## Test Corpus
 
-**Arquivo**: `corpus/Corpus_Stress_OCR_Markdown_V4.pdf` — 224 páginas
+**File**: `corpus/Corpus_Stress_OCR_Markdown_V4.pdf` — 224 pages
 
-O corpus foi projetado para cobrir as condições de digitalização encontradas em
-documentos reais. Inclui páginas nativas (texto extraível diretamente) e páginas
-OCR com variações controladas:
+The corpus was designed to cover the scanning conditions found in real documents.
+It includes native pages (directly extractable text) and OCR pages with controlled
+variations:
 
-| Condição | Descrição |
+| Condition | Description |
 |---|---|
-| `native_dense` | Texto nativo de alta densidade (extração sem OCR) |
-| `scan_clean_300` | Scan limpo a 300 DPI |
-| `scan_clean_200` | Scan limpo a 200 DPI |
-| `low_dpi` | Scan de baixa resolução |
-| `noise` | Ruído de digitalização |
-| `blur` | Borrão |
-| `skew` | Inclinação da página |
-| `rotation` | Rotação (90°, 180°) |
-| `hybrid` | Combinação de condições |
-| `adversarial` | Condições extremas |
+| `native_dense` | High-density native text (extraction without OCR) |
+| `scan_clean_300` | Clean scan at 300 DPI |
+| `scan_clean_200` | Clean scan at 200 DPI |
+| `low_dpi` | Low-resolution scan |
+| `noise` | Scan noise |
+| `blur` | Blur |
+| `skew` | Page skew |
+| `rotation` | Rotation (90°, 180°) |
+| `hybrid` | Combination of conditions |
+| `adversarial` | Extreme conditions |
 
-O arquivo de ground truth (`corpus/Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json`)
-contém o campo `expected_markdown` por página — a saída Markdown esperada para
-cada condição.
+The ground truth file (`corpus/Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json`)
+contains the `expected_markdown` field per page — the expected Markdown output
+for each condition.
 
 ---
 
-## Arquivos Necessários para Executar o Benchmark
+## Required Files to Run the Benchmark
 
-O pipeline requer três arquivos de entrada. O PDF pode ser qualquer documento;
-os outros dois precisam ser criados manualmente ou gerados a partir de um corpus
-existente.
+The pipeline requires three input files. The PDF can be any document;
+the other two must be created manually or generated from an existing corpus.
 
 ```
 corpus/
-  MeuCorpus.pdf                   ← PDF a ser extraído
-  MeuCorpus_MANIFESTO.json        ← ground truth + metadados por página  (preferido)
-  MeuCorpus_REFERENCIA.md         ← alternativa simplificada ao manifesto
+  MeuCorpus.pdf                   ← PDF to be extracted
+  MeuCorpus_MANIFESTO.json        ← ground truth + per-page metadata  (preferred)
+  MeuCorpus_REFERENCIA.md         ← simplified alternative to the manifest
 ```
 
-> **Nota:** O manifesto de *corpus* (ground truth) é diferente do manifesto de
-> *run* gerado pelo `evaluate_e2e.py`. O de run descreve o resultado da extração
-> (tempo, engine, hash do PDF). O de corpus descreve o que era esperado.
+> **Note:** The *corpus* manifest (ground truth) is different from the *run*
+> manifest generated by `evaluate_e2e.py`. The run manifest describes the extraction
+> result (time, engine, PDF hash). The corpus manifest describes what was expected.
 
 ---
 
-### Arquivo 1 — PDF do Corpus
+### File 1 — Corpus PDF
 
-Qualquer PDF válido. O pipeline aceita documentos nativos (texto seleccionável),
-scans e híbridos. Páginas nativas são extraídas sem OCR; páginas raster passam
-pelo engine selecionado.
+Any valid PDF. The pipeline accepts native documents (selectable text),
+scans, and hybrids. Native pages are extracted without OCR; raster pages
+go through the selected engine.
 
-Caminho passado como primeiro argumento ao `evaluate_e2e.py`:
+Path passed as the first argument to `evaluate_e2e.py`:
 
 ```powershell
 python scripts\evaluate_e2e.py corpus\MeuCorpus.pdf --engine tesseract ...
@@ -454,9 +453,9 @@ python scripts\evaluate_e2e.py corpus\MeuCorpus.pdf --engine tesseract ...
 
 ---
 
-### Arquivo 2 — Manifesto JSON do Corpus (preferido)
+### File 2 — Corpus JSON Manifest (preferred)
 
-**Formato**: JSON com chave `"pages"` contendo um array de objetos, um por página.
+**Format**: JSON with a `"pages"` key containing an array of objects, one per page.
 
 ```json
 {
@@ -481,30 +480,30 @@ python scripts\evaluate_e2e.py corpus\MeuCorpus.pdf --engine tesseract ...
 }
 ```
 
-**Campos obrigatórios por entrada:**
+**Required fields per entry:**
 
-| Campo | Tipo | Descrição |
+| Field | Type | Description |
 |---|---|---|
-| `page` | inteiro | Número da página (base 1) |
-| `expected_markdown` | string | Ground truth Markdown para essa página |
+| `page` | integer | Page number (1-based) |
+| `expected_markdown` | string | Ground truth Markdown for that page |
 
-**Campos opcionais:**
+**Optional fields:**
 
-| Campo | Tipo | Descrição |
+| Field | Type | Description |
 |---|---|---|
-| `conditions` | lista de strings | Condições de digitalização da página (usado apenas no relatório de erros) |
+| `conditions` | list of strings | Scanning conditions for the page (used only in the error report) |
 
-**Regras do `expected_markdown`:**
+**Rules for `expected_markdown`:**
 
-1. Deve começar com `## Página N` (o número deve coincidir com `"page"`).
-   O `compute_metrics.py` usa esse cabeçalho para parear referência com hipótese.
-2. Headings usam `#` / `##` / `###` — o nível é avaliado pela métrica `heading_level_accuracy`.
-3. Tabelas devem ser GFM pipe tables para serem detectadas pelas métricas de tabela.
-4. Listas com `-`, `*` ou `1.` são detectadas pela métrica `list_detection_f1`.
-5. Não incluir cabeçalhos de página repetidos (rodapé/header do documento) — eles devem estar
-   ausentes do ground truth para que a `header_leakage_rate` funcione corretamente.
+1. Must start with `## Página N` (the number must match `"page"`).
+   `compute_metrics.py` uses this header to pair the reference with the hypothesis.
+2. Headings use `#` / `##` / `###` — the level is evaluated by the `heading_level_accuracy` metric.
+3. Tables must be GFM pipe tables to be detected by the table metrics.
+4. Lists with `-`, `*`, or `1.` are detected by the `list_detection_f1` metric.
+5. Do not include repeated page headers (document footer/header) — they must be
+   absent from the ground truth for `header_leakage_rate` to work correctly.
 
-**Passado ao `compute_metrics.py` via `--manifesto`:**
+**Passed to `compute_metrics.py` via `--manifesto`:**
 
 ```powershell
 python scripts\compute_metrics.py \
@@ -515,14 +514,14 @@ python scripts\compute_metrics.py \
 
 ---
 
-### Arquivo 3 — Referência Markdown (alternativa simplificada)
+### File 3 — Markdown Reference (simplified alternative)
 
-Quando não houver manifesto, o `compute_metrics.py` aceita um arquivo Markdown
-simples com uma seção `## Página N` para cada página. As condições por página
-**não estarão disponíveis** no relatório de erros, mas todas as métricas são
-calculadas normalmente.
+When there is no manifest, `compute_metrics.py` accepts a plain Markdown
+file with a `## Página N` section for each page. Per-page conditions
+**will not be available** in the error report, but all metrics are
+computed normally.
 
-**Formato:**
+**Format:**
 
 ```markdown
 ## Página 1
@@ -544,15 +543,15 @@ Texto esperado da segunda página.
 Texto esperado...
 ```
 
-**Regras:**
+**Rules:**
 
-- O separador de página é `## Página N` (aceita também `## Pagina N` sem acento,
-  maiúsculas/minúsculas indiferentes, zeros à esquerda como `## Página 001`).
-- Não há nenhum outro campo obrigatório — o arquivo é Markdown puro.
-- Páginas ausentes no arquivo de referência são ignoradas; páginas presentes na
-  referência mas ausentes na hipótese incrementam `failure_rate`.
+- The page separator is `## Página N` (also accepts `## Pagina N` without accent,
+  case-insensitive, leading zeros such as `## Página 001`).
+- There are no other required fields — the file is plain Markdown.
+- Pages absent from the reference file are ignored; pages present in the
+  reference but absent in the hypothesis increment `failure_rate`.
 
-**Passado via `--reference`:**
+**Passed via `--reference`:**
 
 ```powershell
 python scripts\compute_metrics.py \
@@ -563,9 +562,9 @@ python scripts\compute_metrics.py \
 
 ---
 
-### Usando um corpus próprio com run_benchmark.ps1
+### Using a custom corpus with run_benchmark.ps1
 
-O script aceita os caminhos do corpus, manifesto e diretório de saída via parâmetros:
+The script accepts corpus, manifest, and output directory paths via parameters:
 
 ```powershell
 .\scripts\run_benchmark.ps1 `
@@ -576,7 +575,7 @@ O script aceita os caminhos do corpus, manifesto e diretório de saída via par�
   -AllPages
 ```
 
-Para o runner Bash (Linux/WSL):
+For the Bash runner (Linux/WSL):
 
 ```bash
 scripts/run_benchmark.sh \
@@ -589,103 +588,103 @@ scripts/run_benchmark.sh \
 
 ---
 
-### Como gerar o ground truth
+### How to generate the ground truth
 
-Não há ferramenta automática — o `expected_markdown` deve ser escrito ou
-revisado manualmente. O fluxo recomendado:
+There is no automatic tool — `expected_markdown` must be written or
+reviewed manually. The recommended workflow:
 
-1. Extraia o PDF com o melhor engine disponível em modo nativo:
+1. Extract the PDF with the best available engine in native mode:
    ```bash
    pdftext extract MeuCorpus.pdf --output markdown -o MeuCorpus_DRAFT.md
    ```
-2. Revise o Markdown gerado página a página, corrigindo erros OCR e estrutura.
-3. Crie o manifesto JSON com o Markdown corrigido como `expected_markdown` de cada página.
-4. Adicione os campos `conditions` para indicar o tipo de cada página (opcional,
-   mas útil para diagnosticar quais condições cada engine tem dificuldade).
+2. Review the generated Markdown page by page, correcting OCR errors and structure.
+3. Create the JSON manifest with the corrected Markdown as the `expected_markdown` for each page.
+4. Add `conditions` fields to indicate the type of each page (optional,
+   but useful for diagnosing which conditions each engine struggles with).
 
 ---
 
-### Resumo — o que cada arquivo influencia
+### Summary — what each file affects
 
-| Arquivo | Obrigatório | Influencia |
+| File | Required | Affects |
 |---|---|---|
-| PDF | sim | extração pelo engine selecionado |
-| Manifesto JSON (`--manifesto`) | um dos dois | ground truth + condições por página |
-| Referência Markdown (`--reference`) | um dos dois | ground truth (sem condições) |
+| PDF | yes | extraction by the selected engine |
+| JSON Manifest (`--manifesto`) | one of the two | ground truth + per-page conditions |
+| Markdown Reference (`--reference`) | one of the two | ground truth (without conditions) |
 
 ---
 
-## Resultados de Desempenho (Benchmark RAW — 32 páginas densas)
+## Performance Results (RAW Benchmark — 32 dense pages)
 
-> Medido em pp. 72–103 do corpus (32 páginas OCR densas). O pipeline E2E completo
-> produz resultados diferentes pois inclui páginas nativas (muito mais rápidas).
+> Measured on pp. 72–103 of the corpus (32 dense OCR pages). The full E2E pipeline
+> produces different results since it includes native pages (much faster).
 
-| Engine | Tempo total | s/pág | Status |
+| Engine | Total time | s/page | Status |
 |---|---|---|---|
-| PaddleOCR (sem oneDNN — CF-1) | 3018 s | ~94 s | 32/32 OK |
-| RapidOCR ONNX (PP-OCRv4 — CF-2) | 88 s | ~2,76 s | 32/32 OK |
-| RapidOCR OpenVINO (PP-OCRv4 — CF-2) | 20 s | ~0,63 s | 32/32 OK |
-| Tesseract 5 (por, PSM 3) | 18 s | ~0,58 s | 32/32 OK |
-| EasyOCR (latin_g2, CPU) | 173 s | ~5,4 s | 32/32 OK |
+| PaddleOCR (without oneDNN — CF-1) | 3018 s | ~94 s | 32/32 OK |
+| RapidOCR ONNX (PP-OCRv4 — CF-2) | 88 s | ~2.76 s | 32/32 OK |
+| RapidOCR OpenVINO (PP-OCRv4 — CF-2) | 20 s | ~0.63 s | 32/32 OK |
+| Tesseract 5 (por, PSM 3) | 18 s | ~0.58 s | 32/32 OK |
+| EasyOCR (latin_g2, CPU) | 173 s | ~5.4 s | 32/32 OK |
 
-A tabela de métricas de qualidade (`comparison_v1.md`) é preenchida após a
-execução do benchmark E2E completo.
+The quality metrics table (`comparison_v1.md`) is populated after
+running the full E2E benchmark.
 
 ---
 
-## Otimizações por Engine (Fase 9)
+## Per-Engine Optimizations (Phase 9)
 
-Cada backend recebeu otimizações específicas após a análise dos resultados Fase 8.
-Os detalhes completos estão em [`Plano_Comparativo_Paddle.md`](../Plano_Comparativo_Paddle.md).
+Each backend received specific optimizations after analyzing the Phase 8 results.
+Full details are in [`Plano_Comparativo_Paddle.md`](../Plano_Comparativo_Paddle.md).
 
 ### Tesseract
 
-| Parâmetro | Efeito |
+| Parameter | Effect |
 |---|---|
-| `--dpi` calculado de `ocr_render_scale` | Corrige deletion_rate alto (DPI errado silencioso) |
-| `textord_min_linesize=2.5` | Corrige diacríticos PT lidos como linha separada (bug #4276) |
-| `tessedit_char_blacklist=\`` | Elimina backtick que quebra fences Markdown |
-| `textord_noise_rej{rows,words}=0` | Preserva texto válido classificado como ruído |
-| `crunch_del_rating=40` | Preserva mais tokens borderline |
-| `preserve_interword_spaces=1` | Mantém separação entre colunas de tabela |
-| CLAHE grayscale preprocessing | Melhora scans com iluminação irregular |
+| `--dpi` calculated from `ocr_render_scale` | Fixes high deletion_rate (silent wrong DPI) |
+| `textord_min_linesize=2.5` | Fixes PT diacritics read as a separate line (bug #4276) |
+| `tessedit_char_blacklist=\`` | Eliminates backtick that breaks Markdown fences |
+| `textord_noise_rej{rows,words}=0` | Preserves valid text classified as noise |
+| `crunch_del_rating=40` | Preserves more borderline tokens |
+| `preserve_interword_spaces=1` | Maintains separation between table columns |
+| CLAHE grayscale preprocessing | Improves scans with uneven lighting |
 
-Vars de ambiente configuráveis: `TESSERACT_LANG`, `TESSERACT_PSM`, `TESSERACT_OEM`,
+Configurable environment variables: `TESSERACT_LANG`, `TESSERACT_PSM`, `TESSERACT_OEM`,
 `TESSERACT_DPI`, `TESSERACT_TESSDATA_DIR`, `TESSERACT_CONF_MIN`.
 
-### RapidOCR ONNX e OpenVINO
+### RapidOCR ONNX and OpenVINO
 
-| Parâmetro | Valor Fase 9 | Valor anterior |
+| Parameter | Phase 9 value | Previous value |
 |---|---|---|
 | `det_db_unclip_ratio` | `1.8` | `1.6` |
 | `det_db_box_thresh` | `0.45` | `0.5` |
 | `det_db_thresh` | `0.25` | `0.3` |
-| CLAHE LAB L-channel | ativado | — |
+| CLAHE LAB L-channel | enabled | — |
 
-O CLAHE é aplicado no canal L do espaço LAB (preserva informação de cor) antes
-de passar a imagem ao detector. Vars de ambiente: `RAPIDOCR_UNCLIP_RATIO`,
-`RAPIDOCR_BOX_THRESH`, `RAPIDOCR_DET_THRESH`, `RAPIDOCR_TEXT_SCORE`,
-`RAPIDOCR_ANGLE_CLS`, `RAPIDOCR_REC_MODEL`, `RAPIDOCR_REC_KEYS`.
+CLAHE is applied to the L channel of the LAB color space (preserving color
+information) before passing the image to the detector. Environment variables:
+`RAPIDOCR_UNCLIP_RATIO`, `RAPIDOCR_BOX_THRESH`, `RAPIDOCR_DET_THRESH`,
+`RAPIDOCR_TEXT_SCORE`, `RAPIDOCR_ANGLE_CLS`, `RAPIDOCR_REC_MODEL`, `RAPIDOCR_REC_KEYS`.
 
 ### EasyOCR
 
-| Parâmetro | Efeito |
+| Parameter | Effect |
 |---|---|
-| Pipeline detect + recognize separado | Permite configurar os dois estágios independentemente |
-| `canvas_size=max(h,w)` | Evita downscale do CRAFT em páginas grandes |
-| `mag_ratio=1.5` | Melhora detecção de texto pequeno |
-| `decoder='beamsearch'` | Menos erros de substituição em caracteres ambíguos |
-| `adjust_contrast=1.0` | Recuperação de contraste em regiões desbotadas |
-| CLAHE antes do reconhecimento | Melhora scans de baixo contraste |
+| Separate detect + recognize pipeline | Allows configuring both stages independently |
+| `canvas_size=max(h,w)` | Prevents CRAFT downscaling on large pages |
+| `mag_ratio=1.5` | Improves detection of small text |
+| `decoder='beamsearch'` | Fewer substitution errors on ambiguous characters |
+| `adjust_contrast=1.0` | Contrast recovery in faded regions |
+| CLAHE before recognition | Improves low-contrast scans |
 
-Vars de ambiente: `EASYOCR_MODULE_PATH`, `EASYOCR_RECOG_NETWORK`, `EASYOCR_BEAMWIDTH`,
+Environment variables: `EASYOCR_MODULE_PATH`, `EASYOCR_RECOG_NETWORK`, `EASYOCR_BEAMWIDTH`,
 `EASYOCR_WORKERS`, `EASYOCR_ALLOWLIST`, `EASYOCR_BLOCKLIST`.
 
 ---
 
-## Referências
+## References
 
-- Contrato OCR: [`src/structured_pdf_text/ocr/contracts.py`](../src/structured_pdf_text/ocr/contracts.py)
+- OCR contract: [`src/structured_pdf_text/ocr/contracts.py`](../src/structured_pdf_text/ocr/contracts.py)
 - Backends: [`src/structured_pdf_text/ocr/backends/`](../src/structured_pdf_text/ocr/backends/)
-- Diagnósticos base: [`src/structured_pdf_text/diagnostics/ocr_metrics.py`](../src/structured_pdf_text/diagnostics/ocr_metrics.py)
-- Plano de implementação: [`Plano_Comparativo_Paddle.md`](../Plano_Comparativo_Paddle.md)
+- Base diagnostics: [`src/structured_pdf_text/diagnostics/ocr_metrics.py`](../src/structured_pdf_text/diagnostics/ocr_metrics.py)
+- Implementation plan: [`Plano_Comparativo_Paddle.md`](../Plano_Comparativo_Paddle.md)

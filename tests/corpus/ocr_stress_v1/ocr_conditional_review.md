@@ -1,35 +1,35 @@
-# Revisão condicional de OCR — etapa `916e1dc`
+# Conditional OCR Review — step `916e1dc`
 
-## Conclusão
+## Conclusion
 
-A entrega anterior foi auditada no repositório real. O commit atual é
-`916e1dc30af66bb74b9977438e2bc0de5a06521c`, o working tree estava limpo no
-início da revisão e `origin/feat/ocr-adaptive-quality` apontava para o mesmo
-SHA. A comparação com `f18a03149c251a8b48b26c251484db642027ee02` contém apenas
-infraestrutura, manifesto, testes e documentação do corpus; não há mudança em
-`src/structured_pdf_text`.
+The previous delivery was audited in the real repository. The current commit is
+`916e1dc30af66bb74b9977438e2bc0de5a06521c`, the working tree was clean at the
+start of the review, and `origin/feat/ocr-adaptive-quality` pointed to the same
+SHA. The comparison with `f18a03149c251a8b48b26c251484db642027ee02` contains only
+corpus infrastructure, manifest, tests, and documentation; there are no changes
+in `src/structured_pdf_text`.
 
-O corpus existente foi reutilizado para os controles já validados porque seu
-PDF principal e seus subconjuntos permaneciam consistentes com o relatório
-anterior. Durante a investigação da sequência de tabelas, a página 30 revelou
-que o cenário declarado como multilinha não era representado pelo gerador. O
-gerador foi corrigido antes de interpretar o OCR da página 30, o manifesto e o
-PDF foram regenerados e a nova integridade foi testada. A validação estrutural
-continua confirmando 60 páginas, 37 com camada nativa e 23 raster puras,
-manifesto consistente com o PDF e ordem de origem `1..60`.
+The existing corpus was reused for the already-validated controls because its
+main PDF and subsets remained consistent with the previous report. During the
+investigation of the table sequence, page 30 revealed that the scenario declared
+as multiline was not represented by the generator. The generator was fixed before
+interpreting the OCR of page 30, the manifest and PDF were regenerated, and the
+new integrity was tested. Structural validation continues to confirm 60 pages,
+37 with native layer and 23 pure raster, manifest consistent with the PDF, and
+source order `1..60`.
 
-## Verificação da entrega
+## Delivery Verification
 
-| Arquivo/funcionalidade | Alteração na entrega anterior | Teste executado | Resultado | Risco pendente |
+| File/feature | Change in previous delivery | Test run | Result | Pending risk |
 |---|---|---|---|---|
-| `generate.py` | Gerador determinístico e recortes reais da figura 15–16 | `generate.py --help`; manifesto/PDF; teste específico de continuidade | aprovado | continuações de outros pares não são imagens-fonte compartilhadas |
-| `manifest.json` | Metadados de regiões, origem, camadas e `shared_image_id` | SHA do PDF, 60 páginas, dimensões e ordem | aprovado | Code128 gerado, mas não decodificado localmente |
-| `test_ocr_stress_corpus.py` | Integridade, subconjuntos e regressão 15–16 | `pytest -q tests/test_ocr_stress_corpus.py` | aprovado | nenhum |
-| `corpus_validation.md` | Evidências estruturais e baseline anterior | revisão dos hashes e artefatos | aprovado | inspeção visual continua amostral |
-| página 30 do gerador | Cenário corrigido para células raster multilinha | teste de manifesto e extração baseline p30 | corpus aprovado; OCR reproduziu a falha de associação de linhas | assembly de tabela permanece pendente |
-| produção OCR/texto nativo | nenhuma alteração | `git diff f18a031..HEAD -- src/structured_pdf_text` | nenhum arquivo alterado | nenhum bloqueio nesta etapa |
+| `generate.py` | Deterministic generator and real crops of figure 15–16 | `generate.py --help`; manifest/PDF; specific continuity test | approved | continuations of other pairs are not shared source images |
+| `manifest.json` | Region, source, layer metadata and `shared_image_id` | PDF SHA, 60 pages, dimensions, and order | approved | Code128 generated but not decoded locally |
+| `test_ocr_stress_corpus.py` | Integrity, subsets, and 15–16 regression | `pytest -q tests/test_ocr_stress_corpus.py` | approved | none |
+| `corpus_validation.md` | Structural evidence and previous baseline | review of hashes and artifacts | approved | visual inspection remains sampled |
+| generator page 30 | Scenario corrected for multiline raster cells | manifest test and baseline extraction p30 | corpus approved; OCR reproduced the row association failure | table assembly remains pending |
+| production OCR/native text | no change | `git diff f18a031..HEAD -- src/structured_pdf_text` | no file changed | no blocker at this step |
 
-Comandos executados nesta revisão:
+Commands executed in this review:
 
 ```bash
 python3 tests/corpus/ocr_stress_v1/generate.py --help
@@ -39,14 +39,13 @@ pytest -q
 git diff --check
 ```
 
-Todos terminaram com sucesso. Nenhum commit, push, merge ou PR foi feito nesta
-rodada.
+All completed successfully. No commit, push, merge, or PR was made in this round.
 
-## Diagnóstico OCR incremental
+## Incremental OCR Diagnosis
 
-Foi reutilizado o baseline anterior para as páginas 1, 2, 13–14, 15–16 e 19,
-pois os PDFs e a implementação correspondem ao corpus atual. O controle
-negativo 24 foi executado nesta revisão com:
+The previous baseline was reused for pages 1, 2, 13–14, 15–16, and 19, since
+the PDFs and implementation match the current corpus. Negative control 24 was
+run in this review with:
 
 ```bash
 PYTHONPATH=src python3 -m structured_pdf_text.cli extract \
@@ -55,179 +54,174 @@ PYTHONPATH=src python3 -m structured_pdf_text.cli extract \
   -o /tmp/ocr-stress-audit/p24.md
 ```
 
-| Página de origem | Cenário | Política | Observação | Resultado |
+| Source page | Scenario | Policy | Observation | Result |
 |---:|---|---|---|---|
-| 1 | controle nativo | baseline | marcador nativo uma vez | aprovado |
-| 19 | imagem decorativa sem texto | baseline | texto nativo preservado, sem OCR inventado | aprovado |
-| 2 | raster simples | baseline | marcador, acentos, moeda, data e percentual recuperados | aprovado |
-| 13 | misto com comprovante raster | baseline | texto da imagem junto ao texto nativo, sem duplicação observada | aprovado |
-| 14 | misto com bloco raster | baseline | bloco raster e texto nativo preservados | aprovado |
-| 24 | raster textual + gráfico sem texto | baseline | `OCRS-024` recuperado; o rótulo do gráfico vem da camada nativa, não de OCR indiscriminado | aprovado |
-| 15–16 | figura contínua em paisagem | baseline | dois marcadores, conteúdo comum e duas páginas preservados | aprovado |
+| 1 | native control | baseline | native marker once | approved |
+| 19 | decorative image without text | baseline | native text preserved, no invented OCR | approved |
+| 2 | simple raster | baseline | marker, accents, currency, date, and percentage recovered | approved |
+| 13 | mixed with raster receipt | baseline | image text alongside native text, no duplication observed | approved |
+| 14 | mixed with raster block | baseline | raster block and native text preserved | approved |
+| 24 | textual raster + graphic without text | baseline | `OCRS-024` recovered; the graphic label comes from the native layer, not from indiscriminate OCR | approved |
+| 15–16 | continuous figure in landscape | baseline | two markers, common content, and two pages preserved | approved |
 
-As saídas estão em `/tmp/ocr-stress-audit/`, com Markdown, logs, manifestos e
-estatísticas de tempo. O lote p24 terminou com exit code 0, sem linhas de erro,
-em 9,85 s de parede, com pico de 2.472.668 kB.
+Outputs are in `/tmp/ocr-stress-audit/`, with Markdown, logs, manifests, and
+timing statistics. Batch p24 completed with exit code 0, no error lines, in
+9.85 s of wall time, with a peak of 2,472,668 kB.
 
-O `adaptive` não foi executado nos controles aprovados. Ele foi executado
-somente depois da falha reproduzida na página 29, conforme a regra do plano, e
-seus resultados estão registrados abaixo.
+The `adaptive` mode was not run on the approved controls. It was run only after
+the failure was reproduced on page 29, per the plan's rule, and its results are
+recorded below.
 
-## Página 30: falha de associação de células multilinha
+## Page 30: Multiline Cell Association Failure
 
-O gerador foi corrigido para desenhar quebras de linha reais nas células e
-registrar essa intenção no manifesto. Com o corpus corrigido, o OCR reconheceu
-os textos secundários (`mensal`, `estimado`, `revisado`, `controle`, `interno`,
-`atenção`), mas a tabela foi serializada como linhas adicionais com células
-vazias nas demais colunas. O JSON mostrou sete linhas físicas, enquanto o
-cenário exige quatro linhas lógicas com conteúdo multilinha.
+The generator was fixed to draw real line breaks in cells and record this intent
+in the manifest. With the corrected corpus, OCR recognized the secondary texts
+(`mensal`, `estimado`, `revisado`, `controle`, `interno`, `atenção`), but the
+table was serialized as additional rows with empty cells in the remaining
+columns. The JSON showed seven physical rows, while the scenario requires four
+logical rows with multiline content.
 
-O diagnóstico separa as etapas: os tokens aparecem em sete linhas OCR com
-geometria coerente; a tabela contém todos os tokens, mas cria linhas 2, 4 e 6
-para as continuações. Não houve perda no detector OCR. A origem comprovada é a
-associação/serialização de tabela após o reconhecimento.
+The diagnosis separates the stages: tokens appear in seven OCR lines with
+coherent geometry; the table contains all tokens, but creates rows 2, 4, and 6
+for the continuations. There was no loss in the OCR detector. The confirmed
+origin is table association/serialization after recognition.
 
-Esta correção está bloqueada nesta rodada: o plano proíbe modificar módulos de
-texto/assembly sem autorização específica. Não foi alterado código de produção
-para mascarar a falha.
+This fix is blocked in this round: the plan prohibits modifying text/assembly
+modules without specific authorization. No production code was changed to mask
+the failure.
 
-## Decisão e próximo passo
+## Decision and Next Step
 
-Não há correção de OCR autorizada por evidência nesta etapa. O diagnóstico não
-chegou a uma perda nos estágios de enumeração, seleção, recorte, detecção,
-reconhecimento ou montagem; portanto, não há módulo de produção para alterar.
+There is no evidence-authorized OCR fix at this step. The diagnosis did not find
+a loss in the enumeration, selection, crop, detection, recognition, or assembly
+stages; therefore, there is no production module to change.
 
-Próximo passo: após a revisão deste relatório, selecionar o primeiro caso OCR
-restante com falha reproduzida — priorizando tabelas 27–40 ou orientação/figuras
-42–50 — e executar o diagnóstico por estágio. Só então implementar, no máximo,
-uma correção pontual de OCR regional. Nenhuma alteração de texto nativo,
-assembly, reading order, ledger ou deduplicação está autorizada por este plano.
+Next step: after reviewing this report, select the first remaining OCR case with
+a reproduced failure — prioritizing tables 27–40 or orientation/figures 42–50 —
+and run the stage-by-stage diagnosis. Only then implement, at most, one targeted
+regional OCR fix. No change to native text, assembly, reading order, ledger, or
+deduplication is authorized by this plan.
 
-## Primeiro defeito restante: página 29
+## First Remaining Defect: Page 29
 
-A página 28 foi aprovada com `baseline`. A página 29, primeira variante
-seguinte, reproduziu uma falha de reconhecimento:
+Page 28 was approved with `baseline`. Page 29, the next variant, reproduced a
+recognition failure:
 
-| Política | Resultado observado | Evidência de estágio |
+| Policy | Observed result | Stage evidence |
 |---|---|---|
-| `baseline` | `Fictício` saiu como `Ficticio`; `C` saiu como `c`; o título saiu como `—TABELA` | OCR de página solicitado; 17 tokens detectados; qualidade `1.0`; variante selecionada `baseline` |
-| `adaptive` | corrigiu `C` e o espaço do título, mas manteve `Ficticio` | tentou `baseline`, `sharpness` e `unsharp`; selecionou `sharpness`; 16 células preservadas |
+| `baseline` | `Fictício` came out as `Ficticio`; `C` came out as `c`; the title came out as `—TABELA` | page OCR requested; 17 tokens detected; quality `1.0`; selected variant `baseline` |
+| `adaptive` | corrected `C` and the title space, but kept `Ficticio` | tried `baseline`, `sharpness`, and `unsharp`; selected `sharpness`; 16 cells preserved |
 
-O `inspect` da execução baseline confirmou: região `page-1:region-1`
-classificada como `escalate_page_ocr`, `page_ocr_requested=true`, uma passagem
-OCR, tabela `text_tracks` válida, 16 células, cobertura de tokens `1.0`,
-conflitos de associação `0` e nenhuma substituição/duplicação na fusão. Logo,
-a falha surge no reconhecimento dos pixels, antes da montagem. O `inspect`
-adaptive também confirmou cobertura de células `1.0`; nenhuma variante
-produziu a grafia acentuada necessária.
+The `inspect` of the baseline run confirmed: region `page-1:region-1` classified
+as `escalate_page_ocr`, `page_ocr_requested=true`, one OCR pass, valid
+`text_tracks` table, 16 cells, token coverage `1.0`, association conflicts `0`,
+and no substitution/duplication in the merge. Therefore, the failure arises in
+pixel recognition, before assembly. The adaptive `inspect` also confirmed cell
+coverage `1.0`; no variant produced the required accented spelling.
 
-O baseline recebeu qualidade suficiente apesar do erro semântico porque as
-confianças e a cobertura espacial eram altas. Não é seguro corrigir isso com
-substituição textual, léxico ou regra para o conteúdo sintético. Também não há
-autorização neste plano para trocar modelo, resolução, runtime ou alterar
-globalmente o critério de qualidade com base em uma única palavra.
+The baseline received sufficient quality despite the semantic error because
+confidence scores and spatial coverage were high. It is not safe to fix this
+with text substitution, lexicon, or rule for synthetic content. There is also no
+authorization in this plan to swap model, resolution, runtime, or globally alter
+the quality criterion based on a single word.
 
-Este é o ponto de parada do ciclo: não foi feita alteração em `src/` e nenhum
-teste de produção foi criado para mascarar a limitação do reconhecedor. Os
-artefatos completos estão em `/tmp/ocr-stress-audit/p28*`, `/tmp/ocr-stress-audit/p29*`
-e `/tmp/ocr-stress-audit/p29-inspect-*`.
+This is the stopping point of the cycle: no change was made to `src/` and no
+production test was created to mask the recognizer's limitation. The complete
+artifacts are in `/tmp/ocr-stress-audit/p28*`, `/tmp/ocr-stress-audit/p29*`,
+and `/tmp/ocr-stress-audit/p29-inspect-*`.
 
-## Correção autorizada: células raster multilinha
+## Authorized Fix: Multiline Raster Cells
 
-Com autorização específica, a etapa seguinte alterou somente
-`tables/text_tracks.py`. A detecção agora agrupa uma linha que sobrepõe
-verticalmente a linha anterior e ocupa um subconjunto dos mesmos tracks de
-coluna; a serialização ordena os grupos por `y` dentro de cada célula e une o
-conteúdo com espaço. Linhas normais com separação vertical continuam sendo
-linhas distintas.
+With specific authorization, the next step changed only `tables/text_tracks.py`.
+Detection now groups a row that vertically overlaps the previous row and occupies
+a subset of the same column tracks; serialization orders groups by `y` within
+each cell and joins the content with a space. Normal rows with vertical
+separation continue to be distinct rows.
 
-Validações da correção:
+Fix validations:
 
-- teste unitário: `test_borderless_detector_keeps_wrapped_cell_lines_in_one_row`;
-- página 30 baseline antes/depois: de 7 linhas físicas/linhas extras para 4
-  linhas lógicas e 16 células;
-- saída Markdown final preserva `123,45 mensal`, `67,89 estimado`,
-  `90,12 revisado`, `Fictício controle`, `Controle interno` e `V1 atenção`;
-- páginas 27–29 repetidas sem erros; páginas 27 e 28 mantiveram os valores
-  anteriores e a página 29 manteve o conteúdo residual já diagnosticado;
-- controles 1, 2, 13, 14, 19 e 24 repetidos sem erro, duplicação ou alteração
-  de texto nativo;
-- `python3 -m compileall -q src tests`, `pytest -q` e `git diff --check`
-  aprovados.
+- unit test: `test_borderless_detector_keeps_wrapped_cell_lines_in_one_row`;
+- page 30 baseline before/after: from 7 physical rows/extra rows to 4 logical
+  rows and 16 cells;
+- final Markdown output preserves `123,45 mensal`, `67,89 estimado`,
+  `90,12 revisado`, `Fictício controle`, `Controle interno`, and `V1 atenção`;
+- pages 27–29 re-run without errors; pages 27 and 28 retained previous values
+  and page 29 retained the already-diagnosed residual content;
+- controls 1, 2, 13, 14, 19, and 24 re-run without error, duplication, or
+  native text change;
+- `python3 -m compileall -q src tests`, `pytest -q`, and `git diff --check`
+  approved.
 
-Não houve alteração no modo `native`, no OCR regional, no modelo, na resolução,
-no runtime ou no ledger. O próximo risco residual é a qualidade de
-reconhecimento da página 29 (`Ficticio` sem acento), que não foi corrigida por
-esta mudança estrutural.
+There was no change to `native` mode, regional OCR, model, resolution, runtime,
+or ledger. The next residual risk is the recognition quality of page 29
+(`Ficticio` without accent), which was not corrected by this structural change.
 
-## Correção: OCR raster dentro de células nativas
+## Fix: Raster OCR Within Native Cells
 
-Na auditoria seguinte dos cenários 31–40 e da continuação 56–57, foram
-encontradas duas inconsistências do próprio fixture: as imagens declaradas
-como células raster nas páginas 33 e 57 estavam desenhadas abaixo das tabelas.
-O gerador e o manifesto foram corrigidos para posicioná-las dentro de células
-reais, com texto legível e sem alterar o parser de produção.
+In the subsequent audit of scenarios 31–40 and continuation 56–57, two
+inconsistencies in the fixture itself were found: the images declared as raster
+cells on pages 33 and 57 were drawn below the tables. The generator and manifest
+were corrected to position them inside real cells, with legible text and without
+changing the production parser.
 
-Com o fixture corrigido, o diagnóstico da página 33 mostrou que o OCR
-regional reconhecia `CÉLULA OCRS-033`, mas o token era emitido como figura
-separada. A causa estava na montagem: a geometria da tabela já continha a
-célula, porém o token OCR da imagem não era associado à célula e a linha
-nativa sobreposta não era reivindicada pelo bloco de tabela.
+With the corrected fixture, the diagnosis of page 33 showed that regional OCR
+recognized `CÉLULA OCRS-033`, but the token was emitted as a separate figure.
+The cause was in assembly: the table geometry already contained the cell, but
+the OCR token from the image was not associated with the cell and the overlapping
+native row was not claimed by the table block.
 
-A correção de produção é geométrica e genérica:
+The production fix is geometric and generic:
 
-- tokens OCR de uma região substancialmente contida em uma célula nativa são
-  convertidos em evidência da célula;
-- o token consumido deixa de ser enviado ao texto suplementar;
-- linhas nativas cujos tokens compõem células são reivindicadas pelo bloco da
-  tabela, evitando fallback ou duplicação em figura/prosa;
-- tabelas visuais continuam no caminho de refinamento existente.
+- OCR tokens from a region substantially contained in a native cell are converted
+  into cell evidence;
+- the consumed token is no longer sent to supplemental text;
+- native rows whose tokens compose cells are claimed by the table block, avoiding
+  fallback or duplication in figure/prose;
+- visual tables continue on the existing refinement path.
 
-Resultados end-to-end:
+End-to-end results:
 
-- página 33: `3-3 CÉLULA OCRS-033` dentro da célula, sem bloco residual;
-- página 57: `3-3 CÉLULA OCRS-057` dentro da célula, preservando a continuação
-  56–57;
-- `ocr_unmatched_tokens=1` antes da associação e nenhum texto suplementar ou
-  fallback após a associação;
-- controles 1, 2, 13, 14, 19 e 24 repetidos sem erro;
-- testes direcionados, `pytest -q`, `compileall` e `git diff --check`
-  aprovados.
+- page 33: `3-3 CÉLULA OCRS-033` inside the cell, no residual block;
+- page 57: `3-3 CÉLULA OCRS-057` inside the cell, preserving continuation 56–57;
+- `ocr_unmatched_tokens=1` before association and no supplemental text or
+  fallback after association;
+- controls 1, 2, 13, 14, 19, and 24 re-run without error;
+- targeted tests, `pytest -q`, `compileall`, and `git diff --check` approved.
 
-Não houve troca de modelo, runtime, resolução ou regra condicionada ao texto
-do corpus. O residual da página 29 (`Ficticio` sem acento) permanece separado
-e não foi mascarado por substituição textual.
+There was no swap of model, runtime, resolution, or rule conditioned on corpus
+text. The residual of page 29 (`Ficticio` without accent) remains separate and
+was not masked by text substitution.
 
-## Auditoria final de orientação e integração
+## Final Orientation and Integration Audit
 
-As páginas 42–50 foram reproduzidas com a política `baseline`: paisagem,
-texto nativo girado, imagem girada, três colunas, QR/Code128, múltiplas
-imagens e objetos parcial ou totalmente fora da página preservaram o conteúdo
-esperado. A página 57 continuou preservando a célula raster da tabela em
-continuação.
+Pages 42–50 were reproduced with the `baseline` policy: landscape, rotated
+native text, rotated image, three columns, QR/Code128, multiple images, and
+objects partially or entirely outside the page all preserved the expected
+content. Page 57 continued to preserve the raster cell of the table in
+continuation.
 
-Na integração 51–60, as páginas 52 e 55 inicialmente pareciam perder a última
-linha das tabelas raster. O diagnóstico mostrou que os tokens reconhecidos
-correspondiam somente aos pixels existentes: as linhas `B 53,00` e `B 56,00`
-tinham sido desenhadas fora da altura dos bitmaps pelo gerador. A correção foi
-restrita ao fixture, aumentando as regiões para `390×170` e `340×160` pontos;
-nenhum arquivo de produção foi alterado. A nova extração recuperou todas as
-linhas e a página 55 voltou a formar uma tabela visual completa.
+In integration 51–60, pages 52 and 55 initially appeared to lose the last row
+of the raster tables. Diagnosis showed that the recognized tokens matched only
+the existing pixels: rows `B 53,00` and `B 56,00` had been drawn outside the
+bitmap height by the generator. The fix was restricted to the fixture, increasing
+the regions to `390×170` and `340×160` points; no production file was changed.
+The new extraction recovered all rows and page 55 again formed a complete visual
+table.
 
-O teste `test_raster_table_fixtures_expose_all_declared_rows` fixa essa
-invariante do corpus. A falha residual real continua sendo a acentuação de
-`Ficticio` na página 29, localizada no reconhecimento dos pixels e sem
-correção genérica segura disponível nesta etapa.
+The test `test_raster_table_fixtures_expose_all_declared_rows` fixes this corpus
+invariant. The real residual failure remains the accentuation of `Ficticio` on
+page 29, located in pixel recognition and without a safe generic fix available
+at this step.
 
-## Extração completa após a correção do fixture
+## Full Extraction After Fixture Fix
 
-O PDF completo foi regenerado e extraído com `balanced`/`baseline`. A execução
-terminou com código 0; os 60 marcadores `OCRS-P01-CONTROL` …
-`OCRS-P60-CONTROL` aparecem exatamente uma vez cada. A saída completa foi
-preservada em `/tmp/ocr-stress-audit/full-after-fixture.md` e o log registrou
-somente o aviso esperado de área visível nula para a figura da página 50.
+The complete PDF was regenerated and extracted with `balanced`/`baseline`.
+Execution completed with code 0; the 60 markers `OCRS-P01-CONTROL` …
+`OCRS-P60-CONTROL` each appear exactly once. The full output was preserved in
+`/tmp/ocr-stress-audit/full-after-fixture.md` and the log recorded only the
+expected zero-visible-area warning for the figure on page 50.
 
-Também foram confirmados na saída completa: `B 53,00` na página 52, a tabela
-visual com `A 55,00` e `B 56,00` na página 55, e `3-3 CÉLULA OCRS-057` na
-página 57. O comando de validação estrutural, `compileall`, a suíte dirigida,
-`pytest -q` e `git diff --check` continuam aprovados.
+Also confirmed in the full output: `B 53,00` on page 52, the visual table with
+`A 55,00` and `B 56,00` on page 55, and `3-3 CÉLULA OCRS-057` on page 57. The
+structural validation command, `compileall`, the targeted suite, `pytest -q`,
+and `git diff --check` remain approved.

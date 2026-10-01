@@ -1908,13 +1908,13 @@ def _deskew_image(
     *,
     page_index: int | None = None,
 ) -> tuple[object, float]:
-    """Detecta e corrige inclinação pequena em imagens de página (scan ou foto).
+    """Detect and correct small skew in page images (scan or photo).
 
-    Cobre todas as 4 orientações base (0/90/180/270°) porque cv2.minAreaRect
-    detecta o desvio em relação ao eixo mais próximo, não só ao horizontal.
+    Covers all 4 base orientations (0/90/180/270°) because cv2.minAreaRect
+    detects deviation relative to the nearest axis, not only to horizontal.
 
-    Retorna (imagem_corrigida, angulo_aplicado).
-    angulo_aplicado == 0.0 significa que nenhuma correção foi aplicada.
+    Returns (corrected_image, applied_angle).
+    applied_angle == 0.0 means no correction was applied.
     """
     try:
         import cv2

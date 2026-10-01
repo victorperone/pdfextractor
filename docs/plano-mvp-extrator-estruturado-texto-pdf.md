@@ -1,50 +1,50 @@
-# Plano de Implementação do MVP — Extrator Robusto de Texto e Estrutura de PDF
+# MVP Implementation Plan — Robust PDF Text and Structure Extractor
 
-**Status:** proposta arquitetural revisada após estudo comparativo de parsers de mercado  
-**Data da revisão:** 12 de setembro de 2026  
-**Nome de trabalho:** `structured-pdf-text`  
-**Objetivo:** construir um extrator local, auditável e comercialmente utilizável, orientado à máxima recuperação possível do texto realmente presente ou visível em documentos PDF, com tratamento explícito de múltiplas colunas, tabelas, tabelas entre páginas, camadas textuais defeituosas e documentos digitalizados.
+**Status:** architectural proposal revised after a comparative study of market parsers  
+**Revision date:** September 12, 2026  
+**Working name:** `structured-pdf-text`  
+**Objective:** build a local, auditable, and commercially usable extractor, aimed at maximum possible recovery of text actually present or visible in PDF documents, with explicit handling of multiple columns, tables, cross-page tables, defective text layers, and scanned documents.
 
 ---
 
-## 1. Resumo executivo
+## 1. Executive summary
 
-A primeira versão deste plano propunha uma arquitetura essencialmente determinística:
+The first version of this plan proposed an essentially deterministic architecture:
 
 ```text
 PDF
   ↓
 PDFium
   ↓
-caracteres + geometria + fontes
+characters + geometry + fonts
   ↓
-normalização
+normalization
   ↓
-linhas
+lines
   ↓
-palavras
+words
   ↓
 spans
   ↓
-blocos
+blocks
   ↓
-ordem de leitura
+reading order
   ↓
-texto estruturado
+structured text
 ```
 
-Essa base continua correta e deve ser preservada. O estudo de Docling, MinerU, LiteParse, Xberg, Unstructured, PaddleOCR, MarkItDown e Marker, porém, mostra que ela é insuficiente como arquitetura completa para o objetivo agora definido: lidar de forma robusta com documentos empresariais heterogêneos, inclusive PDFs com duas colunas, tabelas ruins, tabelas divididas entre páginas, scans, textos desenhados como vetores, camadas OCR defeituosas, conteúdo parcialmente rasterizado e mistura de texto nativo com imagem.
+This foundation remains correct and should be preserved. The study of Docling, MinerU, LiteParse, Xberg, Unstructured, PaddleOCR, MarkItDown and Marker, however, shows that it is insufficient as a complete architecture for the now-defined objective: robustly handling heterogeneous enterprise documents, including PDFs with two columns, poor tables, tables split across pages, scans, text drawn as vectors, defective OCR layers, partially rasterized content, and mixtures of native text with images.
 
-A principal revisão é transformar o produto em um **pipeline híbrido de fusão de evidências**.
+The main revision is to transform the product into a **hybrid evidence-fusion pipeline**.
 
-A nova arquitetura mantém o PDFium como fonte primária e exata para PDFs digitais, mas adiciona quatro conceitos que passam a ser centrais:
+The new architecture keeps PDFium as the primary and exact source for digital PDFs, but adds four concepts that become central:
 
-1. **Diagnóstico antes de escolher a estratégia.** Cada página e, quando possível, cada região recebe sinais de qualidade. O sistema não decide apenas “PDF nativo ou OCR”; ele decide onde a camada textual é confiável, incompleta, duplicada, invisível, corrompida ou ausente.
-2. **Layout antes da ordem de leitura global.** Um detector de layout identifica regiões como prosa, título, tabela, figura, cabeçalho e rodapé. A ordem de leitura deixa de ser uma única heurística aplicada à página inteira.
-3. **OCR como recuperação seletiva, não substituição automática.** Texto nativo confiável é preservado. OCR entra apenas em páginas ou regiões onde há evidência de perda, corrupção ou conteúdo exclusivamente visual.
-4. **Tabelas como subsistema independente.** Tabelas não passam pela mesma lógica de ordenação usada para parágrafos. A detecção usa uma cascata de estratégias e a continuidade entre páginas é resolvida em uma etapa documental própria.
+1. **Diagnosis before choosing the strategy.** Each page and, when possible, each region receives quality signals. The system does not just decide “native PDF or OCR”; it decides where the text layer is reliable, incomplete, duplicated, invisible, corrupted, or absent.
+2. **Layout before global reading order.** A layout detector identifies regions such as prose, title, table, figure, header, and footer. Reading order is no longer a single heuristic applied to the entire page.
+3. **OCR as selective recovery, not automatic replacement.** Reliable native text is preserved. OCR is used only on pages or regions where there is evidence of loss, corruption, or exclusively visual content.
+4. **Tables as an independent subsystem.** Tables do not go through the same ordering logic used for paragraphs. Detection uses a cascade of strategies and cross-page continuity is resolved in a dedicated document-level step.
 
-A arquitetura revisada pode ser resumida assim:
+The revised architecture can be summarized as follows:
 
 ```text
                                   PDF
@@ -52,219 +52,219 @@ A arquitetura revisada pode ser resumida assim:
                  ┌─────────────────┴─────────────────┐
                  │                                   │
                  ▼                                   ▼
-        Evidência nativa PDFium              Renderização da página
-      caracteres, objetos, paths,             baixa/alta resolução
-      imagens, fontes, coordenadas                    │
+        PDFium native evidence               Page rendering
+      characters, objects, paths,            low/high resolution
+      images, fonts, coordinates                     │
                  │                                    ▼
-                 │                           Análise visual de layout
-                 │                           e OCR quando necessário
+                 │                           Visual layout analysis
+                 │                           and OCR when necessary
                  │                                    │
                  └──────────────┬─────────────────────┘
                                 ▼
-                     Mapa de evidências da página
-                     + confiança + proveniência
+                     Page evidence map
+                     + confidence + provenance
                                 │
                 ┌───────────────┼──────────────────┐
                 ▼               ▼                  ▼
-          Regiões de prosa    Tabelas        Regiões problemáticas
+          Prose regions       Tables        Problematic regions
                 │               │                  │
                 ▼               ▼                  ▼
-        ordem de leitura   pipeline próprio   OCR seletivo
-        e reconstrução     de tabela          ou página inteira
+        reading order     dedicated table   selective OCR
+        and reconstruction  pipeline        or full page
                 │               │                  │
                 └───────────────┼──────────────────┘
                                 ▼
-                         Fusão de evidências
+                         Evidence fusion
                                 │
                                 ▼
-                      Estrutura por página
+                      Per-page structure
                                 │
                                 ▼
-                  Reconstrução entre páginas
-                    tabelas, cabeçalhos, fluxo
+                  Cross-page reconstruction
+                    tables, headers, flow
                                 │
                                 ▼
           raw_text | reading_text | structured JSON | Markdown
 ```
 
-### Decisão principal
+### Main decision
 
-**Nenhum dos projetos estudados deve ser copiado integralmente como arquitetura.** Para nosso objetivo, a melhor solução combina ideias distintas:
+**None of the studied projects should be copied in full as an architecture.** For our objective, the best solution combines distinct ideas:
 
-| Camada | Principal referência | O que aproveitar |
+| Layer | Main reference | What to take from it |
 |---|---|---|
-| Aquisição nativa | LiteParse + Docling | PDFium e separação entre parser e estrutura |
-| Diagnóstico de qualidade | LiteParse + Marker | sinais determinísticos + avaliação de camada textual |
-| Layout | Docling + PaddleOCR + Xberg | regiões visuais antes da reconstrução semântica |
-| OCR seletivo | Marker + MinerU | reparo por região e promoção para página inteira quando necessário |
-| Fusão nativo/OCR | LiteParse + MinerU | merge espacial com proveniência |
-| Ordem de leitura | Marker + Xberg | sequência nativa extraída como evidência forte + XY-cut apenas em regiões adequadas |
-| Tabelas | Xberg + PaddleOCR | cascata determinística e modelo estrutural como fallback |
-| Tabelas entre páginas | MinerU | assinatura estrutural e continuidade documental |
-| Modelo documental | Docling | estrutura intermediária rica antes da serialização |
-| Orquestração de estratégias | Unstructured | estratégia automática e fallback explícito |
-| Extensibilidade | MarkItDown | componentes substituíveis, sem amarrar o produto a um engine |
+| Native acquisition | LiteParse + Docling | PDFium and separation between parser and structure |
+| Quality diagnosis | LiteParse + Marker | deterministic signals + text layer evaluation |
+| Layout | Docling + PaddleOCR + Xberg | visual regions before semantic reconstruction |
+| Selective OCR | Marker + MinerU | region-level repair and promotion to full page when necessary |
+| Native/OCR fusion | LiteParse + MinerU | spatial merge with provenance |
+| Reading order | Marker + Xberg | native sequence extracted as strong evidence + XY-cut only in suitable regions |
+| Tables | Xberg + PaddleOCR | deterministic cascade and structural model as fallback |
+| Cross-page tables | MinerU | structural signature and document continuity |
+| Document model | Docling | rich intermediate structure before serialization |
+| Strategy orchestration | Unstructured | automatic strategy and explicit fallback |
+| Extensibility | MarkItDown | replaceable components, without tying the product to one engine |
 
-Se fosse necessário escolher **um único projeto como referência arquitetural mais próxima do núcleo**, seria o **LiteParse**, porque também parte de PDFium, faz detecção de complexidade, OCR seletivo, merge e reconstrução espacial. Para a arquitetura de produção, porém, o **Marker fornece o melhor padrão de decisão entre texto nativo e recuperação visual**, enquanto **Xberg fornece as melhores lições determinísticas para leitura e tabelas**, **MinerU fornece a referência mais útil para continuidade de tabelas**, e **PaddleOCR fornece o melhor conjunto de ferramentas visuais para o fallback**.
-
----
-
-## 2. Objetivo do produto
-
-O produto não deve ser apresentado apenas como “um leitor de PDF”. O objetivo é mais específico:
-
-> **Recuperar com a maior fidelidade possível o conteúdo textual legível de um PDF e manter evidência suficiente para reconstruir sua organização, sem destruir texto correto ao tentar corrigir casos difíceis.**
-
-O MVP será avaliado principalmente sobre documentos reais da empresa.
-
-Não existe compromisso de ser superior ao MuPDF em qualquer PDF existente. O compromisso tecnicamente defensável é:
-
-> **aproximar ou superar a extração do MuPDF/PyMuPDF no corpus representativo da empresa e, principalmente, recuperar classes de conteúdo que um caminho puramente baseado na camada textual perde.**
-
-Isso inclui explicitamente:
-
-* texto digital com acentuação em português do Brasil;
-* documentos com fontes embutidas e CMaps incomuns;
-* páginas em uma ou várias colunas;
-* cabeçalhos, rodapés e numeração;
-* tabelas com linhas explícitas;
-* tabelas sem bordas;
-* tabelas com células mescladas;
-* tabelas desalinhadas ou mal formatadas;
-* tabelas continuadas na página seguinte;
-* PDFs gerados por sistemas legados;
-* PDFs com camada OCR invisível;
-* PDFs com camada OCR duplicada ou errada;
-* páginas totalmente digitalizadas;
-* páginas híbridas, com texto nativo e regiões rasterizadas;
-* texto rotacionado;
-* texto desenhado como vetores;
-* texto em anotações ou appearance streams que não apareça no caminho textual normal;
-* caracteres Unicode inválidos ou sem mapeamento confiável.
+If it were necessary to choose **a single project as the closest architectural reference to the core**, it would be **LiteParse**, because it also starts from PDFium, performs complexity detection, selective OCR, merge, and spatial reconstruction. For the production architecture, however, **Marker provides the best decision pattern between native text and visual recovery**, while **Xberg provides the best deterministic lessons for reading and tables**, **MinerU provides the most useful reference for table continuity**, and **PaddleOCR provides the best set of visual tools for the fallback**.
 
 ---
 
-## 3. O que significa “melhor extração de texto”
+## 2. Product objective
 
-Um erro comum em parsers é misturar três objetivos diferentes em uma única string. O nosso produto deve mantê-los separados desde o início.
+The product should not be presented merely as “a PDF reader”. The objective is more specific:
+
+> **Recover with the highest possible fidelity the readable textual content of a PDF and maintain sufficient evidence to reconstruct its organization, without destroying correct text while trying to fix difficult cases.**
+
+The MVP will be evaluated primarily on real company documents.
+
+There is no commitment to be superior to MuPDF on every existing PDF. The technically defensible commitment is:
+
+> **approach or surpass the extraction quality of MuPDF/PyMuPDF on the company's representative corpus and, above all, recover content classes that a path purely based on the text layer misses.**
+
+This explicitly includes:
+
+* digital text with Brazilian Portuguese accents;
+* documents with embedded fonts and unusual CMaps;
+* pages in one or multiple columns;
+* headers, footers, and page numbering;
+* tables with explicit lines;
+* borderless tables;
+* tables with merged cells;
+* misaligned or poorly formatted tables;
+* tables continued on the next page;
+* PDFs generated by legacy systems;
+* PDFs with an invisible OCR layer;
+* PDFs with a duplicated or incorrect OCR layer;
+* fully scanned pages;
+* hybrid pages with native text and rasterized regions;
+* rotated text;
+* text drawn as vectors;
+* text in annotations or appearance streams that does not appear in the normal text path;
+* invalid Unicode characters or characters without reliable mapping.
+
+---
+
+## 3. What “better text extraction” means
+
+A common mistake in parsers is mixing three different objectives into a single string. Our product must keep them separate from the start.
 
 ### 3.1. `raw_text`
 
-Objetivo: **máxima recuperação**.
+Objective: **maximum recovery**.
 
-Deve preservar o máximo de conteúdo textual detectado, inclusive elementos que depois possam ser classificados como cabeçalho, rodapé, texto marginal ou repetição.
+Must preserve the maximum amount of detected textual content, including elements that may later be classified as headers, footers, marginal text, or repetitions.
 
-Não deve remover silenciosamente texto apenas porque está perto da margem da página.
+Must not silently remove text just because it is near the page margin.
 
-`raw_text` **não é a concatenação cega de todas as hipóteses**. Duplicatas óbvias podem ser resolvidas pela fusão. A diferença é que ele não aplica limpeza semântica agressiva como remover cabeçalhos, rodapés ou marginais. Todas as hipóteses rejeitadas continuam disponíveis em `structured_document`/diagnostics.
+`raw_text` **is not a blind concatenation of all hypotheses**. Obvious duplicates can be resolved by fusion. The difference is that it does not apply aggressive semantic cleaning such as removing headers, footers, or marginals. All rejected hypotheses remain available in `structured_document`/diagnostics.
 
-É a saída usada quando a pergunta é:
+This is the output used when the question is:
 
-> “Quais textos conseguimos recuperar deste documento?”
+> “What texts can we recover from this document?”
 
 ### 3.2. `reading_text`
 
-Objetivo: **leitura humana coerente**.
+Objective: **coherent human reading**.
 
-Pode:
+May:
 
-* ordenar colunas;
-* juntar linhas de um parágrafo;
-* tratar hifenização;
-* evitar duplicatas;
-* representar tabelas de forma linear ou estruturada;
-* sinalizar cabeçalhos e rodapés repetidos;
-* opcionalmente suprimi-los.
+* order columns;
+* join lines of a paragraph;
+* handle hyphenation;
+* avoid duplicates;
+* represent tables in linear or structured form;
+* flag repeated headers and footers;
+* optionally suppress them.
 
-É a saída usada quando a pergunta é:
+This is the output used when the question is:
 
-> “Como este documento deve ser lido?”
+> “How should this document be read?”
 
 ### 3.3. `structured_document`
 
-Objetivo: **não perder a evidência necessária para decisões futuras**.
+Objective: **not losing the evidence needed for future decisions**.
 
-Deve conter páginas, caracteres, tokens, linhas, regiões, tabelas, imagens relevantes, coordenadas, proveniência, confiança e relações entre elementos.
+Must contain pages, characters, tokens, lines, regions, tables, relevant images, coordinates, provenance, confidence, and relationships between elements.
 
-Essa representação é a fonte de verdade do produto. Texto, Markdown e JSON simplificado são renderizações dela.
+This representation is the product's source of truth. Text, Markdown, and simplified JSON are renderings of it.
 
-### 3.4. Por que essa separação é obrigatória
+### 3.4. Why this separation is mandatory
 
-Há um conflito real entre “recall máximo” e “texto limpo”. Um OCR pode recuperar um cabeçalho que um benchmark considera ruído; um filtro de cabeçalhos pode aumentar a qualidade de Markdown e ao mesmo tempo reduzir a cobertura textual. Esses objetivos não devem ser decididos de forma irreversível durante a aquisição.
+There is a real conflict between “maximum recall” and “clean text”. An OCR may recover a header that a benchmark considers noise; a header filter may increase Markdown quality while simultaneously reducing textual coverage. These objectives must not be irreversibly decided during acquisition.
 
-A regra do produto será:
+The product rule will be:
 
-> **capturar primeiro, classificar depois, remover somente na renderização apropriada.**
+> **capture first, classify later, remove only at the appropriate rendering stage.**
 
 ---
 
-## 4. Pesquisa arquitetural realizada
+## 4. Architectural research conducted
 
-Foram analisadas as implementações e documentações atuais dos seguintes projetos, com foco em código de pipeline, roteamento de OCR, extração nativa, layout, leitura e tabelas:
+The current implementations and documentation of the following projects were analyzed, focusing on pipeline code, OCR routing, native extraction, layout, reading, and tables:
 
-| Projeto | Papel predominante | Licença do código observada | Relevância para nosso MVP |
+| Project | Predominant role | Observed code license | Relevance to our MVP |
 |---|---|---|---|
-| Docling | Document AI estruturado | MIT | muito alta |
-| MinerU | parser híbrido com OCR/VLM | Apache 2.0 com termos adicionais | muito alta |
-| LiteParse | parser PDF leve com PDFium | Apache 2.0 | muito alta |
-| Xberg | parser multimodal em Rust | MIT | muito alta |
-| Unstructured | orquestrador de particionamento | Apache 2.0 | média |
-| PaddleOCR | OCR e Document AI visual | Apache 2.0 para o código | muito alta |
-| MarkItDown | conversor leve para Markdown | MIT | baixa para o núcleo, média para extensibilidade |
-| Marker | parser híbrido de alta qualidade | Apache 2.0 para o código; pesos têm termos próprios | muito alta |
+| Docling | Structured Document AI | MIT | very high |
+| MinerU | Hybrid parser with OCR/VLM | Apache 2.0 with additional terms | very high |
+| LiteParse | Lightweight PDF parser with PDFium | Apache 2.0 | very high |
+| Xberg | Multimodal parser in Rust | MIT | very high |
+| Unstructured | Partitioning orchestrator | Apache 2.0 | medium |
+| PaddleOCR | OCR and visual Document AI | Apache 2.0 for the code | very high |
+| MarkItDown | Lightweight converter to Markdown | MIT | low for the core, medium for extensibility |
+| Marker | High-quality hybrid parser | Apache 2.0 for the code; weights have their own terms | very high |
 
-**Importante:** licença do repositório não garante que todos os pesos de modelos, artefatos ou dependências tenham as mesmas condições. A seleção de modelos para produção deverá ter uma revisão de licenças separada.
+**Important:** the repository license does not guarantee that all model weights, artifacts, or dependencies share the same conditions. Model selection for production will require a separate license review.
 
 ---
 
-## 5. Comparação geral das arquiteturas
+## 5. General architecture comparison
 
-### 5.1. Matriz técnica
+### 5.1. Technical matrix
 
-| Projeto | Texto nativo | Layout visual | OCR | Seleção adaptativa | Merge nativo/OCR | Tabelas | Tabela entre páginas | Ordem de leitura |
+| Project | Native text | Visual layout | OCR | Adaptive selection | Native/OCR merge | Tables | Cross-page table | Reading order |
 |---|---|---|---|---|---|---|---|---|
-| Docling | sim, backend abstrato | sim | sim | configurável | montagem por pipeline | modelo dedicado | estrutura documental permite evolução | modelo dedicado |
-| MinerU | sim | sim | sim | pipeline/híbrido/VLM | híbrido por região | forte | sim, explícito | reconstrução humana/modelada |
-| LiteParse | PDFium | heurística espacial | seletivo | sim, forte | sim | heurística | limitada comparada a MinerU | projeção/estrutura espacial |
-| Xberg | parser nativo, opcional PDFium | opcional, ONNX | fallback | sim | Native/Mixed/OCR | cascata forte | suporte estrutural em evolução | XY-cut + sinais de estrutura |
-| Unstructured | pdfminer | hi_res | OCR only/hi_res | AUTO/FAST/HI_RES/OCR_ONLY | por estratégia | hi_res | não é o foco principal | sorting/XY-cut |
-| PaddleOCR | não é seu foco principal | forte | forte | pipeline configurável | predominantemente visual | muito forte | suportado | baseado em layout/modelos |
-| MarkItDown | pdfminer/pdfplumber | limitado localmente | plugin/cloud | por converter | limitado | pdfplumber + heurísticas | não é foco | dependente do extrator |
-| Marker | pdftext | sim | seletivo | muito forte | por página/bloco | forte + fallback visual | com LLM opcional | usa ordem nativa quando confiável |
+| Docling | yes, abstract backend | yes | yes | configurable | pipeline assembly | dedicated model | document structure allows evolution | dedicated model |
+| MinerU | yes | yes | yes | pipeline/hybrid/VLM | hybrid by region | strong | yes, explicit | human/modeled reconstruction |
+| LiteParse | PDFium | spatial heuristic | selective | yes, strong | yes | heuristic | limited compared to MinerU | projection/spatial structure |
+| Xberg | native parser, optional PDFium | optional, ONNX | fallback | yes | Native/Mixed/OCR | strong cascade | structural support evolving | XY-cut + structure signals |
+| Unstructured | pdfminer | hi_res | OCR only/hi_res | AUTO/FAST/HI_RES/OCR_ONLY | by strategy | hi_res | not the main focus | sorting/XY-cut |
+| PaddleOCR | not its main focus | strong | strong | configurable pipeline | predominantly visual | very strong | supported | layout/model based |
+| MarkItDown | pdfminer/pdfplumber | limited locally | plugin/cloud | by converter | limited | pdfplumber + heuristics | not the focus | extractor-dependent |
+| Marker | pdftext | yes | selective | very strong | per page/block | strong + visual fallback | with optional LLM | uses native order when reliable |
 
-### 5.2. Conclusão conjunta
+### 5.2. Joint conclusion
 
-Os projetos mais robustos convergem para algumas ideias:
+The most robust projects converge on a few ideas:
 
-* não confiar sempre no texto embutido;
-* não aplicar OCR sempre;
-* renderizar a página para validar ou complementar o que a camada textual afirma;
-* detectar layout antes de reconstruir estruturas complexas;
-* tratar tabelas como objetos estruturais, não apenas como linhas de texto;
-* usar diferentes estratégias conforme a qualidade da página;
-* preservar uma estrutura intermediária antes de produzir Markdown ou plain text.
+* do not always trust embedded text;
+* do not always apply OCR;
+* render the page to validate or complement what the text layer claims;
+* detect layout before reconstructing complex structures;
+* treat tables as structural objects, not just lines of text;
+* use different strategies depending on page quality;
+* preserve an intermediate structure before producing Markdown or plain text.
 
-A diferença entre eles está em **quanto trabalho fazem com heurística determinística** e **quanto delegam a modelos de visão**.
+The difference between them lies in **how much work they do with deterministic heuristics** and **how much they delegate to vision models**.
 
-Nossa arquitetura deve ficar no meio desse espectro:
+Our architecture should sit in the middle of that spectrum:
 
 ```text
-texto digital confiável ───────────────► preservar determinismo
+reliable digital text ──────────────► preserve determinism
 
-texto híbrido/problemático ────────────► fundir sinais
+hybrid/problematic text ────────────► merge signals
 
-scan ou conteúdo visual ───────────────► usar percepção visual/OCR
+scan or visual content ─────────────► use visual perception/OCR
 ```
 
 ---
 
 ## 6. Docling
 
-### 6.1. Como a arquitetura funciona
+### 6.1. How the architecture works
 
-Docling trata o PDF como uma entrada para um pipeline documental completo. A implementação atual separa claramente as etapas de preprocessing, layout, OCR, pós processamento de layout, estrutura de tabela, montagem da página e posterior resolução de ordem de leitura e hierarquia de títulos.
+Docling treats the PDF as input to a complete document pipeline. The current implementation clearly separates the stages of preprocessing, layout, OCR, layout postprocessing, table structure, page assembly, and subsequent reading order resolution and heading hierarchy.
 
-A estrutura conceitual é próxima de:
+The conceptual structure is close to:
 
 ```text
 PDF backend
@@ -288,176 +288,176 @@ heading hierarchy
 DoclingDocument
 ```
 
-O projeto possui backends de PDF desacoplados do restante do pipeline. Entre eles existe suporte a pypdfium2, cujo backend expõe células de texto para as etapas superiores.
+The project has PDF backends decoupled from the rest of the pipeline. Among them there is support for pypdfium2, whose backend exposes text cells to the upper stages.
 
-A decisão arquitetural mais importante do Docling é esta:
+The most important architectural decision of Docling is:
 
-> **o parser de PDF não é responsável por entregar o documento final; ele entrega evidências que serão interpretadas por estágios posteriores.**
+> **the PDF parser is not responsible for delivering the final document; it delivers evidence that will be interpreted by later stages.**
 
-Isso coincide com a direção que devemos seguir.
+This aligns with the direction we should follow.
 
-### 6.2. Pontos fortes para nosso caso
+### 6.2. Strengths for our case
 
-**Modelo documental intermediário forte.** O resultado não nasce como uma string. Layout, tabela, imagem e texto sobrevivem tempo suficiente para serem reconciliados.
+**Strong intermediate document model.** The result is not born as a string. Layout, table, image, and text survive long enough to be reconciled.
 
-**Separação de estágios.** OCR, layout e tabela são componentes distintos. Isso facilita trocar um modelo sem reescrever o parser.
+**Stage separation.** OCR, layout, and table are distinct components. This makes it easy to swap a model without rewriting the parser.
 
-**Layout explícito.** A página é entendida visualmente antes de várias decisões estruturais.
+**Explicit layout.** The page is visually understood before several structural decisions are made.
 
-**Reading order como etapa própria.** Isso evita misturar detecção de texto com a decisão de como o conteúdo deve ser lido.
+**Reading order as its own stage.** This avoids mixing text detection with the decision about how content should be read.
 
-**Produção e paralelismo.** O pipeline atual usa filas limitadas e batching por estágio, mostrando uma direção clara para escalar inferência sem transformar cada página em uma chamada monolítica.
+**Production and parallelism.** The current pipeline uses bounded queues and per-stage batching, showing a clear direction for scaling inference without turning each page into a monolithic call.
 
-### 6.3. Limitações para nosso objetivo
+### 6.3. Limitations for our objective
 
-Para o nosso MVP, adotar todo o pipeline do Docling como núcleo teria custos:
+For our MVP, adopting the entire Docling pipeline as the core would have costs:
 
-* mais modelos e mais dependências desde o início;
-* latência maior em PDFs digitais simples;
-* risco de uma interpretação visual substituir informação nativa que já estava correta;
-* maior dificuldade para entender exatamente por que determinado caractere foi escolhido.
+* more models and more dependencies from the start;
+* higher latency on simple digital PDFs;
+* risk of a visual interpretation replacing native information that was already correct;
+* greater difficulty in understanding exactly why a particular character was chosen.
 
-Nosso produto prioriza recuperação textual e auditabilidade antes de enriquecimento semântico. Portanto, layout deve orientar decisões, mas não deve apagar automaticamente a camada textual correta.
+Our product prioritizes textual recovery and auditability over semantic enrichment. Therefore, layout should guide decisions, but should not automatically erase the correct text layer.
 
-### 6.4. Comparação com a arquitetura anterior
+### 6.4. Comparison with the previous architecture
 
-A arquitetura anterior já possuía um `RawPage` e uma sequência de detectores próprios. O Docling mostra que faltava uma camada explícita entre `RawPage` e reconstrução:
+The previous architecture already had a `RawPage` and a sequence of its own detectors. Docling shows that an explicit layer was missing between `RawPage` and reconstruction:
 
 ```text
-ANTES
+BEFORE
 RawPage → LineDetector → WordDetector → BlockDetector
 
-REVISADO
+REVISED
 RawPage + PageImage
         ↓
 PageEvidence
         ↓
 LayoutRegions
         ↓
-reconstrução específica por região
+region-specific reconstruction
 ```
 
-### 6.5. O que devemos incorporar
+### 6.5. What we should incorporate
 
-* backend desacoplado;
-* `StructuredDocument` como modelo de domínio principal;
-* estágios explícitos de layout, OCR, tabela, assembly e ordem;
-* processamento em lote de modelos;
-* possibilidade de trocar `LayoutEngine`, `OcrEngine` e `TableStructureEngine`.
+* decoupled backend;
+* `StructuredDocument` as the main domain model;
+* explicit stages for layout, OCR, table, assembly, and order;
+* model batch processing;
+* ability to swap `LayoutEngine`, `OcrEngine`, and `TableStructureEngine`.
 
-### 6.6. O que não devemos copiar
+### 6.6. What we should not copy
 
-* executar todos os modelos em toda página por padrão;
-* transformar a classificação de layout em autoridade maior que o texto nativo sem um mecanismo de confiança;
-* ampliar o escopo do MVP para fórmulas, imagens e semântica de títulos antes da recuperação textual estar sólida.
+* running all models on every page by default;
+* making layout classification a higher authority than native text without a confidence mechanism;
+* expanding the MVP scope to formulas, images, and title semantics before textual recovery is solid.
 
 ---
 
 ## 7. MinerU
 
-### 7.1. Como a arquitetura funciona
+### 7.1. How the architecture works
 
-MinerU oferece mais de uma rota de parsing e possui um backend híbrido particularmente relevante. A implementação atual usa pypdfium2 em partes do pipeline e combina inferência de layout, OCR, reconhecimento especializado e VLM em intensidades diferentes.
+MinerU offers more than one parsing route and has a particularly relevant hybrid backend. The current implementation uses pypdfium2 in parts of the pipeline and combines layout inference, OCR, specialized recognition, and VLM at different intensities.
 
-Uma representação simplificada do caminho híbrido é:
+A simplified representation of the hybrid path is:
 
 ```text
 PDF
  ↓
-classificação / escolha de esforço
+classification / effort selection
  ↓
-renderização + layout
+rendering + layout
  ↓
-regiões
- ├─ texto normal
- ├─ tabela
- ├─ imagem
- ├─ fórmula
- └─ outros tipos
+regions
+ ├─ regular text
+ ├─ table
+ ├─ image
+ ├─ formula
+ └─ other types
  ↓
-OCR/detecção por regiões candidatas
+OCR/detection per candidate regions
  ↓
-reconciliação em middle representation
+reconciliation in middle representation
  ↓
-tratamento documental
+document handling
  ↓
-merge de tabelas entre páginas
+merge of cross-page tables
  ↓
 Markdown/JSON
 ```
 
-A arquitetura utiliza a região como unidade de decisão. OCR não é necessariamente uma operação cega sobre a página inteira. Há código específico para recortar regiões, mascarar fórmulas antes da detecção OCR e normalizar coordenadas para que as fontes de evidência possam ser combinadas.
+The architecture uses the region as the unit of decision. OCR is not necessarily a blind operation over the entire page. There is specific code for cropping regions, masking formulas before OCR detection, and normalizing coordinates so that evidence sources can be combined.
 
-### 7.2. Pontos fortes para nosso caso
+### 7.2. Strengths for our case
 
-**Pipeline realmente híbrido.** Texto nativo, OCR, layout e VLM não são tratados como alternativas mutuamente exclusivas.
+**Truly hybrid pipeline.** Native text, OCR, layout, and VLM are not treated as mutually exclusive alternatives.
 
-**Região como unidade de recuperação.** Isso é exatamente o que precisamos para páginas parcialmente digitalizadas ou com tabelas rasterizadas em um PDF que também possui texto nativo.
+**Region as the unit of recovery.** This is exactly what we need for partially scanned pages or pages with rasterized tables in a PDF that also has native text.
 
-**Representação intermediária antes da saída.** Permite correções posteriores sem reler o PDF.
+**Intermediate representation before output.** Allows subsequent corrections without re-reading the PDF.
 
-**Tabelas entre páginas.** MinerU possui lógica explícita para unir tabelas continuadas. A implementação mantém estado estrutural de linhas, colunas, `colspan`, `rowspan`, cabeçalhos e ocupação que atravessa a fronteira entre páginas.
+**Cross-page tables.** MinerU has explicit logic for joining continued tables. The implementation maintains structural state of rows, columns, `colspan`, `rowspan`, headers, and occupancy that crosses page boundaries.
 
-**Tratamento de continuação.** A lógica não depende apenas de “há uma tabela no fim de uma página e outra no começo da próxima”. Ela compara estrutura e cabeçalhos e trata textos de continuação e captions.
+**Continuation handling.** The logic does not rely solely on “there is a table at the end of one page and another at the start of the next”. It compares structure and headers and handles continuation texts and captions.
 
-### 7.3. Limitações para nosso objetivo
+### 7.3. Limitations for our objective
 
-MinerU é significativamente mais pesado que o MVP inicialmente proposto.
+MinerU is significantly heavier than the initially proposed MVP.
 
-* múltiplos modelos;
-* VLM em rotas de maior qualidade;
-* footprint de execução maior;
-* mais pontos de falha;
-* mais difícil de embutir como biblioteca pequena;
-* licença atual do projeto contém termos adicionais ao Apache 2.0 que precisam ser considerados se houver intenção de reutilizar código diretamente.
+* multiple models;
+* VLM in higher-quality routes;
+* larger execution footprint;
+* more points of failure;
+* harder to embed as a small library;
+* the project's current license contains additional terms beyond Apache 2.0 that must be considered if there is intent to reuse code directly.
 
-Além disso, nosso primeiro objetivo não é converter fórmulas ou entender imagens. Devemos absorver a arquitetura de fusão sem absorver todo o produto.
+Furthermore, our primary objective is not to convert formulas or understand images. We must absorb the fusion architecture without absorbing the entire product.
 
-### 7.4. Comparação com a arquitetura anterior
+### 7.4. Comparison with the previous architecture
 
-A arquitetura anterior tratava OCR como um fallback tardio, predominantemente por página. MinerU demonstra que isso é insuficiente.
+The previous architecture treated OCR as a late fallback, predominantly page-wide. MinerU demonstrates that this is insufficient.
 
-Mudança necessária:
+Required change:
 
 ```text
-ANTES
-page quality ruim → OCR da página → escolher resultado
+BEFORE
+bad page quality → page OCR → choose result
 
-REVISADO
+REVISED
 layout region
    ↓
-qualidade da evidência nativa naquela região
-   ├─ boa → manter nativo
-   ├─ ausente → OCR da região
-   ├─ corrompida → OCR + comparação
-   └─ maioria da página ruim → promover para OCR da página
+quality of native evidence in that region
+   ├─ good → keep native
+   ├─ absent → region OCR
+   ├─ corrupted → OCR + comparison
+   └─ majority of page is bad → promote to full page OCR
 ```
 
-### 7.5. O que devemos incorporar
+### 7.5. What we should incorporate
 
-* recuperação orientada a regiões;
-* coordenadas normalizadas para fusão;
-* uma representação intermediária rica;
-* `CrossPageTableResolver` inspirado no conceito de assinatura estrutural;
-* estado de `rowspan`/`colspan` durante fusão de tabelas;
-* análise de cabeçalhos repetidos antes de concatenar tabelas;
-* separação entre esforço normal e rota de recuperação pesada.
+* region-oriented recovery;
+* normalized coordinates for fusion;
+* a rich intermediate representation;
+* `CrossPageTableResolver` inspired by the structural signature concept;
+* `rowspan`/`colspan` state during table fusion;
+* repeated header analysis before concatenating tables;
+* separation between normal effort and heavy recovery route.
 
-### 7.6. O que não devemos copiar
+### 7.6. What we should not copy
 
-* dependência obrigatória de VLM para o MVP;
-* pipeline de fórmulas e imagens fora do objetivo textual;
-* serviços distribuídos antes de termos evidência de necessidade operacional.
+* mandatory VLM dependency for the MVP;
+* formulas and images pipeline outside the textual objective;
+* distributed services before we have evidence of operational need.
 
 ---
 
 ## 8. LiteParse
 
-### 8.1. Por que é o comparável mais direto
+### 8.1. Why it is the most direct comparable
 
-LiteParse é o projeto que mais se aproxima da arquitetura inicialmente proposta. Seu núcleo em Rust usa PDFium para a extração nativa, oferece OCR seletivo, merge entre OCR e texto nativo e projeção espacial para reconstruir layout.
+LiteParse is the project that most closely matches the initially proposed architecture. Its Rust core uses PDFium for native extraction, offers selective OCR, merge between OCR and native text, and spatial projection to reconstruct layout.
 
-Conceitualmente:
+Conceptually:
 
 ```text
 PDF
@@ -467,100 +467,100 @@ PDFium native extraction
 ParsedPage
  ↓
 complexity detection
- ├─ simples → caminho nativo
- └─ precisa OCR → render + OCR
+ ├─ simple → native path
+ └─ needs OCR → render + OCR
                      ↓
                  OCR merge
                      ↓
              grid projection
                      ↓
-             texto/estrutura
+             text/structure
 ```
 
-### 8.2. O componente mais importante: complexity detection
+### 8.2. The most important component: complexity detection
 
-O LiteParse implementa uma classificação explícita de motivos pelos quais a página precisa de mais que o caminho textual barato.
+LiteParse implements an explicit classification of reasons why a page needs more than the cheap text path.
 
-Entre os motivos presentes no código estão:
+Among the reasons present in the code are:
 
-| Sinal | Significado para nosso produto |
+| Signal | Meaning for our product |
 |---|---|
-| `Scanned` | página coberta por imagem, praticamente sem texto nativo |
-| `NoText` | página sem camada textual útil |
-| `SparseText` | existe texto nativo, mas sua cobertura parece insuficiente |
-| `EmbeddedImages` | há regiões rasterizadas relevantes além do texto |
-| `Garbled` | camada textual tem indícios de CMap/Unicode quebrado |
-| `VectorText` | conteúdo visível pode estar desenhado como paths, não como texto |
-| `AnnotationText` | texto aparece visualmente em appearance stream de anotação, fora da superfície textual normal |
+| `Scanned` | page covered by an image, practically no native text |
+| `NoText` | page with no useful text layer |
+| `SparseText` | native text exists, but its coverage appears insufficient |
+| `EmbeddedImages` | there are relevant rasterized regions beyond the text |
+| `Garbled` | text layer shows signs of broken CMap/Unicode |
+| `VectorText` | visible content may be drawn as paths, not as text |
+| `AnnotationText` | text appears visually in an annotation appearance stream, outside the normal text surface |
 
-Esse modelo é extremamente relevante. Ele mostra que “tem texto ou não tem texto?” é uma pergunta fraca. Nosso `QualityAnalyzer` precisa responder **por que** uma página ou região não é confiável.
+This model is extremely relevant. It shows that “does it have text or not?” is a weak question. Our `QualityAnalyzer` needs to answer **why** a page or region is not reliable.
 
-### 8.3. Pontos fortes
+### 8.3. Strengths
 
-**PDFium como base.** Valida nossa escolha inicial.
+**PDFium as the foundation.** Validates our initial choice.
 
-**Caminho barato para documentos simples.** Não força modelos em toda página.
+**Cheap path for simple documents.** Does not force models on every page.
 
-**OCR seletivo.** OCR é enriquecimento e recuperação.
+**Selective OCR.** OCR is enrichment and recovery.
 
-**Merge explícito.** Reconhece que nativo e OCR podem coexistir.
+**Explicit merge.** Recognizes that native and OCR can coexist.
 
-**Detecção de casos invisíveis ao text API.** Vetores e anotações são especialmente relevantes para documentos empresariais estranhos.
+**Detection of cases invisible to the text API.** Vectors and annotations are especially relevant for unusual enterprise documents.
 
-**Implementação nativa.** Rust evita parte do overhead de várias chamadas FFI por caractere.
+**Native implementation.** Rust avoids some of the overhead of many FFI calls per character.
 
-### 8.4. Limitações
+### 8.4. Limitations
 
-Os próprios resultados e documentação do LiteParse mostram que layout muito complexo, tabelas densas, scans antigos e certos casos de múltiplas colunas ainda se beneficiam de engines mais pesados.
+LiteParse's own results and documentation show that very complex layout, dense tables, old scans, and certain multi-column cases still benefit from heavier engines.
 
-A projeção em grid é útil, mas não deve ser nossa única solução de leitura. Ela é principalmente uma representação espacial e pode perder semântica de regiões.
+Grid projection is useful, but should not be our only reading solution. It is primarily a spatial representation and may lose region semantics.
 
-### 8.5. Comparação com a arquitetura anterior
+### 8.5. Comparison with the previous architecture
 
-A arquitetura anterior estava correta no eixo PDFium → geometria → reconstrução. O que faltava era o roteador explícito.
+The previous architecture was correct on the PDFium → geometry → reconstruction axis. What was missing was the explicit router.
 
-A alteração é direta:
+The change is direct:
 
 ```text
-ANTES
-PDFium → reconstrução → diagnóstico → talvez OCR
+BEFORE
+PDFium → reconstruction → diagnosis → maybe OCR
 
-MELHOR
-PDFium → diagnóstico barato → estratégia por página/região
-                             ├─ reconstrução nativa
-                             ├─ OCR seletivo
-                             └─ rota visual pesada
+BETTER
+PDFium → cheap diagnosis → strategy per page/region
+                             ├─ native reconstruction
+                             ├─ selective OCR
+                             └─ heavy visual route
 ```
 
-### 8.6. O que devemos incorporar
+### 8.6. What we should incorporate
 
-* taxonomia explícita de complexidade;
-* detecção de imagem de página inteira;
-* cobertura textual;
-* cobertura de imagens;
-* detecção de camada corrompida;
-* detecção de vetores não cobertos por texto;
-* inspeção de anotações quando a página parece vazia;
-* `ExtractionDecision` com razões auditáveis;
-* merge nativo/OCR por geometria.
+* explicit complexity taxonomy;
+* full-page image detection;
+* textual coverage;
+* image coverage;
+* corrupted layer detection;
+* detection of vectors not covered by text;
+* annotation inspection when the page appears empty;
+* `ExtractionDecision` with auditable reasons;
+* native/OCR merge by geometry.
 
-### 8.7. O que devemos melhorar em relação ao LiteParse
+### 8.7. What we should improve compared to LiteParse
 
-* não depender apenas de grid projection para layout complexo;
-* adicionar layout visual em páginas/regiões complexas;
-* criar pipeline específico de tabelas;
-* adicionar continuidade de tabelas entre páginas;
-* preservar simultaneamente `raw_text` e `reading_text`.
+* not relying only on grid projection for complex layout;
+* adding visual layout on complex pages/regions;
+* creating a dedicated table pipeline;
+* adding cross-page table continuity;
+* preserving both `raw_text` and `reading_text` simultaneously.
 
 ---
 
 ## 9. Xberg
 
-### 9.1. Como a arquitetura funciona
+### 9.1. How the architecture works
 
-Xberg segue uma filosofia nativa e modular. Para PDF, possui um parser em Rust, fallback OCR, opção de layout por modelos ONNX, estrutura de tabelas e estratégias de ordem de leitura.
+Xberg follows a native and modular philosophy. For PDF, it has a Rust parser, OCR fallback, optional layout via ONNX models, table structure, and reading order strategies.
 
-Um aspecto particularmente interessante é que ele modela o método de extração como estado:
+A particularly interesting aspect is that it models the extraction method as state:
 
 ```text
 Native
@@ -568,53 +568,53 @@ Mixed
 Ocr
 ```
 
-Isso é superior a um simples booleano `used_ocr`, porque páginas e documentos podem realmente ser mistos.
+This is superior to a simple `used_ocr` boolean, because pages and documents can genuinely be mixed.
 
-### 9.2. A principal lição: prosa e tabela não podem compartilhar cegamente a mesma ordem
+### 9.2. The main lesson: prose and tables cannot blindly share the same order
 
-O código de XY-cut do Xberg documenta uma falha arquitetural real: tentativas de tornar o detector de colunas mais sensível para resolver prosa em duas colunas acabaram interpretando intervalos de células de tabela como divisões de coluna e corrompendo a sequência de números.
+Xberg's XY-cut code documents a real architectural flaw: attempts to make the column detector more sensitive to resolve two-column prose ended up interpreting table cell gaps as column splits and corrupting number sequences.
 
-A lição é decisiva para nosso produto:
+This lesson is decisive for our product:
 
-> **Antes de aplicar XY-cut ou outra heurística global de leitura, devemos saber se a região representa prosa, tabela ou outro tipo estrutural.**
+> **Before applying XY-cut or another global reading heuristic, we must know whether the region represents prose, a table, or another structural type.**
 
-Portanto:
+Therefore:
 
 ```text
-ERRADO
-página inteira → XY-cut → texto/tabela
+WRONG
+entire page → XY-cut → text/table
 
-CORRETO
-página → layout regions
+CORRECT
+page → layout regions
           ├─ prose → reading order resolver
           ├─ table → table pipeline
           ├─ figure → visual/OCR policy
-          └─ marginalia → policy própria
+          └─ marginalia → own policy
 ```
 
-### 9.3. Tabelas em cascata
+### 9.3. Cascaded tables
 
-O subsistema nativo de tabelas do Xberg utiliza múltiplas estratégias em prioridade:
+Xberg's native table subsystem uses multiple strategies in priority order:
 
-1. detector estrito de grid;
-2. detector relaxado para tabelas com linhas e duas ou mais colunas;
-3. reconstrução heurística pela camada textual para casos sem bordas ou grids explícitos.
+1. strict grid detector;
+2. relaxed detector for tables with lines and two or more columns;
+3. heuristic reconstruction from the text layer for cases without borders or explicit grids.
 
-Uma estratégia mais fraca só precisa rodar quando a anterior não encontrou resultado suficiente.
+A weaker strategy only needs to run when the previous one did not find a sufficient result.
 
-Essa é uma arquitetura melhor que escolher um único detector universal.
+This is a better architecture than choosing a single universal detector.
 
-### 9.4. Layout opcional e seletivo
+### 9.4. Optional and selective layout
 
-O projeto também permite combinar layout visual com semântica do PDF. A documentação atual enfatiza que o layout pode informar região, ordem e tabela, enquanto sinais nativos continuam relevantes.
+The project also allows combining visual layout with PDF semantics. The current documentation emphasizes that layout can inform region, order, and table, while native signals remain relevant.
 
-Essa postura é alinhada ao nosso objetivo: usar visão para complementar, não substituir automaticamente.
+This stance aligns with our objective: using vision to complement, not automatically replace.
 
-### 9.5. Comparação com a arquitetura anterior
+### 9.5. Comparison with the previous architecture
 
-A arquitetura antiga tinha XY-cut como estratégia inicial de leitura e deixava tabelas como preocupação posterior. Isso precisa mudar.
+The old architecture had XY-cut as the initial reading strategy and left tables as a later concern. This needs to change.
 
-A nova sequência será:
+The new sequence will be:
 
 ```text
 LayoutRegionDetector
@@ -629,28 +629,28 @@ prose table          other
  └─────── ReadingOrderResolver
 ```
 
-### 9.6. O que devemos incorporar
+### 9.6. What we should incorporate
 
-* `Native/Mixed/Ocr` como proveniência explícita;
-* XY-cut apenas em regiões candidatas a prosa;
-* detecção de heading/linhas largas antes de cortes de coluna;
-* cascata de detectores de tabela;
-* fallback de parser e warnings acionáveis;
-* separar `layout signal` de `content source`.
+* `Native/Mixed/Ocr` as explicit provenance;
+* XY-cut only in prose candidate regions;
+* heading/wide line detection before column splits;
+* cascade of table detectors;
+* parser fallback and actionable warnings;
+* separating `layout signal` from `content source`.
 
-### 9.7. O que não devemos copiar
+### 9.7. What we should not copy
 
-Não há necessidade de substituir PDFium por um novo parser Rust no MVP. Isso aumentaria muito o escopo. O conhecimento do Xberg será usado principalmente na reconstrução e nas políticas de fallback.
+There is no need to replace PDFium with a new Rust parser in the MVP. This would greatly increase the scope. Xberg's knowledge will be used primarily in reconstruction and fallback policies.
 
 ---
 
 ## 10. Unstructured
 
-### 10.1. Como a arquitetura funciona
+### 10.1. How the architecture works
 
-Unstructured é mais útil como referência de **roteamento de estratégias** do que como referência de parser de baixo nível.
+Unstructured is more useful as a reference for **strategy routing** than as a reference for a low-level parser.
 
-O `partition_pdf` atual expõe estratégias explícitas:
+The current `partition_pdf` exposes explicit strategies:
 
 ```text
 AUTO
@@ -659,98 +659,98 @@ HI_RES
 OCR_ONLY
 ```
 
-O caminho `fast` extrai texto diretamente do PDF, hoje apoiado em pdfminer. O caminho `hi_res` utiliza um detector de layout. `ocr_only` força OCR. O modo `auto` observa se o texto do PDF é extraível e escolhe entre o caminho barato e o caminho de maior resolução.
+The `fast` path extracts text directly from the PDF, currently backed by pdfminer. The `hi_res` path uses a layout detector. `ocr_only` forces OCR. The `auto` mode observes whether the PDF text is extractable and chooses between the cheap path and the higher-resolution path.
 
-A implementação também possui parâmetros específicos do pdfminer para margem de linha, caractere, overlap e palavra, mostrando que o projeto aceita que a reconstrução textual precisa ser calibrada.
+The implementation also has specific pdfminer parameters for line margin, character, overlap, and word, showing that the project acknowledges that text reconstruction needs to be calibrated.
 
-### 10.2. Pontos fortes
+### 10.2. Strengths
 
-**Roteamento compreensível.** O usuário e o sistema sabem qual estratégia foi usada.
+**Understandable routing.** The user and the system know which strategy was used.
 
-**Fallback quando a extração falha.** Uma exceção no parser de texto não precisa abortar todo o documento.
+**Fallback when extraction fails.** An exception in the text parser does not need to abort the entire document.
 
-**Separação de custo.** PDF simples não precisa pagar por layout e OCR.
+**Cost separation.** A simple PDF does not need to pay for layout and OCR.
 
-**Integração com estrutura de tabela no modo de alta resolução.** Mostra que estrutura e extração textual são preocupações distintas.
+**Table structure integration in high-resolution mode.** Shows that structure and textual extraction are distinct concerns.
 
-### 10.3. Limitações para nosso caso
+### 10.3. Limitations for our case
 
-O caminho nativo baseado em pdfminer não é a escolha que eu faria para o nosso núcleo, porque já escolhemos PDFium para obter geometria e Unicode de forma próxima de engines de renderização modernos.
+The pdfminer-based native path is not the choice I would make for our core, because we have already chosen PDFium to obtain geometry and Unicode in a way close to modern rendering engines.
 
-Além disso, a estratégia no Unstructured é predominantemente em nível de página/documento. Nosso objetivo exige uma granularidade adicional: regiões boas e ruins podem coexistir na mesma página.
+Furthermore, the strategy in Unstructured is predominantly at the page/document level. Our objective requires additional granularity: good and bad regions can coexist on the same page.
 
-### 10.4. Comparação com a arquitetura anterior
+### 10.4. Comparison with the previous architecture
 
-Nossa arquitetura tinha uma única sequência principal e um fallback OCR tardio. Unstructured reforça que precisamos formalizar estratégia e fallback como parte do domínio.
+Our architecture had a single main sequence and a late OCR fallback. Unstructured reinforces that we need to formalize strategy and fallback as part of the domain.
 
-### 10.5. O que devemos incorporar
+### 10.5. What we should incorporate
 
-* `AUTO`, `NATIVE`, `HYBRID`, `OCR` como modos explícitos;
-* fallback sem abortar o documento inteiro;
-* telemetria da estratégia escolhida;
-* configuração separada de qualidade versus velocidade;
-* possibilidade futura de `fast` e `balanced` sem alterar a API.
+* `AUTO`, `NATIVE`, `HYBRID`, `OCR` as explicit modes;
+* fallback without aborting the entire document;
+* telemetry of the chosen strategy;
+* separate quality versus speed configuration;
+* future possibility of `fast` and `balanced` without changing the API.
 
-### 10.6. O que não devemos incorporar
+### 10.6. What we should not incorporate
 
-* pdfminer como fonte nativa primária;
-* decisão somente em nível de documento;
-* acoplar estrutura de tabela apenas ao modo de alta resolução.
+* pdfminer as the primary native source;
+* decision only at the document level;
+* coupling table structure only to high-resolution mode.
 
 ---
 
 ## 11. PaddleOCR
 
-### 11.1. O papel correto do PaddleOCR em nossa arquitetura
+### 11.1. The correct role of PaddleOCR in our architecture
 
-PaddleOCR é diferente dos parsers anteriores. Ele é principalmente uma plataforma de OCR e Document AI visual. Isso o torna excelente justamente para os casos em que o PDF não nos oferece texto nativo confiável.
+PaddleOCR is different from the previous parsers. It is primarily an OCR and visual Document AI platform. This makes it excellent precisely for the cases where the PDF does not offer us reliable native text.
 
-A família atual inclui recursos como:
+The current family includes features such as:
 
-* orientação do documento;
-* correção de deformação;
-* orientação de linha;
-* detecção e reconhecimento de texto;
-* reconhecimento de tabela;
-* reconhecimento de fórmulas;
-* layout documental;
-* pipelines estruturados como PP-StructureV3;
-* modelos visuais mais completos na família PaddleOCR-VL.
+* document orientation;
+* deformation correction;
+* line orientation;
+* text detection and recognition;
+* table recognition;
+* formula recognition;
+* document layout;
+* structured pipelines such as PP-StructureV3;
+* more complete visual models in the PaddleOCR-VL family.
 
-Há suporte explícito a português em modelos multilíngues, o que é essencial para nosso corpus em pt-BR.
+There is explicit Portuguese support in multilingual models, which is essential for our pt-BR corpus.
 
-### 11.2. Pontos fortes
+### 11.2. Strengths
 
-**Recupera conteúdo que não existe na camada textual.** Scans, imagens, vetores rasterizados e textos incorporados em figuras podem ser lidos.
+**Recovers content that does not exist in the text layer.** Scans, images, rasterized vectors, and text embedded in figures can be read.
 
-**Português.** Modelos multilíngues incluem português e alfabeto latino com diacríticos.
+**Portuguese.** Multilingual models include Portuguese and the Latin alphabet with diacritics.
 
-**Orientação e unwarping.** Muito relevante para documentos digitalizados, fotos ou páginas mal alinhadas.
+**Orientation and unwarping.** Very relevant for scanned documents, photos, or misaligned pages.
 
-**Layout e tabela.** Não precisamos usar OCR apenas como “imagem para string”; podemos recuperar regiões e estruturas.
+**Layout and table.** We do not need to use OCR only as “image to string”; we can recover regions and structures.
 
-**Execução local.** Mantém possibilidade de processamento on premises.
+**Local execution.** Keeps the possibility of on-premises processing.
 
-### 11.3. Por que ele não deve ser o caminho primário
+### 11.3. Why it should not be the primary path
 
-Fazer OCR em um PDF digital bom é, em geral, uma regressão:
+Performing OCR on a good digital PDF is generally a regression:
 
-* transforma texto exato em predição;
-* pode perder acentos, pontuação e caracteres pequenos;
-* pode confundir números semelhantes;
-* perde parte da informação de fonte e ordem do content stream;
-* custa mais CPU/GPU;
-* pode gerar uma estrutura visual plausível, mas diferente do texto real codificado.
+* transforms exact text into a prediction;
+* may lose accents, punctuation, and small characters;
+* may confuse similar-looking numbers;
+* loses some font and content stream order information;
+* costs more CPU/GPU;
+* may generate a visually plausible structure that differs from the actual encoded text.
 
-Portanto:
+Therefore:
 
-> **PaddleOCR deve ser nosso sensor visual de recuperação, não nossa fonte textual padrão.**
+> **PaddleOCR should be our visual recovery sensor, not our default text source.**
 
-### 11.4. Comparação com a arquitetura anterior
+### 11.4. Comparison with the previous architecture
 
-O plano anterior tratava OCR como etapa futura e genérica. A revisão torna o OCR um componente de primeira classe, porém seletivo.
+The previous plan treated OCR as a future and generic step. The revision makes OCR a first-class component, but selective.
 
-Novo contrato sugerido:
+Suggested new contract:
 
 ```python
 class OcrEngine(Protocol):
@@ -758,150 +758,150 @@ class OcrEngine(Protocol):
     def recognize_region(...): ...
 ```
 
-E, separadamente:
+And, separately:
 
 ```python
 class LayoutEngine(Protocol):
     def detect_regions(...): ...
 ```
 
-Mesmo que ambos sejam implementados inicialmente com componentes PaddleOCR, eles devem permanecer interfaces distintas.
+Even if both are initially implemented with PaddleOCR components, they must remain distinct interfaces.
 
-### 11.5. Estratégia recomendada para português
+### 11.5. Recommended strategy for Portuguese
 
-No MVP:
+In the MVP:
 
-* preservar Unicode nativo sempre que confiável;
-* configurar OCR para modelo latino/português adequado;
-* normalizar a saída final em Unicode NFC somente na visão normalizada;
-* nunca converter acentos manualmente por regras frágeis;
-* manter texto original de OCR e texto normalizado separadamente;
-* registrar confiança por token/linha quando a engine fornecer.
+* preserve native Unicode whenever reliable;
+* configure OCR for an appropriate Latin/Portuguese model;
+* normalize the final output to Unicode NFC only in the normalized view;
+* never convert accents manually using fragile rules;
+* keep the original OCR text and the normalized text separately;
+* record confidence per token/line when the engine provides it.
 
-### 11.6. O que devemos incorporar
+### 11.6. What we should incorporate
 
-* OCR local multilíngue;
-* detecção de orientação;
-* unwarping opcional para scans;
-* layout visual pluggable;
-* table structure model como fallback da cascata determinística;
-* OCR por região.
+* local multilingual OCR;
+* orientation detection;
+* optional unwarping for scans;
+* pluggable visual layout;
+* table structure model as a fallback from the deterministic cascade;
+* OCR by region.
 
-### 11.7. O que não devemos incorporar
+### 11.7. What we should not incorporate
 
-* OCR de toda página digital por padrão;
-* dependência da representação Markdown gerada pelo pipeline visual;
-* uso de um VLM grande como requisito do MVP.
+* OCR of every digital page by default;
+* dependency on the Markdown representation generated by the visual pipeline;
+* use of a large VLM as an MVP requirement.
 
 ---
 
 ## 12. MarkItDown
 
-### 12.1. Como a arquitetura funciona para PDF
+### 12.1. How the architecture works for PDF
 
-MarkItDown é intencionalmente leve e orientado a conversão para Markdown. No caminho local de PDF, a implementação atual importa pdfminer e pdfplumber. Há lógica adicional para tabelas/formulários baseada em posições de palavras e heurísticas de alinhamento de colunas.
+MarkItDown is intentionally lightweight and oriented toward conversion to Markdown. In the local PDF path, the current implementation imports pdfminer and pdfplumber. There is additional logic for tables/forms based on word positions and column alignment heuristics.
 
-O projeto também permite plugins e integração com serviços externos de maior capacidade, como OCR por visão ou serviços da Azure.
+The project also allows plugins and integration with higher-capacity external services, such as vision OCR or Azure services.
 
-### 12.2. Pontos fortes
+### 12.2. Strengths
 
-**API simples.** O produto não expõe a complexidade do backend ao consumidor.
+**Simple API.** The product does not expose backend complexity to the consumer.
 
-**Plugins.** Funcionalidades pesadas podem ser opt in.
+**Plugins.** Heavy features can be opt-in.
 
-**Fallback por serviço externo.** Mostra uma forma limpa de manter o núcleo leve.
+**Fallback via external service.** Shows a clean way to keep the core lightweight.
 
-**Heurísticas específicas para documentos empresariais.** O conversor atual possui regras para formulários e numeração parcial, mostrando a utilidade de correções orientadas a padrões reais de documentos.
+**Specific heuristics for enterprise documents.** The current converter has rules for forms and partial numbering, showing the usefulness of corrections oriented toward real document patterns.
 
-### 12.3. Limitações para nosso objetivo
+### 12.3. Limitations for our objective
 
-MarkItDown otimiza para Markdown consumível por LLM, não para máxima recuperação textual auditável.
+MarkItDown optimizes for LLM-consumable Markdown, not for maximum auditable textual recovery.
 
-O uso de pdfminer/pdfplumber e heurísticas de formulário não oferece uma base tão rica quanto PDFium + geometria por caractere + objetos da página.
+The use of pdfminer/pdfplumber and form heuristics does not offer as rich a foundation as PDFium + per-character geometry + page objects.
 
-Também não há no núcleo local uma estratégia comparável à fusão detalhada de evidências que queremos.
+There is also no strategy in the local core comparable to the detailed evidence fusion we want.
 
-### 12.4. Comparação com a arquitetura anterior
+### 12.4. Comparison with the previous architecture
 
-Nossa arquitetura anterior já era tecnicamente mais profunda no eixo PDF. Portanto não devemos alterar o core por causa do MarkItDown.
+Our previous architecture was already technically deeper on the PDF axis. Therefore we should not change the core because of MarkItDown.
 
-### 12.5. O que devemos incorporar
+### 12.5. What we should incorporate
 
-* API simples por cima de uma implementação complexa;
-* plugins/engines substituíveis;
-* renderer Markdown separado do core;
-* possibilidade futura de um `RecoveryProvider` externo sem contaminar o pipeline local.
+* simple API on top of a complex implementation;
+* replaceable plugins/engines;
+* Markdown renderer separated from the core;
+* future possibility of an external `RecoveryProvider` without contaminating the local pipeline.
 
-### 12.6. O que não devemos incorporar
+### 12.6. What we should not incorporate
 
-* Markdown como modelo interno;
-* pdfplumber como único mecanismo de tabela;
-* heurísticas específicas de layout aplicadas antes de termos uma estrutura de evidência robusta.
+* Markdown as an internal model;
+* pdfplumber as the sole table mechanism;
+* specific layout heuristics applied before we have a robust evidence structure.
 
 ---
 
 ## 13. Marker
 
-### 13.1. A arquitetura mais relevante para decisão de qualidade
+### 13.1. The most relevant architecture for quality decisions
 
-Marker tem uma das arquiteturas mais interessantes para nosso problema porque não considera “o PDF tem texto” suficiente para confiar nesse texto.
+Marker has one of the most interesting architectures for our problem because it does not consider “the PDF has text” to be sufficient to trust that text.
 
-O pipeline atual constrói documento, layout, linhas, OCR e estrutura em componentes separados. O `LineBuilder` decide por página se a camada embutida está boa ou se a página precisa de OCR.
+The current pipeline builds document, layout, lines, OCR, and structure in separate components. The `LineBuilder` decides per page whether the embedded layer is good or whether the page needs OCR.
 
-A decisão usa sinais como:
+The decision uses signals such as:
 
-* classificador de erro OCR/texto;
-* cobertura das linhas nativas em relação aos blocos de layout;
-* overlaps anormais entre linhas, úteis para detectar camadas OCR duplicadas ou ruins;
-* bboxes fora da página;
-* verificação visual para descartar linhas cuja região renderizada está em branco;
-* análise por bloco em páginas predominantemente boas.
+* OCR/text error classifier;
+* coverage of native lines relative to layout blocks;
+* abnormal overlaps between lines, useful for detecting duplicated or bad OCR layers;
+* bboxes outside the page;
+* visual verification to discard lines whose rendered region is blank;
+* per-block analysis on predominantly good pages.
 
-O modo `fast` ainda implementa uma ideia particularmente boa:
+The `fast` mode also implements a particularly good idea:
 
-> **uma página boa pode conter apenas alguns blocos ruins; esses blocos são reparados individualmente. Se muitos blocos estiverem ruins, a página é promovida para OCR completo.**
+> **a good page may contain only a few bad blocks; those blocks are repaired individually. If many blocks are bad, the page is promoted to full OCR.**
 
-### 13.2. Ordem nativa como sinal forte
+### 13.2. Native order as a strong signal
 
-Marker também traz uma evidência importante contra uma suposição comum: um modelo aprendido de ordem de leitura não deve substituir automaticamente a sequência nativa.
+Marker also provides important evidence against a common assumption: a learned reading order model should not automatically replace the native sequence.
 
-No código atual, páginas com texto confiável podem usar a posição dos caracteres no fluxo extraído como sinal principal de ordem. O comentário de implementação registra que, no benchmark do projeto, essa ordem venceu a cabeça aprendida em múltiplas colunas.
+In the current code, pages with reliable text can use the position of characters in the extracted stream as the main order signal. The implementation comment records that, in the project's benchmark, this order beat the learned head on multiple columns.
 
-Para nosso produto a conclusão não é “sequência nativa extraída sempre ganha”. A conclusão correta é:
+For our product the conclusion is not “extracted native sequence always wins”. The correct conclusion is:
 
-> **sequência nativa extraída é uma evidência de primeira classe e deve competir com geometria e layout, não ser descartada.**
+> **extracted native sequence is a first-class piece of evidence and should compete with geometry and layout, not be discarded.**
 
-### 13.3. Pontos fortes
+### 13.3. Strengths
 
-**Qualidade como decisão explícita.** Muito melhor que simplesmente testar string vazia.
+**Quality as an explicit decision.** Much better than simply testing for an empty string.
 
-**Validação contra a imagem.** A página renderizada funciona como evidência de que uma bbox realmente contém tinta visível.
+**Validation against the image.** The rendered page serves as evidence that a bbox actually contains visible ink.
 
-**OCR por bloco.** Essencial para híbridos.
+**OCR by block.** Essential for hybrids.
 
-**Promoção adaptativa.** Evita centenas de recortes quando a página inteira está ruim.
+**Adaptive promotion.** Avoids hundreds of crops when the entire page is bad.
 
-**Layout e texto nativo cooperam.** O layout valida cobertura sem precisar substituir os caracteres.
+**Layout and native text cooperate.** Layout validates coverage without needing to replace the characters.
 
-### 13.4. Limitações para nosso caso
+### 13.4. Limitations for our case
 
-Marker depende de modelos próprios do ecossistema Datalab/Surya para grande parte da qualidade avançada. Os pesos possuem termos de uso que precisam ser analisados separadamente para um produto empresarial.
+Marker depends on its own models from the Datalab/Surya ecosystem for much of its advanced quality. The weights have terms of use that need to be analyzed separately for an enterprise product.
 
-Além disso, recursos como merge sofisticado de tabelas entre páginas podem depender de LLM no modo híbrido. Nós queremos uma primeira implementação determinística para esse caso.
+Furthermore, features such as sophisticated cross-page table merging may depend on LLM in hybrid mode. We want a first deterministic implementation for that case.
 
-### 13.5. Comparação com a arquitetura anterior
+### 13.5. Comparison with the previous architecture
 
-Essa é a maior mudança de design provocada pelo estudo.
+This is the largest design change caused by the study.
 
-Antes:
+Before:
 
 ```text
-QualityAnalyzer por página
+QualityAnalyzer per page
   ↓
 OCR fallback
 ```
 
-Depois:
+After:
 
 ```text
 PageQualityAnalyzer
@@ -912,78 +912,78 @@ NativeTextVisualVerifier
   ↓
 RegionQualityMap
   ↓
-para cada região:
+for each region:
     KEEP_NATIVE
     MERGE_OCR
     REPLACE_WITH_OCR
     ESCALATE_PAGE_OCR
 ```
 
-### 13.6. O que devemos incorporar
+### 13.6. What we should incorporate
 
-* validação da camada textual contra layout;
-* detecção de overlaps anormais;
-* verificação de tinta na imagem para texto invisível;
-* reparo por bloco/região;
-* promoção para OCR de página quando a fração de regiões ruins ultrapassar um limite;
-* sequência nativa extraída como sinal explícito;
-* modo `fast` e modo `balanced` no futuro.
+* validation of the text layer against layout;
+* detection of abnormal overlaps;
+* ink verification in the image for invisible text;
+* repair by block/region;
+* promotion to page OCR when the fraction of bad regions exceeds a threshold;
+* extracted native sequence as an explicit signal;
+* `fast` mode and `balanced` mode in the future.
 
-### 13.7. O que não devemos copiar
+### 13.7. What we should not copy
 
-* dependência obrigatória dos modelos Surya;
-* LLM obrigatório para fusão de tabelas;
-* regras de benchmark específicas do Marker como se fossem universais.
+* mandatory dependency on Surya models;
+* mandatory LLM for table fusion;
+* Marker-specific benchmark rules as if they were universal.
 
 ---
 
-## 14. Comparação da arquitetura anterior com todas as abordagens
+## 14. Comparison of the previous architecture with all approaches
 
-A tabela abaixo resume o que muda no plano original depois desta revisão.
+The table below summarizes what changes in the original plan after this revision.
 
-| Aspecto | Arquitetura anterior | Evidência dos projetos | Decisão revisada |
+| Aspect | Previous architecture | Evidence from projects | Revised decision |
 |---|---|---|---|
-| Backend PDF | PDFium | LiteParse e Docling validam a escolha | manter PDFium |
-| Unidade básica | caractere | correto, mas insuficiente sozinho | manter caracteres + objetos + raster |
-| Diagnóstico | `QualityAnalyzer` posterior | LiteParse e Marker fazem gate cedo | mover diagnóstico para o início |
-| OCR | fallback predominantemente por página | Marker/MinerU recuperam regiões | OCR por região + promoção de página |
-| Layout | derivado principalmente por geometria | Docling/Marker/Paddle/Xberg usam detector dedicado | adicionar `LayoutEngine` |
-| Ordem | XY-cut como estratégia inicial | Xberg mostra conflito com tabelas; Marker valoriza sequência nativa extraída | usar grafo + sinais múltiplos, somente em prosa |
-| Tabela | preocupação posterior | Xberg/Paddle/MinerU tratam como subsistema | criar `TablePipeline` próprio |
-| Tabela entre páginas | fora do núcleo | MinerU possui merge estrutural | incluir no MVP |
-| Texto invisível | regra local | Marker valida bbox contra imagem | adicionar `VisualInkVerifier` |
-| Vetor que simula texto | pouco explícito | LiteParse detecta área vetorial não coberta | adicionar sinal de `vector_text` |
-| Anotações | secundário | LiteParse detecta appearance text | inspecionar quando página parece vazia |
-| Proveniência | prevista parcialmente | Xberg Native/Mixed/OCR reforça valor | proveniência por token/região |
-| Documento | páginas independentes | Docling/MinerU têm etapa documental | adicionar `DocumentAssembler` |
-| Saída | text/raw/JSON | mercado tende a Markdown | manter estrutura como fonte de verdade; Markdown é renderer |
+| PDF backend | PDFium | LiteParse and Docling validate the choice | keep PDFium |
+| Basic unit | character | correct, but insufficient alone | keep characters + objects + raster |
+| Diagnosis | later `QualityAnalyzer` | LiteParse and Marker gate early | move diagnosis to the start |
+| OCR | predominantly page-level fallback | Marker/MinerU recover regions | OCR by region + page promotion |
+| Layout | derived mainly by geometry | Docling/Marker/Paddle/Xberg use a dedicated detector | add `LayoutEngine` |
+| Order | XY-cut as initial strategy | Xberg shows conflict with tables; Marker values extracted native sequence | use graph + multiple signals, only on prose |
+| Table | later concern | Xberg/Paddle/MinerU treat as subsystem | create own `TablePipeline` |
+| Cross-page table | outside the core | MinerU has structural merge | include in MVP |
+| Invisible text | local rule | Marker validates bbox against image | add `VisualInkVerifier` |
+| Vector simulating text | not very explicit | LiteParse detects uncovered vector area | add `vector_text` signal |
+| Annotations | secondary | LiteParse detects appearance text | inspect when page appears empty |
+| Provenance | partially planned | Xberg Native/Mixed/OCR reinforces value | provenance per token/region |
+| Document | independent pages | Docling/MinerU have a document stage | add `DocumentAssembler` |
+| Output | text/raw/JSON | market trends toward Markdown | keep structure as source of truth; Markdown is a renderer |
 
 ---
 
-## 15. Qual abordagem é a melhor?
+## 15. Which approach is the best?
 
-### 15.1. Se tivéssemos de escolher um único projeto
+### 15.1. If we had to choose a single project
 
-Para **núcleo técnico semelhante ao que queremos construir**, o melhor comparável é o **LiteParse**.
+For a **technical core similar to what we want to build**, the best comparable is **LiteParse**.
 
-Motivos:
+Reasons:
 
 * PDFium;
-* extração local;
-* detecção de complexidade;
-* OCR seletivo;
-* merge nativo/OCR;
-* geometria preservada;
-* arquitetura relativamente pequena.
+* local extraction;
+* complexity detection;
+* selective OCR;
+* native/OCR merge;
+* preserved geometry;
+* relatively small architecture.
 
-Porém, escolher somente LiteParse como inspiração ainda deixaria lacunas justamente nas classes mais importantes para a empresa: tabelas complexas, continuidade entre páginas e layout muito irregular.
+However, choosing only LiteParse as inspiration would still leave gaps in precisely the most important classes for the company: complex tables, cross-page continuity, and highly irregular layouts.
 
-### 15.2. Se escolhermos a melhor abordagem por camada
+### 15.2. If we choose the best approach per layer
 
-A melhor solução passa a ser:
+The best solution becomes:
 
 ```text
-                 PDFium / abordagem LiteParse
+                 PDFium / LiteParse approach
                            │
                            ▼
              Quality Gate LiteParse + Marker
@@ -993,15 +993,15 @@ A melhor solução passa a ser:
                            │
               ┌────────────┴────────────┐
               ▼                         ▼
-       Texto/prosa                  Tabela
+       Text/prose                   Table
    Marker + Xberg             Xberg + PaddleOCR
               │                         │
               │                         ▼
-              │                 estrutura de células
+              │                 cell structure
               │                         │
               └────────────┬────────────┘
                            ▼
-                   OCR seletivo
+                   selective OCR
                    Marker + MinerU
                            │
                            ▼
@@ -1015,50 +1015,50 @@ A melhor solução passa a ser:
                   StructuredDocument
 ```
 
-### 15.3. Comparação por famílias arquiteturais
+### 15.3. Comparison by architectural families
 
-Os oito projetos podem ser agrupados em quatro famílias, o que ajuda a entender por que nenhuma isoladamente atende nosso objetivo.
+The eight projects can be grouped into four families, which helps explain why none of them alone meets our objective.
 
-| Família | Projetos | Vantagem | Fraqueza para nosso caso |
+| Family | Projects | Advantage | Weakness for our case |
 |---|---|---|---|
-| native first adaptativo | LiteParse, Xberg | velocidade, auditabilidade, preserva texto digital | precisa de reforço visual em layouts/tabelas extremos |
-| híbrido document AI | Docling, MinerU, Marker | layout, OCR e estrutura integrados | custo e complexidade maiores; risco de usar modelo onde texto exato bastava |
-| visual first | PaddleOCR | excelente em scans e conteúdo sem camada textual | transforma texto digital exato em reconhecimento probabilístico se usado sempre |
-| orquestrador/conversor | Unstructured, MarkItDown | API, routing, extensibilidade | não oferece o melhor core de PDF para nossa meta de fidelidade |
+| adaptive native first | LiteParse, Xberg | speed, auditability, preserves digital text | needs visual reinforcement for extreme layouts/tables |
+| hybrid document AI | Docling, MinerU, Marker | layout, OCR and structure integrated | higher cost and complexity; risk of using a model where exact text was sufficient |
+| visual first | PaddleOCR | excellent on scans and content without a text layer | transforms exact digital text into probabilistic recognition if always used |
+| orchestrator/converter | Unstructured, MarkItDown | API, routing, extensibility | does not offer the best PDF core for our fidelity goal |
 
-Nossa arquitetura fica deliberadamente entre as duas primeiras famílias: **native first na aquisição, híbrida na recuperação**. O PaddleOCR entra como sensor visual, e as ideias de orquestração de Unstructured/MarkItDown aparecem nas interfaces e modos, não no core textual.
+Our architecture deliberately sits between the first two families: **native first in acquisition, hybrid in recovery**. PaddleOCR enters as a visual sensor, and the orchestration ideas from Unstructured/MarkItDown appear in the interfaces and modes, not in the textual core.
 
-### 15.4. Recomendação
+### 15.4. Recommendation
 
-**A nova arquitetura deve ser própria e baseada em fusão de evidências.** Não devemos construir “um clone do PyMuPDF”, “um LiteParse em Python” ou “um MinerU menor”.
+**The new architecture should be our own and based on evidence fusion.** We should not build “a PyMuPDF clone”, “a LiteParse in Python”, or “a smaller MinerU”.
 
-Devemos construir um engine que tenha uma propriedade que nem todos esses projetos tornam central:
+We should build an engine that has a property that not all of these projects make central:
 
-> **cada trecho de texto sabe de onde veio, por que foi aceito e quais evidências concorrentes existiam.**
+> **each piece of text knows where it came from, why it was accepted, and what competing evidence existed.**
 
-Essa propriedade será nossa principal ferramenta para aumentar robustez com documentos reais sem acumular correções mágicas.
+This property will be our main tool for increasing robustness with real documents without accumulating magic corrections.
 
 ---
 
-## 16. Arquitetura revisada: Hybrid Evidence Fusion Pipeline
+## 16. Revised architecture: Hybrid Evidence Fusion Pipeline
 
-Chamaremos a arquitetura do MVP de **Hybrid Evidence Fusion Pipeline**.
+We will call the MVP architecture the **Hybrid Evidence Fusion Pipeline**.
 
-A palavra *hybrid* não significa que todo documento será processado por OCR ou modelo visual. Significa que o engine consegue combinar mais de uma fonte quando necessário.
+The word *hybrid* does not mean that every document will be processed by OCR or a visual model. It means the engine can combine more than one source when necessary.
 
-A palavra *evidence* é ainda mais importante: nenhum resultado de OCR, nenhuma heurística de espaço e nenhuma decisão de layout deve virar texto final sem que o sistema consiga registrar de onde veio.
+The word *evidence* is even more important: no OCR result, no spatial heuristic, and no layout decision should become final text unless the system can record where it came from.
 
-### 16.1. Visão completa
+### 16.1. Full view
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ 0. Document Intake                                                         │
-│ bytes, senha, limites, metadata, páginas                                   │
+│ bytes, password, limits, metadata, pages                                   │
 └─────────────────────────────┬───────────────────────────────────────────────┘
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ 1. Native Evidence Collector — PDFium                                      │
-│ chars | text ranges | sequência nativa extraída | fonts | bboxes | paths | images       │
+│ chars | text ranges | native extracted sequence | fonts | bboxes | paths | images       │
 │ annotations | page geometry | rotations                                    │
 └─────────────────────────────┬───────────────────────────────────────────────┘
                               │
@@ -1118,38 +1118,38 @@ A palavra *evidence* é ainda mais importante: nenhum resultado de OCR, nenhuma 
                 raw_text | reading_text | JSON | Markdown
 ```
 
-### 16.2. Regra de ouro
+### 16.2. Golden rule
 
-O pipeline deve tentar resolver cada problema no nível mais barato e determinístico possível.
+The pipeline must try to solve each problem at the cheapest and most deterministic level possible.
 
 ```text
-1. PDF contém texto correto?                 → use esse texto
-2. Geometria resolve a estrutura?            → use geometria
-3. Layout visual ajuda a separar regiões?    → use layout
-4. Só uma região está ruim?                  → OCR da região
-5. Página inteira está ruim?                 → OCR da página
-6. Tabela determinística funciona?           → use detector determinístico
-7. Tabela continua ambígua?                  → use modelo de estrutura
-8. Ainda há conflito?                        → preserve alternativas e confiança
+1. Does the PDF contain correct text?              → use that text
+2. Does geometry resolve the structure?            → use geometry
+3. Does visual layout help separate regions?       → use layout
+4. Is only one region bad?                         → region OCR
+5. Is the entire page bad?                         → full page OCR
+6. Does deterministic table detection work?        → use deterministic detector
+7. Is the table still ambiguous?                   → use structure model
+8. Is there still conflict?                        → preserve alternatives and confidence
 ```
 
-A ordem é importante. Quanto mais tarde entrarmos em inferência probabilística, menor a chance de trocar texto exato por texto “plausível”.
+The order matters. The later we enter probabilistic inference, the lower the chance of swapping exact text for “plausible” text.
 
 ---
 
-## 17. Princípios arquiteturais obrigatórios
+## 17. Mandatory architectural principles
 
-### 17.1. Evidência bruta é imutável
+### 17.1. Raw evidence is immutable
 
-`NativeEvidence` nunca deve ser alterado por normalização, deduplicação ou OCR.
+`NativeEvidence` must never be altered by normalization, deduplication, or OCR.
 
-Se um caractere foi extraído como `ã`, ele continua disponível mesmo que uma etapa posterior normalize outro detalhe.
+If a character was extracted as `ã`, it remains available even if a later stage normalizes some other detail.
 
-Se duas cópias sobrepostas de uma palavra forem detectadas, ambas permanecem na evidência bruta, enquanto a visão de leitura escolhe apenas uma.
+If two overlapping copies of a word are detected, both remain in the raw evidence, while the reading view chooses only one.
 
-### 17.2. Proveniência em todos os elementos derivados
+### 17.2. Provenance in all derived elements
 
-Todo token relevante deve poder indicar sua origem.
+Every relevant token must be able to indicate its origin.
 
 ```python
 class SourceKind(Enum):
@@ -1162,30 +1162,30 @@ class SourceKind(Enum):
     RECOVERED_UNICODE = "recovered_unicode"
 ```
 
-Elementos fundidos podem carregar mais de uma fonte.
+Fused elements may carry more than one source.
 
-### 17.3. OCR nunca destrói texto confiável silenciosamente
+### 17.3. OCR never silently destroys reliable text
 
-Se OCR e camada nativa discordarem, o sistema precisa saber que houve conflito.
+If OCR and the native layer disagree, the system needs to know there was a conflict.
 
-No MVP a regra conservadora será:
+In the MVP the conservative rule will be:
 
 ```text
-native confiável + OCR divergente   → manter native, registrar OCR
-native corrompido + OCR confiável   → escolher OCR
-native ausente + OCR                → escolher OCR
-native parcial + OCR complementar   → merge geométrico
+reliable native + divergent OCR     → keep native, record OCR
+corrupted native + reliable OCR     → choose OCR
+absent native + OCR                 → choose OCR
+partial native + complementary OCR  → geometric merge
 ```
 
-### 17.4. Tabela não é prosa em colunas
+### 17.4. Table is not prose in columns
 
-Esse princípio passa a ser arquitetural, não apenas uma heurística.
+This principle becomes architectural, not just a heuristic.
 
-Nenhum algoritmo de leitura de colunas deve reordenar internamente uma região já classificada como tabela.
+No column reading algorithm should internally reorder a region already classified as a table.
 
-### 17.5. Página não é a única unidade de decisão
+### 17.5. Page is not the only unit of decision
 
-Precisamos dos níveis:
+We need the levels:
 
 ```text
 document
@@ -1194,27 +1194,27 @@ document
       line/token/char
 ```
 
-Uma página pode ser 80% texto nativo perfeito e 20% scan. Forçar um único método para a página inteira perde informação.
+A page can be 80% perfect native text and 20% scan. Forcing a single method for the entire page loses information.
 
-### 17.6. Estrutura precede serialização
+### 17.6. Structure precedes serialization
 
-Não construir Markdown durante detecção.
+Do not build Markdown during detection.
 
-Fluxo correto:
+Correct flow:
 
 ```text
-evidência → estrutura → renderer
+evidence → structure → renderer
 ```
 
-Não:
+Not:
 
 ```text
-evidência → Markdown → tentar reconstruir estrutura
+evidence → Markdown → attempt to reconstruct structure
 ```
 
 ---
 
-## 18. Modelo de dados revisado
+## 18. Revised data model
 
 ### 18.1. `BBox`
 
@@ -1227,17 +1227,17 @@ class BBox:
     y1: float
 ```
 
-Todas as geometrias internas devem usar um sistema canônico único.
+All internal geometries must use a single canonical system.
 
-Sugestão:
+Suggestion:
 
-* origem no canto superior esquerdo;
-* `x` cresce para direita;
-* `y` cresce para baixo;
-* unidade interna em pontos PDF quando a evidência vier do PDF;
-* pixels de OCR sempre convertidos para esse espaço antes do merge.
+* origin at the top-left corner;
+* `x` grows to the right;
+* `y` grows downward;
+* internal unit in PDF points when the evidence comes from the PDF;
+* OCR pixels always converted to this space before the merge.
 
-O objeto original deve manter metadados para conversão reversível.
+The original object must maintain metadata for reversible conversion.
 
 ### 18.2. `NativeCharacter`
 
@@ -1260,7 +1260,7 @@ class NativeCharacter:
     visible_candidate: bool
 ```
 
-`char_index` é importante porque mantém a ordem exposta pelo PDFium. Essa ordem **não deve ser confundida com a ordem bruta dos operadores `Tj/TJ` no content stream**. O `FPDFText_LoadPage` já construiu uma text page, pode inserir caracteres gerados e aplica parte de sua própria interpretação. Portanto, chamaremos esse sinal de **sequência nativa extraída**. Ele é valioso, mas é apenas uma evidência entre outras.
+`char_index` is important because it maintains the order exposed by PDFium. This order **must not be confused with the raw order of the `Tj/TJ` operators in the content stream**. `FPDFText_LoadPage` has already built a text page, may insert generated characters, and applies some of its own interpretation. Therefore, we will call this signal the **native extracted sequence**. It is valuable, but it is only one piece of evidence among others.
 
 ### 18.3. `NativeObjectEvidence`
 
@@ -1276,7 +1276,7 @@ class NativeObjectEvidence:
     rotation: int
 ```
 
-Essa estrutura é necessária para detectar scans, grids de tabela, vector text e appearance text.
+This structure is necessary for detecting scans, table grids, vector text, and appearance text.
 
 ### 18.4. `OcrToken`
 
@@ -1292,7 +1292,7 @@ class OcrToken:
 
 ### 18.5. `TextToken`
 
-É o primeiro objeto derivado capaz de representar fusão.
+This is the first derived object capable of representing fusion.
 
 ```python
 @dataclass
@@ -1407,21 +1407,21 @@ class StructuredDocument:
 
 ---
 
-## 19. Estágio 0 — Document Intake
+## 19. Stage 0 — Document Intake
 
-### 19.1. Responsabilidades
+### 19.1. Responsibilities
 
-* validar o header PDF;
-* abrir o documento;
-* lidar com senha quando configurada;
-* obter contagem de páginas;
-* aplicar limites de segurança;
-* registrar versão do PDFium e engines configuradas;
-* criar `DocumentContext`.
+* validate the PDF header;
+* open the document;
+* handle password when configured;
+* obtain page count;
+* apply security limits;
+* record the PDFium version and configured engines;
+* create `DocumentContext`.
 
-### 19.2. Limites de segurança do MVP
+### 19.2. MVP security limits
 
-Devem ser configuráveis:
+Must be configurable:
 
 ```python
 @dataclass
@@ -1432,13 +1432,13 @@ class SecurityLimits:
     document_timeout_seconds: float | None = None
 ```
 
-Os valores finais devem ser definidos pelo ambiente da empresa.
+The final values must be defined by the company's environment.
 
-### 19.3. Falha parcial
+### 19.3. Partial failure
 
-Um erro em uma página não deve necessariamente invalidar as demais.
+An error on one page must not necessarily invalidate the others.
 
-Resultado possível:
+Possible result:
 
 ```text
 SUCCESS
@@ -1448,40 +1448,40 @@ FAILURE
 
 ---
 
-## 20. Estágio 1 — Native Evidence Collector
+## 20. Stage 1 — Native Evidence Collector
 
-Essa é a fundação de alta fidelidade.
+This is the high-fidelity foundation.
 
-### 20.1. O que coletar do PDFium
+### 20.1. What to collect from PDFium
 
-Por página:
+Per page:
 
-* quantidade de caracteres;
-* Unicode de cada caractere;
+* character count;
+* Unicode of each character;
 * bbox;
-* origem;
-* ângulo;
-* tamanho de fonte;
-* informação de fonte disponível;
-* índice da sequência textual do PDFium;
-* indicador de caractere gerado;
-* indicador de hífen;
-* erro de mapeamento Unicode quando exposto;
-* texto por range;
-* imagens colocadas na página;
-* paths relevantes;
-* anotações;
-* structure tree de PDFs tagged, quando presente;
-* MCIDs/atributos estruturais que a API permitir recuperar;
-* rotação da página;
+* origin;
+* angle;
+* font size;
+* available font information;
+* PDFium textual sequence index;
+* generated character indicator;
+* hyphen indicator;
+* Unicode mapping error when exposed;
+* text by range;
+* images placed on the page;
+* relevant paths;
+* annotations;
+* structure tree from tagged PDFs, when present;
+* MCIDs/structural attributes that the API allows recovering;
+* page rotation;
 * MediaBox/CropBox;
-* matriz necessária para normalizar coordenadas.
+* matrix needed to normalize coordinates.
 
-### 20.2. Precisão sobre a sequência nativa
+### 20.2. Precision about the native sequence
 
-O índice de caractere exposto por PDFium representa a sequência da `FPDF_TEXTPAGE`, não uma gravação literal da ordem de operadores do content stream. O PDFium pode produzir caracteres gerados, inclusive quebras, e expõe APIs experimentais como `FPDFText_IsGenerated`, `FPDFText_IsHyphen` e `FPDFText_HasUnicodeMapError`.
+The character index exposed by PDFium represents the `FPDF_TEXTPAGE` sequence, not a literal recording of the content stream operator order. PDFium can produce generated characters, including breaks, and exposes experimental APIs such as `FPDFText_IsGenerated`, `FPDFText_IsHyphen`, and `FPDFText_HasUnicodeMapError`.
 
-Por isso, o engine deve registrar separadamente:
+Therefore, the engine must record separately:
 
 ```text
 pdfium_char_index
@@ -1490,33 +1490,33 @@ is_hyphen
 has_unicode_map_error
 ```
 
-Quando conseguirmos recuperar a ordem de objetos da página com segurança, ela pode entrar como evidência adicional, mas não devemos chamar `char_index` de “ordem original do PDF”.
+When we can safely recover the page object order, it can enter as additional evidence, but we must not call `char_index` the “original PDF order”.
 
-Essas APIs incluem pontos experimentais do PDFium. A implementação deve fazer **feature detection na versão empacotada pelo pypdfium2** e usar bindings de baixo nível somente quando disponíveis. A ausência de `IsGenerated`, `IsHyphen` ou `HasUnicodeMapError` em uma versão não pode impedir toda a extração; os campos correspondentes devem aceitar `None`/`unknown` e os diagnósticos devem registrar a capacidade efetivamente disponível.
+These APIs include experimental PDFium points. The implementation must perform **feature detection on the version packaged by pypdfium2** and use low-level bindings only when available. The absence of `IsGenerated`, `IsHyphen`, or `HasUnicodeMapError` in a version cannot block the entire extraction; the corresponding fields must accept `None`/`unknown` and diagnostics must record the effectively available capability.
 
-### 20.3. Structure tree como evidência opcional
+### 20.3. Structure tree as optional evidence
 
-PDFs tagged podem trazer uma árvore lógica com elementos como parágrafo, heading, lista, tabela e células. PDFium possui API pública de structure tree (`FPDF_StructTree_GetForPage` e família `FPDF_StructElement_*`).
+Tagged PDFs may carry a logical tree with elements such as paragraph, heading, list, table, and cells. PDFium has a public structure tree API (`FPDF_StructTree_GetForPage` and the `FPDF_StructElement_*` family).
 
-Quando presente, essa informação deve ser coletada como **evidência de alto valor, mas não verdade absoluta**. Muitos PDFs não são tagged; outros têm tags incompletas ou incorretas.
+When present, this information must be collected as **high-value evidence, but not absolute truth**. Many PDFs are not tagged; others have incomplete or incorrect tags.
 
-Uso sugerido:
+Suggested use:
 
 ```text
 structure tree
-  → sinal de tipo de região
-  → sinal adicional de ordem
-  → sinal de tabela/célula
-  → títulos/semântica quando consistente
+  → region type signal
+  → additional order signal
+  → table/cell signal
+  → headings/semantics when consistent
 ```
 
-Não bloquear o MVP se a associação perfeita entre MCID e token exigir trabalho adicional. O primeiro passo pode preservar a árvore e seus identificadores para uso progressivo.
+Do not block the MVP if the perfect association between MCID and token requires additional work. The first step can preserve the tree and its identifiers for progressive use.
 
 ### 20.4. Batch extraction
 
-A implementação inicial em pypdfium2 pode chamar APIs por caractere. Isso é simples, porém o overhead FFI precisa ser medido.
+The initial implementation in pypdfium2 may call APIs per character. This is simple, but the FFI overhead needs to be measured.
 
-O design deve esconder esse detalhe atrás de:
+The design must hide this detail behind:
 
 ```python
 class NativeEvidenceSource(Protocol):
@@ -1524,28 +1524,28 @@ class NativeEvidenceSource(Protocol):
         ...
 ```
 
-Se o overhead for relevante, podemos trocar a implementação por uma extensão Rust/PyO3 que retorna arrays em lote sem modificar o restante do sistema.
+If the overhead is relevant, we can swap the implementation for a Rust/PyO3 extension that returns arrays in batches without modifying the rest of the system.
 
-### 20.5. Não reconstruir ainda
+### 20.5. Do not reconstruct yet
 
-Esta etapa não deve decidir:
+This stage must not decide:
 
-* palavras;
-* parágrafos;
-* colunas;
-* tabelas;
-* cabeçalhos;
-* ordem final.
+* words;
+* paragraphs;
+* columns;
+* tables;
+* headers;
+* final order.
 
-Ela coleta fatos.
+It collects facts.
 
 ---
 
-## 21. Estágio 2 — Page Evidence & Complexity Analyzer
+## 21. Stage 2 — Page Evidence & Complexity Analyzer
 
-Essa etapa é inspirada principalmente em LiteParse e Marker.
+This stage is inspired primarily by LiteParse and Marker.
 
-### 21.1. Saída
+### 21.1. Output
 
 ```python
 @dataclass
@@ -1557,7 +1557,7 @@ class PageComplexity:
     full_page_ocr_candidate: bool
 ```
 
-### 21.2. Razões iniciais
+### 21.2. Initial reasons
 
 ```python
 class ComplexityReason(Enum):
@@ -1575,104 +1575,104 @@ class ComplexityReason(Enum):
     ROTATED_TEXT = "rotated_text"
 ```
 
-### 21.3. Sinais baratos
+### 21.3. Cheap signals
 
-Primeiro calcular sem modelos:
+Calculate first without models:
 
 * `native_char_count`;
-* comprimento textual útil;
-* razão de U+FFFD;
-* razão de caracteres de controle;
-* razão de codepoints improváveis;
-* cobertura geométrica de texto;
-* quantidade/área de imagens;
-* maior imagem em relação à página;
-* área de paths preenchidos não coberta por texto;
-* sobreposição anormal de linhas/caracteres;
-* distribuição de ângulos;
-* densidade de bboxes.
+* useful text length;
+* U+FFFD ratio;
+* control character ratio;
+* unlikely codepoint ratio;
+* geometric text coverage;
+* image count/area;
+* largest image relative to page;
+* filled path area not covered by text;
+* abnormal line/character overlaps;
+* angle distribution;
+* bbox density.
 
 ### 21.4. Garbled text
 
-Sinais possíveis:
+Possible signals:
 
 ```text
-alta proporção de replacement chars
-muitos caracteres de controle
-sequências de codepoints privadas sem explicação
-repetições anormais
-texto grande com vocabulário praticamente nulo
-mapeamento Unicode marcado como falho
+high proportion of replacement chars
+many control characters
+private codepoint sequences without explanation
+abnormal repetitions
+large text with practically zero vocabulary
+Unicode mapping marked as failed
 ```
 
-Não usar dicionário de português como única prova. Nomes, processos, códigos e identificadores legítimos podem parecer “palavras ruins”.
+Do not use a Portuguese dictionary as the sole proof. Names, processes, codes, and legitimate identifiers may look like “bad words”.
 
 ### 21.5. Duplicate OCR layer
 
-Detectar bboxes quase idênticos com strings idênticas ou altamente semelhantes.
+Detect nearly identical bboxes with identical or highly similar strings.
 
-Também detectar muitas linhas sobrepostas em posições incompatíveis, inspirando-se no Marker.
+Also detect many overlapping lines at incompatible positions, inspired by Marker.
 
 ### 21.6. Invisible text
 
-Essa é uma área importante para PDFs com camada OCR antiga.
+This is an important area for PDFs with old OCR layers.
 
-Para linhas suspeitas:
+For suspicious lines:
 
-1. mapear bbox para a página renderizada;
-2. medir se existe tinta/pixel não branco na região;
-3. se não houver conteúdo visual onde o texto afirma estar, marcar como `INVISIBLE_TEXT`.
+1. map bbox to the rendered page;
+2. measure whether ink/non-white pixel exists in the region;
+3. if there is no visual content where the text claims to be, mark as `INVISIBLE_TEXT`.
 
-Não realizar crop individual para milhares de caracteres. Fazer por linha ou bloco e, se possível, usar integral image/máscara de tinta para consulta barata.
+Do not perform individual crops for thousands of characters. Do it by line or block and, if possible, use integral image/ink mask for cheap lookup.
 
 ### 21.7. Vector text
 
-Se a página tem área significativa de paths preenchidos que não é explicada pelas bboxes textuais, marcar como possível `VECTOR_TEXT`.
+If the page has a significant area of filled paths that is not explained by text bboxes, mark as possible `VECTOR_TEXT`.
 
-O objetivo não é identificar letras vetoriais perfeitamente. O objetivo é acionar inspeção visual/OCR.
+The objective is not to identify vector letters perfectly. The objective is to trigger visual inspection/OCR.
 
 ### 21.8. Annotation text
 
-Se a página parece vazia mas possui anotações/appearance streams relevantes, considerar OCR ou inspeção adicional.
+If the page appears empty but has relevant annotations/appearance streams, consider OCR or additional inspection.
 
-### 21.9. O resultado não deve ser apenas um score
+### 21.9. The result must not be just a score
 
-Não queremos:
+We do not want:
 
 ```text
 quality = 0.63
 ```
 
-sem explicação.
+without explanation.
 
-Queremos:
+We want:
 
 ```json
 {
-  "native_text_score": 0.63,
-  "reasons": ["garbled_unicode", "embedded_images"],
-  "recommended_strategy": "hybrid"
+  “native_text_score”: 0.63,
+  “reasons”: [“garbled_unicode”, “embedded_images”],
+  “recommended_strategy”: “hybrid”
 }
 ```
 
 ---
 
-## 22. Estágio 3 — Layout Region Detector
+## 22. Stage 3 — Layout Region Detector
 
-### 22.1. Por que layout visual passa a fazer parte do MVP
+### 22.1. Why visual layout becomes part of the MVP
 
-Somente geometria textual não responde com segurança se duas faixas verticais representam:
+Textual geometry alone cannot safely answer whether two vertical strips represent:
 
-* duas colunas de artigo;
-* duas colunas de uma tabela;
-* texto e uma legenda;
-* sidebar e corpo;
-* valores de formulário;
-* duas áreas independentes.
+* two article columns;
+* two columns of a table;
+* text and a caption;
+* sidebar and body;
+* form values;
+* two independent areas.
 
-A maior mudança da arquitetura é usar layout como sinal anterior à ordem de leitura.
+The biggest change in the architecture is using layout as a signal prior to reading order.
 
-### 22.2. Contrato
+### 22.2. Contract
 
 ```python
 class LayoutEngine(Protocol):
@@ -1680,49 +1680,49 @@ class LayoutEngine(Protocol):
         ...
 ```
 
-A interface não deve depender de PaddleOCR, Docling ou outro fornecedor.
+The interface must not depend on PaddleOCR, Docling, or another vendor.
 
-### 22.3. Engine inicial recomendada
+### 22.3. Recommended initial engine
 
-Para o MVP, o **primeiro candidato concreto será PP-DocLayoutV3**, ou a distribuição standalone equivalente disponibilizada pelo ecossistema PaddleOCR na versão fixada pelo projeto, por três motivos:
+For the MVP, the **first concrete candidate will be PP-DocLayoutV3**, or the equivalent standalone distribution made available by the PaddleOCR ecosystem in the version fixed by the project, for three reasons:
 
-* integração Python direta;
-* modelos preparados para documentos;
-* caminho natural para tabela e OCR no mesmo ecossistema.
+* direct Python integration;
+* models prepared for documents;
+* natural path for table and OCR in the same ecosystem.
 
-Uma alternativa válida é RT-DETR/ONNX no estilo Xberg.
+A valid alternative is RT-DETR/ONNX in the Xberg style.
 
-A escolha definitiva deverá considerar:
+The definitive choice should consider:
 
-* licença dos pesos;
-* desempenho em CPU;
-* desempenho em GPU disponível na empresa;
-* classes reconhecidas;
-* acurácia no corpus real;
-* tamanho dos modelos;
-* facilidade de empacotamento on premises.
+* weight license;
+* CPU performance;
+* performance on GPU available in the company;
+* recognized classes;
+* accuracy on the real corpus;
+* model size;
+* ease of on-premises packaging.
 
-### 22.4. O layout não é autoridade textual
+### 22.4. Layout is not textual authority
 
-O detector pode dizer:
+The detector can say:
 
 ```text
 bbox X = TABLE
 ```
 
-mas não pode inventar ou substituir o conteúdo textual dessa bbox.
+but cannot invent or replace the textual content of that bbox.
 
-O papel dele é:
+Its role is:
 
 ```text
-onde está a região?
-qual tipo estrutural ela provavelmente possui?
-como devemos encaminhá-la?
+where is the region?
+what structural type does it likely have?
+how should we route it?
 ```
 
-### 22.5. Classes mínimas para o MVP
+### 22.5. Minimum classes for the MVP
 
-Não precisamos de dezenas de tipos sem uso. Classes mínimas:
+We do not need dozens of unused types. Minimum classes:
 
 ```text
 TEXT
@@ -1737,151 +1737,151 @@ FOOTNOTE
 UNKNOWN
 ```
 
-### 22.6. Layout em toda página ou somente em páginas complexas?
+### 22.6. Layout on every page or only on complex pages?
 
-Para maximizar qualidade, proponho dois perfis desde o MVP:
+To maximize quality, I propose two profiles from the MVP:
 
 **`fast`**
 
-* roda análise determinística;
-* usa layout visual somente quando complexidade indica necessidade.
+* runs deterministic analysis;
+* uses visual layout only when complexity indicates the need.
 
 **`balanced`**
 
-* roda layout de baixa resolução em todas as páginas;
-* continua evitando OCR quando a camada textual é boa.
+* runs low-resolution layout on all pages;
+* continues avoiding OCR when the text layer is good.
 
-Durante desenvolvimento com documentos reais da empresa, `balanced` deve ser o padrão de avaliação. Depois medimos se `fast` entrega qualidade suficiente em categorias simples.
+During development with real company documents, `balanced` should be the evaluation default. Then we measure whether `fast` delivers sufficient quality in simple categories.
 
-### 22.7. Assignment de texto nativo às regiões
+### 22.7. Assignment of native text to regions
 
-Depois das regiões visuais, cada linha/token nativo é associado por interseção.
+After the visual regions, each native line/token is associated by intersection.
 
-Não usar apenas centro do bbox. Sugerimos:
+Do not use only the bbox center. We suggest:
 
 ```text
 intersection_area(text_bbox, region_bbox) / text_bbox_area
 ```
 
-Com prioridade para a região com maior cobertura.
+With priority for the region with the greatest coverage.
 
-Casos ambíguos ficam marcados, não descartados.
+Ambiguous cases are marked, not discarded.
 
 ---
 
-## 23. Estágio 4 — Reconstrução do texto nativo
+## 23. Stage 4 — Native text reconstruction
 
-O engine ainda precisa fazer o trabalho que motivou o projeto inicialmente: reconstruir caracteres em linhas e tokens melhor do que simplesmente usar uma string devolvida pelo parser.
+The engine still needs to do the work that originally motivated the project: reconstructing characters into lines and tokens better than simply using a string returned by the parser.
 
-### 23.1. Normalização conservadora
+### 23.1. Conservative normalization
 
-Manter duas formas:
+Maintain two forms:
 
 ```python
 raw_text: str
 normalized_text: str
 ```
 
-Normalizações permitidas na visão normalizada:
+Normalizations allowed in the normalized view:
 
 * Unicode NFC;
-* whitespace equivalente para espaço normal quando apropriado;
-* remoção de controles sem semântica;
-* normalização de line ending.
+* equivalent whitespace to normal space when appropriate;
+* removal of semantics-free control characters;
+* line ending normalization.
 
-Não:
+Not:
 
-* trocar caracteres acentuados por ASCII;
-* “corrigir” palavras por dicionário;
-* alterar números;
-* adivinhar letra por contexto sem evidência adicional.
+* replacing accented characters with ASCII;
+* “correcting” words by dictionary;
+* altering numbers;
+* guessing a letter from context without additional evidence.
 
-### 23.2. Deduplicação
+### 23.2. Deduplication
 
-Duplicatas podem surgir de:
+Duplicates may arise from:
 
-* texto pintado mais de uma vez;
-* falso bold;
-* layer OCR duplicada;
-* sombra;
-* content streams repetidos.
+* text painted more than once;
+* fake bold;
+* duplicated OCR layer;
+* shadow;
+* repeated content streams.
 
-Critérios:
+Criteria:
 
 ```text
-mesmo texto/codepoint
-+ bbox com alto overlap
-+ origem muito próxima
-+ fonte/tamanho compatível
+same text/codepoint
++ bbox with high overlap
++ very close origin
++ compatible font/size
 ```
 
-A ação será marcar uma evidência como duplicata derivada, não deletá-la do raw evidence.
+The action will be to mark evidence as a derived duplicate, not delete it from raw evidence.
 
-### 23.3. Formação de linhas
+### 23.3. Line formation
 
-Agrupar primeiro por orientação.
+Group first by orientation.
 
-Para caracteres horizontais, estimar baseline e altura mediana.
+For horizontal characters, estimate baseline and median height.
 
-Características adaptativas:
+Adaptive characteristics:
 
-* diferença perpendicular à baseline;
-* overlap vertical;
-* tamanho de fonte;
-* direção;
-* distância normalizada pelo tamanho/advance;
-* sequência nativa extraída.
+* perpendicular difference from baseline;
+* vertical overlap;
+* font size;
+* direction;
+* distance normalized by size/advance;
+* native extracted sequence.
 
-Não usar tolerância fixa universal em pontos.
+Do not use a universal fixed tolerance in points.
 
-### 23.4. Espaços
+### 23.4. Spaces
 
-Hierarquia de confiança:
+Confidence hierarchy:
 
 ```text
-1. whitespace explícito no PDF
-2. whitespace gerado pela engine
-3. gap geométrico inferido
+1. explicit whitespace in the PDF
+2. whitespace generated by the engine
+3. inferred geometric gap
 ```
 
-O threshold geométrico deve ser aprendido por linha/span.
+The geometric threshold should be learned per line/span.
 
-Exemplo:
+Example:
 
 ```text
-median_char_advance = mediana dos advances
+median_char_advance = median of advances
 word_gap_candidate = gap / median_char_advance
 ```
 
-A distribuição local permite diferenciar kerning de espaço real melhor que um valor fixo.
+The local distribution allows differentiating kerning from actual space better than a fixed value.
 
-### 23.5. Palavras
+### 23.5. Words
 
-Palavra é uma visão derivada, não unidade fundamental.
+A word is a derived view, not a fundamental unit.
 
-Manter pontuação no token apropriado conforme saída, mas preservar caracteres individuais na evidência.
+Keep punctuation in the appropriate token as output, but preserve individual characters in the evidence.
 
 ### 23.6. Spans
 
-Span pode ser criado quando caracteres adjacentes compartilham:
+A span can be created when adjacent characters share:
 
-* fonte;
-* tamanho compatível;
-* peso;
-* estilo;
-* cor quando disponível;
-* orientação;
-* origem de evidência.
+* font;
+* compatible size;
+* weight;
+* style;
+* color when available;
+* orientation;
+* evidence source.
 
-Não usar span para decidir leitura global.
+Do not use spans to decide global reading.
 
 ---
 
-## 24. Estágio 5 — Region Quality Gate
+## 24. Stage 5 — Region Quality Gate
 
-Depois de layout e reconstrução nativa, cada região recebe uma decisão.
+After layout and native reconstruction, each region receives a decision.
 
-### 24.1. Estados
+### 24.1. States
 
 ```python
 class RegionDecision(Enum):
@@ -1893,155 +1893,155 @@ class RegionDecision(Enum):
 
 ### 24.2. `KEEP_NATIVE`
 
-Usar quando:
+Use when:
 
-* texto nativo existe;
-* Unicode é saudável;
-* cobertura visual é plausível;
-* não há duplicação destrutiva;
-* região tem linhas atribuídas;
-* imagem não sugere texto ausente importante.
+* native text exists;
+* Unicode is healthy;
+* visual coverage is plausible;
+* there is no destructive duplication;
+* region has assigned lines;
+* image does not suggest missing important text.
 
 ### 24.3. `MERGE_OCR`
 
-Usar quando:
+Use when:
 
-* região contém imagem/figura junto a texto;
-* texto nativo cobre apenas parte do conteúdo visual;
-* existe suspeita de labels rasterizados;
-* tabela possui alguns valores rasterizados.
+* region contains image/figure alongside text;
+* native text covers only part of the visual content;
+* there is suspicion of rasterized labels;
+* table has some rasterized values.
 
 ### 24.4. `OCR_REGION`
 
-Usar quando:
+Use when:
 
-* layout detectou região textual sem texto nativo;
-* texto é garbled;
-* texto nativo é invisível ou inconsistente com a imagem;
-* há forte sinal de vector text;
-* tabela/figura necessita leitura visual.
+* layout detected a textual region without native text;
+* text is garbled;
+* native text is invisible or inconsistent with the image;
+* there is a strong vector text signal;
+* table/figure requires visual reading.
 
 ### 24.5. `ESCALATE_PAGE_OCR`
 
-Usar quando:
+Use when:
 
-* página é scan;
-* grande parte das regiões textuais está ruim;
-* custo de dezenas de crops supera OCR da página;
-* orientação/unwarping precisa ser tratado globalmente.
+* page is a scan;
+* a large portion of textual regions is bad;
+* the cost of dozens of crops exceeds full page OCR;
+* orientation/unwarping needs to be handled globally.
 
-### 24.6. Threshold de promoção
+### 24.6. Promotion threshold
 
-Não fixar definitivamente antes do corpus.
+Do not fix definitively before the corpus.
 
-Começar com uma métrica simples:
+Start with a simple metric:
 
 ```text
 bad_text_area / total_text_region_area
 ```
 
-mais
+plus
 
 ```text
 bad_text_regions / total_text_regions
 ```
 
-Se ambos forem altos, promover.
+If both are high, promote.
 
 ---
 
-## 25. Estágio 6A — Ordem de leitura de prosa
+## 25. Stage 6A — Prose reading order
 
-### 25.1. Nenhuma fonte sozinha é suficiente
+### 25.1. No single source is sufficient
 
-Usaremos quatro famílias de evidência:
+We will use four families of evidence:
 
 ```text
-SEQUÊNCIA NATIVA EXTRAÍDA
-sequência da text page do backend
+NATIVE EXTRACTED SEQUENCE
+sequence from the backend's text page
 
-ESTRUTURA LÓGICA
-structure tree / tags / MCIDs quando presentes e consistentes
+LOGICAL STRUCTURE
+structure tree / tags / MCIDs when present and consistent
 
 GEOMETRY
-posição, colunas, gaps, alinhamento
+position, columns, gaps, alignment
 
-LAYOUT VISUAL
-regiões e tipos detectados
+VISUAL LAYOUT
+detected regions and types
 ```
 
-### 25.2. Construir um grafo, não apenas ordenar por `(y, x)`
+### 25.2. Build a graph, not just sort by `(y, x)`
 
-Cada região de prosa vira nó.
+Each prose region becomes a node.
 
-Edges candidatam relações:
+Edges candidate relationships:
 
 ```text
 A before B
 ```
 
-com peso derivado de:
+with weight derived from:
 
-* `A` acima de `B` com overlap horizontal;
-* coluna de `A` anterior à coluna de `B`;
-* sequência nativa extraída;
-* ordem/relacionamentos da structure tree quando confiáveis;
-* layout order quando fornecido;
-* continuidade de baseline/parágrafo;
-* distância espacial.
+* `A` above `B` with horizontal overlap;
+* `A`'s column preceding `B`'s column;
+* native extracted sequence;
+* structure tree order/relationships when reliable;
+* layout order when provided;
+* baseline/paragraph continuity;
+* spatial distance.
 
-Depois resolver uma ordem consistente.
+Then resolve a consistent order.
 
 ### 25.3. XY-cut
 
-XY-cut continua útil, mas agora somente dentro de regiões ou grupos classificados como prosa.
+XY-cut remains useful, but now only within regions or groups classified as prose.
 
-Uso recomendado:
+Recommended use:
 
 ```text
 page prose regions
    ↓
-separar faixas full-width
+separate full-width strips
    ↓
-XY-cut nos grupos restantes
+XY-cut on remaining groups
    ↓
-colunas
+columns
 ```
 
-Isso evita que um título largo sobre duas colunas seja partido de forma incorreta.
+This prevents a wide title spanning two columns from being split incorrectly.
 
-### 25.4. Sequência nativa extraída
+### 25.4. Native extracted sequence
 
-Se a camada nativa é saudável e o sequência nativa extraída já percorre as colunas corretamente, devemos valorizá-lo.
+If the native layer is healthy and the native extracted sequence already traverses the columns correctly, we should weight it heavily.
 
-Criar um score:
+Create a score:
 
 ```text
 native_order_consistency
 ```
 
-medindo quantas transições do sequência nativa extraída são geometricamente plausíveis.
+measuring how many transitions of the native extracted sequence are geometrically plausible.
 
-Se alto, sequência nativa extraída recebe peso forte.
+If high, native extracted sequence receives strong weight.
 
-Se baixo, geometria/layout dominam.
+If low, geometry/layout dominate.
 
-### 25.5. Duas colunas
+### 25.5. Two columns
 
-Cenário esperado:
+Expected scenario:
 
 ```text
-Título em largura total
+Full-width title
 
-Coluna A          Coluna B
+Column A          Column B
 A1                B1
 A2                B2
 A3                B3
 
-Rodapé em largura total
+Full-width footer
 ```
 
-Estrutura desejada:
+Desired structure:
 
 ```text
 Title
@@ -2051,7 +2051,7 @@ ColumnGroup
 Footer
 ```
 
-Não:
+Not:
 
 ```text
 Title
@@ -2062,97 +2062,97 @@ B2
 ...
 ```
 
-### 25.6. Texto rotacionado
+### 25.6. Rotated text
 
-Agrupar por orientação canônica próxima de:
+Group by canonical orientation close to:
 
 ```text
 0°, 90°, 180°, 270°
 ```
 
-Rotações pequenas podem ser normalizadas por tolerância; rotações arbitrárias devem preservar quad/bbox e ser tratadas como grupo próprio.
+Small rotations can be normalized by tolerance; arbitrary rotations must preserve quad/bbox and be treated as their own group.
 
-Textos marginais verticais não devem ser inseridos no meio do corpo simplesmente porque compartilham Y.
+Vertical marginal texts must not be inserted in the middle of the body simply because they share Y.
 
 ---
 
-## 26. Estágio 6B — Table Pipeline
+## 26. Stage 6B — Table Pipeline
 
-Tabelas passam a ser parte explícita do MVP.
+Tables become an explicit part of the MVP.
 
-### 26.1. Por que uma cascata
+### 26.1. Why a cascade
 
-Nenhum detector de tabela é ótimo em todos os casos.
+No single table detector is optimal in all cases.
 
-Temos pelo menos estas classes:
+We have at least these classes:
 
 ```text
-A. tabela com bordas completas
-B. tabela com algumas linhas
-C. tabela sem bordas, alinhada por colunas
-D. tabela irregular
-E. tabela digital com texto ruim
-F. tabela em scan
-G. tabela continuada em outra página
+A. table with complete borders
+B. table with some lines
+C. borderless table, aligned by columns
+D. irregular table
+E. digital table with bad text
+F. table in a scan
+G. table continued on another page
 ```
 
-A estratégia deve ser progressiva.
+The strategy should be progressive.
 
-### 26.2. Tier 1 — Grid vetorial estrito
+### 26.2. Tier 1 — Strict vector grid
 
-Usar paths/linhas do PDF.
+Use PDF paths/lines.
 
-Detectar:
+Detect:
 
-* segmentos horizontais;
-* segmentos verticais;
-* interseções;
-* retângulos;
-* tracks de coluna/linha.
+* horizontal segments;
+* vertical segments;
+* intersections;
+* rectangles;
+* column/row tracks.
 
-Alta precisão.
+High precision.
 
-Se grade coerente for encontrada, atribuir tokens por célula.
+If a coherent grid is found, assign tokens per cell.
 
-### 26.3. Tier 2 — Grid relaxado
+### 26.3. Tier 2 — Relaxed grid
 
-Para:
+For:
 
-* bordas incompletas;
-* somente linhas horizontais;
-* somente separadores principais;
-* tabelas de duas colunas label/value.
+* incomplete borders;
+* horizontal lines only;
+* main separators only;
+* two-column label/value tables.
 
-Usar alinhamento textual para completar a estrutura.
+Use text alignment to complete the structure.
 
-### 26.4. Tier 3 — Tabela sem bordas por texto
+### 26.4. Tier 3 — Borderless table by text
 
-Usar linhas/tokens nativos.
+Use native lines/tokens.
 
-Sinais:
+Signals:
 
-* tracks X recorrentes;
-* números alinhados à direita;
-* labels na primeira coluna;
-* distribuição semelhante por várias linhas;
-* gaps horizontais recorrentes;
-* coerência vertical;
-* baixa “prosa contínua”.
+* recurring X tracks;
+* right-aligned numbers;
+* labels in the first column;
+* similar distribution across multiple lines;
+* recurring horizontal gaps;
+* vertical coherence;
+* low “continuous prose”.
 
-Precisamos de um `ProseVsTableClassifier` determinístico antes de aceitar.
+We need a deterministic `ProseVsTableClassifier` before accepting.
 
-### 26.5. Tier 4 — Modelo visual de estrutura
+### 26.5. Tier 4 — Visual structure model
 
-Se layout detectou `TABLE` mas tiers determinísticos falharam ou geraram baixa confiança, executar modelo estrutural.
+If layout detected `TABLE` but deterministic tiers failed or produced low confidence, run a structural model.
 
-Candidatos de avaliação:
+Evaluation candidates:
 
 * PaddleOCR Table Recognition v2;
 * SLANet/SLANeXT;
 * TATR;
-* outro modelo ONNX com licença adequada.
+* another ONNX model with adequate license.
 
-O contrato deve ser nosso:
+The contract must be ours:
 
 ```python
 class TableStructureEngine(Protocol):
@@ -2160,17 +2160,17 @@ class TableStructureEngine(Protocol):
         ...
 ```
 
-### 26.6. Tier 5 — OCR dentro das células/região
+### 26.6. Tier 5 — OCR inside cells/region
 
-O modelo pode recuperar estrutura sem texto perfeito. Depois:
+The model can recover structure without perfect text. Then:
 
-* se há texto nativo confiável, mapear native tokens às células;
-* se não há, usar OCR;
-* se há ambos, fazer merge.
+* if there is reliable native text, map native tokens to cells;
+* if there is none, use OCR;
+* if there are both, merge.
 
-### 26.7. Confiança da tabela
+### 26.7. Table confidence
 
-Combinar:
+Combine:
 
 ```text
 grid coherence
@@ -2182,48 +2182,48 @@ model confidence
 OCR confidence
 ```
 
-### 26.8. Não transformar tabela em Markdown cedo
+### 26.8. Do not transform table to Markdown early
 
-Guardar células primeiro.
+Store cells first.
 
-Markdown é apenas renderer:
+Markdown is just a renderer:
 
 ```text
 StructuredTable → MarkdownTableRenderer
 ```
 
-Isso é essencial para `rowspan`, `colspan`, células vazias e tabelas entre páginas.
+This is essential for `rowspan`, `colspan`, empty cells, and cross-page tables.
 
 ---
 
-## 27. Tabelas continuadas entre páginas
+## 27. Cross-page continued tables
 
-Esse requisito agora faz parte do MVP, porque foi explicitamente citado como um caso real importante.
+This requirement is now part of the MVP, because it was explicitly cited as an important real case.
 
-### 27.1. Problema
+### 27.1. Problem
 
-Página 10:
-
-```text
-| Processo | Parte | Valor |
-| ...      | ...   | ...   |
-| 123      | João  | 900   |
-```
-
-Página 11:
+Page 10:
 
 ```text
-| Processo | Parte | Valor |
-| 124      | Maria | 300   |
-| ...      | ...   | ...   |
+| Process | Party | Amount |
+| ...     | ...   | ...    |
+| 123     | João  | 900    |
 ```
 
-Podem ser:
+Page 11:
 
-* duas tabelas independentes;
-* uma única tabela continuada com cabeçalho repetido;
-* uma tabela sem cabeçalho na segunda página;
-* uma tabela cuja primeira linha da segunda página é continuação de uma célula da página anterior.
+```text
+| Process | Party | Amount |
+| 124     | Maria | 300    |
+| ...     | ...   | ...    |
+```
+
+They may be:
+
+* two independent tables;
+* a single continued table with a repeated header;
+* a table without a header on the second page;
+* a table whose first row on the second page is a continuation of a cell from the previous page.
 
 ### 27.2. `TableSignature`
 
@@ -2243,7 +2243,7 @@ class TableSignature:
 
 ### 27.3. `RowSignature`
 
-Inspirado conceitualmente no MinerU:
+Conceptually inspired by MinerU:
 
 ```python
 @dataclass
@@ -2254,106 +2254,106 @@ class RowSignature:
     normalized_cells: tuple[str, ...]
 ```
 
-### 27.4. Evidências de continuação
+### 27.4. Continuation evidence
 
-Pontuar:
+Score:
 
-* tabela A próxima ao fim da página;
-* tabela B próxima ao início da próxima;
-* número de colunas compatível;
-* tracks X compatíveis;
-* cabeçalho idêntico ou semelhante;
-* segunda página começa diretamente por dados;
-* texto “continuação”, “continua”, “cont.” ou equivalentes;
-* sem novo título forte entre as páginas;
-* sem mudança drástica de largura;
-* tipos de células semelhantes por coluna.
+* table A near the end of the page;
+* table B near the start of the next;
+* compatible column count;
+* compatible X tracks;
+* identical or similar header;
+* second page starts directly with data;
+* text “continuation”, “continues”, “cont.” or equivalents;
+* no strong new title between pages;
+* no drastic width change;
+* similar cell types per column.
 
-### 27.5. Cabeçalho repetido
+### 27.5. Repeated header
 
-Se B repete o cabeçalho de A, não duplicar o header na estrutura lógica da tabela, mas preservar a ocorrência por página em `page_fragments`.
+If B repeats A's header, do not duplicate the header in the table's logical structure, but preserve the per-page occurrence in `page_fragments`.
 
-### 27.6. Rowspan entre páginas
+### 27.6. Cross-page rowspan
 
-Se a estrutura sugere uma célula aberta ao fim da página, manter ocupação lógica para o fragmento seguinte.
+If the structure suggests an open cell at the end of the page, maintain logical occupancy for the next fragment.
 
-Não precisa resolver todos os casos de `rowspan` do mundo no MVP, mas o modelo de dados precisa permitir evolução.
+Does not need to resolve every `rowspan` case in the MVP, but the data model needs to allow evolution.
 
-### 27.7. Não perder paginação
+### 27.7. Do not lose pagination
 
-Mesmo após merge:
+Even after merge:
 
 ```python
 table.page_fragments
 ```
 
-deve indicar onde cada linha/célula apareceu.
+must indicate where each row/cell appeared.
 
-Isso é importante para auditoria e eventual highlight no PDF.
+This is important for auditing and eventual highlighting in the PDF.
 
 ---
 
-## 28. Estágio 7 — OCR Recovery
+## 28. Stage 7 — OCR Recovery
 
-Apesar da numeração, `OCR Recovery` deve ser implementado como **serviço invocável pelos processadores de região**, não como uma passagem linear obrigatória depois de toda prosa e tabela. Uma região de tabela, por exemplo, pode chamar OCR antes da montagem das células; uma região de prosa pode permanecer 100% nativa. O diagrama de estágios representa dependências lógicas, não a necessidade de executar cada bloco em sequência para toda página.
+Despite the numbering, `OCR Recovery` should be implemented as a **service callable by region processors**, not as a mandatory linear pass after all prose and tables. A table region, for example, can call OCR before cell assembly; a prose region can remain 100% native. The stage diagram represents logical dependencies, not the need to execute each block in sequence for every page.
 
-### 28.1. Engine recomendada
+### 28.1. Recommended engine
 
-PaddleOCR é a primeira engine a ser avaliada para o MVP.
+PaddleOCR is the first engine to be evaluated for the MVP.
 
-Motivos:
+Reasons:
 
-* português;
-* OCR moderno;
-* detecção + reconhecimento;
-* orientação;
-* possibilidade de unwarping;
-* modelos de tabela e layout próximos do mesmo ecossistema;
-* execução local.
+* Portuguese;
+* modern OCR;
+* detection + recognition;
+* orientation;
+* unwarping possibility;
+* table and layout models close to the same ecosystem;
+* local execution.
 
-### 28.2. OCR por região
+### 28.2. OCR by region
 
-Fluxo:
+Flow:
 
 ```text
-LayoutRegion bbox em pontos
+LayoutRegion bbox in points
       ↓
-converter para pixel bbox
+convert to pixel bbox
       ↓
-adicionar pequena margem
+add small margin
       ↓
-crop em resolução adequada
+crop at adequate resolution
       ↓
 OCR
       ↓
-converter tokens para coordenadas PDF canônicas
+convert tokens to canonical PDF coordinates
 ```
 
-### 28.3. Resolução
+### 28.3. Resolution
 
-Começar com:
+Start with:
 
 ```text
-150 a 200 DPI → texto normal
-250 a 300 DPI → texto pequeno ou scan ruim
+150 to 200 DPI → normal text
+250 to 300 DPI → small text or bad scan
 ```
 
-Não tornar 300 DPI padrão universal antes de medir custo e qualidade.
+Do not make 300 DPI the universal default before measuring cost and quality.
 
-### 28.4. OCR de página inteira
+### 28.4. Full page OCR
 
-Quando necessário:
+When necessary:
 
-1. detectar orientação;
-2. renderizar;
-3. aplicar correção geométrica se habilitada;
+1. detect orientation;
+2. render;
+3. apply geometric correction if enabled;
 4. OCR;
-5. mapear tokens para espaço canônico;
-6. reconstruir layout/regiões ou utilizar regiões detectadas.
+5. map tokens to canonical space;
+6. reconstruct layout/regions or use detected regions.
 
-### 28.5. OCR não deve “limpar” silenciosamente a saída
+### 28.5. OCR must not silently “clean” the output
 
-Guardar:
+Store:
 
 ```python
 ocr_raw_text
@@ -2361,17 +2361,17 @@ ocr_normalized_text
 ocr_confidence
 ```
 
-Se o OCR retornar `Justica` e o nativo trouxer `Justiça` confiável, não substituir pelo OCR.
+If OCR returns `Justica` and the native text brings a reliable `Justiça`, do not replace with OCR.
 
-### 28.6. OCR de português
+### 28.6. Portuguese OCR
 
-Criar corpus específico com:
+Create a specific corpus with:
 
 ```text
 ã õ ç á à â é ê í ó ô ú
 ```
 
-Além de:
+Plus:
 
 ```text
 Nº
@@ -2381,139 +2381,139 @@ R$
 2º
 ```
 
-E termos comuns do domínio da empresa.
+And common terms from the company's domain.
 
-O objetivo não é treinar um modelo no MVP, mas escolher/configurar corretamente a engine.
+The objective is not to train a model in the MVP, but to correctly choose/configure the engine.
 
 ---
 
-## 29. Estágio 8 — Evidence Fusion
+## 29. Stage 8 — Evidence Fusion
 
-Esta é a camada que diferencia o produto de simplesmente encadear bibliotecas.
+This is the layer that differentiates the product from simply chaining libraries.
 
-### 29.1. Entradas
+### 29.1. Inputs
 
-Para uma região podemos ter:
+For a region we may have:
 
 ```text
 native tokens
 OCR tokens
 layout bbox/type
-native sequência nativa extraída
+native extracted sequence
 image ink map
 font metadata
 quality flags
 ```
 
-### 29.2. Alinhamento espacial
+### 29.2. Spatial alignment
 
-Para cada token OCR, buscar candidatos nativos com:
+For each OCR token, search for native candidates with:
 
-* overlap de bbox;
-* distância de centros;
-* similaridade de linha;
-* texto normalizado semelhante.
+* bbox overlap;
+* center distance;
+* line similarity;
+* similar normalized text.
 
-### 29.3. Casos
+### 29.3. Cases
 
-#### Mesmo texto, mesma região
+#### Same text, same region
 
 ```text
 native: "Justiça"
 ocr:    "Justiça"
 ```
 
-Resultado:
+Result:
 
 ```text
 "Justiça"
 sources = [native, ocr]
-confidence elevada
+high confidence
 ```
 
-#### OCR perde acento
+#### OCR loses accent
 
 ```text
 native: "Justiça"
 ocr:    "Justica"
 ```
 
-Se native está saudável:
+If native is healthy:
 
 ```text
-usar "Justiça"
-registrar divergência
+use "Justiça"
+record divergence
 ```
 
-#### Native corrompido
+#### Corrupted native
 
 ```text
 native: "Ju�ti�a"
 ocr:    "Justiça"
 ```
 
-Resultado:
+Result:
 
 ```text
-usar OCR
+use OCR
 flag = recovered_from_garbled_native
 ```
 
-#### OCR encontra texto ausente
+#### OCR finds missing text
 
 ```text
-native: nenhuma bbox correspondente
+native: no corresponding bbox
 ocr:    "TOTAL"
 ```
 
-Se região visual e confiança forem suficientes:
+If visual region and confidence are sufficient:
 
 ```text
-adicionar token OCR
+add OCR token
 ```
 
-#### Camada OCR invisível duplicada
+#### Duplicated invisible OCR layer
 
 ```text
-native A: bbox visual válida
-native B: mesma palavra deslocada, sem tinta
-OCR:      confirma A
+native A: valid visual bbox
+native B: same word shifted, no ink
+OCR:      confirms A
 ```
 
-Resultado:
+Result:
 
 ```text
-usar A
-marcar B como invisible_duplicate
+use A
+mark B as invisible_duplicate
 ```
 
-### 29.4. Similaridade textual
+### 29.4. Text similarity
 
-Usar similaridade somente como uma evidência, nunca sozinha.
+Use similarity only as one piece of evidence, never alone.
 
-Um número `1.234,56` não pode ser unido a `1.284,56` apenas porque strings são parecidas.
+A number `1.234,56` cannot be joined with `1.284,56` just because strings look similar.
 
-Para tokens predominantemente numéricos, exigir correspondência mais estrita.
+For predominantly numeric tokens, require stricter matching.
 
-### 29.5. Confiança
+### 29.5. Confidence
 
-Evitar falso rigor matemático. O score inicial pode ser heurístico, desde que explicável.
+Avoid false mathematical rigor. The initial score can be heuristic, as long as it is explainable.
 
-Exemplo:
+Example:
 
 ```text
-+ native Unicode válido
-+ visual ink presente
-+ OCR concorda
-+ bbox consistente
-- camada marcada garbled
-- overlap duplicado
-- OCR baixa confiança
++ valid native Unicode
++ visual ink present
++ OCR agrees
++ consistent bbox
+- layer marked garbled
+- duplicated overlap
+- OCR low confidence
 ```
 
-### 29.6. Conflito não resolvido
+### 29.6. Unresolved conflict
 
-Se duas evidências plausíveis discordarem:
+If two plausible pieces of evidence disagree:
 
 ```python
 TokenConflict(
@@ -2523,47 +2523,47 @@ TokenConflict(
 )
 ```
 
-Isso é melhor que esconder incerteza.
+This is better than hiding uncertainty.
 
 ---
 
-## 30. Estágio 9 — Page Assembler
+## 30. Stage 9 — Page Assembler
 
-Depois que regiões estão resolvidas:
+After regions are resolved:
 
-* montar linhas finais;
-* juntar tokens;
-* formar parágrafos;
-* incluir tabelas como blocos estruturais;
-* produzir ordem da página;
-* gerar `raw_text` e `reading_text`.
+* assemble final lines;
+* join tokens;
+* form paragraphs;
+* include tables as structural blocks;
+* produce page order;
+* generate `raw_text` and `reading_text`.
 
-### 30.1. Parágrafos
+### 30.1. Paragraphs
 
-Sinais:
+Signals:
 
-* distância vertical;
-* indentação;
-* continuidade tipográfica;
-* pontuação final;
-* largura de linha;
-* tipo da região;
-* sequência nativa extraída;
-* hifenização.
+* vertical distance;
+* indentation;
+* typographic continuity;
+* final punctuation;
+* line width;
+* region type;
+* native extracted sequence;
+* hyphenation.
 
-### 30.2. Hifenização
+### 30.2. Hyphenation
 
-Não remover `-` automaticamente.
+Do not automatically remove `-`.
 
-Candidato quando:
+Candidate when:
 
 ```text
-linha termina em letra + hífen
-próxima linha começa em letra minúscula
-mesmo parágrafo/região
+line ends in letter + hyphen
+next line starts with a lowercase letter
+same paragraph/region
 ```
 
-Manter informação:
+Maintain information:
 
 ```python
 HyphenJoin(
@@ -2572,105 +2572,105 @@ HyphenJoin(
 )
 ```
 
-### 30.3. Cabeçalhos e rodapés
+### 30.3. Headers and footers
 
-Em `raw_text`: preservar.
+In `raw_text`: preserve.
 
-Em `reading_text`: política configurável.
+In `reading_text`: configurable policy.
 
-Sinalizar repetição por:
+Flag repetition by:
 
-* posição similar;
-* texto igual/similar em várias páginas;
-* fonte/estrutura compatível.
+* similar position;
+* same/similar text on multiple pages;
+* compatible font/structure.
 
 ---
 
-## 31. Estágio 10 — Document Assembler
+## 31. Stage 10 — Document Assembler
 
-### 31.1. Responsabilidades
+### 31.1. Responsibilities
 
-* concatenar páginas sem perder boundaries;
-* detectar elementos repetidos;
-* resolver tabelas entre páginas;
-* preservar links de proveniência;
-* gerar saídas de documento.
+* concatenate pages without losing boundaries;
+* detect repeated elements;
+* resolve cross-page tables;
+* preserve provenance links;
+* generate document outputs.
 
 ### 31.2. Page boundaries
 
-Nunca perder a relação:
+Never lose the relationship:
 
 ```text
-caractere → token → line → region → page
+character → token → line → region → page
 ```
 
-### 31.3. Tabelas entre páginas
+### 31.3. Cross-page tables
 
-Rodar `CrossPageTableResolver` após todas as páginas estarem estruturadas.
+Run `CrossPageTableResolver` after all pages are structured.
 
-### 31.4. Continuidade de parágrafo entre páginas
+### 31.4. Cross-page paragraph continuity
 
-Pode ser implementada após a tabela, mas no MVP deve ser conservadora.
+Can be implemented after the table, but in the MVP should be conservative.
 
-Exemplo:
+Example:
 
 ```text
-página termina sem pontuação
-próxima começa minúscula
-mesmo padrão de coluna
+page ends without punctuation
+next starts with lowercase
+same column pattern
 ```
 
-Pode sinalizar continuidade, mas não precisa fundir irreversivelmente na estrutura primária.
+Can signal continuity, but does not need to irreversibly merge into the primary structure.
 
 ---
 
-## 32. Unicode e português do Brasil
+## 32. Unicode and Brazilian Portuguese
 
-### 32.1. Prioridade
+### 32.1. Priority
 
-Para documentos digitais, PDFium deve ser a primeira fonte para Unicode.
+For digital documents, PDFium must be the first source for Unicode.
 
-OCR entra quando o mapeamento nativo é inadequado.
+OCR enters when the native mapping is inadequate.
 
-### 32.2. Preservar diacríticos
+### 32.2. Preserve diacritics
 
-NFC na saída normalizada:
+NFC in the normalized output:
 
 ```python
 unicodedata.normalize("NFC", text)
 ```
 
-Mas `raw_text` pode manter a sequência original se for necessário para auditoria.
+But `raw_text` can maintain the original sequence if needed for auditing.
 
-### 32.3. Caracteres problemáticos
+### 32.3. Problematic characters
 
-Monitorar:
+Monitor:
 
 ```text
 U+FFFD
 Private Use Area
-glyph sem Unicode
-CID exposto como texto
-controles inesperados
+glyph without Unicode
+CID exposed as text
+unexpected controls
 ```
 
-### 32.4. Recuperação progressiva
+### 32.4. Progressive recovery
 
-Ordem sugerida:
+Suggested order:
 
 ```text
-1. Unicode nativo
-2. informação alternativa do objeto/text range
-3. mapa de glyph/font quando disponível
-4. OCR da região
-5. replacement char + diagnóstico
+1. native Unicode
+2. alternative information from the object/text range
+3. glyph/font map when available
+4. region OCR
+5. replacement char + diagnostics
 ```
 
-Não inventar caractere por linguagem natural no MVP.
+Do not invent characters by natural language in the MVP.
 
-### 32.5. Normalizações que NÃO fazer
+### 32.5. Normalizations NOT to do
 
-Não transformar:
+Do not transform:
 
 ```text
 ç → c
@@ -2679,85 +2679,85 @@ Não transformar:
 ª → a
 ```
 
-Não reformatar automaticamente:
+Do not automatically reformat:
 
 ```text
 CPF
 CNPJ
-número de processo
-valores monetários
-datas
+process number
+monetary values
+dates
 ```
 
 ---
 
-## 33. Casos difíceis e estratégia esperada
+## 33. Difficult cases and expected strategy
 
-| Caso | Caminho preferido |
+| Case | Preferred path |
 |---|---|
-| PDF digital simples | PDFium nativo, sem OCR |
-| PDF digital em duas colunas | structure tree quando útil + layout + sequência nativa extraída + XY-cut em prosa |
-| scan completo | page OCR |
-| página híbrida | native + region OCR |
-| texto nativo garbled | region/page OCR conforme extensão |
-| layer OCR duplicada | overlap + visual ink + dedup |
-| texto invisível | visual verification e OCR se necessário |
-| texto como vetor | path signal + OCR |
-| texto em annotation appearance | annotation signal + OCR/inspection |
-| tabela com bordas | vector grid detector |
-| tabela de duas colunas com borda | relaxed grid detector |
-| tabela sem borda | text track heuristic |
-| tabela visual difícil | table structure model + OCR |
-| tabela em scan | layout + table model + OCR |
-| tabela entre páginas | cross page table resolver |
-| texto rotacionado | orientation group + region handling |
-| cabeçalho/rodapé repetido | preservar raw, classificar reading |
+| Simple digital PDF | native PDFium, no OCR |
+| Two-column digital PDF | structure tree when useful + layout + native extracted sequence + XY-cut on prose |
+| Full scan | page OCR |
+| Hybrid page | native + region OCR |
+| Garbled native text | region/page OCR depending on extent |
+| Duplicated OCR layer | overlap + visual ink + dedup |
+| Invisible text | visual verification and OCR if necessary |
+| Text as vector | path signal + OCR |
+| Text in annotation appearance | annotation signal + OCR/inspection |
+| Table with borders | vector grid detector |
+| Two-column table with border | relaxed grid detector |
+| Borderless table | text track heuristic |
+| Difficult visual table | table structure model + OCR |
+| Table in scan | layout + table model + OCR |
+| Cross-page table | cross page table resolver |
+| Rotated text | orientation group + region handling |
+| Repeated header/footer | preserve raw, classify reading |
 
 ---
 
-## 34. Stack tecnológica recomendada
+## 34. Recommended technology stack
 
-### 34.1. Linguagem
+### 34.1. Language
 
-**Python 3.12+** para o MVP.
+**Python 3.12+** for the MVP.
 
-Motivos:
+Reasons:
 
-* velocidade de implementação;
-* ecossistema de OCR e modelos documentais;
-* integração simples com PaddleOCR/ONNX/PyTorch quando necessário;
-* facilidade de criar tooling de diagnóstico;
-* integração com pypdfium2;
-* prototipação rápida de heurísticas usando documentos reais.
+* implementation speed;
+* OCR and document model ecosystem;
+* simple integration with PaddleOCR/ONNX/PyTorch when necessary;
+* ease of creating diagnostic tooling;
+* integration with pypdfium2;
+* rapid prototyping of heuristics using real documents.
 
 ### 34.2. PDF backend
 
 **pypdfium2 + PDFium**.
 
-Não mudar essa decisão agora.
+Do not change this decision now.
 
 ### 34.3. OCR
 
-Primeira opção a avaliar e implementar:
+First option to evaluate and implement:
 
-**PaddleOCR**, fixando uma versão do pipeline OCR que ofereça reconhecimento multilíngue com `pt`/Portuguese. O repositório atual documenta português entre os idiomas suportados; a versão exata do modelo será congelada depois do benchmark inicial do corpus.
+**PaddleOCR**, pinning a version of the OCR pipeline that offers multilingual recognition with `pt`/Portuguese. The current repository documents Portuguese among the supported languages; the exact model version will be frozen after the initial corpus benchmark.
 
-Manter contrato pluggable para testar outro engine sem alterar pipeline.
+Maintain a pluggable contract to test another engine without changing the pipeline.
 
 ### 34.4. Layout
 
-Primeira avaliação:
+First evaluation:
 
-* modelo de layout do ecossistema PaddleOCR;
-* alternativa ONNX RT-DETR/PP-DocLayout compatível com nossos requisitos.
+* layout model from the PaddleOCR ecosystem;
+* ONNX RT-DETR/PP-DocLayout alternative compatible with our requirements.
 
-A seleção final deve sair do corpus empresarial, não de benchmark público isolado.
+The final selection should come from the enterprise corpus, not from an isolated public benchmark.
 
-### 34.5. Tabela visual
+### 34.5. Visual table
 
-Interface pluggable.
+Pluggable interface.
 
-Candidatos:
+Candidates:
 
 * Paddle table recognition;
 * SLANet/SLANeXT;
@@ -2765,30 +2765,30 @@ Candidatos:
 
 ### 34.6. NumPy/OpenCV
 
-Úteis para:
+Useful for:
 
-* matrizes de overlap;
-* mask de tinta;
-* análise de imagem;
+* overlap matrices;
+* ink mask;
+* image analysis;
 * projections;
-* agrupamento geométrico;
-* transformação de coordenadas.
+* geometric grouping;
+* coordinate transformation.
 
-Não usar OpenCV como requisito para toda página se uma operação equivalente puder ser feita com arrays/Pillow mais barato.
+Do not use OpenCV as a requirement for every page if an equivalent operation can be done more cheaply with arrays/Pillow.
 
-### 34.7. Rust como otimização posterior
+### 34.7. Rust as a later optimization
 
-LiteParse mostra o valor de um core nativo. Não devemos ignorar isso, mas também não devemos começar reimplementando o projeto em Rust.
+LiteParse shows the value of a native core. We should not ignore this, but we should also not start by reimplementing the project in Rust.
 
-Limite claro:
+Clear limit:
 
-> Se profiling mostrar que a enumeração PDFium e as transformações de arrays dominam o tempo, criar uma extensão Rust/PyO3 **somente para aquisição/batch geométrico**.
+> If profiling shows that PDFium enumeration and array transformations dominate the time, create a Rust/PyO3 extension **only for acquisition/geometric batch**.
 
-O restante do pipeline permanece Python.
+The rest of the pipeline remains Python.
 
 ---
 
-## 35. Estrutura de repositório sugerida
+## 35. Suggested repository structure
 
 ```text
 structured-pdf-text/
@@ -2884,9 +2884,9 @@ structured-pdf-text/
     └── compare_extractors.py
 ```
 
-### 35.1. Motivo da separação
+### 35.1. Reason for the separation
 
-Queremos poder substituir:
+We want to be able to replace:
 
 ```text
 PDFium source
@@ -2895,13 +2895,13 @@ OCR engine
 table structure engine
 ```
 
-sem alterar o modelo estrutural e os renderers.
+without altering the structural model and the renderers.
 
 ---
 
-## 36. API pública do MVP
+## 36. MVP public API
 
-### 36.1. Uso simples
+### 36.1. Simple usage
 
 ```python
 from structured_pdf_text import PdfTextExtractor
@@ -2912,13 +2912,13 @@ result = extractor.extract("documento.pdf")
 print(result.reading_text)
 ```
 
-### 36.2. Máxima recuperação
+### 36.2. Maximum recovery
 
 ```python
 print(result.raw_text)
 ```
 
-### 36.3. Estrutura
+### 36.3. Structure
 
 ```python
 for page in result.pages:
@@ -2926,7 +2926,7 @@ for page in result.pages:
         print(region.kind, region.bbox)
 ```
 
-### 36.4. Tabelas
+### 36.4. Tables
 
 ```python
 for table in result.tables:
@@ -2934,7 +2934,7 @@ for table in result.tables:
     print(table.cells)
 ```
 
-### 36.5. Diagnóstico
+### 36.5. Diagnostics
 
 ```python
 for page in result.pages:
@@ -2942,7 +2942,7 @@ for page in result.pages:
     print(page.diagnostics.reasons)
 ```
 
-### 36.6. Configuração
+### 36.6. Configuration
 
 ```python
 extractor = PdfTextExtractor(
@@ -2958,7 +2958,7 @@ extractor = PdfTextExtractor(
 )
 ```
 
-### 36.7. Modos
+### 36.7. Modes
 
 ```text
 native
@@ -2967,29 +2967,29 @@ balanced
 ocr
 ```
 
-**`native`**: PDFium + reconstrução determinística, nenhum modelo.
+**`native`**: PDFium + deterministic reconstruction, no models.
 
-**`fast`**: análise de complexidade, modelos apenas quando acionados.
+**`fast`**: complexity analysis, models only when triggered.
 
-**`balanced`**: layout em toda página e OCR seletivo. Padrão recomendado para o objetivo de qualidade.
+**`balanced`**: layout on every page and selective OCR. Recommended default for the quality objective.
 
-**`ocr`**: força OCR da página, principalmente para diagnóstico.
+**`ocr`**: forces page OCR, primarily for diagnostics.
 
 ---
 
-## 37. CLI do MVP
+## 37. MVP CLI
 
 ```bash
 pdftext extract documento.pdf
 ```
 
-Saída de máxima recuperação:
+Maximum recovery output:
 
 ```bash
 pdftext extract documento.pdf --output raw
 ```
 
-JSON estruturado:
+Structured JSON:
 
 ```bash
 pdftext extract documento.pdf --output json
@@ -3001,19 +3001,19 @@ Markdown:
 pdftext extract documento.pdf --output markdown
 ```
 
-Modo:
+Mode:
 
 ```bash
 pdftext extract documento.pdf --mode balanced
 ```
 
-Português:
+Portuguese:
 
 ```bash
 pdftext extract documento.pdf --language pt
 ```
 
-Diagnóstico:
+Diagnostics:
 
 ```bash
 pdftext inspect documento.pdf --page 12
@@ -3025,7 +3025,7 @@ Overlay:
 pdftext overlay documento.pdf --page 12 --out page-12.png
 ```
 
-Comparação:
+Comparison:
 
 ```bash
 pdftext compare documento.pdf --against pymupdf,liteparse,marker,docling
@@ -3033,9 +3033,9 @@ pdftext compare documento.pdf --against pymupdf,liteparse,marker,docling
 
 ---
 
-## 38. Ferramentas de diagnóstico obrigatórias
+## 38. Mandatory diagnostic tools
 
-Essas ferramentas não são “nice to have”. Com PDFs reais, serão o mecanismo principal de evolução.
+These tools are not “nice to have”. With real PDFs, they will be the main mechanism for evolution.
 
 ### 38.1. Character dump
 
@@ -3055,9 +3055,9 @@ mapping_failed
 visible
 ```
 
-### 38.2. Overlay visual
+### 38.2. Visual overlay
 
-Gerar imagem com camadas selecionáveis:
+Generate image with selectable layers:
 
 ```text
 native chars
@@ -3072,7 +3072,7 @@ conflicts
 
 ### 38.3. Evidence report
 
-Por página:
+Per page:
 
 ```text
 strategy
@@ -3087,13 +3087,13 @@ tables
 processing time
 ```
 
-### 38.4. Diff textual
+### 38.4. Text diff
 
-Comparar:
+Compare:
 
 ```text
-nosso raw_text
-nosso reading_text
+our raw_text
+our reading_text
 PyMuPDF text
 PyMuPDF sort=True
 LiteParse
@@ -3104,92 +3104,92 @@ Marker
 PaddleOCR visual
 ```
 
-Não é obrigatório executar todos em todo ciclo. O script deve aceitar adapters disponíveis.
+Not required to run all in every cycle. The script must accept available adapters.
 
 ### 38.5. Table viewer
 
-Gerar HTML simples mostrando:
+Generate simple HTML showing:
 
-* imagem da região;
-* grid detectado;
-* células;
-* texto por célula;
-* confiança;
-* fragmentos entre páginas.
+* region image;
+* detected grid;
+* cells;
+* text per cell;
+* confidence;
+* cross-page fragments.
 
 ---
 
-## 39. Escopo do MVP revisado
+## 39. Revised MVP scope
 
-### 39.1. Obrigatório
+### 39.1. Mandatory
 
-O MVP só deve ser considerado completo quando possuir:
+The MVP should only be considered complete when it has:
 
-| Capacidade | Obrigatória |
+| Capability | Mandatory |
 |---|---|
-| texto nativo PDFium | sim |
-| bbox por caractere | sim |
-| reconstrução de linhas | sim |
-| inferência de espaços/palavras | sim |
-| acentuação pt-BR preservada | sim |
-| detecção de duplicação | sim |
-| detecção de camada textual ruim | sim |
-| renderização da página | sim |
-| layout regions | sim |
-| duas colunas | sim |
-| OCR seletivo | sim |
-| OCR de scan | sim |
-| merge nativo/OCR | sim |
-| tabela com bordas | sim |
-| tabela sem borda básica | sim |
-| fallback de table model | sim |
-| tabela entre páginas | sim |
-| raw_text | sim |
-| reading_text | sim |
-| JSON estruturado | sim |
-| diagnóstico/overlay | sim |
+| native PDFium text | yes |
+| bbox per character | yes |
+| line reconstruction | yes |
+| space/word inference | yes |
+| pt-BR accentuation preserved | yes |
+| duplication detection | yes |
+| bad text layer detection | yes |
+| page rendering | yes |
+| layout regions | yes |
+| two columns | yes |
+| selective OCR | yes |
+| scan OCR | yes |
+| native/OCR merge | yes |
+| table with borders | yes |
+| basic borderless table | yes |
+| table model fallback | yes |
+| cross-page table | yes |
+| raw_text | yes |
+| reading_text | yes |
+| structured JSON | yes |
+| diagnostics/overlay | yes |
 
-### 39.2. Fora do MVP
+### 39.2. Out of scope for MVP
 
-Pode ficar para depois:
+Can be deferred:
 
-* fórmulas para LaTeX;
-* descrição de figuras;
-* entendimento de charts;
-* handwriting especializado além do que OCR já fornecer;
-* semântica jurídica;
-* classificação de assunto;
+* formulas to LaTeX;
+* figure descriptions;
+* chart understanding;
+* specialized handwriting beyond what OCR already provides;
+* legal semantics;
+* subject classification;
 * RAG/chunking;
-* VLM genérico obrigatório;
+* mandatory generic VLM;
 * DOCX/PPTX;
-* treinamento de modelos próprios.
+* training own models.
 
-### 39.3. Atenção ao escopo
+### 39.3. Scope awareness
 
-Adicionar tabela visual e layout ao MVP aumenta o esforço em relação ao plano anterior. Isso é justificado porque o requisito mudou: “o máximo de texto possível nos mais variados PDFs” não é atendido de forma honesta por um engine baseado somente na camada textual.
+Adding visual tables and layout to the MVP increases effort compared to the previous plan. This is justified because the requirement changed: “the maximum possible text in the most varied PDFs” is not honestly met by an engine based solely on the text layer.
 
 ---
 
-## 40. Plano de implementação
+## 40. Implementation plan
 
-A sequência abaixo prioriza um resultado utilizável cedo, mas evita construir uma arquitetura que precisará ser descartada quando chegarmos às tabelas e OCR.
+The sequence below prioritizes a usable result early, but avoids building an architecture that will need to be discarded when we get to tables and OCR.
 
-### Milestone 0 — Baseline e corpus
+### Milestone 0 — Baseline and corpus
 
-**Objetivo:** saber contra o que estamos competindo.
+**Objective:** know what we are competing against.
 
-Implementar:
+Implement:
 
-* estrutura do repositório;
-* CLI mínima;
-* corpus local privado;
-* runner por diretório;
-* adapters de comparação disponíveis;
-* registro de tempo e saída.
+* repository structure;
+* minimal CLI;
+* local private corpus;
+* directory runner;
+* available comparison adapters;
+* time and output logging.
 
-Separar documentos em categorias, sem tentar criar um benchmark acadêmico.
+Separate documents into categories, without trying to create an academic benchmark.
 
-Sugestão de categorias:
+Suggested categories:
 
 ```text
 digital-simple
@@ -3207,49 +3207,49 @@ rotated
 legacy-system
 ```
 
-**Saída:** relatório bruto dos extratores existentes sobre documentos reais.
+**Output:** raw report from existing extractors on real documents.
 
 ### Milestone 1 — Native Evidence Foundation
 
-**Objetivo:** extrair tudo que PDFium sabe sem perder dados.
+**Objective:** extract everything PDFium knows without losing data.
 
-Implementar:
+Implement:
 
-* `BBox`/coordenadas;
+* `BBox`/coordinates;
 * `NativeCharacter`;
 * `NativeObjectEvidence`;
 * char index;
 * Unicode;
 * font/size/angle;
-* flags do PDFium;
+* PDFium flags;
 * images;
-* paths mínimos;
-* annotations mínimas;
+* minimal paths;
+* minimal annotations;
 * raw page dump.
 
-**Saída:** JSON bruto por página + texto nativo trivial.
+**Output:** raw JSON per page + trivial native text.
 
 ### Milestone 2 — Native Text Reconstruction
 
-**Objetivo:** produzir texto nativo útil sem modelos.
+**Objective:** produce useful native text without models.
 
-Implementar:
+Implement:
 
-* normalização conservadora;
-* deduplicação;
+* conservative normalization;
+* deduplication;
 * orientation groups;
 * line detector;
 * space detector;
 * word/token detector;
-* sequência nativa extraída diagnostics.
+* native extracted sequence diagnostics.
 
-**Saída:** `native_reading_text` e overlays de linha/token.
+**Output:** `native_reading_text` and line/token overlays.
 
 ### Milestone 3 — Complexity Analyzer
 
-**Objetivo:** saber quando não confiar na camada textual.
+**Objective:** know when not to trust the text layer.
 
-Implementar:
+Implement:
 
 * text coverage;
 * full page image;
@@ -3261,76 +3261,76 @@ Implementar:
 * annotation text signal;
 * page decision report.
 
-**Saída:** `NATIVE`, `HYBRID_CANDIDATE`, `OCR_CANDIDATE` + razões.
+**Output:** `NATIVE`, `HYBRID_CANDIDATE`, `OCR_CANDIDATE` + reasons.
 
 ### Milestone 4 — Layout Regions
 
-**Objetivo:** separar prosa, tabela e outros tipos antes de resolver leitura.
+**Objective:** separate prose, table, and other types before resolving reading order.
 
-Implementar:
+Implement:
 
 * `LayoutEngine`;
-* primeira engine;
+* first engine;
 * low-res rendering;
 * region normalization;
 * native line assignment;
 * region overlay.
 
-**Saída:** página segmentada.
+**Output:** segmented page.
 
-### Milestone 5 — Reading Order robusto
+### Milestone 5 — Robust Reading Order
 
-**Objetivo:** resolver uma e duas colunas sem corromper tabelas.
+**Objective:** resolve one and two columns without corrupting tables.
 
-Implementar:
+Implement:
 
 * region graph;
 * full-width bands;
 * source-order consistency;
-* XY-cut somente em prosa;
+* XY-cut only on prose;
 * rotated groups;
-* title/footnote/caption handling básico.
+* basic title/footnote/caption handling.
 
-**Saída:** `reading_text` bom para PDFs digitais complexos.
+**Output:** good `reading_text` for complex digital PDFs.
 
-### Milestone 6 — OCR Engine e scans
+### Milestone 6 — OCR Engine and scans
 
-**Objetivo:** recuperar páginas sem texto.
+**Objective:** recover pages without text.
 
-Implementar:
+Implement:
 
 * `OcrEngine`;
 * PaddleOCR adapter;
-* português;
+* Portuguese;
 * page render;
 * page OCR;
 * coordinate transform;
 * OCR overlay;
 * confidence.
 
-**Saída:** scans convertidos para tokens estruturados.
+**Output:** scans converted to structured tokens.
 
-### Milestone 7 — OCR seletivo e Evidence Fusion
+### Milestone 7 — Selective OCR and Evidence Fusion
 
-**Objetivo:** páginas híbridas.
+**Objective:** hybrid pages.
 
-Implementar:
+Implement:
 
 * `RegionQuality`;
-* OCR de crop;
-* promoção page OCR;
+* crop OCR;
+* page OCR promotion;
 * spatial alignment;
 * native/OCR dedup;
 * conflict handling;
 * source provenance.
 
-**Saída:** `Mixed` extraction real.
+**Output:** real `Mixed` extraction.
 
-### Milestone 8 — Table Pipeline determinístico
+### Milestone 8 — Deterministic Table Pipeline
 
-**Objetivo:** resolver tabelas digitais comuns sem depender de modelo.
+**Objective:** resolve common digital tables without depending on a model.
 
-Implementar:
+Implement:
 
 * path line extraction;
 * strict grid;
@@ -3340,29 +3340,29 @@ Implementar:
 * prose rejection;
 * table confidence.
 
-**Saída:** `StructuredTable` para tabelas digitais.
+**Output:** `StructuredTable` for digital tables.
 
-### Milestone 9 — Table visual fallback
+### Milestone 9 — Visual table fallback
 
-**Objetivo:** resolver tabelas que não têm geometria suficiente.
+**Objective:** resolve tables that do not have sufficient geometry.
 
-Implementar:
+Implement:
 
 * `TableStructureEngine`;
-* primeira engine visual;
-* crop da tabela;
-* estrutura predicted;
+* first visual engine;
+* table crop;
+* predicted structure;
 * native text → cell mapping;
 * OCR → cell mapping;
 * merge.
 
-**Saída:** tabelas de scan e tabelas ruins.
+**Output:** scan tables and poorly formatted tables.
 
 ### Milestone 10 — Cross Page Tables
 
-**Objetivo:** unir fragmentos.
+**Objective:** join fragments.
 
-Implementar:
+Implement:
 
 * `TableSignature`;
 * header signatures;
@@ -3374,11 +3374,11 @@ Implementar:
 * page fragments;
 * merge.
 
-**Saída:** uma tabela lógica preservando páginas de origem.
+**Output:** a single logical table preserving source pages.
 
-### Milestone 11 — Document Assembly e renderers
+### Milestone 11 — Document Assembly and renderers
 
-Implementar:
+Implement:
 
 * `StructuredDocument`;
 * raw text;
@@ -3388,9 +3388,9 @@ Implementar:
 * repeated headers/footers policy;
 * page boundaries.
 
-### Milestone 12 — Performance e hardening
+### Milestone 12 — Performance and hardening
 
-Medir:
+Measure:
 
 * PDFium time;
 * FFI calls;
@@ -3401,21 +3401,21 @@ Medir:
 * merge time;
 * peak memory.
 
-Somente depois:
+Only then:
 
 * batching;
 * multiprocessing;
 * model reuse;
 * cache;
-* Rust/PyO3 batch extraction se justificado.
+* Rust/PyO3 batch extraction if justified.
 
 ---
 
-## 41. Matriz de aderência arquitetural
+## 41. Architectural adherence matrix
 
-A tabela abaixo não é um benchmark de qualidade. É uma avaliação arquitetural qualitativa de quão bem cada projeto cobre os problemas que nosso produto precisa resolver. Escala: 1 = fraco/não é foco, 5 = muito forte.
+The table below is not a quality benchmark. It is a qualitative architectural assessment of how well each project covers the problems our product needs to solve. Scale: 1 = weak/not the focus, 5 = very strong.
 
-| Projeto | Nativo fiel | Diagnóstico adaptativo | Layout | OCR | Tabelas | Entre páginas | Explicabilidade | Fit geral para inspiração |
+| Project | Faithful native | Adaptive diagnosis | Layout | OCR | Tables | Cross-page | Explainability | Overall fit for inspiration |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Docling | 4 | 4 | 5 | 4 | 5 | 3 | 3 | 5 |
 | MinerU | 4 | 5 | 5 | 5 | 5 | 5 | 3 | 5 |
@@ -3425,69 +3425,69 @@ A tabela abaixo não é um benchmark de qualidade. É uma avaliação arquitetur
 | PaddleOCR | 1 | 3 | 5 | 5 | 5 | 4 | 3 | 4 |
 | MarkItDown | 3 | 2 | 2 | 2 | 3 | 1 | 4 | 2 |
 | Marker | 4 | 5 | 5 | 5 | 5 | 4 | 4 | 5 |
-| **Nossa arquitetura alvo** | **5** | **5** | **5** | **5** | **5** | **5** | **5** | **5** |
+| **Our target architecture** | **5** | **5** | **5** | **5** | **5** | **5** | **5** | **5** |
 
-A última linha representa **objetivo de design**, não capacidade já implementada.
+The last row represents a **design objective**, not already-implemented capability.
 
-### 41.1. Ranking por contribuição à nossa arquitetura
+### 41.1. Ranking by contribution to our architecture
 
-**LiteParse**: melhor validação do nosso core PDFium + selective OCR + complexity gate.
+**LiteParse**: best validation of our PDFium core + selective OCR + complexity gate.
 
-**Marker**: melhor padrão de decisão entre camada nativa boa, bloco ruim e OCR completo.
+**Marker**: best decision pattern between a good native layer, a bad block, and full OCR.
 
-**Xberg**: melhores lições para ordem de leitura determinística e cascata de tabelas.
+**Xberg**: best lessons for deterministic reading order and table cascade.
 
-**MinerU**: melhor referência para fusão híbrida pesada e tabela entre páginas.
+**MinerU**: best reference for heavy hybrid fusion and cross-page tables.
 
-**PaddleOCR**: melhor candidato para a camada visual/OCR local.
+**PaddleOCR**: best candidate for the local visual/OCR layer.
 
-**Docling**: melhor referência para organização do pipeline e modelo documental.
+**Docling**: best reference for pipeline organization and document model.
 
-**Unstructured**: boa referência para estratégia automática e fallback.
+**Unstructured**: good reference for automatic strategy and fallback.
 
-**MarkItDown**: boa referência para extensibilidade, não para o núcleo PDF.
+**MarkItDown**: good reference for extensibility, not for the PDF core.
 
 ---
 
-## 42. Avaliação com documentos reais da empresa
+## 42. Evaluation with real company documents
 
-O usuário deste projeto explicitamente prefere validar com documentos reais em vez de montar primeiro uma suíte formal. A estratégia do MVP seguirá isso.
+The user of this project explicitly prefers validating with real documents instead of first building a formal test suite. The MVP strategy will follow this.
 
-### 42.1. Corpus inicial
+### 42.1. Initial corpus
 
-Não precisamos de milhares de PDFs. Precisamos de diversidade.
+We do not need thousands of PDFs. We need diversity.
 
-Começar com aproximadamente 50 a 100 documentos escolhidos intencionalmente.
+Start with approximately 50 to 100 intentionally selected documents.
 
-Exemplo de composição:
+Example composition:
 
-| Categoria | Meta inicial |
+| Category | Initial target |
 |---|---:|
-| digital simples | 10 |
-| múltiplas colunas | 10 |
-| fontes/Unicode problemáticos | 10 |
-| tabelas digitais | 15 |
-| tabelas entre páginas | 10 |
+| simple digital | 10 |
+| multiple columns | 10 |
+| problematic fonts/Unicode | 10 |
+| digital tables | 15 |
+| cross-page tables | 10 |
 | scans | 10 |
-| híbridos | 10 |
-| casos conhecidos como ruins | 15 |
+| hybrid | 10 |
+| known bad cases | 15 |
 
-Um PDF pode pertencer a várias categorias.
+A PDF can belong to multiple categories.
 
-### 42.2. Casos de ouro
+### 42.2. Golden cases
 
-Para cada problema recorrente, manter uma página ou trecho conhecido:
+For each recurring problem, maintain a known page or excerpt:
 
 ```text
-"este parágrafo deve aparecer inteiro"
-"esta coluna deve vir antes daquela"
-"esta tabela possui 7 colunas"
-"esta célula é R$ 1.234,56"
-"a tabela continua na página 14"
-"o nome contém Ç/Ã/Á"
+"this paragraph must appear complete"
+"this column must come before that one"
+"this table has 7 columns"
+"this cell is R$ 1.234,56"
+"the table continues on page 14"
+"the name contains Ç/Ã/Á"
 ```
 
-Não precisa começar como teste automatizado. Pode ser um arquivo YAML de observações humanas:
+Does not need to start as an automated test. Can be a YAML file of human observations:
 
 ```yaml
 file: processo-001.pdf
@@ -3496,59 +3496,59 @@ expectations:
   - contains: "Justiça"
   - contains: "São Cristóvão"
   - table_columns: 6
-  - reading_order_note: "coluna esquerda antes da direita"
+  - reading_order_note: "left column before the right"
 ```
 
-Depois esses dados podem virar regressões automáticas quando os problemas se estabilizarem.
+Later these data can become automatic regressions once the problems stabilize.
 
-### 42.3. Extratores a comparar
+### 42.3. Extractors to compare
 
-Quando puderem ser executados localmente e conforme suas licenças:
+When they can be run locally and in accordance with their licenses:
 
-* PyMuPDF/MuPDF como referência técnica isolada;
+* PyMuPDF/MuPDF as the isolated technical reference;
 * LiteParse;
 * Docling;
 * MinerU;
 * Xberg;
 * Marker;
 * Unstructured;
-* PaddleOCR para rota visual;
-* MarkItDown apenas como referência simples.
+* PaddleOCR for the visual route;
+* MarkItDown only as a simple reference.
 
-### 42.4. O que observar
+### 42.4. What to observe
 
-Não reduzir tudo a uma nota única.
+Do not reduce everything to a single score.
 
-Registrar pelo menos:
+Record at least:
 
 ```text
-text recall observado
-texto inventado/duplicado
-Unicode/acentos
-ordem de leitura
-tabelas detectadas
-estrutura de célula
-tabela entre páginas
-necessidade de OCR
-tempo
-memória
+observed text recall
+invented/duplicated text
+Unicode/accents
+reading order
+detected tables
+cell structure
+cross-page table
+OCR need
+time
+memory
 ```
 
-### 42.5. Métricas práticas
+### 42.5. Practical metrics
 
 #### Character recovery
 
-Quando houver texto de referência disponível:
+When reference text is available:
 
 ```text
 CER = Character Error Rate
 ```
 
-Útil especialmente para OCR.
+Especially useful for OCR.
 
 #### Normalized text coverage
 
-Para trechos esperados:
+For expected excerpts:
 
 ```text
 found_expected_fragments / expected_fragments
@@ -3556,11 +3556,11 @@ found_expected_fragments / expected_fragments
 
 #### Accent correctness
 
-Contar divergências em palavras contendo diacríticos.
+Count divergences in words containing diacritics.
 
 #### Reading order
 
-Não precisamos inicialmente de métrica acadêmica complexa. Marcar página como:
+We do not initially need a complex academic metric. Mark page as:
 
 ```text
 OK
@@ -3568,40 +3568,40 @@ MINOR
 WRONG
 ```
 
-#### Tabela
+#### Table
 
-Avaliar separadamente:
+Evaluate separately:
 
 ```text
-detectada?
-número de linhas correto?
-número de colunas correto?
-texto nas células correto?
-ordem correta?
-merge entre páginas correto?
+detected?
+correct number of rows?
+correct number of columns?
+correct text in cells?
+correct order?
+correct cross-page merge?
 ```
 
-### 42.6. Critério de vitória contra MuPDF
+### 42.6. Victory criterion against MuPDF
 
-Para o corpus empresarial:
+For the enterprise corpus:
 
-* não perder casos que MuPDF extrai corretamente;
-* recuperar uma parcela relevante dos casos que MuPDF perde por ausência/corrupção da camada textual;
-* melhorar ordem em documentos de múltiplas colunas selecionados;
-* extrair tabela de forma mais útil quando plain text do MuPDF embaralha células;
-* manter desempenho aceitável no caminho nativo.
+* do not lose cases that MuPDF extracts correctly;
+* recover a relevant portion of cases that MuPDF misses due to absence/corruption of the text layer;
+* improve order in selected multi-column documents;
+* extract tables more usefully when MuPDF's plain text scrambles cells;
+* maintain acceptable performance on the native path.
 
-Não exigir que `balanced` seja tão rápido quanto MuPDF; exigir que `native/fast` seja competitivo e que o custo adicional tenha uma razão auditável.
+Do not require `balanced` to be as fast as MuPDF; require that `native/fast` is competitive and that additional cost has an auditable reason.
 
 ---
 
-## 43. Estratégia de comparação específica com MuPDF/PyMuPDF
+## 43. Specific comparison strategy with MuPDF/PyMuPDF
 
-### 43.1. Comparar diferentes visões
+### 43.1. Compare different views
 
-PyMuPDF possui mais de uma saída relevante.
+PyMuPDF has more than one relevant output.
 
-Comparar:
+Compare:
 
 ```text
 page.get_text("text")
@@ -3610,7 +3610,7 @@ page.get_text("words")
 page.get_text("rawdict")
 ```
 
-Nosso produto:
+Our product:
 
 ```text
 raw_text
@@ -3619,55 +3619,55 @@ tokens/lines
 structured_document
 ```
 
-### 43.2. Não copiar implementação
+### 43.2. Do not copy the implementation
 
-MuPDF/PyMuPDF continua sendo referência de comportamento e qualidade, não fonte de código.
+MuPDF/PyMuPDF remains a reference for behavior and quality, not a source of code.
 
-Não copiar:
+Do not copy:
 
-* constantes;
+* constants;
 * thresholds;
-* código;
-* estruturas internas literais;
-* heurísticas sob AGPL.
+* code;
+* literal internal structures;
+* heuristics under AGPL.
 
-Usar:
+Use:
 
-* especificação PDF;
-* documentação pública;
-* comportamento observado;
-* corpus empresarial;
-* nossas próprias decisões.
+* PDF specification;
+* public documentation;
+* observed behavior;
+* enterprise corpus;
+* our own decisions.
 
-### 43.3. Casos onde podemos superar
+### 43.3. Cases where we can surpass
 
-**Scans:** OCR seletivo/visual.
+**Scans:** selective/visual OCR.
 
-**Layer Unicode ruim:** OCR de região.
+**Bad Unicode layer:** region OCR.
 
-**Tabela:** estrutura própria em vez de plain text.
+**Table:** own structure instead of plain text.
 
-**Página híbrida:** merge por região.
+**Hybrid page:** merge by region.
 
-**Ordem:** layout + sequência nativa extraída + geometria.
+**Order:** layout + native extracted sequence + geometry.
 
-**Tabela entre páginas:** representação documental.
+**Cross-page table:** document representation.
 
 ---
 
-## 44. Desempenho
+## 44. Performance
 
-### 44.1. Dois budgets de desempenho
+### 44.1. Two performance budgets
 
-Não existe um único “tempo do parser”. Teremos caminhos diferentes.
+There is no single “parser time”. We will have different paths.
 
-**Native/fast:** deve permanecer próximo do custo de PDFium + heurísticas.
+**Native/fast:** must remain close to the cost of PDFium + heuristics.
 
-**Balanced:** aceita custo de layout.
+**Balanced:** accepts the cost of layout.
 
-**OCR/hybrid:** aceita custo maior porque há conteúdo que não seria recuperado de outra forma.
+**OCR/hybrid:** accepts higher cost because there is content that would not be recovered otherwise.
 
-### 44.2. Medir tempo por estágio
+### 44.2. Measure time per stage
 
 ```text
 open_pdf_ms
@@ -3685,19 +3685,19 @@ assemble_ms
 
 ### 44.3. FFI Python ↔ PDFium
 
-Risco real do design Python.
+Real risk of the Python design.
 
-Se cada caractere exige várias transições FFI:
+If each character requires several FFI transitions:
 
 ```text
-N chars × 5 chamadas
+N chars × 5 calls
 ```
 
-um documento grande pode acumular overhead.
+a large document can accumulate overhead.
 
-Primeiro medir.
+Measure first.
 
-Se necessário:
+If necessary:
 
 ```text
 Python orchestrator
@@ -3707,24 +3707,24 @@ Rust/PyO3 batch native extractor
 PDFium
 ```
 
-### 44.4. Renderização
+### 44.4. Rendering
 
-Evitar renderizar em alta resolução toda página antecipadamente.
+Avoid rendering every page at high resolution in advance.
 
-Fluxo ideal:
+Ideal flow:
 
 ```text
-low-res para layout/ink
-high-res somente páginas/regiões que precisam OCR/table visual
+low-res for layout/ink
+high-res only for pages/regions that need OCR/visual table
 ```
 
-Essa ideia é semelhante ao comportamento seletivo observado em Marker.
+This idea is similar to the selective behavior observed in Marker.
 
-### 44.5. Reuso de modelos
+### 44.5. Model reuse
 
-Modelos devem ser inicializados uma vez por worker/processo.
+Models must be initialized once per worker/process.
 
-Não:
+Not:
 
 ```text
 page → load model → infer → unload
@@ -3732,23 +3732,23 @@ page → load model → infer → unload
 
 ### 44.6. Batching
 
-Layout e OCR devem aceitar batches quando a engine suportar.
+Layout and OCR must accept batches when the engine supports it.
 
-### 44.7. Paralelismo
+### 44.7. Parallelism
 
-PDFium exige cautela com threads e objetos compartilhados.
+PDFium requires caution with threads and shared objects.
 
-Primeira estratégia de escala:
+First scaling strategy:
 
-* um documento/processo ou páginas em workers independentes conforme segurança da binding;
-* modelos compartilhados de forma compatível com o runtime;
-* avaliar multiprocessing antes de threads para operações PDFium.
+* one document/process or pages in independent workers according to binding safety;
+* models shared in a way compatible with the runtime;
+* evaluate multiprocessing before threads for PDFium operations.
 
-### 44.8. Meta inicial de desempenho
+### 44.8. Initial performance target
 
-Não fixar um número artificial antes do corpus.
+Do not fix an artificial number before the corpus.
 
-Registrar percentis:
+Record percentiles:
 
 ```text
 p50 ms/page
@@ -3756,284 +3756,284 @@ p95 ms/page
 p99 ms/page
 ```
 
-separados por estratégia.
+separated by strategy.
 
 ---
 
-## 45. Estimativa de esforço revisada
+## 45. Revised effort estimate
 
-O novo escopo é materialmente maior que o documento original.
+The new scope is materially larger than the original document.
 
-Uma implementação “PDFium + linhas + palavras + order” pode ser feita rapidamente. Um MVP que honestamente inclua OCR seletivo, layout, tabelas visuais e continuidade entre páginas é outro produto.
+A “PDFium + lines + words + order” implementation can be done quickly. An MVP that honestly includes selective OCR, layout, visual tables, and cross-page continuity is a different product.
 
-Faixa indicativa para **um desenvolvedor experiente com forte apoio de coding agent**, trabalhando iterativamente com corpus real:
+Indicative range for **an experienced developer with strong coding agent support**, working iteratively with a real corpus:
 
-| Marco | Faixa indicativa |
+| Milestone | Indicative range |
 |---|---:|
-| Baseline + native evidence | 1 a 2 semanas |
-| Reconstrução + complexity | 2 a 3 semanas |
-| Layout + reading order | 2 a 4 semanas |
-| OCR + evidence fusion | 2 a 4 semanas |
-| Table pipeline digital | 2 a 4 semanas |
-| Table visual + cross page | 3 a 5 semanas |
-| Hardening/performance | 2 a 4 semanas |
+| Baseline + native evidence | 1 to 2 weeks |
+| Reconstruction + complexity | 2 to 3 weeks |
+| Layout + reading order | 2 to 4 weeks |
+| OCR + evidence fusion | 2 to 4 weeks |
+| Digital table pipeline | 2 to 4 weeks |
+| Visual table + cross page | 3 to 5 weeks |
+| Hardening/performance | 2 to 4 weeks |
 
-As etapas se sobrepõem e aprendizado do corpus muda a velocidade. Portanto não somar mecanicamente como cronograma contratual.
+The stages overlap and corpus learning changes the speed. Therefore do not add these up mechanically as a contractual schedule.
 
-Uma expectativa mais realista é:
+A more realistic expectation is:
 
 ```text
-Proof of concept forte:          ~4 a 6 semanas
-MVP tecnicamente demonstrável:  ~8 a 12 semanas
-MVP robusto para piloto interno: ~12 a 20 semanas
+Strong proof of concept:          ~4 to 6 weeks
+Technically demonstrable MVP:     ~8 to 12 weeks
+Robust MVP for internal pilot:    ~12 to 20 weeks
 ```
 
-Isso é uma **estimativa de engenharia**, não compromisso de prazo.
+This is an **engineering estimate**, not a deadline commitment.
 
-### 45.1. Onde o risco está
+### 45.1. Where the risk lies
 
-Não está em “ler caracteres do PDFium”.
+Not in “reading characters from PDFium”.
 
-Está em:
+It is in:
 
 ```text
-qualidade do gate
-merge OCR/nativo
-tabelas sem borda
-ordem em layouts híbridos
-continuidade de tabelas
-edge cases de PDFs ruins
+gate quality
+OCR/native merge
+borderless tables
+order in hybrid layouts
+table continuity
+edge cases of bad PDFs
 ```
 
 ---
 
 ## 46. Performance versus PyMuPDF
 
-### 46.1. Caminho nativo
+### 46.1. Native path
 
-É plausível que sejamos mais lentos que MuPDF inicialmente por:
+It is plausible that we will initially be slower than MuPDF due to:
 
 * Python;
 * FFI;
-* mais diagnóstico;
-* mais estruturas intermediárias.
+* more diagnostics;
+* more intermediate structures.
 
-Isso é aceitável se o gap for controlado.
+This is acceptable if the gap is controlled.
 
-### 46.2. Caminho balanceado
+### 46.2. Balanced path
 
-Será inevitavelmente mais lento que `page.get_text()` porque executa layout visual.
+Will inevitably be slower than `page.get_text()` because it runs visual layout.
 
-A comparação justa é qualidade/custo, não apenas velocidade.
+The fair comparison is quality/cost, not just speed.
 
-### 46.3. Caminho OCR
+### 46.3. OCR path
 
-Ordens de grandeza mais caro que extração nativa. Só deve ser usado quando necessário.
+Orders of magnitude more expensive than native extraction. Should only be used when necessary.
 
-### 46.4. Vantagem potencial
+### 46.4. Potential advantage
 
-Ao contrário de uma pipeline pesada executada sempre, nossa arquitetura pode manter um caminho rápido:
+Unlike a heavy pipeline always executed, our architecture can maintain a fast path:
 
 ```text
-PDF digital simples
+simple digital PDF
   ↓
 native evidence
   ↓
 complexity = clean
   ↓
-sem layout pesado no modo fast
+no heavy layout in fast mode
   ↓
-texto
+text
 ```
 
-Isso mantém escalabilidade para o caso comum.
+This maintains scalability for the common case.
 
 ---
 
-## 47. Segurança, privacidade e implantação
+## 47. Security, privacy, and deployment
 
-### 47.1. Princípio
+### 47.1. Principle
 
-Todos os componentes padrão do MVP devem ser executáveis localmente.
+All standard MVP components must be runnable locally.
 
-Nenhum PDF empresarial deve ser enviado a serviço externo por padrão.
+No enterprise PDF should be sent to an external service by default.
 
-### 47.2. Engines remotas
+### 47.2. Remote engines
 
-Se futuramente existir:
+If in the future there is:
 
 ```python
 RemoteRecoveryEngine
 ```
 
-ela precisa ser opt in e sujeita a política explícita.
+it must be opt-in and subject to explicit policy.
 
 ### 47.3. Logs
 
-Nunca registrar automaticamente:
+Never automatically record:
 
-* texto integral do documento;
+* full document text;
 * CPF;
-* nomes;
-* número de processo;
-* conteúdo de células.
+* names;
+* process number;
+* cell content.
 
-Logs operacionais usam IDs/hash e métricas.
+Operational logs use IDs/hashes and metrics.
 
-Dumps completos só em tooling de diagnóstico controlado.
+Full dumps only in controlled diagnostic tooling.
 
-### 47.4. PDFs hostis
+### 47.4. Hostile PDFs
 
-Defesas:
+Defenses:
 
-* limite de páginas;
-* limite de tamanho;
+* page limit;
+* size limit;
 * timeout;
-* limite de pixels renderizados;
-* captura de exceções por página;
-* subprocesso opcional para isolamento no futuro.
+* rendered pixel limit;
+* per-page exception capture;
+* optional subprocess for future isolation.
 
 ---
 
-## 48. Licenciamento
+## 48. Licensing
 
-Esta seção não substitui avaliação jurídica.
+This section does not replace legal review.
 
-### 48.1. Dependências que motivam a arquitetura
+### 48.1. Dependencies that motivate the architecture
 
-A intenção é evitar incorporar MuPDF/PyMuPDF no produto proprietário quando a empresa não quiser cumprir AGPL ou adquirir a licença comercial.
+The intent is to avoid incorporating MuPDF/PyMuPDF in the proprietary product when the company does not want to comply with AGPL or acquire the commercial license.
 
 ### 48.2. PDFium/pypdfium2
 
-Continuam sendo a base preferida por licença permissiva do ecossistema e capacidade técnica. Verificar versões e notices antes da distribuição.
+Remain the preferred foundation due to the ecosystem's permissive license and technical capability. Verify versions and notices before distribution.
 
-### 48.3. Projetos pesquisados
+### 48.3. Researched projects
 
-A pesquisa arquitetural **não significa que copiaremos código** deles.
+The architectural research **does not mean we will copy code** from them.
 
-Observações atuais:
+Current observations:
 
-* Docling: MIT no código;
+* Docling: MIT on the code;
 * LiteParse: Apache 2.0;
 * Xberg: MIT;
 * Unstructured: Apache 2.0;
-* PaddleOCR: Apache 2.0 para o código, com verificação separada dos pesos escolhidos;
+* PaddleOCR: Apache 2.0 for the code, with separate verification of chosen weights;
 * MarkItDown: MIT;
-* Marker: código Apache 2.0; pesos têm termos próprios e precisam de análise separada;
-* MinerU: licença atual baseada em Apache 2.0 com termos adicionais de uso comercial e atribuição para serviços online.
+* Marker: Apache 2.0 code; weights have their own terms and need separate analysis;
+* MinerU: current license based on Apache 2.0 with additional terms for commercial use and attribution for online services.
 
-### 48.4. Regra de projeto
+### 48.4. Project rule
 
-Antes de adicionar um modelo:
+Before adding a model:
 
 ```text
-1. registrar nome/versão
-2. registrar URL
-3. registrar licença do código
-4. registrar licença dos pesos
-5. registrar dependências relevantes
-6. aprovação para uso empresarial
+1. record name/version
+2. record URL
+3. record code license
+4. record weights license
+5. record relevant dependencies
+6. approval for enterprise use
 ```
 
-### 48.5. Clean room conceitual
+### 48.5. Conceptual clean room
 
-Ao aprender com projetos permissivos ou copyleft, documentar **ideia arquitetural**, não portar heurísticas literais sem revisão de licença.
+When learning from permissive or copyleft projects, document the **architectural idea**, not porting literal heuristics without license review.
 
 ---
 
-## 49. Principais riscos técnicos
+## 49. Main technical risks
 
-### 49.1. PDFium não expor toda a evidência necessária
+### 49.1. PDFium not exposing all needed evidence
 
-Algumas informações do PDF podem não estar disponíveis pela API textual pública da forma desejada.
+Some PDF information may not be available through the public text API in the desired way.
 
-Mitigação:
+Mitigation:
 
-* usar APIs de objetos de página quando disponíveis;
-* usar renderização como sensor visual;
-* manter `NativeEvidenceSource` substituível;
-* não acoplar algoritmo ao pypdfium2 diretamente.
+* use page object APIs when available;
+* use rendering as a visual sensor;
+* keep `NativeEvidenceSource` replaceable;
+* do not couple the algorithm directly to pypdfium2.
 
-### 49.2. Falso positivo de OCR
+### 49.2. OCR false positive
 
-Um gate agressivo pode mandar páginas boas para OCR e piorar texto exato.
+An aggressive gate may send good pages to OCR and worsen exact text.
 
-Mitigação:
+Mitigation:
 
-* começar conservador;
-* OCR seletivo;
-* manter native como evidência concorrente;
-* comparar divergência;
-* medir por categoria.
+* start conservative;
+* selective OCR;
+* keep native as competing evidence;
+* compare divergence;
+* measure by category.
 
-### 49.3. Layout model errar tabela/prosa
+### 49.3. Layout model misclassifying table/prose
 
-Se tabela for classificada como texto, reading order pode corromper dados.
+If a table is classified as text, reading order may corrupt data.
 
-Mitigação:
+Mitigation:
 
-* sinais determinísticos de grid/track podem promover região a tabela;
-* table detector também roda por indícios geométricos;
-* nunca depender de uma única classe do modelo.
+* deterministic grid/track signals can promote a region to table;
+* table detector also runs on geometric indicators;
+* never depend on a single class from the model.
 
-### 49.4. Duas colunas confundirem tabela
+### 49.4. Two columns being confused with a table
 
-Risco já observado em arquiteturas de mercado.
+Risk already observed in market architectures.
 
-Mitigação:
+Mitigation:
 
 * `ProseVsTableClassifier`;
-* altura/comprimento das linhas;
-* recorrência de tracks;
+* line height/length;
+* track recurrence;
 * numeric density;
 * layout signal;
-* isolamento do TablePipeline.
+* isolation of the TablePipeline.
 
-### 49.5. Tabela sem borda virar prosa
+### 49.5. Borderless table becoming prose
 
-Mitigação:
+Mitigation:
 
-* exigir recorrência em várias linhas;
-* coerência de colunas;
-* semântica simples de numeric tracks;
-* model fallback somente quando layout também indicar tabela.
+* require recurrence across multiple lines;
+* column coherence;
+* simple semantics of numeric tracks;
+* model fallback only when layout also indicates table.
 
-### 49.6. Tabela entre páginas ser unida erroneamente
+### 49.6. Cross-page table being joined erroneously
 
-Mitigação:
+Mitigation:
 
-* nunca usar somente proximidade de página;
-* exigir múltiplas evidências estruturais;
-* preservar fragmentos mesmo quando merge ocorre;
-* confidence e diagnostics.
+* never use only page proximity;
+* require multiple structural pieces of evidence;
+* preserve fragments even when merge occurs;
+* confidence and diagnostics.
 
-### 49.7. OCR errar valores numéricos
+### 49.7. OCR getting numeric values wrong
 
-Crítico em documentos empresariais.
+Critical in enterprise documents.
 
-Mitigação:
+Mitigation:
 
-* preferir native quando válido;
-* regras mais estritas de merge para números;
-* guardar conflito;
-* usar OCR de maior resolução em tabela quando necessário.
+* prefer native when valid;
+* stricter merge rules for numbers;
+* keep the conflict;
+* use higher-resolution OCR in tables when necessary.
 
-### 49.8. Python virar gargalo
+### 49.8. Python becoming a bottleneck
 
-Mitigação:
+Mitigation:
 
-* medir por estágio;
-* vectorizar geometria;
-* evitar objetos Python excessivos no hot path quando necessário;
-* PyO3/Rust somente depois de profiling.
+* measure per stage;
+* vectorize geometry;
+* avoid excessive Python objects in the hot path when necessary;
+* PyO3/Rust only after profiling.
 
-### 49.9. Crescimento excessivo de escopo
+### 49.9. Excessive scope growth
 
-Document AI completo é um problema muito maior que extração textual.
+Complete Document AI is a much larger problem than text extraction.
 
-Mitigação:
+Mitigation:
 
-O MVP não fará:
+The MVP will not do:
 
 ```text
 image captioning
@@ -4046,11 +4046,11 @@ entity extraction
 
 ---
 
-## 50. Observabilidade
+## 50. Observability
 
-### 50.1. Toda página registra decisão
+### 50.1. Every page records a decision
 
-Exemplo:
+Example:
 
 ```json
 {
@@ -4067,7 +4067,7 @@ Exemplo:
 }
 ```
 
-### 50.2. Métricas agregadas
+### 50.2. Aggregated metrics
 
 ```text
 native_pages
@@ -4082,15 +4082,15 @@ unicode_failures
 conflicts
 ```
 
-### 50.3. Motivo de cada fallback
+### 50.3. Reason for each fallback
 
-Não aceitar log genérico:
+Do not accept generic log:
 
 ```text
 fallback to OCR
 ```
 
-Preferir:
+Prefer:
 
 ```text
 page=17 region=table-2 OCR_REGION reason=native_text_missing visual_ink=0.42
@@ -4098,45 +4098,45 @@ page=17 region=table-2 OCR_REGION reason=native_text_missing visual_ink=0.42
 
 ---
 
-## 51. Critérios de saída do MVP
+## 51. MVP exit criteria
 
-O MVP pode ser apresentado como pronto para piloto interno quando:
+The MVP can be presented as ready for internal pilot when:
 
-1. extrair PDFs digitais comuns sem OCR;
-2. preservar acentos e Unicode dos documentos selecionados;
-3. resolver páginas de duas colunas do corpus sem intercalar linhas;
-4. detectar quando a camada textual está ausente ou claramente ruim;
-5. recuperar scans em português com qualidade útil;
-6. recuperar regiões visuais sem substituir texto nativo bom no restante da página;
-7. extrair tabelas com bordas em estrutura de células;
-8. extrair parte significativa das tabelas sem borda representativas do corpus;
-9. usar fallback visual quando a tabela determinística falhar;
-10. unir os principais exemplos reais de tabela continuada entre páginas;
-11. produzir `raw_text`, `reading_text` e JSON estruturado;
-12. explicar por diagnóstico quais estratégias foram usadas;
-13. possuir overlay que permita investigar uma página problemática;
-14. ser executável inteiramente no ambiente da empresa;
-15. não depender de MuPDF/PyMuPDF em runtime.
+1. extracting common digital PDFs without OCR;
+2. preserving accents and Unicode from the selected documents;
+3. resolving two-column corpus pages without interleaving lines;
+4. detecting when the text layer is absent or clearly bad;
+5. recovering Portuguese scans with useful quality;
+6. recovering visual regions without replacing good native text on the rest of the page;
+7. extracting tables with borders in a cell structure;
+8. extracting a significant portion of borderless tables representative of the corpus;
+9. using visual fallback when the deterministic table fails;
+10. joining the main real examples of cross-page continued tables;
+11. producing `raw_text`, `reading_text`, and structured JSON;
+12. explaining through diagnostics which strategies were used;
+13. having an overlay that allows investigation of a problematic page;
+14. being executable entirely in the company's environment;
+15. not depending on MuPDF/PyMuPDF at runtime.
 
-### 51.1. Gate comparativo
+### 51.1. Comparative gate
 
-Sobre o corpus de aceitação:
+On the acceptance corpus:
 
 ```text
-Nenhuma regressão grave sistemática contra MuPDF nos PDFs digitais simples.
+No systematic severe regression against MuPDF on simple digital PDFs.
 
-Melhoria demonstrável nos casos que exigem layout, OCR ou tabela estruturada.
+Demonstrable improvement in cases that require layout, OCR, or structured tables.
 
-Erros remanescentes classificáveis por categoria e visíveis nos diagnostics.
+Remaining errors classifiable by category and visible in diagnostics.
 ```
 
 ---
 
-## 52. Primeiro incremento recomendado
+## 52. First recommended increment
 
-A primeira entrega deve deliberadamente **não** começar pelo modelo de layout.
+The first delivery must deliberately **not** start with the layout model.
 
-Implementar:
+Implement:
 
 ```text
 PDFium NativeEvidenceSource
@@ -4152,329 +4152,329 @@ native reading text
 visual overlay
 ```
 
-Escolher cinco PDFs:
+Choose five PDFs:
 
 ```text
-1 simples
-1 duas colunas
-1 tabela
-1 Unicode ruim
+1 simple
+1 two columns
+1 table
+1 bad Unicode
 1 scan
 ```
 
-No scan, o resultado vazio nesse primeiro incremento é esperado. Ele serve para validar o sinal de `NO_TEXT/SCANNED` depois.
+For the scan, an empty result in this first increment is expected. It serves to validate the `NO_TEXT/SCANNED` signal later.
 
-### 52.1. Critério de conclusão
+### 52.1. Completion criterion
 
-Conseguimos olhar uma página e responder exatamente:
+We can look at a page and answer exactly:
 
 ```text
-quais chars PDFium viu?
-qual Unicode?
-onde cada char está?
-qual era sua ordem?
-como nosso LineDetector os agrupou?
+which chars did PDFium see?
+what Unicode?
+where is each char?
+what was its order?
+how did our LineDetector group them?
 ```
 
 ---
 
-## 53. Segundo incremento recomendado
+## 53. Second recommended increment
 
-Adicionar `ComplexityAnalyzer` antes de OCR.
+Add `ComplexityAnalyzer` before OCR.
 
-Trabalhar com casos reais:
+Work with real cases:
 
 ```text
 scan
-camada duplicada
-camada Unicode ruim
-imagem com texto
+duplicated layer
+bad Unicode layer
+image with text
 ```
 
-Implementar somente sinais determinísticos.
+Implement only deterministic signals.
 
-Resultado esperado:
+Expected result:
 
 ```text
-página 1 clean
-página 2 scanned
-página 3 garbled
-página 4 embedded_images
+page 1 clean
+page 2 scanned
+page 3 garbled
+page 4 embedded_images
 ```
 
-Não fazer OCR ainda.
+Do not perform OCR yet.
 
 ---
 
-## 54. Terceiro incremento recomendado
+## 54. Third recommended increment
 
-Adicionar layout low-res e separar regiões.
+Add low-res layout and separate regions.
 
-Objetivo:
+Objective:
 
 ```text
-prosa ≠ tabela
+prose ≠ table
 ```
 
-Usar primeiro os PDFs de duas colunas e tabelas.
+Use two-column and table PDFs first.
 
-Só depois ligar XY-cut/reading order por região.
+Only then enable XY-cut/reading order per region.
 
 ---
 
-## 55. Quarto incremento recomendado
+## 55. Fourth recommended increment
 
-Adicionar PaddleOCR para scans inteiros.
+Add PaddleOCR for full scans.
 
-Não implementar merge complexo primeiro.
+Do not implement complex merge first.
 
-Objetivo:
+Objective:
 
 ```text
 scan → OCR tokens → reading text
 ```
 
-Validar português e coordenadas.
+Validate Portuguese and coordinates.
 
 ---
 
-## 56. Quinto incremento recomendado
+## 56. Fifth recommended increment
 
-OCR por região + evidence fusion.
+OCR by region + evidence fusion.
 
-Usar páginas híbridas reais.
+Use real hybrid pages.
 
-Validar:
+Validate:
 
 ```text
-texto native bom permanece idêntico
-texto visual ausente é adicionado
-não surgem duplicatas
+good native text remains identical
+absent visual text is added
+no duplicates appear
 ```
 
 ---
 
-## 57. Sexto incremento recomendado
+## 57. Sixth recommended increment
 
-Tabela digital.
+Digital table.
 
-Começar por bordas explícitas.
+Start with explicit borders.
 
-Depois:
+Then:
 
 ```text
 relaxed borders
 borderless tracks
 ```
 
-Evitar table model enquanto ainda não conseguimos inspecionar bem o grid determinístico.
+Avoid the table model while we still cannot inspect the deterministic grid well.
 
 ---
 
-## 58. Sétimo incremento recomendado
+## 58. Seventh recommended increment
 
-Table structure model + OCR por célula/região.
+Table structure model + OCR per cell/region.
 
-Somente agora adicionar a parte visual pesada das tabelas.
+Only now add the heavy visual part of tables.
 
 ---
 
-## 59. Oitavo incremento recomendado
+## 59. Eighth recommended increment
 
 Cross page table resolver.
 
-Começar pelos exemplos reais da empresa, porque as heurísticas de continuidade são altamente dependentes do tipo de documento.
+Start with the company's real examples, because continuity heuristics are highly dependent on the document type.
 
-Construir regra genérica a partir dos sinais, não a partir de nomes fixos de documentos.
-
----
-
-## 60. Decisões que não devemos tomar cedo
-
-### 60.1. “Todo PDF complexo vai para OCR”
-
-Errado. Pode perder texto exato e aumentar custo.
-
-### 60.2. “Layout model sempre define ordem”
-
-Errado. Sequência nativa extraída pode ser superior em muitos PDFs digitais.
-
-### 60.3. “XY-cut resolve tabela e coluna”
-
-Errado. Há evidência prática de corrupção de tabela quando o mesmo mecanismo tenta resolver ambos.
-
-### 60.4. “PaddleOCR será nossa arquitetura”
-
-Errado. É uma engine dentro da arquitetura.
-
-### 60.5. “Markdown é o produto”
-
-Errado. Markdown perde informação estrutural e de proveniência.
-
-### 60.6. “Um score de qualidade basta”
-
-Errado. Precisamos das razões.
-
-### 60.7. “Se OCR concorda parcialmente, ele está certo”
-
-Errado, especialmente em números.
-
-### 60.8. “Header/footer deve ser removido”
-
-Não da evidência. No máximo de uma renderização de leitura.
-
-### 60.9. “Implementar tudo em Rust agora”
-
-Prematuro. Python + engines nativas oferece velocidade de desenvolvimento e performance suficiente para medir o problema real.
+Build a generic rule from signals, not from fixed document names.
 
 ---
 
-## 61. Roadmap depois do MVP
+## 60. Decisions we should not make early
 
-### Fase 1 — Qualidade
+### 60.1. “Every complex PDF goes to OCR”
 
-* refinar classifier de complexidade;
-* melhor region quality;
-* melhores regras para documentos jurídicos/administrativos sem acoplamento ao domínio;
-* segundo OCR engine opcional para divergências críticas.
+Wrong. Can lose exact text and increase cost.
 
-### Fase 2 — Performance
+### 60.2. “Layout model always defines order”
+
+Wrong. Native extracted sequence can be superior in many digital PDFs.
+
+### 60.3. “XY-cut resolves tables and columns”
+
+Wrong. There is practical evidence of table corruption when the same mechanism tries to resolve both.
+
+### 60.4. “PaddleOCR will be our architecture”
+
+Wrong. It is an engine within the architecture.
+
+### 60.5. “Markdown is the product”
+
+Wrong. Markdown loses structural and provenance information.
+
+### 60.6. “A single quality score is enough”
+
+Wrong. We need the reasons.
+
+### 60.7. “If OCR partially agrees, it is correct”
+
+Wrong, especially for numbers.
+
+### 60.8. “Header/footer should be removed”
+
+Not from the evidence. At most from a reading rendering.
+
+### 60.9. “Implement everything in Rust now”
+
+Premature. Python + native engines provides development speed and performance sufficient to measure the real problem.
+
+---
+
+## 61. Roadmap after the MVP
+
+### Phase 1 — Quality
+
+* refine the complexity classifier;
+* better region quality;
+* better rules for legal/administrative documents without domain coupling;
+* optional second OCR engine for critical divergences.
+
+### Phase 2 — Performance
 
 * batch native extraction;
-* PyO3/Rust se necessário;
-* batching de modelos;
+* PyO3/Rust if necessary;
+* model batching;
 * cache;
-* workers persistentes.
+* persistent workers.
 
-### Fase 3 — Estrutura
+### Phase 3 — Structure
 
-* listas;
+* lists;
 * headings;
 * forms/key-value;
 * footnotes;
-* melhor paragraph continuation.
+* better paragraph continuation.
 
-### Fase 4 — Multimodal opcional
+### Phase 4 — Optional multimodal
 
-* fórmulas;
+* formulas;
 * charts;
 * image text/description;
-* VLM somente para regiões não resolvidas.
+* VLM only for unresolved regions.
 
 ---
 
-## 62. Recomendação final para apresentação à empresa
+## 62. Final recommendation for presentation to the company
 
-A proposta não deve ser apresentada como “vamos reimplementar PyMuPDF”.
+The proposal must not be presented as “we will reimplement PyMuPDF”.
 
-A formulação correta é:
+The correct formulation is:
 
-> **Construir um engine próprio de extração robusta de PDF, com backend permissivamente licenciado, que preserve texto digital exato quando ele existe e utilize layout e OCR de forma seletiva para recuperar conteúdo que parsers tradicionais perdem.**
+> **Build our own robust PDF extraction engine, with a permissively licensed backend, that preserves exact digital text when it exists and uses layout and OCR selectively to recover content that traditional parsers miss.**
 
-A escolha inicial de PDFium permanece válida e foi reforçada pelo estudo dos parsers atuais. O que muda é a camada acima dele.
+The initial choice of PDFium remains valid and was reinforced by the study of current parsers. What changes is the layer above it.
 
-A arquitetura final do MVP é deliberadamente híbrida:
-
-```text
-PDFium                  → verdade nativa quando confiável
-Layout detector         → entende regiões
-Quality gate            → decide onde confiar
-OCR                     → recupera o que não está disponível nativamente
-Table pipeline          → evita tratar tabela como prosa
-Evidence fusion         → escolhe sem apagar alternativas
-Document assembler      → resolve relações entre páginas
-```
-
-O diferencial não será possuir “mais uma heurística de texto”. O diferencial será **orquestrar múltiplas evidências sem sacrificar o conteúdo correto que já estava no PDF**.
-
-Isso também cria um caminho incremental seguro:
+The final MVP architecture is deliberately hybrid:
 
 ```text
-primeiro somos bons em texto nativo
-        ↓
-adicionamos diagnóstico
-        ↓
-adicionamos layout
-        ↓
-adicionamos OCR seletivo
-        ↓
-adicionamos tabelas
-        ↓
-adicionamos continuidade entre páginas
+PDFium                  → native truth when reliable
+Layout detector         → understands regions
+Quality gate            → decides where to trust
+OCR                     → recovers what is not natively available
+Table pipeline          → avoids treating tables as prose
+Evidence fusion         → chooses without erasing alternatives
+Document assembler      → resolves cross-page relationships
 ```
 
-Cada etapa melhora a cobertura sem obrigar a substituir o núcleo anterior.
+The differentiator will not be having “one more text heuristic”. The differentiator will be **orchestrating multiple pieces of evidence without sacrificing the correct content that was already in the PDF**.
+
+This also creates a safe incremental path:
+
+```text
+first we are good at native text
+        ↓
+we add diagnostics
+        ↓
+we add layout
+        ↓
+we add selective OCR
+        ↓
+we add tables
+        ↓
+we add cross-page continuity
+```
+
+Each stage improves coverage without requiring the previous core to be replaced.
 
 ---
 
-## 63. Fontes técnicas consultadas nesta revisão
+## 63. Technical sources consulted in this revision
 
 ### Docling
 
-* Repositório: <https://github.com/docling-project/docling>
+* Repository: <https://github.com/docling-project/docling>
 * `docling/pipeline/standard_pdf_pipeline.py`
 * `docling/backend/pypdfium2_backend.py`
-* documentação de pipeline options: <https://docling-project.github.io/docling/reference/pipeline_options/>
-* commit analisado no GitHub durante esta revisão: `5ea6490ffdc57b2fd7de5cc436f2d0a22f2214d4`
+* pipeline options documentation: <https://docling-project.github.io/docling/reference/pipeline_options/>
+* commit analyzed on GitHub during this revision: `5ea6490ffdc57b2fd7de5cc436f2d0a22f2214d4`
 
 ### MinerU
 
-* Repositório: <https://github.com/opendatalab/MinerU>
+* Repository: <https://github.com/opendatalab/MinerU>
 * `mineru/backend/hybrid/hybrid_analyze.py`
 * `mineru/backend/utils/runtime_utils.py`
 * `mineru/utils/table_merge.py`
-* licença atual: `LICENSE.md`
-* commit analisado: `4fe4bde114a23ee5dd637eae99b767f4669bf58c`
+* current license: `LICENSE.md`
+* commit analyzed: `4fe4bde114a23ee5dd637eae99b767f4669bf58c`
 
 ### LiteParse
 
-* Repositório: <https://github.com/run-llama/liteparse>
+* Repository: <https://github.com/run-llama/liteparse>
 * `crates/liteparse/src/ocr_merge.rs`
 * `crates/liteparse/src/projection.rs`
 * `crates/liteparse/src/extract.rs`
-* commit analisado: `c999b5302ac903e8bed5ce047ac4a0122cd869b1`
+* commit analyzed: `c999b5302ac903e8bed5ce047ac4a0122cd869b1`
 
 ### Xberg
 
-* Repositório: <https://github.com/xberg-io/xberg>
+* Repository: <https://github.com/xberg-io/xberg>
 * `crates/xberg/src/extractors/pdf/mod.rs`
 * `crates/xberg-native-pdf/src/pipeline/reading_order/xycut.rs`
 * `crates/xberg/src/pdf/native/table.rs`
-* documentação de layout: <https://docs.xberg.io/guides/layout-detection/>
-* commit analisado: `606fa72230058da9b9d0a16e5c999b38b92dc847`
+* layout documentation: <https://docs.xberg.io/guides/layout-detection/>
+* commit analyzed: `606fa72230058da9b9d0a16e5c999b38b92dc847`
 
 ### Unstructured
 
-* Repositório: <https://github.com/Unstructured-IO/unstructured>
+* Repository: <https://github.com/Unstructured-IO/unstructured>
 * `unstructured/partition/pdf.py`
 * `LICENSE.md`
-* commit analisado: `ee2b3a350d314a2a4e0cb7dfe6e34a1d92fd426d`
+* commit analyzed: `ee2b3a350d314a2a4e0cb7dfe6e34a1d92fd426d`
 
 ### PaddleOCR
 
-* Repositório: <https://github.com/PaddlePaddle/PaddleOCR>
+* Repository: <https://github.com/PaddlePaddle/PaddleOCR>
 * PP-StructureV3 documentation/source
 * Table Recognition v2 documentation
 * multilingual recognition documentation
-* commit analisado: `2661c7c0ef5c613e8f93c6e93b2e052399f0f854`
+* commit analyzed: `2661c7c0ef5c613e8f93c6e93b2e052399f0f854`
 
 ### MarkItDown
 
-* Repositório: <https://github.com/microsoft/markitdown>
+* Repository: <https://github.com/microsoft/markitdown>
 * `packages/markitdown/src/markitdown/converters/_pdf_converter.py`
 * `LICENSE`
-* commit analisado: `5640da7142fb546da0ef712093f3e29d87c62e0b`
+* commit analyzed: `5640da7142fb546da0ef712093f3e29d87c62e0b`
 
 ### Marker
 
-* Repositório: <https://github.com/datalab-to/marker>
+* Repository: <https://github.com/datalab-to/marker>
 * `marker/converters/pdf.py`
 * `marker/builders/document.py`
 * `marker/builders/line.py`
-* README do projeto e documentação dos modos `fast`/`balanced`
-* commit analisado: `f6b072ad46a79026ee75d1777c4e3e798a2712a5`
+* project README and documentation for `fast`/`balanced` modes
+* commit analyzed: `f6b072ad46a79026ee75d1777c4e3e798a2712a5`
 
-### Referências anteriores
+### Previous references
 
 * PyMuPDF: <https://github.com/pymupdf/PyMuPDF>
 * MuPDF: <https://github.com/ArtifexSoftware/mupdf>
@@ -4484,33 +4484,33 @@ Cada etapa melhora a cobertura sem obrigar a substituir o núcleo anterior.
 
 ---
 
-## 64. Registro da decisão arquitetural
+## 64. Architectural decision record
 
-**Decisão:** substituir a arquitetura linear `PDFium → reconstrução → OCR fallback` por um **Hybrid Evidence Fusion Pipeline**.
+**Decision:** replace the linear `PDFium → reconstruction → OCR fallback` architecture with a **Hybrid Evidence Fusion Pipeline**.
 
-**Mantido:** PDFium/pypdfium2 como backend primário, Python para o MVP, reconstrução própria, estrutura interna independente.
+**Kept:** PDFium/pypdfium2 as the primary backend, Python for the MVP, own reconstruction, independent internal structure.
 
-**Adicionado ao MVP:**
+**Added to the MVP:**
 
-* complexity gate cedo;
+* early complexity gate;
 * layout regions;
-* quality gate por região;
-* OCR seletivo;
-* fusão explícita nativo/OCR;
-* table pipeline separado;
+* per-region quality gate;
+* selective OCR;
+* explicit native/OCR fusion;
+* separate table pipeline;
 * table model fallback;
-* tabelas entre páginas;
-* proveniência e conflito por evidência.
+* cross-page tables;
+* per-evidence provenance and conflict.
 
-**Removido como premissa:**
+**Removed as a premise:**
 
-* XY-cut sobre a página inteira;
-* OCR apenas como fallback final por página;
-* tabela como preocupação pós-MVP;
-* `QualityAnalyzer` somente após reconstrução completa.
+* XY-cut over the entire page;
+* OCR only as the final per-page fallback;
+* table as a post-MVP concern;
+* `QualityAnalyzer` only after full reconstruction.
 
-**Justificativa:** o conjunto de arquiteturas atuais mais robustas converge para pipelines adaptativos e region-aware. A análise de código mostrou ainda riscos concretos de aplicar a mesma heurística espacial a prosa e tabelas. A arquitetura revisada maximiza a capacidade de recuperação sem tornar OCR ou modelo visual a fonte principal para PDFs digitais corretos.
+**Justification:** the set of most robust current architectures converges on adaptive and region-aware pipelines. The code analysis also showed concrete risks of applying the same spatial heuristic to both prose and tables. The revised architecture maximizes recovery capability without making OCR or a visual model the primary source for correct digital PDFs.
 
 ---
 
-**Fim do documento.**
+**End of document.**

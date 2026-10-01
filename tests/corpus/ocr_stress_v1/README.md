@@ -1,47 +1,47 @@
 # Document_OCR_Stress_V1
 
-Corpus sintético modular de 60 páginas para inspeção de OCR, geometria,
-regiões raster, tabelas e integração. Todo o conteúdo é fictício e gerado
-localmente; não há documentos empresariais, imagens baixadas ou fontes
-comerciais no corpus.
+Modular synthetic corpus of 60 pages for OCR inspection, geometry,
+raster regions, tables, and integration. All content is fictitious and generated
+locally; there are no business documents, downloaded images, or commercial
+fonts in the corpus.
 
-Esta entrega contém somente o gerador, o manifesto e os testes de integridade.
-Ela não altera `src/structured_pdf_text`, não carrega modelos OCR e não tenta
-corrigir defeitos do parser encontrados durante a inspeção.
+This delivery contains only the generator, the manifest, and the integrity tests.
+It does not modify `src/structured_pdf_text`, does not load OCR models, and does not attempt
+to fix parser defects found during inspection.
 
-## Dependências
+## Dependencies
 
-O gerador usa as dependências já previstas no projeto:
+The generator uses the dependencies already planned in the project:
 
-- ReportLab para criar a camada PDF e QR/Code128;
-- Pillow para transformações determinísticas;
-- pypdfium2 para rasterizar temporariamente o conteúdo das imagens e validar o
-  PDF final.
+- ReportLab to create the PDF layer and QR/Code128;
+- Pillow for deterministic transformations;
+- pypdfium2 to temporarily rasterize image content and validate the
+  final PDF.
 
-Nenhuma dependência é instalada automaticamente. O gerador não depende de
-fontes externas: o texto-base usa as fontes PDF14 do ReportLab.
+No dependency is automatically installed. The generator does not depend on
+external fonts: the base text uses ReportLab's PDF14 fonts.
 
-## Geração no WSL
+## Generation on WSL
 
-Na raiz do repositório:
+From the repository root:
 
 ```bash
 python3 tests/corpus/ocr_stress_v1/generate.py
 ```
 
-Isso cria:
+This creates:
 
-- `manifest.json` e `scenarios.md` ao lado do gerador;
-- `outputs/Document_OCR_Stress_V1.pdf`, ignorado pelo Git.
+- `manifest.json` and `scenarios.md` alongside the generator;
+- `outputs/Document_OCR_Stress_V1.pdf`, ignored by Git.
 
-O PDF completo tem exatamente 60 páginas. O manifesto registra o SHA do PDF,
-as dimensões, o bloco, a presença de texto nativo, regiões raster, tabelas,
-figuras, continuações e indicadores fictícios esperados.
+The complete PDF has exactly 60 pages. The manifest records the SHA of the PDF,
+dimensions, block, presence of native text, raster regions, tables,
+figures, continuations, and expected fictitious indicators.
 
-## Subconjuntos
+## Subsets
 
-Selecione páginas por número, lista ou intervalo. O manifesto do subconjunto
-preserva `source_page` para relacionar cada página gerada à página original:
+Select pages by number, list, or range. The subset manifest
+preserves `source_page` to relate each generated page to the original page:
 
 ```bash
 python3 tests/corpus/ocr_stress_v1/generate.py --pages 15-16
@@ -49,23 +49,23 @@ python3 tests/corpus/ocr_stress_v1/generate.py --pages 36-37 38-39
 python3 tests/corpus/ocr_stress_v1/generate.py --pages 56-57 --output-dir /tmp/ocr-stress-v1
 ```
 
-As continuações 15–16, 36–37, 38–39 e 56–57 devem ser executadas juntas
-quando o objetivo for avaliar continuidade. Um subconjunto é um novo PDF e
-pode ter referências internas diferentes do PDF completo.
+Continuations 15–16, 36–37, 38–39, and 56–57 must be run together
+when the goal is to evaluate continuity. A subset is a new PDF and
+may have different internal references than the complete PDF.
 
-## Testes de integridade
+## Integrity Tests
 
-Os testes não carregam PaddleOCR, PaddlePaddle ou qualquer modelo:
+The tests do not load PaddleOCR, PaddlePaddle, or any model:
 
 ```bash
 pytest -q tests/test_ocr_stress_corpus.py
 ```
 
-Eles geram cópias temporárias, conferem 60 páginas e sua ordem, dimensões,
-hashes, marcadores, presença/ausência de texto selecionável, objetos de imagem,
-subconjuntos, continuações e renderização em baixa resolução.
+They generate temporary copies, check 60 pages and their order, dimensions,
+hashes, markers, presence/absence of selectable text, image objects,
+subsets, continuations, and low-resolution rendering.
 
-Para uma validação manual independente do parser:
+For an independent manual validation of the parser:
 
 ```bash
 python3 - <<'PY'
@@ -77,7 +77,5 @@ print("pages:", len(pdf))
 PY
 ```
 
-Depois da revisão visual, o PDF pode ser usado em invocações separadas do
-PDFExtractor. Registrar SHA do código, páginas, modo, política OCR, threads,
-tempo, memória, exit code e observações; não transformar os indicadores do
-manifesto em regras de produção.
+After the visual review, the PDF can be used in separate PDFExtractor invocations. Record the SHA of the code, pages, mode, OCR policy, threads,
+time, memory, exit code, and observations; do not turn manifest indicators into production rules.

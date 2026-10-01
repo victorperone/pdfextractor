@@ -1,12 +1,12 @@
-# Fase 8 — Benchmark E2E: todas as engines, sequencial
+# Phase 8 — E2E Benchmark: all engines, sequential
 #
-# Smoke test (5 paginas):
+# Smoke test (5 pages):
 #   .\scripts\run_benchmark.ps1
 #
-# Documento completo:
+# Full document:
 #   .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 #
-# Engine unica:
+# Single engine:
 #   .\scripts\run_benchmark.ps1 -Engine easyocr -AllPages -RunSuffix "v2"
 #   .\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
 
@@ -38,9 +38,9 @@ foreach ($engine in $engines) {
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host " Engine: $engine" -ForegroundColor Cyan
     if ($AllPages) {
-        Write-Host " Paginas: todas" -ForegroundColor Cyan
+        Write-Host " Pages: all" -ForegroundColor Cyan
     } else {
-        Write-Host " Paginas: $Pages" -ForegroundColor Cyan
+        Write-Host " Pages: $Pages" -ForegroundColor Cyan
     }
     Write-Host "========================================" -ForegroundColor Cyan
 
@@ -52,7 +52,7 @@ foreach ($engine in $engines) {
     }
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [ERRO] evaluate_e2e falhou para $engine" -ForegroundColor Red
+        Write-Host "  [ERROR] evaluate_e2e failed for $engine" -ForegroundColor Red
         $failed += $engine
         continue
     }
@@ -61,7 +61,7 @@ foreach ($engine in $engines) {
     python scripts\compute_metrics.py --hypothesis $hyp --manifesto $Manifesto --engine $engine --run-id $runId --output-dir $OutDir
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [ERRO] compute_metrics falhou para $engine" -ForegroundColor Red
+        Write-Host "  [ERROR] compute_metrics failed for $engine" -ForegroundColor Red
         $failed += $engine
     }
 }
@@ -69,7 +69,7 @@ foreach ($engine in $engines) {
 # --- compare_engines ---
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " Tabela comparativa" -ForegroundColor Cyan
+Write-Host " Comparison table" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 $metricsFiles = @(Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" -ErrorAction SilentlyContinue |
@@ -77,15 +77,15 @@ $metricsFiles = @(Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" -ErrorAc
 
 if ($metricsFiles) {
     python scripts\compare_engines.py @metricsFiles --output "$OutDir\comparison_${RunSuffix}.md"
-    Write-Host "  Tabela: $OutDir\comparison_${RunSuffix}.md" -ForegroundColor Green
+    Write-Host "  Table: $OutDir\comparison_${RunSuffix}.md" -ForegroundColor Green
 } else {
-    Write-Host "  Nenhum arquivo de metricas encontrado em $OutDir" -ForegroundColor Yellow
+    Write-Host "  No metrics files found in $OutDir" -ForegroundColor Yellow
 }
 
 Write-Host ""
 if ($failed) {
-    Write-Host "Engines com falha: $($failed -join ', ')" -ForegroundColor Red
+    Write-Host "Failed engines: $($failed -join ', ')" -ForegroundColor Red
     exit 1
 } else {
-    Write-Host "Todas as engines concluidas com sucesso!" -ForegroundColor Green
+    Write-Host "All engines completed successfully!" -ForegroundColor Green
 }
