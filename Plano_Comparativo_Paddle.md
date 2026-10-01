@@ -381,3 +381,80 @@ Documentadas em `metricas_avaliacao_parser_ocr_markdown.md` — implementar em f
 - **Recursos:** Peak RAM, VRAM, CPU/GPU Usage
 - **Exatidão total:** Document Exact Match, Page Exact Match, Block Exact Match
 - **Semântica:** Semantic Similarity (baixa prioridade — não substitui métricas textuais)
+
+---
+
+## Fase 9 — Otimizações Tesseract (espelho da Fase 9 EasyOCR)
+
+### Contexto
+
+O benchmark Fase 8 revelou problemas críticos no Tesseract que têm causa-raiz clara e corrigível via configuração de CLI:
+
+| Métrica | Valor Fase 8 | Causa raiz |
+|---|---|---|
+| deletion_rate | 27.4% (pior) | `--dpi` ausente → Tesseract usa 70 DPI internamente |
+| CER | 43.15% | DPI bug + diacríticos PT mal lidos |
+| invalid_markdown_rate | 3.57% | backtick gerado → quebra fences Markdown |
+| cell_cer | 1.14 | espaços entre colunas colapsados |
+
+### Itens implementados
+
+| ID | Ação | Impacto esperado | Status |
+|---|---|---|---|
+| T-01 | `--dpi` calculado automaticamente de `config.ocr_render_scale` (padrão 144 para scale=2.0) | Corrige deletion_rate 27.4% → meta <15% | ✅ Impl. |
+| T-02 | `-c textord_min_linesize=2.5` — corrige bug de diacríticos PT (ã,ç,ê,õ lidos como linha separada) | Reduz CER em documentos PT | ✅ Impl. |
+| T-03 | `-c tessedit_char_blacklist=\`` — elimina backtick do output | Elimina invalid_markdown_rate 3.57% → 0% | ✅ Impl. |
+| T-04 | `-c textord_noise_rejrows=0 -c textord_noise_rejwords=0` — desabilita rejeição agressiva de linhas/palavras | Reduz deleções de texto válido | ✅ Impl. |
+| T-05 | `-c crunch_del_rating=40` (padrão 60) — threshold mais permissivo para deleção de palavras | Preserva mais tokens borderline | ✅ Impl. |
+| T-06 | `-c language_model_penalty_non_dict_word=0.05` (padrão 0.15) — menos penalidade para vocab financeiro | Melhora CNPJ, ATIVO, EBITDA etc. | ✅ Impl. |
+| T-07 | `-c preserve_interword_spaces=1` — preserva espaços entre colunas de tabela | Melhora cell_cer | ✅ Impl. |
+| T-08 | CLAHE preprocessing via `_clahe_preprocess()` — converte para grayscale + aplica CLAHE antes do OCR | Melhora scans com iluminação irregular | ✅ Impl. |
+| T-09 | `TESSERACT_TESSDATA_DIR` env var → `--tessdata-dir` flag — suporte a `tessdata_best` | ~5% CER adicional (download manual necessário) | ✅ Impl. |
+| T-10 | `TESSERACT_DPI` env var — sobrescreve DPI calculado | Override para casos especiais | ✅ Impl. |
+| T-11 | `TESSERACT_CONF_MIN` env var — filtro de confiança mínima (0–100, padrão 0 = sem filtro) | Reduz tokens de baixa qualidade | ✅ Impl. |
+
+### Parâmetros fixos (sempre ativos)
+
+Todos fixos no código — sem configuração necessária:
+
+| Parâmetro | Valor | Motivo |
+|---|---|---|
+| `textord_min_linesize` | `2.5` | Bug diacríticos PT — sempre necessário para `por` |
+| `tessedit_char_blacklist` | `` ` `` | Sempre gera Markdown inválido |
+| `textord_noise_rejrows` | `0` | Deleção falsa de linhas válidas |
+| `textord_noise_rejwords` | `0` | Deleção falsa de palavras válidas |
+| `crunch_del_rating` | `40` | Menos agressivo que padrão 60 |
+| `language_model_penalty_non_dict_word` | `0.05` | Vocab financeiro |
+| `preserve_interword_spaces` | `1` | Separação de colunas em tabelas |
+| CLAHE preprocessing | clipLimit=2.0, tileGridSize=8×8 | Local contrast enhancement |
+
+### Variáveis de ambiente
+
+| Var | Padrão | Efeito |
+|---|---|---|
+| `TESSERACT_LANG` | `por` | Idioma Tesseract |
+| `TESSERACT_PSM` | `3` | Page segmentation mode |
+| `TESSERACT_OEM` | `1` | OCR engine mode (LSTM) |
+| `TESSERACT_DPI` | `72 × ocr_render_scale` | Override DPI calculado |
+| `TESSERACT_TESSDATA_DIR` | não definido | Caminho para tessdata_best |
+| `TESSERACT_CONF_MIN` | `0` | Confiança mínima (0–100) |
+
+### O que NÃO foi implementado
+
+| Item | Motivo |
+|---|---|
+| PSM padrão diferente (4, 11) | Precisa de benchmark para validar — PSM 3 correto para documentos mistos |
+| `user_words` / `user_patterns` | Manutenção custosa; ganho menor que DPI+diacritics fix |
+| Fine-tuning (tesstrain) | Explicitamente excluído |
+| `OMP_THREAD_LIMIT` | Variável de ambiente do SO — documentada na docstring do módulo |
+
+### Benchmark esperado após implementação
+
+```powershell
+.\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix "v2"
+```
+
+Metas:
+- deletion_rate: 27.4% → <15%
+- CER: 43.15% → <30%
+- invalid_markdown_rate: 3.57% → 0%

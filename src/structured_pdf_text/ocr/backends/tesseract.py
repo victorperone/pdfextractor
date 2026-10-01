@@ -7,10 +7,49 @@ and parses the TSV output directly. Requires:
 
 Language mapping: config.language "pt" → Tesseract "-l por"
 PSM 3 (auto page segmentation) and OEM 1 (LSTM only) are the defaults.
-Override via environment variables:
-    TESSERACT_PSM=6     (e.g. single uniform text block)
-    TESSERACT_OEM=3     (e.g. legacy + LSTM)
-    TESSERACT_LANG=por  (override language directly)
+
+Environment variables
+---------------------
+TESSERACT_LANG           Override language (default: derived from config, e.g. "por").
+                         Use "por+eng" for documents with mixed Portuguese/English.
+TESSERACT_PSM            Page segmentation mode (default: 3 = auto).
+                         Alternatives: 4 (single column), 6 (uniform block),
+                         11 (sparse text — recovers more on complex layouts).
+TESSERACT_OEM            OCR engine mode (default: 1 = LSTM only).
+TESSERACT_DPI            Override DPI hint (default: 72 × ocr_render_scale,
+                         e.g. 144 for the default scale=2.0).
+                         Set to 300 if rendering PDF pages at 300 DPI.
+TESSERACT_TESSDATA_DIR   Path to a tessdata directory; enables tessdata_best.
+                         Download por.traineddata from:
+                         https://github.com/tesseract-ocr/tessdata_best
+                         then: $env:TESSERACT_TESSDATA_DIR = "C:\\tessdata_best"
+TESSERACT_CONF_MIN       Minimum word confidence (0–100, default: 0 = no filter).
+                         Values 30–50 can remove low-quality noise tokens.
+
+Optimization notes (Fase 9)
+----------------------------
+- --dpi: DPI hint computed from config.ocr_render_scale (72 × scale).
+  Without this, Tesseract defaults to 70 DPI internally, treating small text
+  as noise and deleting it — the primary cause of the 27.4% deletion_rate.
+- textord_min_linesize=2.5: fixes a Tesseract bug where Portuguese diacritics
+  (ã, ç, ê, õ) are read as a separate line of marks above the text (issue #4276).
+- tessedit_char_blacklist=`: backtick in output creates invalid Markdown fences;
+  blacklisting it eliminates the 3.57% invalid_markdown_rate entirely.
+- textord_noise_rejrows/words=0: disables aggressive line/word deletion that
+  misclassifies valid text as noise on low-DPI or uneven-scan pages.
+- crunch_del_rating=40 (default 60): raises the confidence floor at which words
+  are silently deleted; preserves more borderline-quality tokens.
+- language_model_penalty_non_dict_word=0.05 (default 0.15): reduces the penalty
+  for financial vocabulary (CNPJ, ATIVO, EBITDA, etc.) not in the PT dictionary.
+- preserve_interword_spaces=1: preserves column spacing in table output.
+- CLAHE preprocessing: local contrast enhancement applied before OCR using
+  cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).  Falls back gracefully
+  if OpenCV is unavailable.  Result is saved as grayscale PNG (Tesseract reads
+  grayscale directly; saving as 'L' mode avoids redundant color conversion).
+
+OMP_THREAD_LIMIT note: set OMP_THREAD_LIMIT=1 in the environment when running
+many Tesseract processes in parallel — the default 4 OMP threads per process
+causes contention and is slower than 1 thread × N parallel processes.
 """
 from __future__ import annotations
 
@@ -75,7 +114,6 @@ def _tesseract_info() -> dict[str, str]:
         langs_output = langs_result.stdout + langs_result.stderr
         for line in langs_output.splitlines():
             if "tessdata" in line.lower() and ("/" in line or "\\" in line):
-                # Extract the path from e.g. 'List of available languages in "C:\...tessdata/" (3):'
                 import re
                 m = re.search(r'"([^"]+)"', line)
                 if m:
@@ -86,7 +124,39 @@ def _tesseract_info() -> dict[str, str]:
     return info
 
 
-def _to_pil(image: object):
+def _clahe_preprocess(pil_image: object) -> object:
+    """Apply CLAHE local contrast enhancement and return grayscale PIL Image.
+
+    Converts to grayscale, applies CLAHE (clipLimit=2.0, tileGridSize=8×8),
+    and returns an 'L' mode PIL Image.  Tesseract reads grayscale directly,
+    so saving as 'L' avoids a redundant color conversion round-trip.
+
+    Falls back to the original image unchanged if OpenCV is unavailable.
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        arr = np.asarray(pil_image)
+        if arr.ndim == 3:
+            try:
+                gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            except Exception:
+                gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        elif arr.ndim == 2:
+            gray = arr.astype(np.uint8)
+        else:
+            return pil_image
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        return Image.fromarray(enhanced, mode="L")
+    except Exception:
+        return pil_image
+
+
+def _to_pil(image: object) -> object:
     """Convert numpy array or passthrough PIL Image."""
     try:
         import numpy as np
@@ -98,20 +168,40 @@ def _to_pil(image: object):
     return image  # assume already PIL
 
 
-def _run_tesseract_tsv(image: object, lang: str, psm: int, oem: int) -> str:
+def _run_tesseract_tsv(
+    image: object,
+    lang: str,
+    psm: int,
+    oem: int,
+    dpi: int,
+    extra_flags: list[str],
+) -> str:
     """Run tesseract on image, return TSV output string."""
     pil = _to_pil(image)
+    pil = _clahe_preprocess(pil)
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp = f.name
         pil.save(tmp, format="PNG")
+        cmd = [
+            "tesseract", tmp, "stdout",
+            "--oem", str(oem),
+            "--psm", str(psm),
+            "-l", lang,
+            "--dpi", str(dpi),
+            "-c", "textord_min_linesize=2.5",
+            "-c", "tessedit_char_blacklist=`",
+            "-c", "textord_noise_rejrows=0",
+            "-c", "textord_noise_rejwords=0",
+            "-c", "crunch_del_rating=40",
+            "-c", "language_model_penalty_non_dict_word=0.05",
+            "-c", "preserve_interword_spaces=1",
+            *extra_flags,
+            "tsv",
+        ]
         result = subprocess.run(
-            ["tesseract", tmp, "stdout",
-             "--oem", str(oem),
-             "--psm", str(psm),
-             "-l", lang,
-             "tsv"],
+            cmd,
             capture_output=True, text=True, encoding="utf-8", timeout=120,
         )
         return result.stdout
@@ -125,7 +215,12 @@ def _parse_tsv(tsv_text: str) -> list[dict]:
     return list(reader)
 
 
-def _valid_word_row(row: dict, offset_x: float = 0.0, offset_y: float = 0.0):
+def _valid_word_row(
+    row: dict,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+    conf_min: float = 0.0,
+):
     """Parse a valid Tesseract word row into text, score, and bounds."""
     if row.get("level") != "5":
         return None
@@ -142,6 +237,8 @@ def _valid_word_row(row: dict, offset_x: float = 0.0, offset_y: float = 0.0):
         return None
     if not math.isfinite(score) or score < 0.0 or score > 100.0:
         return None
+    if score < conf_min:
+        return None
     if not all(math.isfinite(value) for value in (left, top, width, height)):
         return None
     if width <= 0.0 or height <= 0.0:
@@ -152,10 +249,14 @@ def _valid_word_row(row: dict, offset_x: float = 0.0, offset_y: float = 0.0):
     return text, score, (left, top, right, bottom)
 
 
-def _tsv_to_ocr_tokens(rows: list[dict], source_engine: str) -> list[OCRToken]:
+def _tsv_to_ocr_tokens(
+    rows: list[dict],
+    source_engine: str,
+    conf_min: float = 0.0,
+) -> list[OCRToken]:
     tokens = []
     for row in rows:
-        parsed = _valid_word_row(row)
+        parsed = _valid_word_row(row, conf_min=conf_min)
         if parsed is None:
             continue
         text, score, (x0, y0, x1, y1) = parsed
@@ -175,10 +276,11 @@ def _tsv_to_ocr_tokens(rows: list[dict], source_engine: str) -> list[OCRToken]:
 def _tsv_to_pipeline_tokens(
     rows: list[dict], page_index: int, language: str,
     offset_x: float = 0.0, offset_y: float = 0.0,
+    conf_min: float = 0.0,
 ) -> list[OcrToken]:
     tokens = []
     for row in rows:
-        parsed = _valid_word_row(row, offset_x, offset_y)
+        parsed = _valid_word_row(row, offset_x, offset_y, conf_min=conf_min)
         if parsed is None:
             continue
         text, score, (x0, y0, x1, y1) = parsed
@@ -195,10 +297,13 @@ def _tsv_to_pipeline_tokens(
         ))
     return tokens
 
+
 class TesseractBackend:
     """OCRBackend using the Tesseract 5 CLI (subprocess, no pytesseract).
 
     Satisfies both OCRBackend (benchmark) and OcrEngine (pipeline) protocols.
+
+    See module docstring for all tunable environment variables.
     """
 
     def __init__(self, config: "ExtractorConfig") -> None:
@@ -210,6 +315,20 @@ class TesseractBackend:
         )
         self._psm = int(os.environ.get("TESSERACT_PSM", "3"))
         self._oem = int(os.environ.get("TESSERACT_OEM", "1"))
+
+        # DPI: computed from render scale so Tesseract never falls back to 70 DPI.
+        default_dpi = int(72 * getattr(config, "ocr_render_scale", 2.0))
+        self._dpi = int(os.environ.get("TESSERACT_DPI", str(default_dpi)))
+
+        # Optional tessdata_best directory.
+        tessdata_dir = os.environ.get("TESSERACT_TESSDATA_DIR", "")
+        self._extra_flags: list[str] = (
+            ["--tessdata-dir", tessdata_dir] if tessdata_dir else []
+        )
+
+        # Minimum word confidence filter (0 = no filter, matches previous behaviour).
+        self._conf_min = float(os.environ.get("TESSERACT_CONF_MIN", "0"))
+
         info = _tesseract_info()
         self._version = info["version"]
         self._tessdata = info["tessdata"]
@@ -251,12 +370,15 @@ class TesseractBackend:
 
     def recognize(self, request: OCRRequest) -> OCRResult:
         t0 = time.perf_counter()
+        # Use DPI from request when available (benchmark sets it explicitly).
+        dpi = request.dpi if request.dpi else self._dpi
         try:
             tsv = _run_tesseract_tsv(
-                request.image, self._tess_lang, self._psm, self._oem
+                request.image, self._tess_lang, self._psm, self._oem,
+                dpi=dpi, extra_flags=self._extra_flags,
             )
             rows = _parse_tsv(tsv)
-            tokens = tuple(_tsv_to_ocr_tokens(rows, "tesseract"))
+            tokens = tuple(_tsv_to_ocr_tokens(rows, "tesseract", self._conf_min))
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
         except FileNotFoundError:
@@ -299,10 +421,12 @@ class TesseractBackend:
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
         tsv = _run_tesseract_tsv(
-            page_image, self._tess_lang, self._psm, self._oem
+            page_image, self._tess_lang, self._psm, self._oem,
+            dpi=self._dpi, extra_flags=self._extra_flags,
         )
         return _tsv_to_pipeline_tokens(
-            _parse_tsv(tsv), page_index, self._language
+            _parse_tsv(tsv), page_index, self._language,
+            conf_min=self._conf_min,
         )
 
     def recognize_region(
@@ -321,11 +445,13 @@ class TesseractBackend:
         crop_pil = Image.fromarray(arr[y0:y1, x0:x1])
 
         tsv = _run_tesseract_tsv(
-            crop_pil, self._tess_lang, self._psm, self._oem
+            crop_pil, self._tess_lang, self._psm, self._oem,
+            dpi=self._dpi, extra_flags=self._extra_flags,
         )
         return _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
             offset_x=float(x0), offset_y=float(y0),
+            conf_min=self._conf_min,
         )
 
     # ------------------------------------------------------------------
