@@ -175,6 +175,8 @@ class PaddleOCRBackend:
         image: Any,
         page_index: int,
         region_bbox: BBox | None = None,
+        *,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
         """Serialize image, send to worker, deserialize OcrToken list."""
         from PIL import Image
@@ -210,7 +212,8 @@ class PaddleOCRBackend:
                     text=item["text"],
                     confidence=float(item["confidence"]),
                     bbox=BBox(x0, y0, x1, y1),
-                    source_kind=SourceKind.OCR,
+                    source=SourceKind.OCR_PAGE,
+                    language=self._config.language,
                 )
             )
         return tokens
