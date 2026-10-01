@@ -421,6 +421,200 @@ cada condição.
 
 ---
 
+## Arquivos Necessários para Executar o Benchmark
+
+O pipeline requer três arquivos de entrada. O PDF pode ser qualquer documento;
+os outros dois precisam ser criados manualmente ou gerados a partir de um corpus
+existente.
+
+```
+corpus/
+  MeuCorpus.pdf                   ← PDF a ser extraído
+  MeuCorpus_MANIFESTO.json        ← ground truth + metadados por página  (preferido)
+  MeuCorpus_REFERENCIA.md         ← alternativa simplificada ao manifesto
+```
+
+> **Nota:** O manifesto de *corpus* (ground truth) é diferente do manifesto de
+> *run* gerado pelo `evaluate_e2e.py`. O de run descreve o resultado da extração
+> (tempo, engine, hash do PDF). O de corpus descreve o que era esperado.
+
+---
+
+### Arquivo 1 — PDF do Corpus
+
+Qualquer PDF válido. O pipeline aceita documentos nativos (texto seleccionável),
+scans e híbridos. Páginas nativas são extraídas sem OCR; páginas raster passam
+pelo engine selecionado.
+
+Caminho passado como primeiro argumento ao `evaluate_e2e.py`:
+
+```powershell
+python scripts\evaluate_e2e.py corpus\MeuCorpus.pdf --engine tesseract ...
+```
+
+---
+
+### Arquivo 2 — Manifesto JSON do Corpus (preferido)
+
+**Formato**: JSON com chave `"pages"` contendo um array de objetos, um por página.
+
+```json
+{
+  "corpus": "MeuCorpus v1",
+  "pages": [
+    {
+      "page": 1,
+      "conditions": ["native_dense"],
+      "expected_markdown": "## Página 1\n\nTexto esperado da página 1...\n\n| Col A | Col B |\n|---|---|\n| val | val |"
+    },
+    {
+      "page": 2,
+      "conditions": ["scan_clean_300"],
+      "expected_markdown": "## Página 2\n\n# Título\n\nTexto esperado..."
+    },
+    {
+      "page": 3,
+      "conditions": ["noise", "low_dpi"],
+      "expected_markdown": "## Página 3\n\nConteúdo esperado da página com ruído..."
+    }
+  ]
+}
+```
+
+**Campos obrigatórios por entrada:**
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `page` | inteiro | Número da página (base 1) |
+| `expected_markdown` | string | Ground truth Markdown para essa página |
+
+**Campos opcionais:**
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `conditions` | lista de strings | Condições de digitalização da página (usado apenas no relatório de erros) |
+
+**Regras do `expected_markdown`:**
+
+1. Deve começar com `## Página N` (o número deve coincidir com `"page"`).
+   O `compute_metrics.py` usa esse cabeçalho para parear referência com hipótese.
+2. Headings usam `#` / `##` / `###` — o nível é avaliado pela métrica `heading_level_accuracy`.
+3. Tabelas devem ser GFM pipe tables para serem detectadas pelas métricas de tabela.
+4. Listas com `-`, `*` ou `1.` são detectadas pela métrica `list_detection_f1`.
+5. Não incluir cabeçalhos de página repetidos (rodapé/header do documento) — eles devem estar
+   ausentes do ground truth para que a `header_leakage_rate` funcione corretamente.
+
+**Passado ao `compute_metrics.py` via `--manifesto`:**
+
+```powershell
+python scripts\compute_metrics.py \
+  --hypothesis output\fase8\extracted_tesseract_v1-tesseract.md \
+  --manifesto corpus\MeuCorpus_MANIFESTO.json \
+  --engine tesseract --run-id v1-tesseract --output-dir output\fase8
+```
+
+---
+
+### Arquivo 3 — Referência Markdown (alternativa simplificada)
+
+Quando não houver manifesto, o `compute_metrics.py` aceita um arquivo Markdown
+simples com uma seção `## Página N` para cada página. As condições por página
+**não estarão disponíveis** no relatório de erros, mas todas as métricas são
+calculadas normalmente.
+
+**Formato:**
+
+```markdown
+## Página 1
+
+Texto esperado da primeira página. Pode conter headings, tabelas e listas.
+
+## Página 2
+
+# Título da Seção
+
+Texto esperado da segunda página.
+
+| Coluna A | Coluna B |
+|---|---|
+| Valor 1  | Valor 2  |
+
+## Página 3
+
+Texto esperado...
+```
+
+**Regras:**
+
+- O separador de página é `## Página N` (aceita também `## Pagina N` sem acento,
+  maiúsculas/minúsculas indiferentes, zeros à esquerda como `## Página 001`).
+- Não há nenhum outro campo obrigatório — o arquivo é Markdown puro.
+- Páginas ausentes no arquivo de referência são ignoradas; páginas presentes na
+  referência mas ausentes na hipótese incrementam `failure_rate`.
+
+**Passado via `--reference`:**
+
+```powershell
+python scripts\compute_metrics.py \
+  --hypothesis output\fase8\extracted_tesseract_v1-tesseract.md \
+  --reference corpus\MeuCorpus_REFERENCIA.md \
+  --engine tesseract --run-id v1-tesseract --output-dir output\fase8
+```
+
+---
+
+### Usando um corpus próprio com run_benchmark.ps1
+
+O script aceita os caminhos do corpus, manifesto e diretório de saída via parâmetros:
+
+```powershell
+.\scripts\run_benchmark.ps1 `
+  -Corpus    "corpus\MeuCorpus.pdf" `
+  -Manifesto "corpus\MeuCorpus_MANIFESTO.json" `
+  -OutDir    "output\meu-corpus" `
+  -RunSuffix "v1" `
+  -AllPages
+```
+
+Para o runner Bash (Linux/WSL):
+
+```bash
+scripts/run_benchmark.sh \
+  --pdf      corpus/MeuCorpus.pdf \
+  --manifesto corpus/MeuCorpus_MANIFESTO.json \
+  --output-dir output/meu-corpus \
+  --run-suffix v1 \
+  --all-pages
+```
+
+---
+
+### Como gerar o ground truth
+
+Não há ferramenta automática — o `expected_markdown` deve ser escrito ou
+revisado manualmente. O fluxo recomendado:
+
+1. Extraia o PDF com o melhor engine disponível em modo nativo:
+   ```bash
+   pdftext extract MeuCorpus.pdf --output markdown -o MeuCorpus_DRAFT.md
+   ```
+2. Revise o Markdown gerado página a página, corrigindo erros OCR e estrutura.
+3. Crie o manifesto JSON com o Markdown corrigido como `expected_markdown` de cada página.
+4. Adicione os campos `conditions` para indicar o tipo de cada página (opcional,
+   mas útil para diagnosticar quais condições cada engine tem dificuldade).
+
+---
+
+### Resumo — o que cada arquivo influencia
+
+| Arquivo | Obrigatório | Influencia |
+|---|---|---|
+| PDF | sim | extração pelo engine selecionado |
+| Manifesto JSON (`--manifesto`) | um dos dois | ground truth + condições por página |
+| Referência Markdown (`--reference`) | um dos dois | ground truth (sem condições) |
+
+---
+
 ## Resultados de Desempenho (Benchmark RAW — 32 páginas densas)
 
 > Medido em pp. 72–103 do corpus (32 páginas OCR densas). O pipeline E2E completo
