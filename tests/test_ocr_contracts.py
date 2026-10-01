@@ -215,19 +215,30 @@ class TestFactory:
         with pytest.raises(UnsupportedOCREngine):
             build_ocr_backend(config)
 
-    def test_factory_raises_for_unimplemented_rapidocr(self) -> None:
+    def test_factory_builds_rapidocr_when_optional_runtime_is_stubbed(self, monkeypatch) -> None:
         from structured_pdf_text.config import ExtractorConfig
-        from structured_pdf_text.ocr.factory import build_ocr_backend
-        config = ExtractorConfig(ocr_engine="rapidocr-onnx")
-        with pytest.raises(UnsupportedOCREngine):
-            build_ocr_backend(config)
+        from structured_pdf_text.ocr import factory
+        from structured_pdf_text.ocr.backends.rapidocr import RapidOCRBackend
 
-    def test_factory_raises_for_unimplemented_tesseract(self) -> None:
+        class DummyRapidOCR:
+            def __init__(self, **kwargs):
+                pass
+
+        monkeypatch.setattr(
+            "structured_pdf_text.ocr.backends.rapidocr._import_rapidocr",
+            lambda runtime: DummyRapidOCR,
+        )
+        backend = factory.build_ocr_backend(ExtractorConfig(ocr_engine="rapidocr-onnx"))
+        assert isinstance(backend, RapidOCRBackend)
+        assert backend._runtime == "onnxruntime"
+
+    def test_factory_builds_tesseract_backend(self) -> None:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr.factory import build_ocr_backend
-        config = ExtractorConfig(ocr_engine="tesseract")
-        with pytest.raises(UnsupportedOCREngine):
-            build_ocr_backend(config)
+        from structured_pdf_text.ocr.backends.tesseract import TesseractBackend
+
+        backend = build_ocr_backend(ExtractorConfig(ocr_engine="tesseract"))
+        assert isinstance(backend, TesseractBackend)
 
 
 # ---------------------------------------------------------------------------

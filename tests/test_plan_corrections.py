@@ -256,3 +256,102 @@ def test_model_commands_remain_in_help_and_invalid_profile_fails_early(capsys, t
     assert "setup-models" in help_text
     assert "models-status" in help_text
     assert cli_module.main(["models-status", "--ocr-model-profile", "unknown", "--cache-home", str(tmp_path)]) == 2
+
+
+def test_paddle_cpu_runtime_policy_defaults_to_safe_one_dnn_off(monkeypatch) -> None:
+    from structured_pdf_text.ocr.runtime_policy import resolve_paddle_runtime_policy
+
+    monkeypatch.delenv("PADDLE_ENABLE_MKLDNN", raising=False)
+    assert resolve_paddle_runtime_policy(system="Linux").enable_mkldnn is False
+    monkeypatch.setenv("PADDLE_ENABLE_MKLDNN", "0")
+    assert resolve_paddle_runtime_policy(system="Linux").enable_mkldnn is False
+    monkeypatch.setenv("PADDLE_ENABLE_MKLDNN", "1")
+    assert resolve_paddle_runtime_policy(system="Linux").enable_mkldnn is True
+
+
+def test_models_status_requires_uvdoc_when_unwarping_is_enabled(tmp_path, capsys) -> None:
+    from structured_pdf_text.cli import _cmd_models_status
+    from structured_pdf_text.ocr.models import required_model_directories
+
+    profile = get_profile("pt")
+    required = required_model_directories(profile)
+    assert required["doc_unwarping_model_dir"] == "UVDoc"
+    for model_name in required.values():
+        if model_name == "UVDoc":
+            continue
+        model_dir = tmp_path / "official_models" / model_name
+        model_dir.mkdir(parents=True)
+        (model_dir / "model.pdparams").write_text("fixture", encoding="utf-8")
+
+    assert _cmd_models_status("pt", str(tmp_path)) == 1
+    output = capsys.readouterr().out
+    assert "[missing] UVDoc" in output
+    assert "Offline OCR readiness: NOT READY" in output
+
+    uvdoc_dir = tmp_path / "official_models" / "UVDoc"
+    uvdoc_dir.mkdir()
+    (uvdoc_dir / "model.pdparams").write_text("fixture", encoding="utf-8")
+    assert _cmd_models_status("pt", str(tmp_path)) == 0
+    output = capsys.readouterr().out
+    assert "[ok] UVDoc" in output
+    assert "Offline OCR readiness: READY" in output
+
+
+def test_paddle_direct_and_subprocess_modes_share_the_resolved_policy(monkeypatch) -> None:
+    import structured_pdf_text.ocr.backends.paddle as paddle_backend
+    import structured_pdf_text.ocr.paddle as paddle_engine
+
+    monkeypatch.setenv("PADDLE_ENABLE_MKLDNN", "0")
+    config = ExtractorConfig(language="pt")
+
+    monkeypatch.setattr(paddle_backend, "_has_torch_conflict", lambda: True)
+    subprocess_backend = paddle_backend.PaddleOCRBackend(config)
+    assert subprocess_backend._subprocess_config["mkldnn"] is False
+    assert subprocess_backend._subprocess_config["disable_pir_api"] is False
+
+    direct_options = {}
+
+    class EngineStub:
+        def __init__(self, **options):
+            direct_options.update(options)
+
+    monkeypatch.setattr(paddle_backend, "_has_torch_conflict", lambda: False)
+    monkeypatch.setattr(paddle_engine, "PaddleOcrEngine", EngineStub)
+    paddle_backend.PaddleOCRBackend(config)
+    assert direct_options["enable_mkldnn"] is subprocess_backend._subprocess_config["mkldnn"]
+
+
+def test_page_ocr_exception_and_successful_empty_result_have_distinct_diagnostics(tmp_path) -> None:
+    class Backend:
+        def __init__(self, *, should_fail: bool) -> None:
+            self.should_fail = should_fail
+
+        def recognize_page(
+            self,
+            image,
+            page_index,
+            page_bbox=None,
+            *,
+            quality_variants=None,
+            quality_policy=None,
+        ):
+            if self.should_fail:
+                raise RuntimeError("backend failure")
+            return []
+
+        def recognize_region(self, image, page_index, region_bbox):
+            return []
+
+    pdf_path = _pdf(tmp_path / "ocr-diagnostic.pdf")
+    config = ExtractorConfig(mode="ocr", language="pt", ocr_quality_variants=False)
+
+    failed = PdfTextExtractor(config, ocr_engine=Backend(should_fail=True)).extract(pdf_path)
+    failed_page = failed.pages[0]
+    assert "page_ocr_unavailable" in failed_page.diagnostics.facts["partial_reasons"]
+    assert any("backend failed before producing" in warning for warning in failed_page.diagnostics.warnings)
+    assert not any("OCR completed successfully" in warning for warning in failed_page.diagnostics.warnings)
+
+    empty = PdfTextExtractor(config, ocr_engine=Backend(should_fail=False)).extract(pdf_path)
+    empty_page = empty.pages[0]
+    assert "page_ocr_unavailable" not in empty_page.diagnostics.facts["partial_reasons"]
+    assert any("OCR completed successfully but produced no usable tokens" in warning for warning in empty_page.diagnostics.warnings)

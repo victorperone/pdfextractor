@@ -167,11 +167,14 @@ def validate_model_inventory(inventory: list[dict[str, Any]]) -> None:
 
 
 def pipeline_kwargs(cache_home: Path, profile: str) -> dict[str, Any]:
+    _add_src_to_path()
+    from structured_pdf_text.ocr.runtime_policy import resolve_paddle_runtime_policy
+
     root = cache_home.expanduser().resolve() / "official_models"
     names = model_names(profile)
     kwargs: dict[str, Any] = {
         "device": "cpu",
-        "enable_mkldnn": True,
+        "enable_mkldnn": resolve_paddle_runtime_policy().enable_mkldnn,
         "use_doc_orientation_classify": False,
         "use_doc_unwarping": True,
         "use_layout_detection": False,

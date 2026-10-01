@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import os
 import subprocess
 import tempfile
@@ -124,38 +125,46 @@ def _parse_tsv(tsv_text: str) -> list[dict]:
     return list(reader)
 
 
+def _valid_word_row(row: dict, offset_x: float = 0.0, offset_y: float = 0.0):
+    """Parse a valid Tesseract word row into text, score, and bounds."""
+    if row.get("level") != "5":
+        return None
+    text = (row.get("text") or "").strip()
+    if not text:
+        return None
+    try:
+        score = float(row["conf"])
+        left = float(row["left"]) + offset_x
+        top = float(row["top"]) + offset_y
+        width = float(row["width"])
+        height = float(row["height"])
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return None
+    if not math.isfinite(score) or score < 0.0 or score > 100.0:
+        return None
+    if not all(math.isfinite(value) for value in (left, top, width, height)):
+        return None
+    if width <= 0.0 or height <= 0.0:
+        return None
+    right, bottom = left + width, top + height
+    if not math.isfinite(right) or not math.isfinite(bottom):
+        return None
+    return text, score, (left, top, right, bottom)
+
+
 def _tsv_to_ocr_tokens(rows: list[dict], source_engine: str) -> list[OCRToken]:
     tokens = []
     for row in rows:
-        # level 5 = word; skip empty or invalid
-        if row.get("level") != "5":
+        parsed = _valid_word_row(row)
+        if parsed is None:
             continue
-        text = (row.get("text") or "").strip()
-        if not text:
-            continue
-        conf_raw = row.get("conf", "-1")
-        try:
-            conf = float(conf_raw)
-        except (ValueError, TypeError):
-            conf = -1.0
-        if conf < 0:
-            continue  # -1 means rejected by Tesseract
-
-        try:
-            left = float(row["left"])
-            top = float(row["top"])
-            width = float(row["width"])
-            height = float(row["height"])
-        except (KeyError, ValueError, TypeError):
-            continue
-
-        x0, y0, x1, y1 = left, top, left + width, top + height
+        text, score, (x0, y0, x1, y1) = parsed
         polygon = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
         tokens.append(OCRToken(
             text=text,
             polygon_px=polygon,
             bbox_px=(x0, y0, x1, y1),
-            confidence_native=conf,
+            confidence_native=score,
             confidence_scale="0..100",
             level="word",
             source_engine=source_engine,
@@ -169,40 +178,22 @@ def _tsv_to_pipeline_tokens(
 ) -> list[OcrToken]:
     tokens = []
     for row in rows:
-        if row.get("level") != "5":
+        parsed = _valid_word_row(row, offset_x, offset_y)
+        if parsed is None:
             continue
-        text = (row.get("text") or "").strip()
-        if not text:
-            continue
-        conf_raw = row.get("conf", "-1")
+        text, score, (x0, y0, x1, y1) = parsed
         try:
-            conf = float(conf_raw) / 100.0
-        except (ValueError, TypeError):
-            conf = 0.0
-        if conf < 0:
-            continue
-
-        try:
-            left = float(row["left"]) + offset_x
-            top = float(row["top"]) + offset_y
-            width = float(row["width"])
-            height = float(row["height"])
-        except (KeyError, ValueError, TypeError):
-            continue
-
-        try:
-            bbox = BBox(left, top, left + width, top + height)
-        except Exception:
+            bbox = BBox(x0, y0, x1, y1)
+        except (TypeError, ValueError):
             continue
         tokens.append(OcrToken(
             text=text,
             bbox=bbox,
-            confidence=max(0.0, min(1.0, conf)),
+            confidence=score / 100.0,
             language=language,
             source=SourceKind.OCR_PAGE,
         ))
     return tokens
-
 
 class TesseractBackend:
     """OCRBackend using the Tesseract 5 CLI (subprocess, no pytesseract).
@@ -305,16 +296,14 @@ class TesseractBackend:
         page_bbox: "BBox | None" = None,
         *,
         quality_variants: bool | None = None,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
-        try:
-            tsv = _run_tesseract_tsv(
-                page_image, self._tess_lang, self._psm, self._oem
-            )
-            return _tsv_to_pipeline_tokens(
-                _parse_tsv(tsv), page_index, self._language
-            )
-        except Exception:
-            return []
+        tsv = _run_tesseract_tsv(
+            page_image, self._tess_lang, self._psm, self._oem
+        )
+        return _tsv_to_pipeline_tokens(
+            _parse_tsv(tsv), page_index, self._language
+        )
 
     def recognize_region(
         self,
@@ -322,25 +311,22 @@ class TesseractBackend:
         page_index: int,
         region_bbox: "BBox",
     ) -> list[OcrToken]:
-        try:
-            import numpy as np
-            from PIL import Image
+        import numpy as np
+        from PIL import Image
 
-            pil = _to_pil(page_image)
-            arr = np.array(pil)
-            x0, y0 = int(region_bbox.x0), int(region_bbox.y0)
-            x1, y1 = int(region_bbox.x1), int(region_bbox.y1)
-            crop_pil = Image.fromarray(arr[y0:y1, x0:x1])
+        pil = _to_pil(page_image)
+        arr = np.array(pil)
+        x0, y0 = int(region_bbox.x0), int(region_bbox.y0)
+        x1, y1 = int(region_bbox.x1), int(region_bbox.y1)
+        crop_pil = Image.fromarray(arr[y0:y1, x0:x1])
 
-            tsv = _run_tesseract_tsv(
-                crop_pil, self._tess_lang, self._psm, self._oem
-            )
-            return _tsv_to_pipeline_tokens(
-                _parse_tsv(tsv), page_index, self._language,
-                offset_x=float(x0), offset_y=float(y0),
-            )
-        except Exception:
-            return []
+        tsv = _run_tesseract_tsv(
+            crop_pil, self._tess_lang, self._psm, self._oem
+        )
+        return _tsv_to_pipeline_tokens(
+            _parse_tsv(tsv), page_index, self._language,
+            offset_x=float(x0), offset_y=float(y0),
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle

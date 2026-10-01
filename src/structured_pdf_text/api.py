@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 import time
 from collections.abc import Callable
@@ -285,6 +286,7 @@ class PdfTextExtractor:
                 }
 
                 ocr_tokens: list[OcrToken] = []
+                page_ocr_failed = False
                 ocr_lines: list[TextLine] = []
                 unmatched_ocr_lines: list[TextLine] = []
                 unmatched_ocr_tokens: list[OcrToken] = []
@@ -384,20 +386,32 @@ class PdfTextExtractor:
                             ocr_start = time.perf_counter()
                             try:
                                 if page_ocr_requested:
+                                    recognize_page = self.ocr_engine.recognize_page
+                                    quality_policy = effective_ocr_quality_policy(self.config).value
+                                    # Compatibility for user-injected legacy engines is
+                                    # selected by signature, never by catching an internal TypeError.
                                     try:
-                                        ocr_tokens = self.ocr_engine.recognize_page(
-                                            ocr_image,
-                                            page_index,
-                                            native_page.bbox,
-                                            quality_policy=effective_ocr_quality_policy(self.config).value,
+                                        parameters = inspect.signature(recognize_page).parameters
+                                    except (TypeError, ValueError):
+                                        parameters = {}
+                                    accepts_quality_policy = (
+                                        "quality_policy" in parameters
+                                        or any(
+                                            p.kind is inspect.Parameter.VAR_KEYWORD
+                                            for p in parameters.values()
                                         )
-                                    except TypeError:
-                                        # Preserve compatibility with early injected
-                                        # engines that implement the two-argument API.
-                                        ocr_tokens = self.ocr_engine.recognize_page(
-                                            ocr_image,
-                                            page_index,
-                                        )
+                                    )
+                                    page_kwargs = (
+                                        {"quality_policy": quality_policy}
+                                        if accepts_quality_policy
+                                        else {}
+                                    )
+                                    ocr_tokens = recognize_page(
+                                        ocr_image,
+                                        page_index,
+                                        native_page.bbox,
+                                        **page_kwargs,
+                                    )
                                     ocr_passes_total = getattr(
                                         self.ocr_engine, "last_pass_count", None
                                     )
@@ -438,8 +452,10 @@ class PdfTextExtractor:
                                 timings["ocr_ms"] = (
                                     time.perf_counter() - ocr_start
                                 ) * 1000
+                                page_ocr_failed = True
                                 warnings.append(
-                                    f"OCR unavailable: {type(exc).__name__}: {exc}"
+                                    "OCR backend failed before producing a usable result: "
+                                    f"{type(exc).__name__}: {exc}"
                                 )
                                 if mode == ExtractionMode.OCR or page_ocr_requested:
                                     partial_reasons.append("page_ocr_unavailable")
@@ -526,9 +542,10 @@ class PdfTextExtractor:
                     and self.ocr_engine is not None
                     and ocr_image is not None
                     and not ocr_tokens
+                    and not page_ocr_failed
                 ):
                     warnings.append(
-                        "OCR completed but produced no usable tokens for an OCR-primary page"
+                        "OCR completed successfully but produced no usable tokens for an OCR-primary page"
                     )
 
                 if region_ocr_requested:

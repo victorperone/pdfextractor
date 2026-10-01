@@ -25,7 +25,7 @@ import importlib.util
 import io
 import json
 import os
-import platform
+import logging
 import subprocess
 import sys
 import time
@@ -36,6 +36,10 @@ from structured_pdf_text.config import ExtractorConfig, effective_ocr_quality_po
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.errors import PaddleOcrUnavailable
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.ocr.runtime_policy import (
+    apply_paddle_runtime_policy,
+    resolve_paddle_runtime_policy,
+)
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -85,12 +89,16 @@ class PaddleOCRBackend:
 
         self._config = config
         get_profile(config.language)
-        # PaddlePaddle's oneDNN (MKL-DNN) backend has known compatibility issues
-        # on Windows with certain PIR attribute types (ArrayAttribute<DoubleAttribute>)
-        # in PaddlePaddle 3.x. Disable it on Windows to avoid runtime_error on all
-        # OCR pages. Can be overridden by setting PADDLE_ENABLE_MKLDNN=1.
-        _default_mkldnn = platform.system() != "Windows"
-        _enable_mkldnn = os.environ.get("PADDLE_ENABLE_MKLDNN", "1" if _default_mkldnn else "0") == "1"
+        self._runtime_policy = resolve_paddle_runtime_policy()
+        apply_paddle_runtime_policy(self._runtime_policy)
+        logging.getLogger(__name__).info(
+            "Paddle runtime policy: device=cpu, paddle=%s, enable_mkldnn=%s (%s), disable_pir_api=%s",
+            _package_version("paddlepaddle"),
+            self._runtime_policy.enable_mkldnn,
+            self._runtime_policy.reason,
+            self._runtime_policy.disable_pir_api,
+        )
+        _enable_mkldnn = self._runtime_policy.enable_mkldnn
 
         self._subprocess_config: dict | None = None
         self._worker_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
@@ -106,6 +114,7 @@ class PaddleOCRBackend:
                 "quality_policy": effective_ocr_quality_policy(config).value,
                 "quality_thresholds": config.ocr_quality_thresholds,
                 "mkldnn": _enable_mkldnn,
+                "disable_pir_api": self._runtime_policy.disable_pir_api,
             }
             self._engine = None
         else:
@@ -182,6 +191,8 @@ class PaddleOCRBackend:
             "image_b64": image_b64,
             "page_index": page_index,
         }
+        if quality_policy is not None:
+            req["quality_policy"] = quality_policy
         if region_bbox is not None:
             req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
 
@@ -292,11 +303,18 @@ class PaddleOCRBackend:
         page_bbox: BBox | None = None,
         *,
         quality_variants: bool | None = None,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
         if self._subprocess_config is not None:
-            return self._call_subprocess("recognize_page", page_image, page_index)
+            return self._call_subprocess(
+                "recognize_page", page_image, page_index, quality_policy=quality_policy
+            )
         return self._engine.recognize_page(  # type: ignore[union-attr]
-            page_image, page_index, page_bbox, quality_variants=quality_variants
+            page_image,
+            page_index,
+            page_bbox,
+            quality_variants=quality_variants,
+            quality_policy=quality_policy,
         )
 
     def recognize_region(

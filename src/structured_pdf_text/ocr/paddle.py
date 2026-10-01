@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import difflib
 import threading
@@ -17,7 +18,12 @@ from structured_pdf_text.errors import (
     is_resource_exhaustion,
 )
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.models import get_profile
+from structured_pdf_text.ocr.models import (
+    PADDLE_OCR_FEATURE_DEFAULTS,
+    get_profile,
+    model_directory_is_ready,
+    required_model_directories,
+)
 from structured_pdf_text.ocr.image_quality import profile_image
 from structured_pdf_text.ocr.quality import (
     OcrCandidate,
@@ -27,6 +33,10 @@ from structured_pdf_text.ocr.quality import (
     raw_result_metrics,
 )
 from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+from structured_pdf_text.ocr.runtime_policy import (
+    apply_paddle_runtime_policy,
+    resolve_paddle_runtime_policy,
+)
 from structured_pdf_text.config import OcrQualityThresholds
 
 
@@ -232,16 +242,22 @@ def _resolve_required_local_models(
     for kwarg, model_name in profile.dir_kwargs.items():
         resolved.setdefault(kwarg, str(root / model_name))
 
-    required_keys = tuple(profile.dir_kwargs)
+    required_dirs = required_model_directories(
+        profile,
+        use_doc_orientation_classify=bool(resolved.get("use_doc_orientation_classify", True)),
+        use_doc_unwarping=bool(resolved.get("use_doc_unwarping", True)),
+        use_textline_orientation=bool(resolved.get("use_textline_orientation", True)),
+    )
     missing: list[str] = []
 
-    for key in required_keys:
+    for key, model_name in required_dirs.items():
+        resolved.setdefault(key, str(root / model_name))
         value = resolved.get(key)
         if not value:
             missing.append(f"{key}=<not configured>")
             continue
         model_dir = Path(str(value)).expanduser()
-        if not model_dir.is_dir() or not any(model_dir.iterdir()):
+        if not model_directory_is_ready(model_dir):
             missing.append(f"{key}={model_dir}")
 
     if missing:
@@ -257,7 +273,7 @@ def _resolve_required_local_models(
 
     return {
         key: str(Path(str(resolved[key])).expanduser().resolve())
-        for key in required_keys
+        for key in required_dirs
     }
 
 
@@ -794,6 +810,9 @@ class PaddleOcrEngine:
             .resolve()
         )
 
+        runtime_policy = resolve_paddle_runtime_policy()
+        apply_paddle_runtime_policy(runtime_policy)
+
         # Runtime policy: extraction must never perform model-source discovery.
         # These env vars are set inside _INIT_LOCK so concurrent initialisations
         # with different cache directories do not interleave their writes.
@@ -823,10 +842,8 @@ class PaddleOcrEngine:
         )
 
         options = {
-            "use_doc_orientation_classify": True,
-            "use_doc_unwarping": True,
-            "use_textline_orientation": True,
-            "enable_mkldnn": True,
+            **PADDLE_OCR_FEATURE_DEFAULTS,
+            "enable_mkldnn": runtime_policy.enable_mkldnn,
             # Detection limit aligned to RGB budget — overridable via self.options.
             "text_det_limit_side_len": _det_limit,
             "text_det_limit_type": "max",
@@ -1016,27 +1033,39 @@ def _tokens_from_result(
     for text, confidence, box, _ in records:
         if not text or box is None:
             continue
-        x0, y0, x1, y1 = _box_coordinates(box)
-        if box_transform is not None:
-            x0, y0, x1, y1 = box_transform(
-                x0,
-                y0,
-                x1,
-                y1,
-                coordinate_width,
-                coordinate_height,
+        try:
+            x0, y0, x1, y1 = _box_coordinates(box)
+            if not all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+                continue
+            if x1 <= x0 or y1 <= y0:
+                continue
+            if box_transform is not None:
+                x0, y0, x1, y1 = box_transform(
+                    x0, y0, x1, y1, coordinate_width, coordinate_height,
+                )
+            coordinates = (
+                target.x0 + x0 * scale_x,
+                target.y0 + y0 * scale_y,
+                target.x0 + x1 * scale_x,
+                target.y0 + y1 * scale_y,
             )
-        bbox = BBox(
-            target.x0 + x0 * scale_x,
-            target.y0 + y0 * scale_y,
-            target.x0 + x1 * scale_x,
-            target.y0 + y1 * scale_y,
-        )
+            if not all(math.isfinite(value) for value in coordinates):
+                continue
+            bbox = BBox(*coordinates)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            # A malformed detector row should not discard valid rows in the page.
+            continue
+        try:
+            score = float(confidence) if confidence is not None else None
+        except (TypeError, ValueError, OverflowError):
+            score = None
+        if score is not None and not math.isfinite(score):
+            score = None
         tokens.append(
             OcrToken(
                 text=str(text),
                 bbox=bbox,
-                confidence=float(confidence) if confidence is not None else None,
+                confidence=score,
                 language=None,
                 source=SourceKind.OCR_PAGE,
                 rotation=effective_rotation,
@@ -1750,20 +1779,21 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
                 return nested
         records: list[tuple[str, float | None, Any, int]] = []
         for item in raw:
-            if isinstance(item, dict):
-                records.extend(_records(item))
-            elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                box = item[0]
-                payload = item[1]
-                if isinstance(payload, (list, tuple)) and payload:
-                    records.append(
-                        (
+            try:
+                if isinstance(item, dict):
+                    records.extend(_records(item))
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    box, payload = item[0], item[1]
+                    if isinstance(payload, (list, tuple)) and payload:
+                        records.append((
                             str(payload[0]),
                             payload[1] if len(payload) > 1 else None,
                             box,
                             _as_rotation(payload[2]) if len(payload) > 2 else 0,
-                        )
-                    )
+                        ))
+            except (TypeError, ValueError, IndexError, OverflowError):
+                # Ignore a malformed record while retaining usable siblings.
+                continue
         return records
     if hasattr(raw, "json"):
         value = raw.json
@@ -1785,20 +1815,26 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
         scores = [] if scores is None else scores
         boxes = [] if boxes is None else boxes
         angles = [] if angles is None else angles
-        return [
-            (
-                str(text),
-                _as_float(scores[index]) if index < len(scores) else None,
-                boxes[index],
-                _as_rotation(angles[index]) if index < len(angles) else 0,
-            )
-            for index, text in enumerate(texts)
-            if index < len(boxes)
-        ]
+        records = []
+        try:
+            for index, text in enumerate(texts):
+                try:
+                    if index >= len(boxes):
+                        continue
+                    confidence = _as_float(scores[index]) if index < len(scores) else None
+                    rotation = _as_rotation(angles[index]) if index < len(angles) else 0
+                    records.append((str(text), confidence, boxes[index], rotation))
+                except (TypeError, ValueError, IndexError, OverflowError):
+                    continue
+        except TypeError:
+            return []
+        return records
     if hasattr(raw, "__iter__") and not isinstance(raw, (str, bytes)):
-        return _records(list(raw))
+        try:
+            return _records(list(raw))
+        except TypeError:
+            return []
     return []
-
 
 def _dominant_record_rotation(records: list[tuple[str, float | None, Any, int]]) -> int:
     usable = [rotation for text, confidence, _, rotation in records if text and (confidence is None or confidence >= 0.50)]

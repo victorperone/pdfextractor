@@ -59,6 +59,7 @@ def test_image(cache_home: str, profile: str) -> bool:
     """Carrega PaddleOCR diretamente e roda inferência numa imagem sintética."""
     _add_src()
     from structured_pdf_text.ocr.models import get_profile
+    from structured_pdf_text.ocr.runtime_policy import resolve_paddle_runtime_policy
 
     import numpy as np
     from paddleocr import PaddleOCR
@@ -77,7 +78,7 @@ def test_image(cache_home: str, profile: str) -> bool:
         "use_doc_orientation_classify": True,
         "use_doc_unwarping": True,
         "use_textline_orientation": True,
-        "enable_mkldnn": True,
+        "enable_mkldnn": resolve_paddle_runtime_policy().enable_mkldnn,
         "device": "cpu",
     }
 

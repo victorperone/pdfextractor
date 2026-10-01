@@ -127,13 +127,14 @@ fails immediately with a clear error before processing any page.**
 python -m structured_pdf_text.cli setup-models
 ```
 
-This downloads the four required models to
+This downloads the required OCR models to
 `~/.cache/pdfextractor/paddlex/official_models/`:
 
 - `PP-LCNet_x1_0_doc_ori` — document orientation classifier
 - `PP-LCNet_x1_0_textline_ori` — text-line orientation classifier
 - `PP-OCRv6_medium_det` — text detection (default)
 - `PP-OCRv6_medium_rec` — text recognition (default)
+- `UVDoc` — document unwarping
 
 ### Step 2 — Verify readiness
 
@@ -292,11 +293,14 @@ selects PP-OCRv5 only when explicitly requested. `--ocr-quality-policy` is
 independent: it selects the OCR variant strategy. `exhaustive` emits an
 informational resource-use warning and does not automatically reduce OCR
 quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter.
-The adapter runs with MKL-DNN/OneDNN and document unwarping (UVDoc) enabled;
-both have been confirmed working on Windows Server 2025. Models are loaded from
-explicit local paths; remote model-source checks are disabled at runtime.
-Model paths and behaviour can be overridden through `PaddleOcrEngine`
-constructor options.
+CPU OCR disables MKL-DNN/oneDNN by default because the current Paddle 3.x
+PIR/oneDNN path is known to fail on some Linux/WSL CPU stacks. Set
+`PADDLE_ENABLE_MKLDNN=1` to opt in explicitly; this can re-enable that upstream
+failure on affected versions. Document unwarping (UVDoc) is enabled by default
+and is checked alongside the profile models by `setup-models`, `models-status`,
+and the runtime. Models are loaded from explicit local paths; remote
+model-source checks are disabled at runtime. Model paths and behavior can be
+overridden through `PaddleOcrEngine` constructor options.
 
 OCR quality policies are available through the API and CLI:
 

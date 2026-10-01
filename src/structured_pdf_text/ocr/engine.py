@@ -23,6 +23,7 @@ class OcrEngine(Protocol):
         page_bbox: BBox | None = None,
         *,
         quality_variants: bool | None = None,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
         """Run OCR on a fully rendered page image.
 

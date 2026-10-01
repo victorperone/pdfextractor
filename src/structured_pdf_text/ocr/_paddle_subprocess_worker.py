@@ -32,8 +32,6 @@ from __future__ import annotations
 import base64
 import io
 import json
-import os
-import platform
 import sys
 from pathlib import Path
 
@@ -43,12 +41,22 @@ _SRC = Path(__file__).parent.parent.parent  # .../src/
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-# Disable oneDNN on Windows (CF-1) before any paddle import
-if platform.system() == "Windows":
-    os.environ.setdefault("FLAGS_enable_pir_api", "0")
+from structured_pdf_text.ocr.runtime_policy import (
+    PaddleRuntimePolicy,
+    apply_paddle_runtime_policy,
+)
+
+# Apply the parent's resolved policy before importing Paddle/PaddleOCR.
 
 
 def _make_engine(config: dict):
+    apply_paddle_runtime_policy(
+        PaddleRuntimePolicy(
+            enable_mkldnn=bool(config.get("mkldnn", False)),
+            disable_pir_api=bool(config.get("disable_pir_api", False)),
+            reason="resolved by parent process",
+        )
+    )
     from structured_pdf_text.ocr.paddle import PaddleOcrEngine
 
     return PaddleOcrEngine(
@@ -118,7 +126,9 @@ def main() -> None:
                 page_index = int(req.get("page_index", 0))
 
                 if method == "recognize_page":
-                    tokens = engine.recognize_page(image, page_index)
+                    tokens = engine.recognize_page(
+                        image, page_index, quality_policy=req.get("quality_policy")
+                    )
                 else:
                     from structured_pdf_text.geometry import BBox
 

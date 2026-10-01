@@ -156,6 +156,7 @@ class OCRBackend(Protocol):
         page_bbox: BBox | None = None,
         *,
         quality_variants: bool | None = None,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
         """Pipeline-layer page OCR — same signature as ``OcrEngine.recognize_page``."""
         ...

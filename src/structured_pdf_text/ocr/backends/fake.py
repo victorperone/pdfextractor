@@ -100,6 +100,7 @@ class FakeOCRBackend:
         page_bbox: BBox | None = None,
         *,
         quality_variants: bool | None = None,
+        quality_policy: str | None = None,
     ) -> list[OcrToken]:
         return list(self.tokens)
 

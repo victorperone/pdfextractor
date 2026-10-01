@@ -27,7 +27,7 @@ from structured_pdf_text.ocr.paddle import (
 def _make_model_dirs(root: Path, names: list[str] | None = None) -> None:
     """Create non-empty model directories under root/official_models/."""
     if names is None:
-        names = list(_LOCAL_MODEL_DIRECTORIES.values())
+        names = [*_LOCAL_MODEL_DIRECTORIES.values(), "UVDoc"]
     for name in names:
         model_dir = root / "official_models" / name
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -250,3 +250,32 @@ def test_validate_local_ocr_models_raises_when_missing(tmp_path: Path) -> None:
     # Empty cache — no model directories at all.
     with pytest.raises(PaddleOcrUnavailable):
         validate_local_ocr_models(language="pt", cache_home=str(tmp_path))
+
+
+def test_missing_uvdoc_is_rejected_before_runtime_initialization(tmp_path: Path) -> None:
+    _make_model_dirs(tmp_path)
+    uvdoc = tmp_path / "official_models" / "UVDoc"
+    (uvdoc / "model.pdparams").unlink()
+    uvdoc.rmdir()
+
+    with pytest.raises(PaddleOcrUnavailable, match="UVDoc"):
+        validate_local_ocr_models(language="pt", cache_home=str(tmp_path))
+
+
+def test_direct_engine_uses_central_mkldnn_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_model_dirs(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_paddle_ocr(**kwargs: Any) -> FakePaddleOCR:
+        captured.update(kwargs)
+        return FakePaddleOCR(**kwargs)
+
+    fake_module = type("paddleocr", (), {"PaddleOCR": staticmethod(fake_paddle_ocr)})()
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake_module)
+    monkeypatch.setenv("PADDLE_ENABLE_MKLDNN", "1")
+
+    _make_engine(tmp_path)._get_ocr()
+    assert captured["enable_mkldnn"] is True

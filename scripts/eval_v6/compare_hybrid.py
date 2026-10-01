@@ -48,6 +48,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+_SRC = ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from structured_pdf_text.ocr.runtime_policy import resolve_paddle_runtime_policy  # noqa: E402
+
 HYBRID_PROFILES = ("v5", "v6")
 LAYOUT_MODEL = "PP-DocLayout_plus-L"
 DEFAULT_THRESHOLD = 0.85
@@ -216,7 +221,7 @@ def _build_ocr_pipeline(cache: Path, profile: str) -> Any:
         use_doc_unwarping=True,
         use_textline_orientation=False,
         device="cpu",
-        enable_mkldnn=True,
+        enable_mkldnn=resolve_paddle_runtime_policy().enable_mkldnn,
     )
 
 

@@ -23,9 +23,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+PADDLE_OCR_FEATURE_DEFAULTS: dict[str, bool] = {
+    "use_doc_orientation_classify": True,
+    "use_doc_unwarping": True,
+    "use_textline_orientation": True,
+}
+UV_DOC_MODEL = "UVDoc"
+
+
 @dataclass(frozen=True, slots=True)
 class OcrModelProfile:
-    """Names of the four PaddleOCR models that make up one language profile."""
+    """Names of the four text and orientation models in one OCR profile."""
 
     language: str
     doc_orientation: str
@@ -114,3 +122,38 @@ def get_profile(language: str) -> OcrModelProfile:
             f"Choose one of the listed profiles explicitly with --ocr-model-profile."
         )
     return profile
+
+
+def required_model_directories(
+    profile: OcrModelProfile,
+    *,
+    use_doc_orientation_classify: bool = True,
+    use_doc_unwarping: bool = True,
+    use_textline_orientation: bool = True,
+) -> dict[str, str]:
+    """Return model directory kwargs required by the effective Paddle config."""
+    required: dict[str, str] = {}
+    if use_doc_orientation_classify:
+        required["doc_orientation_classify_model_dir"] = profile.doc_orientation
+    if use_doc_unwarping:
+        required["doc_unwarping_model_dir"] = UV_DOC_MODEL
+    if use_textline_orientation:
+        required["textline_orientation_model_dir"] = profile.textline_orientation
+    required["text_detection_model_dir"] = profile.detection
+    required["text_recognition_model_dir"] = profile.recognition
+    return required
+
+
+def model_directory_is_ready(model_dir: str | "Path") -> bool:
+    """Check for actual model weights rather than a non-empty placeholder dir."""
+    from pathlib import Path
+
+    path = Path(model_dir)
+    if not path.is_dir():
+        return False
+    weight_suffixes = {".pdmodel", ".pdiparams", ".pdparams", ".nb", ".onnx", ".bin", ".pt"}
+    return any(
+        item.is_file()
+        and (item.suffix.lower() in weight_suffixes or item.name.endswith(".pdiparams.info"))
+        for item in path.iterdir()
+    )

@@ -88,7 +88,7 @@ pip install "numpy==2.0.2"
 
 | ID | Descrição | Status |
 |---|---|---|
-| CF-1 | **oneDNN desabilitado no Windows** — Paddle 3.x com PIR API ativo causa crash no Windows. Workaround: `FLAGS_enable_pir_api=False`. | Aguarda fix upstream |
+| CF-1 | **oneDNN desabilitado por padrão em CPU** — Paddle 3.x pode falhar no caminho PIR/oneDNN em Linux/WSL e Windows. `PADDLE_ENABLE_MKLDNN=1` é opt-in explícito; `FLAGS_enable_pir_api=False` permanece aplicado no Windows. | Política segura no runtime |
 | CF-2 | **DLL incompatível `paddle2onnx`** — Incompatibilidade 0xC0000139 no Windows. RapidOCR usa PP-OCRv4 embutido em vez de converter modelos Paddle. | Contornado |
 | CF-3 | **Conflito de numpy** — EasyOCR força numpy ≥ 2.5.x; OpenVINO < 2.1.0 requer numpy < 2.x. Fix: `pip install "numpy==2.0.2"` | ✅ Aplicado |
 

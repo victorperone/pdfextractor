@@ -20,7 +20,14 @@ from .diagnostics.dump import dump_native_page_json
 from .diagnostics.corpus import corpus_report
 from .diagnostics.compare import compare_extractors
 from .errors import FatalExtractionError
-from .ocr.models import get_profile
+from .ocr.models import (
+    PADDLE_OCR_FEATURE_DEFAULTS,
+    UV_DOC_MODEL,
+    get_profile,
+    model_directory_is_ready,
+    required_model_directories,
+)
+from .ocr.runtime_policy import apply_paddle_runtime_policy, resolve_paddle_runtime_policy
 from .ocr.paddle import (
     PaddleOcrUnavailable,
     _local_model_root,
@@ -49,7 +56,10 @@ def _warn_if_exhaustive(policy: str, *, emitted: bool = False) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="pdftext")
+    parser = argparse.ArgumentParser(
+        prog="pdftext",
+        description="PDF text extraction. CPU OCR defaults to oneDNN disabled; set PADDLE_ENABLE_MKLDNN=1 to opt in.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     extract_parser = subparsers.add_parser("extract", help="Extract text or structure from a PDF")
@@ -648,26 +658,9 @@ def _print_fatal_extraction_error(exc: FatalExtractionError) -> None:
     )
 
 
-_WEIGHT_EXTENSIONS = frozenset({
-    ".pdmodel", ".pdiparams", ".pdparams", ".pdiparams.info",
-    ".nb", ".onnx", ".bin", ".pt",
-})
-
-
 def _model_is_ready(model_dir: "Path") -> bool:
-    """Return True when model_dir looks like a properly installed PaddleOCR model.
-
-    A directory that exists but contains only README or JSON files is NOT ready.
-    At least one weight file (by extension) must be present.
-    """
-    if not model_dir.is_dir():
-        return False
-    for entry in model_dir.iterdir():
-        suffix = entry.suffix.lower()
-        # .pdiparams.info has two suffixes; check the full name too.
-        if suffix in _WEIGHT_EXTENSIONS or entry.name.endswith(".pdiparams.info"):
-            return True
-    return False
+    """Compatibility wrapper around the shared model readiness check."""
+    return model_directory_is_ready(model_dir)
 
 
 def _cmd_models_status(language: str, cache_home: str | None) -> int:
@@ -689,7 +682,10 @@ def _cmd_models_status(language: str, cache_home: str | None) -> int:
     print(f"OCR model home:\n  {root}\n")
 
     all_ok = True
-    for model_name in profile.dir_kwargs.values():
+    required_models = required_model_directories(
+        profile, **PADDLE_OCR_FEATURE_DEFAULTS
+    ).values()
+    for model_name in required_models:
         model_dir = root / model_name
         if _model_is_ready(model_dir):
             print(f"[ok] {model_name}")
@@ -747,12 +743,13 @@ def _cmd_setup_models(language: str, cache_home: str | None) -> int:
         return 1
 
     root = _local_model_root(resolved_cache)
+    policy = resolve_paddle_runtime_policy()
+    apply_paddle_runtime_policy(policy)
     options: dict = {
-        "use_doc_orientation_classify": True,
-        "use_doc_unwarping": True,
-        "use_textline_orientation": True,
-        "enable_mkldnn": True,
+        **PADDLE_OCR_FEATURE_DEFAULTS,
+        "enable_mkldnn": policy.enable_mkldnn,
         **profile.name_kwargs,
+        "doc_unwarping_model_name": UV_DOC_MODEL,
     }
 
     try:
@@ -763,7 +760,10 @@ def _cmd_setup_models(language: str, cache_home: str | None) -> int:
 
     print("\nVerifying installed models...")
     all_ok = True
-    for model_name in profile.dir_kwargs.values():
+    required_models = required_model_directories(
+        profile, **PADDLE_OCR_FEATURE_DEFAULTS
+    ).values()
+    for model_name in required_models:
         model_dir = root / model_name
         if _model_is_ready(model_dir):
             print(f"  [ok] {model_dir}")
