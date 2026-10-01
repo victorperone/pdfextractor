@@ -545,3 +545,48 @@ Metas (v1 → v2, sem troca de modelo):
 - substitution_rate: 7.6% → <5%
 - cer_normalized: 0.360 → <0.30
 - `deletion_rate` não deve piorar (CLAHE não gera falsos positivos)
+
+---
+
+## Melhorias de Infraestrutura de Benchmark (2026-10-01)
+
+### compute_metrics.py — Paralelização com ProcessPoolExecutor
+
+O loop de páginas de `scripts/compute_metrics.py` foi paralelizado usando
+`ProcessPoolExecutor` com um worker por core de CPU.
+
+| Antes | Depois | Hardware |
+|---|---|---|
+| ~60 min (sequencial) | ~10 min | 12 cores, corpus 224 páginas |
+
+**Por que é seguro:**
+- Cada página é processada de forma independente (sem estado compartilhado).
+- A função worker `_process_page` é definida em nível de módulo (picklable), garantindo
+  compatibilidade com o método `spawn` do Windows.
+- Os resultados são ordenados por número de página após a coleta, produzindo
+  output idêntico ao da versão sequencial.
+
+**Guard necessário no Windows:** o bloco `if __name__ == "__main__":` já existia
+no script antes da paralelização (linha 1102+), protegendo contra execução
+recursiva nos workers.
+
+### run_benchmark.ps1 — Correção do splatting @metricsFiles
+
+**Problema:** quando apenas uma engine é executada, `Get-ChildItem | ForEach-Object { $_.FullName }`
+retorna uma string (não array). `@string` em PowerShell itera sobre os caracteres
+individuais, passando `\` e `.` como argumentos ao `compare_engines.py`, que
+os interpretava como caminhos de arquivo válidos e falhava silenciosamente.
+
+**Sintoma observado:**
+```
+WARNING: skipping \: ...
+WARNING: skipping .: ...
+ERROR: no valid metrics files loaded
+```
+
+**Correção:** envolver a atribuição em `@(...)` força o resultado a ser sempre
+um array, independente do número de arquivos retornados:
+```powershell
+$metricsFiles = @(Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" ... |
+    ForEach-Object { $_.FullName })
+```

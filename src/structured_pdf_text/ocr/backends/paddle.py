@@ -52,6 +52,12 @@ _WORKER_SCRIPT = Path(__file__).parent.parent / "_paddle_subprocess_worker.py"
 
 
 def _resolve_num_threads(num_threads: int) -> int:
+    """Translate ExtractorConfig.num_threads to a concrete value for PaddleOcrEngine.
+
+    -1 means "leave Paddle's own default unchanged" (not passed to the engine).
+     0 means "auto-detect" → max(2, cpu_count).
+    Any positive value is clamped to at least 1.
+    """
     if num_threads == -1:
         return -1
     if num_threads == 0:

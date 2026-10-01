@@ -92,8 +92,13 @@ try {
 
 Write-Host ""
 Write-Host "=== Setup completo ===" -ForegroundColor Cyan
-Write-Host "Execute o benchmark com:"
-Write-Host "  python scripts\benchmark_raw_ocr.py corpus\Document_AI_V3.pdf --engine paddle --pages 72-103 --output-dir output\benchmark_raw"
-Write-Host "  python scripts\benchmark_raw_ocr.py corpus\Document_AI_V3.pdf --engine rapidocr-onnx --pages 72-103 --output-dir output\benchmark_raw"
-Write-Host "  python scripts\benchmark_raw_ocr.py corpus\Document_AI_V3.pdf --engine rapidocr-openvino --pages 72-103 --output-dir output\benchmark_raw"
-Write-Host "  python scripts\benchmark_raw_ocr.py corpus\Document_AI_V3.pdf --engine tesseract --pages 72-103 --output-dir output\benchmark_raw"
+Write-Host "Execute o benchmark E2E com:"
+Write-Host "  # Smoke test — 5 páginas, todas as engines"
+Write-Host "  .\scripts\run_benchmark.ps1"
+Write-Host ""
+Write-Host "  # Documento completo"
+Write-Host "  .\scripts\run_benchmark.ps1 -RunSuffix v2 -AllPages"
+Write-Host ""
+Write-Host "  # Engine individual"
+Write-Host "  .\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix v2"
+Write-Host "  .\scripts\run_benchmark.ps1 -Engine rapidocr-onnx -AllPages -RunSuffix v2"

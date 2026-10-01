@@ -51,6 +51,30 @@ extractor = PdfTextExtractor(config)
 document = extractor.extract("documento.pdf")
 ```
 
+### Seleção de Engine na CLI
+
+Use `--ocr-engine` no comando `pdftext extract`:
+
+```bash
+# PaddleOCR (padrão — requer setup-models)
+pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output markdown
+
+# Tesseract (requer binário tesseract no PATH)
+pdftext extract documento.pdf --mode balanced --ocr-engine tesseract --output markdown
+
+# RapidOCR ONNX (sem download de modelos)
+pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-onnx --output markdown
+
+# RapidOCR OpenVINO
+pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-openvino --output markdown
+
+# EasyOCR (baixa modelos no primeiro uso)
+pdftext extract documento.pdf --mode balanced --ocr-engine easyocr --output markdown
+```
+
+Engines não-Paddle não usam `--ocr-model-profile`.  O `--mode balanced` mantém
+a lógica de fallback (native-first → OCR apenas em páginas que precisam).
+
 ---
 
 ## Instalação das Engines
@@ -232,6 +256,36 @@ Parâmetros padrão: páginas 77–81, sufixo `smoke`.
 .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 ```
 
+### Engine Individual ou Subconjunto (PowerShell)
+
+Use o parâmetro `-Engine` para limitar a execução a uma ou mais engines:
+
+```powershell
+# Uma engine — completo
+.\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix "v2"
+
+# Duas engines — completo
+.\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
+
+# Uma engine — smoke test
+.\scripts\run_benchmark.ps1 -Engine paddle -RunSuffix "v2-smoke"
+```
+
+A tabela comparativa (`compare_engines.py`) é gerada com as engines que concluíram
+com sucesso. Se apenas uma engine foi executada, a tabela contém uma única coluna.
+
+### Engine Individual (Linux / WSL)
+
+Use `--engines` para o runner Bash:
+
+```bash
+# Uma engine — completo
+scripts/run_benchmark.sh --engines tesseract --all-pages --run-suffix wsl-v2
+
+# Duas engines — smoke test
+scripts/run_benchmark.sh --engines "easyocr,tesseract" --run-suffix wsl-smoke
+```
+
 ### Linux / WSL
 
 ```bash
@@ -267,6 +321,7 @@ python scripts\compare_engines.py output\fase8\metrics_*_smoke-*.json --output o
 
 | Parâmetro | Padrão | Descrição |
 |---|---|---|
+| `-Engine` | `""` (todas) | Engine(s) a executar. Aceita uma engine (`tesseract`) ou lista CSV (`"easyocr,tesseract"`). Omitir executa as cinco engines. |
 | `-Pages` | `"77-81"` | Intervalo de páginas para smoke test |
 | `-AllPages` | (switch) | Processar documento completo |
 | `-RunSuffix` | `"smoke"` | Sufixo dos arquivos de saída |
@@ -320,6 +375,25 @@ Todos os arquivos são salvos em `output/fase8/` por padrão.
 
 ---
 
+## Performance do Pipeline de Scripts
+
+### compute_metrics.py — processamento paralelo
+
+O cálculo de métricas usa `ProcessPoolExecutor` para processar cada página em
+paralelo (um worker por core de CPU). As páginas são independentes entre si,
+então os resultados são idênticos à versão sequencial.
+
+| Condição | Tempo (224 páginas) |
+|---|---|
+| Sequencial (antes de Fase 9) | ~60 min |
+| Paralelo — 12 cores | ~10 min |
+
+No Windows, o `ProcessPoolExecutor` usa o método de início `spawn`. A função
+worker `_process_page` precisa ser picklable (definida em nível de módulo, fora
+de `main()`), o que é garantido pela implementação atual.
+
+---
+
 ## Corpus de Teste
 
 **Arquivo**: `corpus/Corpus_Stress_OCR_Markdown_V4.pdf` — 224 páginas
@@ -362,6 +436,56 @@ cada condição.
 
 A tabela de métricas de qualidade (`comparison_v1.md`) é preenchida após a
 execução do benchmark E2E completo.
+
+---
+
+## Otimizações por Engine (Fase 9)
+
+Cada backend recebeu otimizações específicas após a análise dos resultados Fase 8.
+Os detalhes completos estão em [`Plano_Comparativo_Paddle.md`](../Plano_Comparativo_Paddle.md).
+
+### Tesseract
+
+| Parâmetro | Efeito |
+|---|---|
+| `--dpi` calculado de `ocr_render_scale` | Corrige deletion_rate alto (DPI errado silencioso) |
+| `textord_min_linesize=2.5` | Corrige diacríticos PT lidos como linha separada (bug #4276) |
+| `tessedit_char_blacklist=\`` | Elimina backtick que quebra fences Markdown |
+| `textord_noise_rej{rows,words}=0` | Preserva texto válido classificado como ruído |
+| `crunch_del_rating=40` | Preserva mais tokens borderline |
+| `preserve_interword_spaces=1` | Mantém separação entre colunas de tabela |
+| CLAHE grayscale preprocessing | Melhora scans com iluminação irregular |
+
+Vars de ambiente configuráveis: `TESSERACT_LANG`, `TESSERACT_PSM`, `TESSERACT_OEM`,
+`TESSERACT_DPI`, `TESSERACT_TESSDATA_DIR`, `TESSERACT_CONF_MIN`.
+
+### RapidOCR ONNX e OpenVINO
+
+| Parâmetro | Valor Fase 9 | Valor anterior |
+|---|---|---|
+| `det_db_unclip_ratio` | `1.8` | `1.6` |
+| `det_db_box_thresh` | `0.45` | `0.5` |
+| `det_db_thresh` | `0.25` | `0.3` |
+| CLAHE LAB L-channel | ativado | — |
+
+O CLAHE é aplicado no canal L do espaço LAB (preserva informação de cor) antes
+de passar a imagem ao detector. Vars de ambiente: `RAPIDOCR_UNCLIP_RATIO`,
+`RAPIDOCR_BOX_THRESH`, `RAPIDOCR_DET_THRESH`, `RAPIDOCR_TEXT_SCORE`,
+`RAPIDOCR_ANGLE_CLS`, `RAPIDOCR_REC_MODEL`, `RAPIDOCR_REC_KEYS`.
+
+### EasyOCR
+
+| Parâmetro | Efeito |
+|---|---|
+| Pipeline detect + recognize separado | Permite configurar os dois estágios independentemente |
+| `canvas_size=max(h,w)` | Evita downscale do CRAFT em páginas grandes |
+| `mag_ratio=1.5` | Melhora detecção de texto pequeno |
+| `decoder='beamsearch'` | Menos erros de substituição em caracteres ambíguos |
+| `adjust_contrast=1.0` | Recuperação de contraste em regiões desbotadas |
+| CLAHE antes do reconhecimento | Melhora scans de baixo contraste |
+
+Vars de ambiente: `EASYOCR_MODULE_PATH`, `EASYOCR_RECOG_NETWORK`, `EASYOCR_BEAMWIDTH`,
+`EASYOCR_WORKERS`, `EASYOCR_ALLOWLIST`, `EASYOCR_BLOCKLIST`.
 
 ---
 

@@ -238,6 +238,10 @@ Consulte o guia completo em [`docs/benchmark_engines.md`](docs/benchmark_engines
 
 # Documento completo
 .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
+
+# Engine individual ou subconjunto
+.\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix "v2"
+.\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
 ```
 
 ### Execução rápida (Linux / WSL)
@@ -272,7 +276,7 @@ pdftext extract documento.pdf
 pdftext extract documento.pdf --output raw
 pdftext extract documento.pdf --output json
 
-# OCR-assisted extraction (requires setup-models)
+# OCR-assisted extraction with PaddleOCR (default engine, requires setup-models)
 pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy adaptive
 pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy baseline
@@ -280,6 +284,12 @@ pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quali
 pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output json
 pdftext extract documento.pdf --mode ocr --ocr-model-profile pt --output reading
 pdftext extract documento.pdf --best --ocr-model-profile pt --output markdown -o output.md
+
+# Select a different OCR engine (no --ocr-model-profile needed for non-Paddle engines)
+pdftext extract documento.pdf --mode balanced --ocr-engine tesseract --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-onnx --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-openvino --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-engine easyocr --output markdown
 
 # Inspection and diagnostics
 pdftext inspect documento.pdf --page 1
@@ -307,7 +317,22 @@ management commands, `pt` is the default and selects PP-OCRv6 medium
 selects PP-OCRv5 only when explicitly requested. `--ocr-quality-policy` is
 independent: it selects the OCR variant strategy. `exhaustive` emits an
 informational resource-use warning and does not automatically reduce OCR
-quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter.
+quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter by
+default.
+
+`--ocr-engine` selects the OCR backend. The five available engines are:
+
+| Engine | Flag value | Notes |
+|---|---|---|
+| PaddleOCR PP-OCRv6 | `paddle` (default) | Requires `pdftext setup-models` |
+| RapidOCR + ONNX Runtime | `rapidocr-onnx` | No model download needed |
+| RapidOCR + Intel OpenVINO | `rapidocr-openvino` | No model download needed |
+| Tesseract 5 | `tesseract` | Requires Tesseract binary in PATH |
+| EasyOCR (PyTorch CPU) | `easyocr` | Downloads models on first use |
+
+Non-Paddle engines do not use `--ocr-model-profile`. The engine is also
+selectable through the Python API via `ExtractorConfig(ocr_engine="tesseract")`
+or `dataclasses.replace(config, ocr_engine="rapidocr-onnx")`.
 CPU OCR disables MKL-DNN/oneDNN by default because the current Paddle 3.x
 PIR/oneDNN path is known to fail on some Linux/WSL CPU stacks. Set
 `PADDLE_ENABLE_MKLDNN=1` to opt in explicitly; this can re-enable that upstream
