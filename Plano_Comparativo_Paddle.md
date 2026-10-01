@@ -12,7 +12,7 @@
 | 5 | RapidOCR OpenVINO | `backends/rapidocr.py` (openvino), 32/32 OK | ✅ |
 | 6 | Tesseract 5 | `backends/tesseract.py`, PSM 3 + OEM 1 | ✅ |
 | 7 | EasyOCR | `backends/easyocr.py`, PyTorch CPU | ✅ |
-| 8 | Benchmark E2E completo | `evaluate_e2e.py`, `compute_metrics.py`, `compare_engines.py` | ⬜ |
+| 8 | Benchmark E2E completo | `evaluate_e2e.py`, `compute_metrics.py`, `compare_engines.py` — 5 engines, 144/144 páginas | ✅ |
 
 ---
 
@@ -21,7 +21,7 @@
 | Engine | Tempo total | s/pág | Páginas OK | CER médio |
 |---|---|---|---|---|
 | PaddleOCR (sem oneDNN — CF-1) | 3018 s | ~94 s | 32/32 | 0.4106 (parcial) |
-| RapidOCR ONNX (PP-OCRv4 — CF-2) | 88.2 s | ~2.76 s | 32/32 | — aguarda Fase 8 |
+| RapidOCR ONNX (PP-OCRv4 — CF-2) | 88.2 s | ~2.76 s | 32/32 | ver resultados completos da Fase 8 abaixo |
 | RapidOCR OpenVINO (PP-OCRv4 — CF-2) | 20.1 s | ~0.63 s | 32/32 | — |
 | Tesseract 5 (por, PSM 3, OEM 1) | 18.5 s | ~0.58 s | 32/32 | — |
 | EasyOCR (latin_g2, CPU) | 173.1 s | ~5.4 s | 32/32 | — |
@@ -48,10 +48,10 @@ Avaliar a qualidade de extração de cada engine no **documento completo** via p
 ### Corpus e Ground Truth
 
 - Arquivo: `corpus/Document_AI_V3.pdf` — **todas as páginas** (nativas + scan)
-- Ground truth: disponível — fornecer caminho via argumento ou `GROUND_TRUTH_DIR`
+- Ground truth: `corpus/Document_AI_V3.md` e `corpus/Document_AI_V3_MANIFESTO.json`; o Markdown é a referência textual e o manifesto fornece metadados por página
 - O pipeline E2E aplica native-first; métricas avaliam a saída final completa
 
-### Scripts a implementar
+### Scripts utilizados
 
 | Arquivo | Responsabilidade |
 |---|---|
@@ -133,27 +133,99 @@ output/fase8/
 └── comparison_table.md          — tabela comparativa de todas as engines
 ```
 
-### Tabela comparativa (a preencher após execução)
+### Resultado completo obtido no WSL (2026-10-01)
 
-| Métrica | Paddle | RapidOCR ONNX | RapidOCR OpenVINO | Tesseract | EasyOCR |
+- Documento: `corpus/Document_AI_V3.pdf`, 144 páginas.
+- Referências: `corpus/Document_AI_V3.md` e `corpus/Document_AI_V3_MANIFESTO.json` (144 páginas de referência, nenhuma ausente na saída).
+- Execução: `scripts/run_benchmark.sh --all-pages --run-suffix wsl-full-20260930`.
+- Modo E2E: `balanced`; os tempos incluem o pipeline completo por engine, não apenas a chamada isolada ao OCR.
+- Ambiente: WSL, Python 3.12 no `.venv`; runtimes configurados pelo `scripts/setup_ocr_benchmark.sh`.
+- Artefatos (Markdown extraído, manifesto, métricas JSON e erros por página): `output/fase8/`. A tabela comparativa gerada está em [`output/fase8/comparison_wsl-full-20260930.md`](output/fase8/comparison_wsl-full-20260930.md).
+
+#### Tempo de execução
+
+| Engine | Páginas avaliadas | Tempo E2E | s/página | Run ID |
+|---|---:|---:|---:|---|
+| paddle | 144/144 | 2274.9 s | 15.80 | `wsl-full-20260930-paddle` |
+| rapidocr-onnx | 144/144 | 91.4 s | 0.63 | `wsl-full-20260930-rapidocr-onnx` |
+| rapidocr-openvino | 144/144 | 38.2 s | 0.27 | `wsl-full-20260930-rapidocr-openvino` |
+| tesseract | 144/144 | 37.0 s | 0.26 | `wsl-full-20260930-tesseract` |
+| easyocr | 144/144 | 479.5 s | 3.33 | `wsl-full-20260930-easyocr` |
+
+#### Todas as métricas CER e WER
+
+CER/WER e suas taxas são valores agregados pelo avaliador sobre o documento. Para CER e WER, menor é melhor; para Word Accuracy, maior é melhor. Heading Text CER igual a zero indica que nenhum par de heading textual entrou no cálculo, não uma taxa de erro perfeita.
+
+| Métrica | **paddle** | **rapidocr-onnx** | **rapidocr-openvino** | **tesseract** | **easyocr** |
 |---|---|---|---|---|---|
-| CER Normalized | — | — | — | — | — |
-| CER Text Only | — | — | — | — | — |
-| WER | — | — | — | — | — |
-| Block F1 | — | — | — | — | — |
-| Heading F1 | — | — | — | — | — |
-| Heading Level Accuracy | — | — | — | — | — |
-| Paragraph Boundary F1 | — | — | — | — | — |
-| Table F1 | — | — | — | — | — |
-| Cell Exact Match | — | — | — | — | — |
-| Cell Alignment Accuracy | — | — | — | — | — |
-| Reading Order Accuracy | — | — | — | — | — |
-| Duplicate Content Rate | — | — | — | — | — |
-| Header Leakage Rate | — | — | — | — | — |
-| Failure Rate | — | — | — | — | — |
-| Numeric Exact Match | — | — | — | — | — |
-| Currency Exact Match | — | — | — | — | — |
-| Identifier Exact Match | — | — | — | — | — |
+| CER Raw ↓ | 0.477071 | 0.511163 | 0.511163 | 0.488814 | 0.474609 |
+| CER Normalized ↓ | 0.479743 | 0.515389 | 0.515389 | 0.492034 | 0.477694 |
+| CER Text Only ↓ | 0.509125 | 0.548293 | 0.548293 | 0.518416 | 0.500495 |
+| Heading Text CER ↓ | 0.000000 | 0.000000 | 0.000000 | 0.000000 | 0.000000 |
+| Cell CER ↓ | 1.077918 | 1.065245 | 1.065245 | 1.404613 | 1.128853 |
+| WER ↓ | 0.509370 | 0.506693 | 0.506693 | 0.546710 | 0.547837 |
+| Word Accuracy ↑ | 0.490630 | 0.493307 | 0.493307 | 0.453290 | 0.452163 |
+| Substitution Rate ↓ | 0.117092 | 0.204453 | 0.204453 | 0.155136 | 0.182190 |
+| Deletion Rate ↓ | 0.371847 | 0.228265 | 0.228265 | 0.367479 | 0.324644 |
+| Insertion Rate ↓ | 0.020431 | 0.073975 | 0.073975 | 0.024095 | 0.041003 |
+| Omission Rate ↓ | 0.371847 | 0.228265 | 0.228265 | 0.367479 | 0.324644 |
+
+#### Demais métricas multidimensionais
+
+#### Grupo 2 — Estrutura Markdown
+
+| Métrica | **easyocr** | **paddle** | **rapidocr-onnx** | **rapidocr-openvino** | **tesseract** |
+|---|---|---|---|---|---|
+| Heading F1 ↑ | 0.1600 | 0.1584 | **0.1616** | 0.1616 | 0.1584 |
+| Heading Level Acc. ↑ | **0.0000** | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| Heading Text CER ↓ | **0.0000** | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| Block F1 ↑ | 0.7257 | **0.8094** | 0.7399 | 0.7399 | 0.7250 |
+| Paragraph Boundary F1 ↑ | **0.9602** | 0.8957 | 0.9509 | 0.9509 | 0.9592 |
+| List Detection F1 ↑ | **0.8235** | 0.8235 | 0.8235 | 0.8235 | 0.7000 |
+| Markdown AST Sim. ↑ | 0.6430 | **0.6617** | 0.6532 | 0.6532 | 0.6418 |
+
+#### Grupo 3 — Tabelas
+
+| Métrica | **easyocr** | **paddle** | **rapidocr-onnx** | **rapidocr-openvino** | **tesseract** |
+|---|---|---|---|---|---|
+| Table F1 ↑ | 0.9365 | **0.9449** | 0.9280 | 0.9280 | 0.9449 |
+| Row F1 ↑ | 0.9092 | **0.9142** | 0.9089 | 0.9089 | 0.9073 |
+| Column F1 ↑ | 0.8984 | 0.8968 | 0.8819 | 0.8819 | **0.8990** |
+| Table Dim. Accuracy ↑ | 0.4746 | **0.5000** | 0.4828 | 0.4828 | 0.4833 |
+| Cell Exact Match ↑ | 0.3246 | **0.3460** | 0.3163 | 0.3163 | 0.3429 |
+| Cell CER ↓ | 1.1289 | 1.0779 | **1.0652** | 1.0652 | 1.4046 |
+| Cell Alignment Acc. ↑ | 0.3246 | **0.3460** | 0.3163 | 0.3163 | 0.3429 |
+| Table Structure Sim. ↑ | 0.8994 | **0.9015** | 0.8909 | 0.8909 | 0.8991 |
+
+#### Grupo 4 — Ordem e Integridade
+
+| Métrica | **easyocr** | **paddle** | **rapidocr-onnx** | **rapidocr-openvino** | **tesseract** |
+|---|---|---|---|---|---|
+| Reading Order Acc. ↑ | 0.1784 | **0.1992** | 0.1680 | 0.1680 | 0.1846 |
+| Duplicate Content ↓ | **0.0071** | 0.1585 | 0.0093 | 0.0093 | 0.0095 |
+| Header Leakage ↓ | **0.0000** | 0.5208 | 0.0000 | 0.0000 | 0.0000 |
+| Footer Leakage ↓ | **0.0000** | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| Page# Leakage ↓ | 0.0041 | **0.0020** | 0.0020 | 0.0020 | 0.0030 |
+| Failure Rate ↓ | **0.0069** | 0.0069 | 0.0069 | 0.0069 | 0.0069 |
+| Invalid Markdown ↓ | **0.0000** | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+
+#### Grupo 5 — Dados Críticos
+
+| Métrica | **easyocr** | **paddle** | **rapidocr-onnx** | **rapidocr-openvino** | **tesseract** |
+|---|---|---|---|---|---|
+| Numeric Exact Match ↑ | **0.9962** | 0.9924 | 0.9848 | 0.9848 | 0.9962 |
+| Date Exact Match ↑ | **1.0000** | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| Currency Exact Match ↑ | 0.9621 | 0.9848 | 0.9091 | 0.9091 | **1.0000** |
+| Identifier Exact Match ↑ | **1.0000** | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+
+#### Resumo dos resultados
+
+- EasyOCR teve o menor CER global (Raw `0.4746`, Normalized `0.4777` e Text Only `0.5005`).
+- RapidOCR ONNX e OpenVINO tiveram o menor WER (`0.5067`) e a maior Word Accuracy (`0.4933`).
+- Paddle teve o maior Block F1 (`0.8094`) e levou `37.9` minutos no documento completo.
+- O Failure Rate foi `0.0069` para as cinco engines; todas produziram e tiveram avaliação para 144/144 páginas.
+
+Os valores Heading Text CER são zero porque a implementação não encontrou pares textuais de headings para calcular essa métrica; esse zero deve ser lido como ausência de amostras comparáveis, e não como acerto perfeito. Os detalhes por página e relatórios de erro permanecem nos artefatos indicados acima.
 
 ---
 

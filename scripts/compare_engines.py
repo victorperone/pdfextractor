@@ -34,6 +34,7 @@ from pathlib import Path
 _METRICS: list[tuple[str, str, str]] = [
     # (display_name, group_key, metric_key)
     # Grupo 1 — Texto
+    ("CER Raw",               "grupo1_texto",                 "cer_raw"),
     ("CER Normalized",        "grupo1_texto",                 "cer_normalized"),
     ("CER Text Only",         "grupo1_texto",                 "cer_text_only"),
     ("WER",                   "grupo1_texto",                 "wer"),
@@ -76,7 +77,7 @@ _METRICS: list[tuple[str, str, str]] = [
 
 # Metrics where lower is better (errors)
 _LOWER_IS_BETTER = {
-    "cer_normalized", "cer_text_only", "wer", "substitution_rate",
+    "cer_raw", "cer_normalized", "cer_text_only", "wer", "substitution_rate",
     "deletion_rate", "insertion_rate", "omission_rate", "heading_text_cer",
     "cell_cer", "duplicate_content_rate", "header_leakage_rate",
     "footer_leakage_rate", "page_number_leakage_rate", "failure_rate",

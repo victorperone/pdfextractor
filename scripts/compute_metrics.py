@@ -884,15 +884,16 @@ def main() -> int:
     hyp_text = args.hypothesis.read_text(encoding="utf-8")
     hyp_pages = _parse_pages(hyp_text)
 
-    # Load reference pages
+    # A separate Markdown reference takes precedence; the manifesto can then
+    # provide page conditions and run metadata even when it has no reference text.
     ref_pages: dict[int, str] = {}
-    if args.manifesto and args.manifesto.exists():
-        ref_pages = _load_reference_from_manifesto(args.manifesto)
-    elif args.reference and args.reference.exists():
+    if args.reference and args.reference.exists():
         ref_text = args.reference.read_text(encoding="utf-8")
         ref_pages = _parse_pages(ref_text)
+    elif args.manifesto and args.manifesto.exists():
+        ref_pages = _load_reference_from_manifesto(args.manifesto)
     else:
-        print("ERROR: reference source not found", file=sys.stderr)
+        print("ERROR: reference Markdown or manifesto not found", file=sys.stderr)
         return 1
 
     if not ref_pages:
@@ -922,6 +923,7 @@ def main() -> int:
     all_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
 
     # Accumulators for group 1 micro-average (weighted by ref length)
+    _t_chars_raw = _t_edits_raw = 0
     _t_chars_norm = _t_edits_norm = 0
     _t_chars_text = _t_edits_text = 0
     _t_words = _t_word_edits = 0
@@ -934,6 +936,8 @@ def main() -> int:
         hyp_body = _strip_page_header(hyp_content)
 
         # Compute Levenshtein once; feed both per-page diagnostics and accumulators
+        ref_raw = ref_body
+        hyp_raw = hyp_body
         ref_n = _normalize(ref_body)
         hyp_n = _normalize(hyp_body)
         ref_t = _strip_md(ref_body)
@@ -941,15 +945,18 @@ def main() -> int:
         ref_w = ref_n.split()
         hyp_w = hyp_n.split()
 
+        edits_raw = _lev_distance(list(hyp_raw), list(ref_raw))
         edits_norm = _lev_distance(list(hyp_n), list(ref_n))
         edits_text = _lev_distance(list(hyp_t), list(ref_t))
         word_edits = _lev_distance(hyp_w, ref_w)
         S, D, I = _lev_ops(hyp_w, ref_w)
 
+        rc = max(len(ref_raw), 1)
         nc = max(len(ref_n), 1)
         tc = max(len(ref_t), 1)
         nw = max(len(ref_w), 1)
 
+        _t_chars_raw += rc; _t_edits_raw += edits_raw
         _t_chars_norm += nc; _t_edits_norm += edits_norm
         _t_chars_text += tc; _t_edits_text += edits_text
         _t_words += nw; _t_word_edits += word_edits
@@ -957,7 +964,7 @@ def main() -> int:
 
         wer_val = word_edits / nw
         text_m = {
-            "cer_raw": round(_cer_raw(hyp_body, ref_body), 6),
+            "cer_raw": round(edits_raw / rc, 6),
             "cer_normalized": round(edits_norm / nc, 6),
             "cer_text_only": round(edits_text / tc, 6),
             "wer": round(wer_val, 6),
@@ -996,6 +1003,7 @@ def main() -> int:
     # --- Group 1: full-document text (micro-average, weighted by ref length) ---
     _wer_val = _t_word_edits / _t_words
     full_text_m = {
+        "cer_raw": round(_t_edits_raw / _t_chars_raw, 6),
         "cer_normalized": round(_t_edits_norm / _t_chars_norm, 6),
         "cer_text_only": round(_t_edits_text / _t_chars_text, 6),
         "wer": round(_wer_val, 6),

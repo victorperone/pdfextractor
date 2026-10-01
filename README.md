@@ -240,6 +240,19 @@ Consulte o guia completo em [`docs/benchmark_engines.md`](docs/benchmark_engines
 .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 ```
 
+### Execução rápida (Linux / WSL)
+
+```bash
+# Preparar os runtimes OCR no .venv e o Tesseract no prefixo local
+scripts/setup_ocr_benchmark.sh
+
+# Smoke test — páginas 77–81 do Document AI V3
+scripts/run_benchmark.sh --run-suffix wsl-smoke
+
+# Documento completo
+scripts/run_benchmark.sh --run-suffix wsl-v1 --all-pages
+```
+
 Scripts envolvidos:
 
 | Script | Função |
@@ -247,7 +260,9 @@ Scripts envolvidos:
 | `scripts/evaluate_e2e.py` | Extrai PDF com uma engine; salva Markdown + manifesto |
 | `scripts/compute_metrics.py` | Calcula métricas contra ground truth |
 | `scripts/compare_engines.py` | Gera tabela comparativa de todas as engines |
-| `scripts/run_benchmark.ps1` | Orquestra as três etapas sequencialmente |
+| `scripts/run_benchmark.ps1` | Orquestra as três etapas sequencialmente no Windows |
+| `scripts/setup_ocr_benchmark.sh` | Instala os runtimes e modelos necessários no WSL |
+| `scripts/run_benchmark.sh` | Orquestra as três etapas sequencialmente em Linux/WSL |
 
 ## CLI examples
 

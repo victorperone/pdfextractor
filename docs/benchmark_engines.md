@@ -106,6 +106,7 @@ Mede a fidelidade do texto extraído em relação ao ground truth.
 
 | Métrica | Descrição |
 |---|---|
+| `cer_raw` | CER sem normalização, preservando diferenças de Markdown, espaços e quebras de linha. |
 | `cer_normalized` | Character Error Rate após normalização (NFC, CRLF→LF, espaços). Principal métrica de qualidade OCR. |
 | `cer_text_only` | CER com Markdown removido — isola erro de reconhecimento do erro de estruturação. |
 | `wer` | Word Error Rate — sensível a erros de segmentação de palavras. |
@@ -223,13 +224,31 @@ pip install "numpy==2.0.2"   # CF-3: corrige conflito EasyOCR/OpenVINO
 .\scripts\run_benchmark.ps1
 ```
 
-Parâmetros padrão: páginas 77–82, sufixo `smoke`.
+Parâmetros padrão: páginas 77–81, sufixo `smoke`.
 
 ### Documento Completo
 
 ```powershell
 .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 ```
+
+### Linux / WSL
+
+```bash
+# Instalar runtimes OCR no .venv e Tesseract em um prefixo sem sudo
+scripts/setup_ocr_benchmark.sh
+
+# Smoke test no corpus Document AI V3 (páginas 77–81)
+scripts/run_benchmark.sh --run-suffix wsl-smoke
+
+# Documento completo
+scripts/run_benchmark.sh --run-suffix wsl-v1 --all-pages
+```
+
+O runner Bash usa `corpus/Document_AI_V3.pdf`, `corpus/Document_AI_V3.md` e
+`corpus/Document_AI_V3_MANIFESTO.json` por padrão. O Markdown fornece o texto
+referência; o manifesto fornece metadados por página. Os dois podem ser
+sobrescritos com `--pdf`, `--reference` e `--manifesto`.
 
 ### Engine Individual (PowerShell, linha única)
 
@@ -248,7 +267,7 @@ python scripts\compare_engines.py output\fase8\metrics_*_smoke-*.json --output o
 
 | Parâmetro | Padrão | Descrição |
 |---|---|---|
-| `-Pages` | `"77-82"` | Intervalo de páginas para smoke test |
+| `-Pages` | `"77-81"` | Intervalo de páginas para smoke test |
 | `-AllPages` | (switch) | Processar documento completo |
 | `-RunSuffix` | `"smoke"` | Sufixo dos arquivos de saída |
 | `-Corpus` | *(caminho padrão)* | Caminho do PDF |
