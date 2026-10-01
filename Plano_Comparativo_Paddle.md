@@ -458,3 +458,90 @@ Metas:
 - deletion_rate: 27.4% → <15%
 - CER: 43.15% → <30%
 - invalid_markdown_rate: 3.57% → 0%
+
+---
+
+## Fase 9 — RapidOCR ONNX e OpenVINO
+
+### Diagnóstico Fase 8
+
+Ambas as variantes partilham as mesmas fraquezas estruturais (failure_rate ≈ 0.9% — engine estável, mas qualidade baixa):
+
+| Métrica | RapidOCR-ONNX | RapidOCR-OpenVINO | Causa raiz |
+|---|---|---|---|
+| cer_normalized | 0.3596 | 0.3633 | modelo ch + diacríticos perdidos |
+| insertion_rate (omissões) | **0.4968** | **0.4987** | texto não detectado/reconhecido |
+| deletion_rate (extras) | 0.0273 | 0.0278 | baixo — poucas alucinações |
+| substitution_rate | 0.0761 | 0.0754 | diacríticos → caractere errado |
+| cell_cer | 0.6702 | 0.8889 | texto pequeno perdido em células |
+| currency_exact_match | 0.3403 | 0.3361 | R$ perdido por diacríticos adjacentes |
+
+**Nota:** `insertion_rate` nesta codebase representa palavras da referência **ausentes** no output (semântica invertida vs ASR padrão).
+
+**Piores páginas (ambas):** `ocr_table` com degradação (skew, lowdpi, noise, blur, grayscale, jpeg). Páginas 156, 162, 148, 181, 161, 182 — coincidentes em ambas as variantes.
+
+### Causas raiz identificadas
+
+1. **Modelo padrão PP-OCRv4 ch (Chinês):** não contém ã, ç, ê, õ na codificação de saída — modelo bundled em `rapidocr-onnxruntime 1.4.4` é treinado para Chinês simplificado + ASCII básico.
+2. **`unclip_ratio=1.6` clipa diacríticos:** ascendentes de ã, â, ê e descenders de ç estouram caixas de detecção não expandidas o suficiente.
+3. **`box_thresh=0.5` e `det_thresh=0.3` conservadores:** perdem caixas fracas em scans degradados (lowdpi, jpeg, blur).
+4. **CLAHE ausente:** scans chegam ao detector sem enhancement local de contraste.
+
+### Otimizações implementadas (Fase 9)
+
+| ID | Ação | Impacto esperado | Status |
+|---|---|---|---|
+| R-01 | CLAHE via canal L do espaço LAB — `_clahe_preprocess()` retorna BGR 3-channel (preserva cor vs grayscale dos outros backends) | Melhora recall em scans degradados | ✅ Impl. |
+| R-02 | `det_db_unclip_ratio` 1.6 → 1.8 — expande caixas detectadas para incluir diacríticos | Reduz clipagem de ã, ç, ê nas bordas | ✅ Impl. |
+| R-03 | `det_db_box_thresh` 0.5 → 0.45 — recupera caixas fracas em scans de baixo contraste | Melhora recall em tabelas degradadas | ✅ Impl. |
+| R-04 | `det_db_thresh` 0.3 → 0.25 — threshold pixel-level mais permissivo para ink fraco | Recupera texto em fotocópias | ✅ Impl. |
+| R-05 | `text_score` exposto via `RAPIDOCR_TEXT_SCORE` (padrão 0.5 mantido) | Tunável por env var | ✅ Impl. |
+| R-06 | `with_angle_cls=False` por padrão — documentos PT portrait não precisam | Remove latência desnecessária | ✅ Impl. |
+| R-07 | `RAPIDOCR_REC_KEYS` env var para dict de caracteres — necessário ao trocar para modelo Latin | Habilita modelos Latin sem hardcode | ✅ Impl. |
+| R-08 | try/except no construtor — fallback gracioso para versões do pacote que não aceitam os kwargs | Robustez cross-version | ✅ Impl. |
+
+### Parâmetros e seus padrões (Fase 9)
+
+| Parâmetro | Padrão v1 (antes) | Padrão v2 (Fase 9) | Motivo |
+|---|---|---|---|
+| CLAHE preprocessing | ausente | LAB L-channel, clipLimit=2.0, 8×8 | Contrast enhancement preservando cor |
+| `det_db_unclip_ratio` | 1.6 | **1.8** | Diacríticos clipados nas bordas |
+| `det_db_box_thresh` | 0.5 | **0.45** | Caixas fracas em scans degradados |
+| `det_db_thresh` | 0.3 | **0.25** | Ink fraco em fotocópias |
+| `text_score` | 0.5 | 0.5 (exposto) | Tunável, padrão mantido |
+| `with_angle_cls` | True (padrão pacote) | **False** | Documentos portrait não precisam |
+
+### Variáveis de ambiente
+
+| Var | Padrão | Efeito |
+|---|---|---|
+| `RAPIDOCR_DET_MODEL` | não definido | Caminho para modelo de detecção alternativo |
+| `RAPIDOCR_REC_MODEL` | não definido | Caminho para modelo Latin (PP-OCRv4 latin, PP-OCRv6) |
+| `RAPIDOCR_REC_KEYS` | não definido | Dict de caracteres para modelo não-padrão (ex: `en_dict.txt`) |
+| `RAPIDOCR_UNCLIP_RATIO` | `1.8` | Expansão de caixas DB (1.5–2.0) |
+| `RAPIDOCR_BOX_THRESH` | `0.45` | Score mínimo por caixa (0.3–0.6) |
+| `RAPIDOCR_DET_THRESH` | `0.25` | Threshold pixel-level do mapa DB (0.2–0.4) |
+| `RAPIDOCR_TEXT_SCORE` | `0.5` | Confiança mínima por linha |
+| `RAPIDOCR_ANGLE_CLS` | `0` | Ativar classificador de ângulo (`1` = opt-in) |
+
+### O que NÃO foi implementado
+
+| Item | Motivo |
+|---|---|
+| Modelo Latin como padrão | Requer download de model + dict — opt-in via env var existente |
+| Modelo PP-OCRv6 como padrão | CF-2: DLL incompatibility no Windows; opt-in via env var |
+| `score_mode: slow` | Ganho marginal; aumenta latência em todas as páginas |
+| `intra_op_num_threads` / `inference_num_threads` | Padrão automático do ONNX/OpenVINO é suficiente |
+
+### Benchmark esperado após implementação
+
+```powershell
+.\scripts\run_benchmark.ps1 -Engine rapidocr-onnx -AllPages -RunSuffix "v2"
+.\scripts\run_benchmark.ps1 -Engine rapidocr-openvino -AllPages -RunSuffix "v2"
+```
+
+Metas (v1 → v2, sem troca de modelo):
+- insertion_rate: 49.7% → <40%
+- substitution_rate: 7.6% → <5%
+- cer_normalized: 0.360 → <0.30
+- `deletion_rate` não deve piorar (CLAHE não gera falsos positivos)
