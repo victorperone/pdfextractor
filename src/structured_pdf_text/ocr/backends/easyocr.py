@@ -13,8 +13,10 @@ EASYOCR_MODULE_PATH      Path to model cache directory (default: ~/.EasyOCR/mode
 EASYOCR_RECOG_NETWORK    Recognition model name (default: '' → EasyOCR default = latin_g2)
                          Use 'latin_g1' for the older, larger model.
 EASYOCR_BEAMWIDTH        Beam width for beamsearch decoder (default: 10, min: 1)
-EASYOCR_WORKERS          DataLoader workers for recognition (default: 0)
-                         Set >0 for ~30% CPU speedup on Linux; keep 0 on Windows.
+EASYOCR_WORKERS          DataLoader workers for recognition.
+                         Default: auto — 0 on Windows (spawn safety), half of
+                         cpu_count() capped at 4 on Linux/macOS.
+                         Override only if the auto-detection is wrong.
 EASYOCR_ALLOWLIST        Character allowlist applied to all recognition calls.
                          Example: '0123456789.,R$%()-/ '  for financial documents.
                          Default: unset (no restriction).
@@ -61,6 +63,23 @@ from structured_pdf_text.ocr.contracts import (
 
 if TYPE_CHECKING:
     from structured_pdf_text.config import ExtractorConfig
+
+
+def _default_workers() -> int:
+    """Return a safe default for EasyOCR DataLoader worker count.
+
+    On Windows, PyTorch uses 'spawn' for multiprocessing, which requires
+    the __main__ guard and causes deadlocks in subprocess contexts like
+    our paddle_subprocess worker.  Zero is the only safe default there.
+    On Linux/macOS, 'fork' is used and workers parallelize data loading
+    for a ~30% throughput gain.  We use half of the available cores,
+    capped at 4, to avoid starving other pipeline stages.
+    """
+    import platform
+    if platform.system() == "Windows":
+        return 0
+    cpu = os.cpu_count() or 1
+    return min(4, max(1, cpu // 2))
 
 
 _LANG_MAP: dict[str, list[str]] = {
@@ -293,7 +312,7 @@ class EasyOCRBackend:
 
         # --- env-var configuration ---
         self._beamwidth = max(1, int(os.environ.get("EASYOCR_BEAMWIDTH", "10")))
-        self._workers = max(0, int(os.environ.get("EASYOCR_WORKERS", "0")))
+        self._workers = max(0, int(os.environ.get("EASYOCR_WORKERS", str(_default_workers()))))
         self._adjust_contrast = 1.0
         allowlist_env = os.environ.get("EASYOCR_ALLOWLIST", "")
         self._allowlist: str | None = allowlist_env if allowlist_env else None
