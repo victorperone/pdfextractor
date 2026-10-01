@@ -33,10 +33,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import unicodedata
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 _SRC = Path(__file__).parent.parent / "src"
@@ -842,6 +844,69 @@ def _build_error_report(
 
 
 # ---------------------------------------------------------------------------
+# Per-page worker (top-level so ProcessPoolExecutor can pickle it on Windows)
+# ---------------------------------------------------------------------------
+
+def _process_page(args: tuple) -> dict:
+    pn, ref_content, hyp_content, page_conditions = args
+    ref_body = _strip_page_header(ref_content)
+    hyp_body = _strip_page_header(hyp_content)
+
+    ref_raw = ref_body
+    hyp_raw = hyp_body
+    ref_n = _normalize(ref_body)
+    hyp_n = _normalize(hyp_body)
+    ref_t = _strip_md(ref_body)
+    hyp_t = _strip_md(hyp_body)
+    ref_w = ref_n.split()
+    hyp_w = hyp_n.split()
+
+    edits_raw  = _lev_distance(list(hyp_raw), list(ref_raw))
+    edits_norm = _lev_distance(list(hyp_n),   list(ref_n))
+    edits_text = _lev_distance(list(hyp_t),   list(ref_t))
+    word_edits = _lev_distance(hyp_w, ref_w)
+    S, D, I    = _lev_ops(hyp_w, ref_w)
+
+    rc = max(len(ref_raw), 1)
+    nc = max(len(ref_n), 1)
+    tc = max(len(ref_t), 1)
+    nw = max(len(ref_w), 1)
+
+    wer_val = word_edits / nw
+    text_m = {
+        "cer_raw":           round(edits_raw  / rc, 6),
+        "cer_normalized":    round(edits_norm / nc, 6),
+        "cer_text_only":     round(edits_text / tc, 6),
+        "wer":               round(wer_val, 6),
+        "word_accuracy":     round(max(0.0, 1.0 - wer_val), 6),
+        "substitution_rate": round(S / nw, 6),
+        "deletion_rate":     round(D / nw, 6),
+        "insertion_rate":    round(I / nw, 6),
+        "omission_rate":     round(D / nw, 6),
+    }
+    struct_m = compute_structure_metrics(hyp_body, ref_body)
+    table_m  = compute_table_metrics(hyp_body, ref_body)
+    crit_m   = compute_critical_data_metrics(hyp_body, ref_body)
+
+    entry = {
+        "page": pn,
+        "conditions": page_conditions.get(pn, ""),
+        **text_m,
+        **struct_m,
+        **table_m,
+        **crit_m,
+    }
+    acc = {
+        "chars_raw":  rc,  "edits_raw":  edits_raw,
+        "chars_norm": nc,  "edits_norm": edits_norm,
+        "chars_text": tc,  "edits_text": edits_text,
+        "words":      nw,  "word_edits": word_edits,
+        "S": S, "D": D, "I": I,
+    }
+    return {"pn": pn, "acc": acc, "entry": entry}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -929,76 +994,27 @@ def main() -> int:
     _t_words = _t_word_edits = 0
     _t_S = _t_D = _t_I = 0
 
-    for pn in all_page_nums:
-        ref_content = ref_pages[pn]
-        hyp_content = hyp_pages.get(pn, "")
-        ref_body = _strip_page_header(ref_content)
-        hyp_body = _strip_page_header(hyp_content)
-
-        # Compute Levenshtein once; feed both per-page diagnostics and accumulators
-        ref_raw = ref_body
-        hyp_raw = hyp_body
-        ref_n = _normalize(ref_body)
-        hyp_n = _normalize(hyp_body)
-        ref_t = _strip_md(ref_body)
-        hyp_t = _strip_md(hyp_body)
-        ref_w = ref_n.split()
-        hyp_w = hyp_n.split()
-
-        edits_raw = _lev_distance(list(hyp_raw), list(ref_raw))
-        edits_norm = _lev_distance(list(hyp_n), list(ref_n))
-        edits_text = _lev_distance(list(hyp_t), list(ref_t))
-        word_edits = _lev_distance(hyp_w, ref_w)
-        S, D, I = _lev_ops(hyp_w, ref_w)
-
-        rc = max(len(ref_raw), 1)
-        nc = max(len(ref_n), 1)
-        tc = max(len(ref_t), 1)
-        nw = max(len(ref_w), 1)
-
-        _t_chars_raw += rc; _t_edits_raw += edits_raw
-        _t_chars_norm += nc; _t_edits_norm += edits_norm
-        _t_chars_text += tc; _t_edits_text += edits_text
-        _t_words += nw; _t_word_edits += word_edits
-        _t_S += S; _t_D += D; _t_I += I
-
-        wer_val = word_edits / nw
-        text_m = {
-            "cer_raw": round(edits_raw / rc, 6),
-            "cer_normalized": round(edits_norm / nc, 6),
-            "cer_text_only": round(edits_text / tc, 6),
-            "wer": round(wer_val, 6),
-            "word_accuracy": round(max(0.0, 1.0 - wer_val), 6),
-            "substitution_rate": round(S / nw, 6),
-            "deletion_rate": round(D / nw, 6),
-            "insertion_rate": round(I / nw, 6),
-            "omission_rate": round(D / nw, 6),
-        }
-
-        struct_m = compute_structure_metrics(hyp_body, ref_body)
-        table_m = compute_table_metrics(hyp_body, ref_body)
-        crit_m = compute_critical_data_metrics(hyp_body, ref_body)
-
-        page_entry = {
-            "page": pn,
-            "conditions": page_conditions.get(pn, ""),
-            **text_m,
-            **struct_m,
-            **table_m,
-            **crit_m,
-        }
-        per_page_results.append(page_entry)
-
-        if not args.quiet:
-            print(
-                f"  P{pn:03d} CER={text_m['cer_normalized']:.3f} "
-                f"WER={text_m['wer']:.3f} "
-                f"TF1={table_m['table_f1']:.3f}",
-                end="\r",
-            )
-
     if not args.quiet:
-        print()
+        print(f"  Processando {len(all_page_nums)} páginas em paralelo "
+              f"(workers={os.cpu_count()})...")
+
+    page_args = [
+        (pn, ref_pages[pn], hyp_pages.get(pn, ""), page_conditions)
+        for pn in all_page_nums
+    ]
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        results = list(executor.map(_process_page, page_args))
+
+    results.sort(key=lambda r: r["pn"])
+
+    for r in results:
+        a = r["acc"]
+        _t_chars_raw  += a["chars_raw"];  _t_edits_raw  += a["edits_raw"]
+        _t_chars_norm += a["chars_norm"]; _t_edits_norm += a["edits_norm"]
+        _t_chars_text += a["chars_text"]; _t_edits_text += a["edits_text"]
+        _t_words      += a["words"];      _t_word_edits += a["word_edits"]
+        _t_S += a["S"]; _t_D += a["D"]; _t_I += a["I"]
+        per_page_results.append(r["entry"])
 
     # --- Group 1: full-document text (micro-average, weighted by ref length) ---
     _wer_val = _t_word_edits / _t_words
