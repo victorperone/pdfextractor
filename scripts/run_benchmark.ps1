@@ -5,17 +5,28 @@
 #
 # Documento completo:
 #   .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
+#
+# Engine unica:
+#   .\scripts\run_benchmark.ps1 -Engine easyocr -AllPages -RunSuffix "v2"
+#   .\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
 
 param(
     [string]$Pages      = "77-81",
     [switch]$AllPages,
     [string]$RunSuffix  = "smoke",
+    [string]$Engine     = "",
     [string]$Corpus     = "C:\Users\a_victor.perone\workspace\pdfextractor\corpus\Corpus_Stress_OCR_Markdown_V4.pdf",
     [string]$Manifesto  = "C:\Users\a_victor.perone\workspace\pdfextractor\corpus\Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json",
     [string]$OutDir     = "output\fase8"
 )
 
-$engines = @("tesseract", "rapidocr-onnx", "rapidocr-openvino", "easyocr", "paddle")
+$allEngines = @("tesseract", "rapidocr-onnx", "rapidocr-openvino", "easyocr", "paddle")
+
+if ($Engine -ne "") {
+    $engines = $Engine -split "," | ForEach-Object { $_.Trim() }
+} else {
+    $engines = $allEngines
+}
 $failed  = @()
 
 foreach ($engine in $engines) {
