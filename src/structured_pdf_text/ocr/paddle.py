@@ -1791,6 +1791,11 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
                             box,
                             _as_rotation(payload[2]) if len(payload) > 2 else 0,
                         ))
+                else:
+                    # PaddleOCR 3.x predict() yields PipelineResult objects inside a
+                    # list; they are not dicts or list/tuples, so the branches above
+                    # silently drop them. Recurse to hit the hasattr(raw, "json") path.
+                    records.extend(_records(item))
             except (TypeError, ValueError, IndexError, OverflowError):
                 # Ignore a malformed record while retaining usable siblings.
                 continue
