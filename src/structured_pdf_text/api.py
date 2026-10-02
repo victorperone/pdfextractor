@@ -1011,12 +1011,26 @@ class PdfTextExtractor:
         document.diagnostics.facts["native_source_calls"] = source.metrics_snapshot()
         document.diagnostics.facts["num_threads"] = _resolve_num_threads(self.config.num_threads)
         if self.ocr_engine is not None:
-            profile = get_profile(self.config.language)
-            document.diagnostics.facts["ocr_profile"] = self.config.language
-            document.diagnostics.facts["ocr_models"] = {
-                "detection": profile.detection,
-                "recognition": profile.recognition,
-            }
+            if hasattr(self.ocr_engine, "identity"):
+                # OCRBackend protocol: emit engine-agnostic identity diagnostics.
+                ident = self.ocr_engine.identity  # type: ignore[union-attr]
+                document.diagnostics.facts["ocr_profile"] = ident.profile
+                document.diagnostics.facts["ocr_engine_identity"] = {
+                    "engine": ident.engine,
+                    "runtime": ident.runtime,
+                    "language": ident.language,
+                    "device": ident.device,
+                    "package_versions": ident.package_versions,
+                }
+            else:
+                # Legacy OcrEngine (Paddle direct, no OCRBackend wrapper):
+                # fall back to the Paddle-specific model profile.
+                profile = get_profile(self.config.language)
+                document.diagnostics.facts["ocr_profile"] = self.config.language
+                document.diagnostics.facts["ocr_models"] = {
+                    "detection": profile.detection,
+                    "recognition": profile.recognition,
+                }
         return document
 
 
