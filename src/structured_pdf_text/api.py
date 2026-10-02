@@ -801,9 +801,21 @@ class PdfTextExtractor:
                     ocr_degraded = False
                     ocr_degraded_reasons: list[str] = []
                 elif ocr_tokens:
-                    ocr_outcome = "success"
-                    ocr_degraded = False
-                    ocr_degraded_reasons = []
+                    # Check if EasyOCR used its readtext() fallback path.
+                    _easyocr_fallback = bool(
+                        getattr(self.ocr_engine, "last_easyocr_fallback_used", False)
+                    )
+                    if _easyocr_fallback:
+                        ocr_outcome = "recovered"
+                        ocr_degraded = True
+                        ocr_degraded_reasons = [
+                            "easyocr_readtext_fallback:"
+                            + str(getattr(self.ocr_engine, "last_easyocr_fallback_reason", "unknown"))
+                        ]
+                    else:
+                        ocr_outcome = "success"
+                        ocr_degraded = False
+                        ocr_degraded_reasons = []
                 else:
                     ocr_outcome = "degraded"
                     ocr_degraded = True
@@ -848,6 +860,8 @@ class PdfTextExtractor:
                         "ocr_quality_policy": effective_ocr_quality_policy(self.config).value,
                         "ocr_baseline_quality": _quality_to_dict(getattr(ocr_diag_engine, "last_baseline_quality", None)),
                         "ocr_image_profile": _image_profile_to_dict(getattr(ocr_diag_engine, "last_image_profile", None)),
+                        "easyocr_fallback_used": bool(getattr(ocr_diag_engine, "last_easyocr_fallback_used", False)),
+                        "easyocr_fallback_reason": getattr(ocr_diag_engine, "last_easyocr_fallback_reason", None),
                         "ocr_recovery_triggered": bool(getattr(ocr_diag_engine, "last_recovery_triggered", False)),
                         "ocr_recovery_reasons": list(getattr(ocr_diag_engine, "last_recovery_reasons", [])),
                         "ocr_selected_variant": getattr(ocr_diag_engine, "last_selected_variant", None),

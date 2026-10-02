@@ -617,7 +617,7 @@ class EasyOCRBackend:
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
         img = _to_numpy(page_image)
-        raw, _fallback = _run_easyocr(
+        raw, fallback = _run_easyocr(
             self._reader,
             img,
             decoder=self._decoder,
@@ -627,6 +627,10 @@ class EasyOCRBackend:
             blocklist=self._blocklist,
             workers=self._workers,
             rotation_info=self._rotation_info,
+        )
+        self.last_easyocr_fallback_used: bool = fallback is not None
+        self.last_easyocr_fallback_reason: str | None = (
+            fallback.get("primary_error") if fallback else None
         )
         return _result_to_pipeline_tokens(raw, page_index, self._language)
 
@@ -641,8 +645,10 @@ class EasyOCRBackend:
             img, region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1,
         )
         if crop.size == 0:
+            self.last_easyocr_fallback_used = False
+            self.last_easyocr_fallback_reason = None
             return []
-        raw, _fallback = _run_easyocr(
+        raw, fallback = _run_easyocr(
             self._reader,
             crop,
             decoder=self._decoder,
@@ -652,6 +658,10 @@ class EasyOCRBackend:
             blocklist=self._blocklist,
             workers=self._workers,
             rotation_info=self._rotation_info,
+        )
+        self.last_easyocr_fallback_used = fallback is not None
+        self.last_easyocr_fallback_reason = (
+            fallback.get("primary_error") if fallback else None
         )
         return _result_to_pipeline_tokens(
             raw, page_index, self._language,
