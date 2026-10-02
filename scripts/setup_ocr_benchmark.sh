@@ -70,4 +70,22 @@ if ! "$REPO_ROOT/.venv/bin/tesseract" --list-langs 2>&1 | grep -qx 'por'; then
 fi
 "$REPO_ROOT/.venv/bin/tesseract" --version | head -n 1
 echo "Tesseract por traineddata: ready"
-echo "EasyOCR model cache: $REPO_ROOT/.ocr-model-cache/easyocr"
+
+# Materialise EasyOCR weights (craft_mlt_25k.pth + latin_g2.pth) so that
+# the measured benchmark run never triggers a network download.
+echo "Downloading EasyOCR weights (craft + latin_g2) — this may take a few minutes..."
+EASYOCR_MODULE_PATH="$REPO_ROOT/.ocr-model-cache/easyocr" \
+"$PYTHON_BIN" - <<'PY'
+import os, easyocr
+# Instantiating Reader with download_enabled=True (default) fetches and caches
+# craft_mlt_25k.pth and latin_g2.pth.  Subsequent runs find them on disk.
+easyocr.Reader(["pt"], gpu=False,
+               model_storage_directory=os.environ["EASYOCR_MODULE_PATH"],
+               download_enabled=True)
+print("EasyOCR weights ready.")
+PY
+
+# Run a full preflight across all five engines and exit non-zero on any failure.
+echo ""
+echo "Running preflight across all five OCR backends..."
+"$PYTHON_BIN" "$SCRIPT_DIR/preflight_ocr_backends.py" --language pt
