@@ -126,33 +126,6 @@ def _to_numpy(image: object) -> "Any":
     return arr
 
 
-def _clahe_grey(img: "Any") -> "Any | None":
-    """Convert image to CLAHE-enhanced grayscale for recognition stage.
-
-    Returns a uint8 grayscale numpy array, or None if OpenCV is unavailable.
-    CLAHE (clipLimit=2.0, tileGridSize=8×8) applies local contrast enhancement
-    without affecting high-contrast regions significantly.
-    """
-    try:
-        import cv2
-        import numpy as np
-        arr = np.asarray(img)
-        if arr.ndim == 3:
-            # Try RGB→gray first; fall back to BGR→gray
-            try:
-                gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-            except Exception:
-                gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-        elif arr.ndim == 2:
-            gray = arr.astype(np.uint8)
-        else:
-            return None
-        gray = np.clip(gray, 0, 255).astype(np.uint8)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        return clahe.apply(gray)
-    except Exception:
-        return None
-
 
 def _run_easyocr(
     reader: "Any",

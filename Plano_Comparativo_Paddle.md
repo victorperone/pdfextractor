@@ -338,33 +338,35 @@ reader = easyocr.Reader(['pt'], recog_network='latin_g1')
 |---|---|---|---|---|---|
 | 🔴 Alta | E-01 | `canvas_size` dinâmico (`max(h,w)`) | Mínimo | Nunca faz downscale da imagem | ✅ Impl. |
 | 🔴 Alta | E-07 | `allowlist` via `EASYOCR_ALLOWLIST` | Baixo | currency_exact_match 38% → >60% | ✅ Impl. |
-| 🔴 Alta | E-02+E-03 | `decoder='beamsearch', beamWidth=10` | Mínimo | Reduz substitution_rate | ✅ Impl. |
-| 🟡 Média | E-04 | `mag_ratio=1.5` | Mínimo | Melhora detecção em tabelas | ✅ Impl. |
+| 🔴 Alta | E-02+E-03 | `decoder` via `EASYOCR_DECODER` (padrão `greedy`) | Mínimo | A/B necessário para confirmar ganho de beamsearch | ✅ Impl. |
+| 🟡 Média | E-04 | `mag_ratio=1.2` via `EASYOCR_MAG_RATIO` | Mínimo | Melhora detecção em tabelas | ✅ Impl. |
 | 🟡 Média | E-08 | `blocklist` via `EASYOCR_BLOCKLIST` | Baixo | Configurável por deployment | ✅ Impl. |
-| 🟡 Média | 9.2 | Pipeline detect + recognize separado | Médio | Parâmetros por estágio + CLAHE | ✅ Impl. |
-| 🟡 Média | 9.3 | CLAHE preprocessing (grayscale p/ recognize) | Baixo-Médio | Melhora páginas escaneadas | ✅ Impl. |
+| 🟡 Média | 9.2 | Pipeline detect + recognize separado (contrato upstream) | Médio | Corrige unwrap [0] do detect(); grayscale para recognize() | ✅ Impl. |
+| 🟡 Média | 9.3 | CLAHE preprocessing (grayscale p/ recognize) | Baixo-Médio | Melhora páginas escaneadas | ⬜ Pendente (A/B necessário) |
 | 🟡 Média | E-06 | `workers` via `EASYOCR_WORKERS` (padrão 0) | Mínimo | ~30% speedup em Linux; 0 no Windows | ✅ Impl. |
 | 🟢 Baixa | 9.4 | `latin_g1` via `EASYOCR_RECOG_NETWORK` | Baixo | Benchmark necessário para confirmar ganho | ✅ Impl. |
 | 🟢 Baixa | 9.6 | Fine-tuning do modelo | Alto | Teto máximo de qualidade | ⬜ Pendente |
 
-### Nota de implementação (2026-10-01)
+### Nota de implementação (2026-10-02)
 
-Todas as otimizações foram implementadas em `src/structured_pdf_text/ocr/backends/easyocr.py`.
-O backend agora usa o **pipeline detect + recognize separado** por padrão, com fallback automático para `readtext()` em caso de incompatibilidade de API.
+Otimizações implementadas em `src/structured_pdf_text/ocr/backends/easyocr.py`.
+O backend usa o **pipeline detect + recognize separado** espelhando o contrato upstream do EasyOCR:
+`reformat_input()` → `detect(reformat=False)` → `[0]` unwrap → `recognize(img_gray, reformat=False)`.
+Fallback explícito para `readtext()` em caso de falha, com `RuntimeWarning` e `status="recovered"`.
 
-**Parâmetros fixos** (sempre ativos):
-- `decoder='beamsearch'`
-- `beamWidth=10` (sobrescrito por `EASYOCR_BEAMWIDTH`)
-- `canvas_size=max(h,w)` (dinâmico por imagem)
-- `mag_ratio=1.5`
-- `adjust_contrast=1.0`
-- CLAHE na etapa de reconhecimento (quando OpenCV disponível)
-
-**Parâmetros configuráveis por env var** (desativados por padrão):
-- `EASYOCR_WORKERS` — parallelismo DataLoader (padrão 0; set `4` em Linux)
+**Parâmetros configuráveis por env var:**
+- `EASYOCR_DECODER` — `greedy` (padrão, upstream default) ou `beamsearch` (A/B ainda não executado)
+- `EASYOCR_BEAMWIDTH` — beam width para beamsearch (padrão `5`, upstream default)
+- `EASYOCR_MAG_RATIO` — magnification do CRAFT (padrão `1.2`)
+- `EASYOCR_ADJUST_CONTRAST` — contraste interno do recognize (padrão `0.5`)
+- `EASYOCR_WORKERS` — paralelismo DataLoader (padrão auto: 0 no Windows, cpu//2 no Linux, máx 4)
 - `EASYOCR_ALLOWLIST` — allowlist global (ex: `'0123456789.,R$%()-/ '`)
 - `EASYOCR_BLOCKLIST` — blocklist global (atenção: não bloquear 'O'/'o' em PT)
 - `EASYOCR_RECOG_NETWORK` — modelo alternativo (ex: `latin_g1`)
+- `EASYOCR_MODULE_PATH` — diretório de cache dos modelos
+
+**Não implementado (requer A/B antes de integrar):**
+- CLAHE preprocessing — `_clahe_grey()` foi removida por ser código morto; reintegrar somente após A/B com ganho mensurável comprovado
 
 **Próximo passo:** Re-executar o benchmark Fase 8 v2 com estas otimizações para medir o delta de melhoria.
 
