@@ -390,11 +390,19 @@ def _fallback_readtext(
         ) from exc2
 
 
-def _result_to_ocr_tokens(raw: list[Any], source_engine: str) -> list[OCRToken]:
+def _result_to_ocr_tokens(
+    raw: list[Any],
+    source_engine: str,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+) -> list[OCRToken]:
     """Convert EasyOCR result list to canonical OCRToken list.
 
     Each item: (bbox_points, text, confidence)
       bbox_points: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] (4 corners)
+
+    offset_x/offset_y shift all coordinates into page-pixel space when the
+    image passed to OCR was a pre-cropped region.
     """
     if not raw:
         return []
@@ -407,7 +415,7 @@ def _result_to_ocr_tokens(raw: list[Any], source_engine: str) -> list[OCRToken]:
             if not str(text).strip():
                 continue
             confidence = finite_confidence(item[2]) if len(item) > 2 else None
-            geometry = quadrilateral_geometry(bbox_pts)
+            geometry = quadrilateral_geometry(bbox_pts, offset_x, offset_y)
         except (TypeError, ValueError, IndexError):
             continue
         if geometry is None:
@@ -565,7 +573,8 @@ class EasyOCRBackend:
                 workers=self._workers,
                 rotation_info=self._rotation_info,
             )
-            tokens = tuple(_result_to_ocr_tokens(raw, "easyocr"))
+            rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
+            tokens = tuple(_result_to_ocr_tokens(raw, "easyocr", offset_x=rx0, offset_y=ry0))
             text = " ".join(t.text for t in tokens)
             if fallback_info is not None:
                 status = "recovered"

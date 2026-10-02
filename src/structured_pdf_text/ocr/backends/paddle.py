@@ -289,17 +289,20 @@ class PaddleOCRBackend:
         t0 = time.perf_counter()
 
         try:
+            is_region = request.input_kind == "region" and request.region_id is not None
+            region_box: BBox | None = None
+            if is_region:
+                if request.region_bbox is not None:
+                    region_box = BBox(*request.region_bbox)
+                else:
+                    region_box = BBox(0.0, 0.0, 1.0, 1.0)
+
             if self._subprocess_config is not None:
-                method = (
-                    "recognize_region"
-                    if request.input_kind == "region" and request.region_id is not None
-                    else "recognize_page"
-                )
-                region = BBox(0.0, 0.0, 1.0, 1.0) if method == "recognize_region" else None
-                tokens = self._call_subprocess(method, request.image, request.page_index, region)
-            elif request.input_kind == "region" and request.region_id is not None:
+                method = "recognize_region" if is_region else "recognize_page"
+                tokens = self._call_subprocess(method, request.image, request.page_index, region_box)
+            elif is_region:
                 tokens = self._engine.recognize_region(  # type: ignore[union-attr]
-                    request.image, request.page_index, BBox(0.0, 0.0, 1.0, 1.0)
+                    request.image, request.page_index, region_box  # type: ignore[arg-type]
                 )
             else:
                 tokens = self._engine.recognize_page(  # type: ignore[union-attr]

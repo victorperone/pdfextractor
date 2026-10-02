@@ -254,10 +254,17 @@ def _tsv_to_ocr_tokens(
     rows: list[dict],
     source_engine: str,
     conf_min: float = 0.0,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
 ) -> list[OCRToken]:
+    """Convert Tesseract TSV rows to canonical OCRToken list.
+
+    offset_x/offset_y shift all coordinates into page-pixel space when the
+    image passed to Tesseract was a pre-cropped region.
+    """
     tokens = []
     for row in rows:
-        parsed = _valid_word_row(row, conf_min=conf_min)
+        parsed = _valid_word_row(row, offset_x=offset_x, offset_y=offset_y, conf_min=conf_min)
         if parsed is None:
             continue
         text, score, (x0, y0, x1, y1) = parsed
@@ -379,7 +386,8 @@ class TesseractBackend:
                 dpi=dpi, extra_flags=self._extra_flags,
             )
             rows = _parse_tsv(tsv)
-            tokens = tuple(_tsv_to_ocr_tokens(rows, "tesseract", self._conf_min))
+            rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
+            tokens = tuple(_tsv_to_ocr_tokens(rows, "tesseract", self._conf_min, offset_x=rx0, offset_y=ry0))
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
         except FileNotFoundError:

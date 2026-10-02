@@ -74,6 +74,7 @@ class OCRRequest:
     input_kind: str         # "page" | "region" | "line"
     language: str
     region_id: str | None = None
+    region_bbox: tuple[float, float, float, float] | None = None  # (x0,y0,x1,y1) in page-pixel space
     dpi: int | None = None
     coordinate_system: str = "page"
 

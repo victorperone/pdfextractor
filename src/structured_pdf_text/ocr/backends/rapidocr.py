@@ -131,7 +131,17 @@ def _extract_raw(out: Any) -> Any:
     return None
 
 
-def _result_to_ocr_tokens(raw: Any, source_engine: str) -> list[OCRToken]:
+def _result_to_ocr_tokens(
+    raw: Any,
+    source_engine: str,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+) -> list[OCRToken]:
+    """Convert RapidOCR result list to canonical OCRToken list.
+
+    offset_x/offset_y shift all coordinates into page-pixel space when the
+    image passed to OCR was a pre-cropped region.
+    """
     if not raw:
         return []
     tokens = []
@@ -143,7 +153,7 @@ def _result_to_ocr_tokens(raw: Any, source_engine: str) -> list[OCRToken]:
             if not str(text).strip():
                 continue
             confidence = finite_confidence(item[2]) if len(item) > 2 else None
-            geometry = quadrilateral_geometry(bbox_pts)
+            geometry = quadrilateral_geometry(bbox_pts, offset_x, offset_y)
         except (TypeError, ValueError, IndexError):
             continue
         if geometry is None:
@@ -284,7 +294,8 @@ class RapidOCRBackend:
             img = _to_numpy(request.image)
             out = _run_rapidocr(self._engine, img)
             raw = _extract_raw(out)
-            tokens = tuple(_result_to_ocr_tokens(raw, self._engine_key))
+            rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
+            tokens = tuple(_result_to_ocr_tokens(raw, self._engine_key, offset_x=rx0, offset_y=ry0))
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
         except Exception as exc:
