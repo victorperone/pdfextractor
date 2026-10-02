@@ -41,6 +41,13 @@ EASYOCR_BLOCKLIST          Character blocklist applied to all recognition calls.
                            Note: do NOT set 'OoIl' globally — 'o' and 'O' are common
                            Portuguese letters.  Use EASYOCR_ALLOWLIST instead for
                            digit-only deployments.
+EASYOCR_ROTATION_INFO      Comma-separated rotation angles to try for line orientation
+                           correction, e.g. '90,180,270'.  EasyOCR will recognise each
+                           detected line at the original angle and at each listed angle,
+                           keeping the result with highest confidence.  Default: unset
+                           (None — no rotation, fastest).  Use '90,180,270' only when
+                           the corpus contains lines rotated at arbitrary angles.
+                           Adds roughly N× inference time per line where N = len(angles).
 
 Optimization notes
 ------------------
@@ -179,6 +186,21 @@ _LANG_MAP: dict[str, list[str]] = {
 }
 
 
+def _parse_rotation_info(env_val: str) -> "list[int] | None":
+    """Parse EASYOCR_ROTATION_INFO env var into a list of int angles or None.
+
+    '90,180,270' → [90, 180, 270]
+    '' or unset  → None (no rotation correction)
+    """
+    val = env_val.strip()
+    if not val:
+        return None
+    try:
+        return [int(a.strip()) for a in val.split(",") if a.strip()]
+    except ValueError:
+        return None
+
+
 def _package_version(name: str) -> str:
     try:
         from importlib.metadata import version
@@ -219,6 +241,7 @@ def _run_easyocr(
     allowlist: "str | None",
     blocklist: "str | None",
     workers: int,
+    rotation_info: "list[int] | None" = None,
 ) -> "tuple[list[Any], dict[str, Any] | None]":
     """Run EasyOCR using detect/recognize split mirroring upstream readtext().
 
@@ -231,10 +254,11 @@ def _run_easyocr(
       1. reformat_input() prepares colour + grayscale arrays.
       2. detect() is called with reformat=False; its aggregate output [0] is
          extracted for the single input image.
-      3. recognize() receives the grayscale image and the unwrapped lists,
-         also with reformat=False.
+      3. recognize() receives the grayscale image, the unwrapped lists, and
+         rotation_info (EasyOCR 1.7.2 supports this on the nominal path).
 
     Falls back to unified readtext() only on exception, with explicit logging.
+    The fallback receives the same rotation_info so behaviour is consistent.
     """
     import numpy as np
     mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
@@ -245,12 +269,12 @@ def _run_easyocr(
         from easyocr.utils import reformat_input  # type: ignore
         img_color, img_gray = reformat_input(arr)
     except Exception:
-        # reformat_input unavailable (unusual packaging); fall back to readtext
         return _fallback_readtext(
             reader, arr,
             decoder=decoder, beamwidth=beamwidth,
             adjust_contrast=adjust_contrast,
             allowlist=allowlist, blocklist=blocklist, workers=workers,
+            rotation_info=rotation_info,
             reason="reformat_input_unavailable",
         )
 
@@ -275,6 +299,7 @@ def _run_easyocr(
             decoder=decoder, beamwidth=beamwidth,
             adjust_contrast=adjust_contrast,
             allowlist=allowlist, blocklist=blocklist, workers=workers,
+            rotation_info=rotation_info,
             reason=f"detect_failed: {type(exc).__name__}: {exc}",
         )
 
@@ -292,6 +317,7 @@ def _run_easyocr(
             detail=1,
             paragraph=False,
             adjust_contrast=adjust_contrast,
+            rotation_info=rotation_info,
             reformat=False,
         )
         return result, None  # nominal path — no fallback
@@ -301,6 +327,7 @@ def _run_easyocr(
             decoder=decoder, beamwidth=beamwidth,
             adjust_contrast=adjust_contrast,
             allowlist=allowlist, blocklist=blocklist, workers=workers,
+            rotation_info=rotation_info,
             reason=f"recognize_failed: {type(exc).__name__}: {exc}",
         )
 
@@ -315,12 +342,15 @@ def _fallback_readtext(
     allowlist: "str | None",
     blocklist: "str | None",
     workers: int,
+    rotation_info: "list[int] | None",
     reason: str,
 ) -> "tuple[list[Any], dict[str, Any]]":
     """Recover via unified readtext() and return explicit fallback metadata.
 
     readtext() re-runs its own detect() internally, so cost and path differ
     from the nominal split.  Callers must surface this as a degraded result.
+    The same rotation_info as the nominal path is forwarded so behaviour is
+    consistent between the two paths.
     """
     import warnings as _warnings
     mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
@@ -351,6 +381,7 @@ def _fallback_readtext(
             allowlist=allowlist,
             blocklist=blocklist,
             workers=workers,
+            rotation_info=rotation_info,
         )
         return result, fallback_info
     except Exception as exc2:
@@ -447,6 +478,8 @@ class EasyOCRBackend:
         self._allowlist: str | None = allowlist_env if allowlist_env else None
         blocklist_env = os.environ.get("EASYOCR_BLOCKLIST", "")
         self._blocklist: str | None = blocklist_env if blocklist_env else None
+        rotation_info_env = os.environ.get("EASYOCR_ROTATION_INFO", "")
+        self._rotation_info: list[int] | None = _parse_rotation_info(rotation_info_env)
 
         # Apply PyTorch thread limits before the Reader (and its model loading)
         # initialises, so all inference calls inherit the constrained thread pool.
@@ -498,6 +531,7 @@ class EasyOCRBackend:
                 "workers": self._workers,
                 "torch_num_threads": self._torch_num_threads,
                 "adjust_contrast": self._adjust_contrast,
+                "rotation_info": self._rotation_info,
             },
         )
 
@@ -529,6 +563,7 @@ class EasyOCRBackend:
                 allowlist=self._allowlist,
                 blocklist=self._blocklist,
                 workers=self._workers,
+                rotation_info=self._rotation_info,
             )
             tokens = tuple(_result_to_ocr_tokens(raw, "easyocr"))
             text = " ".join(t.text for t in tokens)
@@ -581,6 +616,7 @@ class EasyOCRBackend:
             allowlist=self._allowlist,
             blocklist=self._blocklist,
             workers=self._workers,
+            rotation_info=self._rotation_info,
         )
         return _result_to_pipeline_tokens(raw, page_index, self._language)
 
@@ -603,6 +639,7 @@ class EasyOCRBackend:
             allowlist=self._allowlist,
             blocklist=self._blocklist,
             workers=self._workers,
+            rotation_info=self._rotation_info,
         )
         return _result_to_pipeline_tokens(
             raw, page_index, self._language,

@@ -112,7 +112,8 @@ def run_easyocr(monkeypatch):
     monkeypatch.setitem(sys.modules, "easyocr.utils", fake_easyocr_utils)
 
     def call_run(reader, img, *, decoder="greedy", beamwidth=5,
-                 adjust_contrast=0.5, allowlist=None, blocklist=None, workers=0):
+                 adjust_contrast=0.5, allowlist=None, blocklist=None, workers=0,
+                 rotation_info=None):
         return _run_easyocr(
             reader, img,
             decoder=decoder,
@@ -121,6 +122,7 @@ def run_easyocr(monkeypatch):
             allowlist=allowlist,
             blocklist=blocklist,
             workers=workers,
+            rotation_info=rotation_info,
         )
 
     return call_run, img_color, img_gray
@@ -385,3 +387,70 @@ class TestFallbackOnRecognizeFailure:
             warnings.simplefilter("always")
             _, fallback_info = call_run(reader, _make_image())
         assert "recognize_failed" in fallback_info.get("primary_error", "")
+
+
+# ---------------------------------------------------------------------------
+# F12 — rotation_info propagation
+# ---------------------------------------------------------------------------
+
+class TestRotationInfoNominalPath:
+    """rotation_info must reach recognize() on the nominal path, not readtext()."""
+
+    def test_rotation_info_none_by_default(self, run_easyocr):
+        """When rotation_info is None, recognize() is called with rotation_info=None."""
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image(), rotation_info=None)
+        assert reader.readtext.call_count == 0
+        assert reader.recognize.call_args[1].get("rotation_info") is None
+
+    def test_rotation_info_list_reaches_recognize(self, run_easyocr):
+        """rotation_info=[90,180,270] must be forwarded to recognize(), not readtext()."""
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        rotation = [90, 180, 270]
+        call_run(reader, _make_image(), rotation_info=rotation)
+        assert reader.readtext.call_count == 0, "readtext() must not be called on nominal path"
+        assert reader.recognize.call_count == 1
+        assert reader.recognize.call_args[1].get("rotation_info") == rotation
+
+    def test_nominal_path_with_rotation_info_does_not_trigger_fallback(self, run_easyocr):
+        """Setting rotation_info must not push execution to the fallback path."""
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        _, fallback_info = call_run(reader, _make_image(), rotation_info=[90, 180, 270])
+        assert fallback_info is None, "fallback_info must be None on nominal path"
+
+
+class TestRotationInfoFallbackPath:
+    """On fallback, the same rotation_info must be forwarded to readtext()."""
+
+    def test_fallback_receives_rotation_info_when_detect_raises(self, run_easyocr):
+        """readtext() must receive the same rotation_info as the failed nominal attempt."""
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(detect_raises=True)
+        rotation = [90, 180, 270]
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            call_run(reader, _make_image(), rotation_info=rotation)
+        assert reader.readtext.call_count == 1
+        assert reader.readtext.call_args[1].get("rotation_info") == rotation
+
+    def test_fallback_receives_rotation_info_when_recognize_raises(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(recognize_raises=True)
+        rotation = [90, 270]
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            call_run(reader, _make_image(), rotation_info=rotation)
+        assert reader.readtext.call_count == 1
+        assert reader.readtext.call_args[1].get("rotation_info") == rotation
+
+    def test_fallback_none_rotation_info_forwarded(self, run_easyocr):
+        """None rotation_info must also be forwarded consistently (not converted to [])."""
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(detect_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            call_run(reader, _make_image(), rotation_info=None)
+        assert reader.readtext.call_args[1].get("rotation_info") is None
