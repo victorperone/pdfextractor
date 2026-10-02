@@ -26,7 +26,7 @@ Write-Host ""
 Write-Host "[2/5] RapidOCR + ONNX Runtime..." -ForegroundColor Yellow
 python -m pip install "rapidocr-onnxruntime==1.4.4" "onnxruntime==1.30.0"
 
-# --- 3. RapidOCR OpenVINO (two-step install — conflicting constraint) ---
+# --- 3. RapidOCR OpenVINO (two-step install) ---
 Write-Host ""
 Write-Host "[3/5] RapidOCR + OpenVINO 2024.4.0..." -ForegroundColor Yellow
 # openvino requires numpy<2.1.0; install first to resolve conflict
@@ -51,17 +51,17 @@ Write-Host ""
 Write-Host "=== Verifying installations ===" -ForegroundColor Cyan
 
 $checks = @(
-    @("PaddlePaddle",           "import paddle; print(paddle.__version__)"),
-    @("PaddleOCR",              "from importlib.metadata import version; print(version('paddleocr'))"),
-    @("PaddleX",                "from importlib.metadata import version; print(version('paddlex'))"),
-    @("RapidOCR ONNX",         "from importlib.metadata import version; print(version('rapidocr-onnxruntime'))"),
-    @("ONNX Runtime",           "from importlib.metadata import version; print(version('onnxruntime'))"),
-    @("RapidOCR OpenVINO",     "from importlib.metadata import version; print(version('rapidocr-openvino'))"),
-    @("OpenVINO",               "from importlib.metadata import version; print(version('openvino'))"),
-    @("EasyOCR",                "from importlib.metadata import version; print(version('easyocr'))"),
-    @("PyTorch",                "import torch; print(torch.__version__)"),
-    @("Torchvision",            "import torchvision; print(torchvision.__version__)"),
-    @("NumPy",                  "import numpy; print(numpy.__version__)")
+    @("PaddlePaddle",       "import paddle; print(paddle.__version__)"),
+    @("PaddleOCR",          "from importlib.metadata import version; print(version('paddleocr'))"),
+    @("PaddleX",            "from importlib.metadata import version; print(version('paddlex'))"),
+    @("RapidOCR ONNX",     "from importlib.metadata import version; print(version('rapidocr-onnxruntime'))"),
+    @("ONNX Runtime",       "from importlib.metadata import version; print(version('onnxruntime'))"),
+    @("RapidOCR OpenVINO", "from importlib.metadata import version; print(version('rapidocr-openvino'))"),
+    @("OpenVINO",           "from importlib.metadata import version; print(version('openvino'))"),
+    @("EasyOCR",            "from importlib.metadata import version; print(version('easyocr'))"),
+    @("PyTorch",            "import torch; print(torch.__version__)"),
+    @("Torchvision",        "import torchvision; print(torchvision.__version__)"),
+    @("NumPy",              "import numpy; print(numpy.__version__)")
 )
 
 foreach ($check in $checks) {
@@ -86,14 +86,14 @@ if ($null -eq $tessExe) {
     Write-Host "  FAIL Tesseract not found in PATH" -ForegroundColor Red
     Write-Host "       Install from: https://github.com/UB-Mannheim/tesseract/wiki" -ForegroundColor Red
 } else {
-    tesseract --version 2>&1 | Select-String "tesseract" | ForEach-Object {
-        Write-Host "  OK  $($_.ToString().Trim())" -ForegroundColor Green
-    }
+    $tessVersion = tesseract --version 2>&1 | Out-String
+    $tessFirstLine = ($tessVersion -split "`n")[0].Trim()
+    Write-Host "  OK  $tessFirstLine" -ForegroundColor Green
     $tessLangs = tesseract --list-langs 2>&1 | Out-String
     if ($LASTEXITCODE -eq 0 -and $tessLangs -match "por") {
         Write-Host "  OK  tessdata: por (Portuguese) available" -ForegroundColor Green
     } else {
-        Write-Host "  FAIL tessdata 'por' not found — download from:" -ForegroundColor Red
+        Write-Host "  FAIL tessdata 'por' not found - download from:" -ForegroundColor Red
         Write-Host "       https://github.com/tesseract-ocr/tessdata_best/raw/main/por.traineddata" -ForegroundColor Red
         Write-Host "       Copy to: C:\Program Files\Tesseract-OCR\tessdata\" -ForegroundColor Red
     }
@@ -102,12 +102,19 @@ if ($null -eq $tessExe) {
 # Materialise EasyOCR weights (craft_mlt_25k.pth + latin_g2.pth) so that
 # the measured benchmark run never triggers a network download.
 Write-Host ""
-Write-Host "Downloading EasyOCR weights (craft + latin_g2) — this may take a few minutes..." -ForegroundColor Yellow
-$easyocrScript = 'import easyocr, os; cache = os.path.join(os.path.expanduser(chr(126)), ".EasyOCR", "model"); easyocr.Reader(["pt"], gpu=False, model_storage_directory=cache, download_enabled=True); print("EasyOCR weights ready:", cache)'
-python -c $easyocrScript
+Write-Host "Downloading EasyOCR weights (craft + latin_g2) - this may take a few minutes..." -ForegroundColor Yellow
+$tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+Set-Content -Path $tmpPy -Encoding UTF8 -Value @(
+    "import easyocr, os",
+    "cache = os.path.join(os.path.expanduser('~'), '.EasyOCR', 'model')",
+    "easyocr.Reader(['pt'], gpu=False, model_storage_directory=cache, download_enabled=True)",
+    "print('EasyOCR weights ready:', cache)"
+)
+python $tmpPy
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  WARN EasyOCR weight download may have failed — check connectivity." -ForegroundColor Yellow
+    Write-Host "  WARN EasyOCR weight download may have failed - check connectivity." -ForegroundColor Yellow
 }
+Remove-Item $tmpPy -ErrorAction SilentlyContinue
 
 # Run a full preflight across all five engines.
 Write-Host ""
@@ -115,13 +122,13 @@ Write-Host "Running preflight across all five OCR backends..." -ForegroundColor 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 python "$scriptDir\preflight_ocr_backends.py" --language pt
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "One or more engines failed preflight — see output above." -ForegroundColor Red
+    Write-Host "One or more engines failed preflight - see output above." -ForegroundColor Red
 }
 
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan
 Write-Host "Run the E2E benchmark with:"
-Write-Host "  # Smoke test — 5 pages, all engines"
+Write-Host "  # Smoke test - 5 pages, all engines"
 Write-Host "  .\scripts\run_benchmark.ps1"
 Write-Host ""
 Write-Host "  # Full document"
