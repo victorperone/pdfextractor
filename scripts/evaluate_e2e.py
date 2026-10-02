@@ -293,7 +293,7 @@ def main() -> int:
 
         diag = page.diagnostics
         page_warnings: list[str] = list(getattr(diag, "warnings", []))
-        partial_reasons: list[str] = [str(r) for r in getattr(diag, "reasons", [])]
+        partial_reasons: list[str] = [r.value if hasattr(r, "value") else str(r) for r in getattr(diag, "reasons", [])]
         facts: dict = dict(getattr(diag, "facts", {}))
 
         # Derive ocr_outcome from diagnostics facts and token counts.
@@ -329,7 +329,7 @@ def main() -> int:
             "elapsed_s": round(elapsed_page, 4),
             "char_count": len(content),
             "ocr_tokens_added": ocr_tokens_added,
-            "strategy": str(getattr(diag, "strategy", "unknown")),
+            "strategy": getattr(getattr(diag, "strategy", None), "value", None) or "unknown",
         })
 
     # --- Document-level benchmark status ---
