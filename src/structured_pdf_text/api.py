@@ -90,6 +90,17 @@ class PdfTextExtractor:
         else:
             self.ocr_engine = None
 
+    def close(self) -> None:
+        """Release resources held by the OCR backend (e.g. the Paddle subprocess)."""
+        if self.ocr_engine is not None and hasattr(self.ocr_engine, "close"):
+            self.ocr_engine.close()
+
+    def __enter__(self) -> "PdfTextExtractor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
     def extract(
         self,
         path: str | Path,
