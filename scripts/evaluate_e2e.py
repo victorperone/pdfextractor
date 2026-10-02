@@ -372,6 +372,10 @@ def main() -> int:
         except Exception:
             pass
 
+    # --- Memory snapshot (set by api.py after extraction completes) ---
+    doc_facts: dict = dict(getattr(doc_diag, "facts", {}))
+    memory_stats: dict = dict(doc_facts.get("memory", {}))
+
     manifest = {
         "schema_version": "2.0",
         "run_id": run_id,
@@ -391,6 +395,7 @@ def main() -> int:
         "warnings_count": len(doc_warnings),
         "elapsed_s": round(elapsed_s, 3),
         "page_count": len(document.pages),
+        "memory": memory_stats,
         "extracted_markdown": str(md_path),
         "timing_note": (
             "per-page elapsed_s is the wall-clock interval between progress callbacks "
