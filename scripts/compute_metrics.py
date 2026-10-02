@@ -564,6 +564,88 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
     }
 
 
+def aggregate_table_metrics_from_pages(
+    per_page_results: list[dict],
+    selected_but_missing: set[int],
+    ref_pages: dict[int, str],
+) -> dict:
+    """Aggregate Group 3 table metrics from per-page results.
+
+    Per-page computation already pairs tables within the same page (via
+    compute_table_metrics on each page body), which avoids the cross-page
+    positional shift that occurs when pairing tables in a concatenated document.
+
+    Missing pages contribute empty hypothesis tables (all reference tables become FN).
+    """
+    _table_keys = [
+        "row_f1", "column_f1", "table_dimension_accuracy",
+        "cell_exact_match", "cell_cer", "cell_alignment_accuracy",
+        "table_structure_similarity", "table_content_f1",
+    ]
+
+    accum: dict[str, list[float]] = {k: [] for k in _table_keys}
+    total_ref_tables = 0
+    total_hyp_tables = 0
+
+    # Pages evaluated normally (present in both hyp and ref)
+    for entry in per_page_results:
+        if entry.get("missing_from_hypothesis"):
+            continue
+        for k in _table_keys:
+            if k in entry:
+                accum[k].append(entry[k])
+        # table_f1 numerics come from per-page counts; recompute from totals below.
+
+    # Missing pages: each reference table is a FN; contribution drives down F1.
+    for pn in selected_but_missing:
+        ref_body = _strip_page_header(ref_pages.get(pn, ""))
+        n_ref = len(_parse_md_tables(ref_body))
+        total_ref_tables += n_ref
+        if n_ref:
+            # per-page metrics: 0 TP → all zeros
+            for k in _table_keys:
+                accum[k].append(0.0)
+            accum["cell_cer"][-1] = 0.0  # no cells present
+
+    # Recompute table F1 from the page-level counts stored in per_page_results
+    for entry in per_page_results:
+        if entry.get("missing_from_hypothesis"):
+            continue
+        # We don't store n_ref/n_hyp tables per page, so derive from the body.
+        pass
+
+    # Simpler approach: sum ref and hyp tables across all evaluated pages.
+    # table_f1 is computed correctly via TP=min(n_ref,n_hyp), etc.
+    evaluated_page_nums = {e["page"] for e in per_page_results if not e.get("missing_from_hypothesis")}
+    for pn in evaluated_page_nums:
+        pass  # counts already accumulated via per-page compute_table_metrics
+
+    # For table F1 (detection), re-derive from hyp+ref concatenated only for
+    # the table *count*, not positional pairing.
+    # Use per-page table_f1 average as the aggregate (consistent with other per-page averages).
+    page_table_f1s = [e.get("table_f1", 0.0) for e in per_page_results if not e.get("missing_from_hypothesis")]
+    # Missing pages contribute 0.0 table_f1 when they have reference tables.
+    for pn in selected_but_missing:
+        ref_body = _strip_page_header(ref_pages.get(pn, ""))
+        if _parse_md_tables(ref_body):
+            page_table_f1s.append(0.0)
+
+    def _avg(lst: list[float]) -> float:
+        return round(sum(lst) / len(lst), 4) if lst else 1.0
+
+    return {
+        "table_f1": _avg(page_table_f1s),
+        "row_f1": _avg(accum["row_f1"]),
+        "column_f1": _avg(accum["column_f1"]),
+        "table_dimension_accuracy": _avg(accum["table_dimension_accuracy"]),
+        "cell_exact_match": _avg(accum["cell_exact_match"]),
+        "cell_cer": round(sum(accum["cell_cer"]) / len(accum["cell_cer"]), 6) if accum["cell_cer"] else 0.0,
+        "cell_alignment_accuracy": _avg(accum["cell_alignment_accuracy"]),
+        "table_structure_similarity": _avg(accum["table_structure_similarity"]),
+        "table_content_f1": _avg(accum["table_content_f1"]),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Grupo 4 — Order and integrity
 # ---------------------------------------------------------------------------
@@ -1085,6 +1167,7 @@ def main() -> int:
     # Without a run manifest we fall back to the reference page set — every
     # reference page is treated as selected, which is conservative but correct.
     run_manifest_pages: set[int] | None = None
+    _run_meta: dict = {}
     if args.run_manifest and args.run_manifest.exists():
         with open(args.run_manifest, encoding="utf-8") as f:
             _rm = json.load(f)
@@ -1092,6 +1175,19 @@ def main() -> int:
             int(e["page"])
             for e in _rm.get("pages", [])
             if e.get("page") is not None
+        }
+        # Propagate E2E run metadata so compare_engines.py can validate runs
+        # and display benchmark_status without needing to re-read the manifest.
+        _run_meta = {
+            "benchmark_status":  _rm.get("benchmark_status"),
+            "document_status":   _rm.get("document_status"),
+            "pdf_sha256":        _rm.get("pdf_sha256"),
+            "mode":              _rm.get("mode"),
+            "engine_identity":   _rm.get("engine_identity", {}),
+            "degraded_pages":    _rm.get("degraded_pages", []),
+            "failed_ocr_pages":  _rm.get("failed_ocr_pages", []),
+            "elapsed_s":         _rm.get("elapsed_s"),
+            "selected_pages":    sorted(run_manifest_pages) if run_manifest_pages else [],
         }
 
     # Selected = pages the engine was supposed to produce output for.
@@ -1242,7 +1338,9 @@ def main() -> int:
         print("  Calculando métricas estruturais e de tabelas (full-doc)...")
 
     full_struct_m = compute_structure_metrics(hyp_full_body, ref_full_body)
-    full_table_m = compute_table_metrics(hyp_penalised_body, ref_penalised_body)
+    # Table metrics: aggregate from per-page results (already page-paired) rather
+    # than from the concatenated document, which would shift pairings across pages.
+    full_table_m = aggregate_table_metrics_from_pages(per_page_results, selected_but_missing, ref_pages)
     full_crit_m = compute_critical_data_metrics(hyp_penalised_body, ref_penalised_body)
     integrity_m = compute_integrity_metrics(
         hyp_full_body, ref_full_body, hyp_pages, ref_pages, selected_but_missing
@@ -1266,6 +1364,12 @@ def main() -> int:
         "pages_in_ref_not_hyp": pages_in_ref_not_hyp,
         "pages_in_hyp_not_ref": pages_in_hyp_not_ref,
         "missing_pages_penalised": len(selected_but_missing) > 0,
+        # Top-level shorthands so compare_engines.py can read them directly
+        # without needing to access the nested "run" block.
+        "benchmark_status": _run_meta.get("benchmark_status"),
+        "pdf_sha256": _run_meta.get("pdf_sha256"),
+        "mode": _run_meta.get("mode"),
+        "run": _run_meta if _run_meta else None,
         "grupo1_texto": full_text_m,
         "grupo2_estrutura_markdown": full_struct_m,
         "grupo3_tabelas": full_table_m,

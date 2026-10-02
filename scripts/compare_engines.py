@@ -65,6 +65,7 @@ _METRICS: list[tuple[str, str, str]] = [
     ("Cell CER",              "grupo3_tabelas",               "cell_cer"),
     ("Cell Alignment Acc.",   "grupo3_tabelas",               "cell_alignment_accuracy"),
     ("Table Structure Sim.",  "grupo3_tabelas",               "table_structure_similarity"),
+    ("Table Content F1",      "grupo3_tabelas",               "table_content_f1"),
     # Group 4 — Order and Integrity
     ("Reading Order Acc.",    "grupo4_ordem_integridade",     "reading_order_accuracy"),
     ("Duplicate Content",     "grupo4_ordem_integridade",     "duplicate_content_rate"),
@@ -74,10 +75,21 @@ _METRICS: list[tuple[str, str, str]] = [
     ("Failure Rate",          "grupo4_ordem_integridade",     "failure_rate"),
     ("Invalid Markdown",      "grupo4_ordem_integridade",     "invalid_markdown_rate"),
     # Group 5 — Critical Data
-    ("Numeric Exact Match",   "grupo5_dados_criticos",        "numeric_exact_match"),
-    ("Date Exact Match",      "grupo5_dados_criticos",        "date_exact_match"),
-    ("Currency Exact Match",  "grupo5_dados_criticos",        "currency_exact_match"),
-    ("Identifier Exact Match","grupo5_dados_criticos",        "identifier_exact_match"),
+    # *_exact_match == recall; show Precision, Recall and F1 for each category
+    # so that a model that copies all reference values but also invents extras
+    # cannot score as "perfect" on a single recall-only column.
+    ("Numeric Recall",        "grupo5_dados_criticos",        "numeric_exact_match"),
+    ("Numeric Precision",     "grupo5_dados_criticos",        "numeric_precision"),
+    ("Numeric F1",            "grupo5_dados_criticos",        "numeric_f1"),
+    ("Date Recall",           "grupo5_dados_criticos",        "date_exact_match"),
+    ("Date Precision",        "grupo5_dados_criticos",        "date_precision"),
+    ("Date F1",               "grupo5_dados_criticos",        "date_f1"),
+    ("Currency Recall",       "grupo5_dados_criticos",        "currency_exact_match"),
+    ("Currency Precision",    "grupo5_dados_criticos",        "currency_precision"),
+    ("Currency F1",           "grupo5_dados_criticos",        "currency_f1"),
+    ("Identifier Recall",     "grupo5_dados_criticos",        "identifier_exact_match"),
+    ("Identifier Precision",  "grupo5_dados_criticos",        "identifier_precision"),
+    ("Identifier F1",         "grupo5_dados_criticos",        "identifier_f1"),
 ]
 
 # Metrics where lower is better (errors)
@@ -135,11 +147,20 @@ def _best_engines(values: dict[str, float | None], key: str, tol: float = 1e-6) 
 # ---------------------------------------------------------------------------
 
 def _comparability_key(data: dict) -> dict:
-    """Extract the fields that must be identical across all compared runs."""
-    # pages_selected_but_missing is a list in schema v2; sort for stable comparison.
+    """Extract the fields that must be identical across all compared runs.
+
+    Schema v2 metrics JSONs carry a top-level "pdf_sha256", "mode", and a
+    "run.selected_pages" list that let us validate the exact page set rather
+    than just the count.  Fall back to count-only for older files.
+    """
     missing = data.get("pages_selected_but_missing", [])
-    selected = data.get("pages_selected", data.get("pages_reference"))
+    # Prefer the exact sorted page list from the run block; fall back to count.
+    run_block = data.get("run") or {}
+    exact_pages = run_block.get("selected_pages")
+    selected = tuple(sorted(exact_pages)) if exact_pages else data.get("pages_selected", data.get("pages_reference"))
     return {
+        "pdf_sha256": data.get("pdf_sha256"),
+        "mode": data.get("mode"),
         "pages_reference": data.get("pages_reference"),
         "pages_selected": selected,
         "pages_selected_but_missing": sorted(missing) if isinstance(missing, list) else missing,
@@ -271,7 +292,89 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
         )
 
     lines += ["", ""]
+
+    # --- By-condition breakdown ---
+    # Groups per_page results by the "conditions" tag from the corpus manifest
+    # and micro-averages key metrics.  Requires per_page to be present in each
+    # metrics file (it always is when produced by compute_metrics.py).
+    condition_section = _render_by_condition(all_data)
+    if condition_section:
+        lines += condition_section
+
     return "\n".join(lines)
+
+
+_BY_CONDITION_METRICS: list[tuple[str, str]] = [
+    # (display_name, per_page_key)
+    ("CER Text-Only ↓", "cer_text_only"),
+    ("WER ↓",           "wer"),
+    ("Deletion ↓",      "deletion_rate"),
+    ("Currency F1 ↑",   "currency_f1"),
+    ("Cell CER ↓",      "cell_cer"),
+]
+
+
+def _render_by_condition(all_data: list[tuple[str, dict]]) -> list[str]:
+    """Render a by-condition CER/WER breakdown section.
+
+    Returns an empty list when no per_page data is available (old files).
+    """
+    # Collect all condition labels across all engines.
+    all_conditions: set[str] = set()
+    engine_by_cond: dict[str, dict[str, list[dict]]] = {}  # engine -> cond -> [page_entries]
+
+    for eng, data in all_data:
+        per_page = data.get("per_page", [])
+        if not per_page:
+            continue
+        engine_by_cond[eng] = {}
+        for entry in per_page:
+            cond = entry.get("conditions") or "sem condição"
+            all_conditions.add(cond)
+            engine_by_cond.setdefault(eng, {}).setdefault(cond, []).append(entry)
+
+    if not all_conditions:
+        return []
+
+    engines = [eng for eng, _ in all_data if eng in engine_by_cond]
+    if not engines:
+        return []
+
+    engine_headers = " | ".join(f"**{e}**" for e in engines)
+    lines: list[str] = [
+        "---",
+        "",
+        "## Breakdown por Condição do Corpus",
+        "",
+        "> Micro-média das páginas agrupadas pela tag `conditions` do manifesto.",
+        "",
+    ]
+
+    for display_name, key in _BY_CONDITION_METRICS:
+        lines += [
+            f"### {display_name}",
+            "",
+            f"| Condição | {engine_headers} |",
+            "|---" + "|---" * len(engines) + "|",
+        ]
+        for cond in sorted(all_conditions):
+            row = [f"`{cond}`"]
+            best_vals: dict[str, float | None] = {}
+            for eng in engines:
+                pages = engine_by_cond.get(eng, {}).get(cond, [])
+                vals = [p[key] for p in pages if key in p and p[key] is not None]
+                best_vals[eng] = sum(vals) / len(vals) if vals else None
+            best_set = _best_engines(best_vals, key)
+            for eng in engines:
+                v = best_vals[eng]
+                cell = _fmt(v)
+                if eng in best_set and v is not None:
+                    cell = f"**{cell}**"
+                row.append(cell)
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
+
+    return lines
 
 
 def main() -> int:
