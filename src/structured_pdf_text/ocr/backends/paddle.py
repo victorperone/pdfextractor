@@ -25,10 +25,11 @@ import dataclasses
 import importlib.util
 import io
 import json
-import os
 import logging
+import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -112,6 +113,11 @@ class PaddleOCRBackend:
 
         self._subprocess_config: dict | None = None
         self._worker_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        # Serialise all subprocess request/response cycles so two callers
+        # on different threads can never interleave their writes and reads.
+        self._worker_lock: threading.Lock = threading.Lock()
+        # Monotonic counter used as request_id for response matching.
+        self._worker_req_seq: int = 0
 
         # Resolve cache_home once at construction time, mirroring PaddleOcrEngine's
         # own resolution, so healthcheck() checks the same directory the engine uses.
@@ -153,7 +159,12 @@ class PaddleOCRBackend:
     # ------------------------------------------------------------------
 
     def _ensure_worker(self) -> None:
-        """Start the subprocess worker if not already running."""
+        """Start the subprocess worker if not already running.
+
+        Must be called while ``_worker_lock`` is held (done by ``_worker_send``).
+        Uses ``_raw_send`` directly to avoid re-acquiring the lock for the
+        init handshake.
+        """
         if self._worker_proc is not None and self._worker_proc.poll() is None:
             return  # still alive
 
@@ -161,23 +172,22 @@ class PaddleOCRBackend:
             [sys.executable, str(_WORKER_SCRIPT)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            bufsize=0,  # unbuffered binary I/O — flush() is explicit in _worker_send
+            bufsize=0,  # unbuffered binary I/O — flush() is explicit in _raw_send
         )
-        # Send init request
+        # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
         init_req = {"method": "init", **self._subprocess_config}  # type: ignore[arg-type]
-        response = self._worker_send(init_req)
+        response = self._raw_send(init_req)
         if response.get("status") != "ok":
             raise RuntimeError(
                 f"Paddle worker init failed: {response.get('error')}"
             )
 
-    def _worker_send(self, request: dict) -> dict:
-        """Send one JSONL request to the worker and return the parsed response.
+    def _raw_send(self, request: dict) -> dict:
+        """Write one request and read one response on the raw pipe.
 
-        Enforces a read timeout (PADDLE_WORKER_TIMEOUT env var, default 120 s)
-        so that a hung worker never blocks the parent process indefinitely.
-        readline() runs in a background thread; TimeoutError is raised and the
-        worker process is killed if the deadline expires.
+        No lock, no request_id injection — callers must hold ``_worker_lock``
+        before calling this.  Used by ``_ensure_worker`` (init handshake) and
+        ``_worker_send`` (normal requests).
         """
         assert self._worker_proc is not None
         assert self._worker_proc.stdin is not None
@@ -209,6 +219,42 @@ class PaddleOCRBackend:
                 f"Paddle worker sent malformed JSON: {response_line[:200]!r}"
             ) from exc
 
+    def _worker_send(self, request: dict) -> dict:
+        """Send one JSONL request to the worker and return the parsed response.
+
+        The full write → read cycle is serialised by ``_worker_lock`` so that
+        concurrent callers on different threads cannot interleave their writes
+        and reads and receive mismatched responses.
+
+        A monotonic ``request_id`` is injected into every request and verified
+        against the response, making protocol violations immediately visible
+        rather than silently returning a stale or misrouted result.
+
+        Enforces a read timeout (PADDLE_WORKER_TIMEOUT env var, default 120 s)
+        so that a hung worker never blocks the parent process indefinitely.
+        readline() runs in a background thread; TimeoutError is raised and the
+        worker process is killed if the deadline expires.
+        """
+        with self._worker_lock:
+            # Ensure the worker is alive inside the lock so concurrent callers
+            # cannot race to start two workers simultaneously.
+            self._ensure_worker()
+
+            self._worker_req_seq += 1
+            req_id = self._worker_req_seq
+            request = {**request, "request_id": req_id}
+
+            response = self._raw_send(request)
+
+            # Verify the response belongs to this request.
+            resp_id = response.get("request_id")
+            if resp_id is not None and resp_id != req_id:
+                raise RuntimeError(
+                    f"Paddle worker request_id mismatch: sent {req_id}, got {resp_id}"
+                )
+
+            return response
+
     def _call_subprocess(
         self,
         method: str,
@@ -238,7 +284,6 @@ class PaddleOCRBackend:
         if region_bbox is not None:
             req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
 
-        self._ensure_worker()
         response = self._worker_send(req)
 
         if response.get("status") != "ok":
@@ -398,8 +443,8 @@ class PaddleOCRBackend:
 
         if self._subprocess_config is not None:
             # In subprocess mode: also ping the worker to verify the subprocess runs.
+            # _worker_send handles _ensure_worker internally under the lock.
             try:
-                self._ensure_worker()
                 resp = self._worker_send({"method": "healthcheck"})
                 return "ready" if resp.get("status") == "ok" else "unknown"
             except Exception:

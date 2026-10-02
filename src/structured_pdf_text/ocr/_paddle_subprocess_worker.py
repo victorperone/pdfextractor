@@ -24,7 +24,7 @@ Protocol: JSONL over stdin/stdout (one JSON object per line).
     OR the literal string "QUIT" to shut down.
 
   Response:
-    {"status": "ok"|"error", "tokens": [...], "error": null|str}
+    {"status": "ok"|"error", "tokens": [...], "error": null|str, "request_id": int|null}
     Tokens: [{"text": str, "confidence": float|null, "bbox": [x0,y0,x1,y1],
                "source": str, "language": str|null, "rotation": int, "provenance": str|null}, ...]
 """
@@ -124,19 +124,21 @@ def main() -> None:
             _reply({"status": "error", "tokens": [], "error": f"bad JSON: {exc}"})
             continue
 
+        # Echo request_id so the parent can verify response routing.
+        req_id: int | None = req.get("request_id")
         method = req.get("method", "")
 
         try:
             if method == "init":
                 init_config = req
                 engine = _make_engine(req)
-                _reply({"status": "ok", "tokens": [], "error": None})
+                _reply({"status": "ok", "tokens": [], "error": None}, req_id)
 
             elif method == "healthcheck":
                 if engine is None:
-                    _reply({"status": "error", "tokens": [], "error": "not initialized"})
+                    _reply({"status": "error", "tokens": [], "error": "not initialized"}, req_id)
                 else:
-                    _reply({"status": "ok", "tokens": [], "error": None})
+                    _reply({"status": "ok", "tokens": [], "error": None}, req_id)
 
             elif method in ("recognize_page", "recognize_region"):
                 if engine is None:
@@ -159,16 +161,18 @@ def main() -> None:
                     bbox = BBox(*coords)
                     tokens = engine.recognize_region(image, page_index, bbox)
 
-                _reply({"status": "ok", "tokens": _tokens_to_json(tokens), "error": None})
+                _reply({"status": "ok", "tokens": _tokens_to_json(tokens), "error": None}, req_id)
 
             else:
-                _reply({"status": "error", "tokens": [], "error": f"unknown method: {method!r}"})
+                _reply({"status": "error", "tokens": [], "error": f"unknown method: {method!r}"}, req_id)
 
         except Exception as exc:
-            _reply({"status": "error", "tokens": [], "error": str(exc)})
+            _reply({"status": "error", "tokens": [], "error": str(exc)}, req_id)
 
 
-def _reply(obj: dict) -> None:
+def _reply(obj: dict, request_id: int | None = None) -> None:
+    if request_id is not None:
+        obj = {**obj, "request_id": request_id}
     _response_pipe.write((json.dumps(obj, ensure_ascii=False) + "\n").encode())
     _response_pipe.flush()
 
