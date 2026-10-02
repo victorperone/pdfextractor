@@ -22,6 +22,7 @@ decision chain.
 
 from __future__ import annotations
 
+import inspect
 import math
 import os
 from dataclasses import dataclass
@@ -688,20 +689,26 @@ def _recognize(
     quality_variants: bool,
     quality_policy: str | None = None,
 ) -> list[OcrToken]:
-    """Call the OCR engine, tolerating engines that accept fewer keyword args."""
+    """Call the OCR engine with only the keyword args its signature declares.
+
+    Uses inspect.signature() to detect supported parameters once and call
+    directly, avoiding a broad except-TypeError cascade that would mask real
+    bugs raised inside the engine (e.g. wrong types passed to numpy/PIL).
+    """
     try:
-        return engine.recognize_page(
-            image,
-            page_index,
-            bbox,
-            quality_variants=quality_variants,
-            quality_policy=quality_policy,
-        )
-    except TypeError:
-        try:
-            return engine.recognize_page(image, page_index, bbox)
-        except TypeError:
-            return engine.recognize_page(image, page_index)
+        params = set(inspect.signature(engine.recognize_page).parameters)
+    except (TypeError, ValueError):
+        params = set()
+
+    kwargs: dict[str, Any] = {}
+    if "quality_variants" in params:
+        kwargs["quality_variants"] = quality_variants
+    if "quality_policy" in params:
+        kwargs["quality_policy"] = quality_policy
+
+    if "page_bbox" in params or len(params) >= 4:
+        return engine.recognize_page(image, page_index, bbox, **kwargs)
+    return engine.recognize_page(image, page_index, **kwargs)
 
 
 def _map_token_to_page(
