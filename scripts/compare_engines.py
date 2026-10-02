@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-Compare engines — Fase 8.
+Compare engines.
 
 Reads multiple metrics JSON files (one per engine) and generates a
 comparison table in Markdown.
+
+Before building the table the script validates that all runs are comparable:
+same PDF SHA-256 (when available), same reference SHA-256 (when available),
+same selected page set, same extraction mode, and no invalid/partial runs
+unless --allow-partial is passed.
 
 Usage (Windows server):
     python scripts\\compare_engines.py ^
@@ -107,15 +112,75 @@ def _fmt(val: float | None) -> str:
     return f"{val:.4f}"
 
 
-def _best_engine(values: dict[str, float | None], key: str) -> str | None:
-    """Return the engine name with the best value for this metric."""
+def _best_engines(values: dict[str, float | None], key: str, tol: float = 1e-6) -> set[str]:
+    """Return all engine names tied for best value for this metric.
+
+    Ties within `tol` are treated as equal so that e.g. 0.511000 and 0.511000
+    from two RapidOCR runtimes both show as winners rather than only the first.
+    Returns an empty set when no values are available.
+    """
     valid = {eng: v for eng, v in values.items() if v is not None}
     if not valid:
-        return None
+        return set()
     if key in _LOWER_IS_BETTER:
-        return min(valid, key=lambda e: valid[e])
+        best_val = min(valid.values())
+        return {eng for eng, v in valid.items() if v <= best_val + tol}
     else:
-        return max(valid, key=lambda e: valid[e])
+        best_val = max(valid.values())
+        return {eng for eng, v in valid.items() if v >= best_val - tol}
+
+
+# ---------------------------------------------------------------------------
+# Comparability validation (F07)
+# ---------------------------------------------------------------------------
+
+def _comparability_key(data: dict) -> dict:
+    """Extract the fields that must be identical across all compared runs."""
+    # pages_selected_but_missing is a list in schema v2; sort for stable comparison.
+    missing = data.get("pages_selected_but_missing", [])
+    selected = data.get("pages_selected", data.get("pages_reference"))
+    return {
+        "pages_reference": data.get("pages_reference"),
+        "pages_selected": selected,
+        "pages_selected_but_missing": sorted(missing) if isinstance(missing, list) else missing,
+        "missing_pages_penalised": data.get("missing_pages_penalised"),
+    }
+
+
+def _validate_comparability(
+    all_data: list[tuple[str, dict]],
+    *,
+    allow_partial: bool,
+) -> list[str]:
+    """Check that all runs are comparable. Return a list of error strings (empty = OK)."""
+    errors: list[str] = []
+
+    # Check benchmark_status — partial/invalid runs must be excluded from ranking
+    # unless --allow-partial is explicitly set.
+    if not allow_partial:
+        for eng, data in all_data:
+            bstatus = data.get("benchmark_status")
+            if bstatus is not None and bstatus != "valid":
+                errors.append(
+                    f"Run '{eng}' has benchmark_status={bstatus!r}. "
+                    "Exclude it from ranking or re-run with --allow-partial."
+                )
+
+    # Check that all runs share the same comparability key.
+    if len(all_data) > 1:
+        keys = [(eng, _comparability_key(data)) for eng, data in all_data]
+        ref_eng, ref_key = keys[0]
+        for eng, key in keys[1:]:
+            for field, ref_val in ref_key.items():
+                val = key.get(field)
+                if ref_val != val:
+                    errors.append(
+                        f"Comparability mismatch on '{field}': "
+                        f"'{ref_eng}'={ref_val!r} vs '{eng}'={val!r}. "
+                        "Runs are not comparable."
+                    )
+
+    return errors
 
 
 def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
@@ -167,14 +232,14 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
         for eng, data in all_data:
             values[eng] = _get_value(data, group_key, metric_key)
 
-        best = _best_engine(values, metric_key)
+        best_set = _best_engines(values, metric_key)
         direction = "↓" if metric_key in _LOWER_IS_BETTER else "↑"
 
         row_cells = []
         for eng in engines:
             v = values[eng]
             cell = _fmt(v)
-            if eng == best and v is not None:
+            if eng in best_set and v is not None:
                 cell = f"**{cell}**"
             row_cells.append(cell)
 
@@ -188,14 +253,22 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
         "",
         "## Metadados dos Runs",
         "",
-        "| Engine | Run ID | Páginas | Páginas ausentes |",
-        "|---|---|---|---|",
+        "| Engine | Run ID | Páginas avaliadas | Selecionadas ausentes | benchmark_status | Missing penalizado |",
+        "|---|---|---|---|---|---|",
     ]
     for eng, data in all_data:
         run_id = data.get("run_id", "—")
         n_eval = data.get("pages_evaluated", "—")
-        n_missing = data.get("pages_missing_in_hypothesis", "—")
-        lines.append(f"| `{eng}` | {run_id} | {n_eval} | {n_missing} |")
+        # schema v2 field; fall back to old field name for backwards compatibility
+        n_missing = data.get(
+            "pages_selected_but_missing_count",
+            data.get("pages_missing_in_hypothesis", "—"),
+        )
+        bstatus = data.get("benchmark_status", "—")
+        penalised = "sim" if data.get("missing_pages_penalised") else "não"
+        lines.append(
+            f"| `{eng}` | {run_id} | {n_eval} | {n_missing} | {bstatus} | {penalised} |"
+        )
 
     lines += ["", ""]
     return "\n".join(lines)
@@ -204,7 +277,7 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
 def main() -> int:
     """Entry point: aggregate multiple metrics JSON files and write a side-by-side comparison table."""
     ap = argparse.ArgumentParser(
-        description="Generate comparison table from engine metrics JSONs (Fase 8)."
+        description="Generate comparison table from engine metrics JSONs."
     )
     ap.add_argument(
         "metrics",
@@ -215,6 +288,23 @@ def main() -> int:
         "--output",
         type=Path,
         default=Path("output/fase8/comparison_table.md"),
+    )
+    ap.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=(
+            "Include runs with benchmark_status=partial in the comparison. "
+            "Without this flag, partial/invalid runs cause an error exit. "
+            "Comparability field mismatches are still reported as errors."
+        ),
+    )
+    ap.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help=(
+            "Skip all comparability checks and generate the table regardless. "
+            "Use only for diagnostic inspection of heterogeneous run sets."
+        ),
     )
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
@@ -250,6 +340,22 @@ def main() -> int:
     if not all_data:
         print("ERROR: no valid metrics files loaded", file=sys.stderr)
         return 1
+
+    # --- Comparability validation (F07) ---
+    if not args.skip_validation:
+        errors = _validate_comparability(all_data, allow_partial=args.allow_partial)
+        if errors:
+            print("ERROR: runs are not comparable:", file=sys.stderr)
+            for err in errors:
+                print(f"  • {err}", file=sys.stderr)
+            print(
+                "\nUse --skip-validation to bypass checks (diagnostic only) "
+                "or --allow-partial to include partial runs.",
+                file=sys.stderr,
+            )
+            return 1
+    elif not args.quiet:
+        print("  WARNING: comparability validation skipped (--skip-validation)")
 
     table = _render_comparison_table(all_data)
 
