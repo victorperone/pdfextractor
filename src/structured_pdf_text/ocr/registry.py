@@ -26,25 +26,28 @@ REGISTRY: dict[str, BackendEntry] = {
         name="paddle",
         display_name="PaddleOCR PP-OCRv6 medium",
         default_runtime="paddle_static",
-        default_profile="ppocrv6-medium",
+        default_profile="pt",
         extras="ocr",
         setup_hint="pdftext setup-models --language pt",
     ),
     "rapidocr-onnx": BackendEntry(
         name="rapidocr-onnx",
-        display_name="RapidOCR PP-OCRv6 medium + ONNX Runtime",
+        display_name="RapidOCR + ONNX Runtime",
         default_runtime="onnxruntime",
-        default_profile="ppocrv6-medium",
-        extras="ocr-rapid-onnx",
-        setup_hint="pdftext setup-models --ocr-engine rapidocr-onnx",
+        default_profile="builtin-ch",
+        extras="ocr-rapidocr-onnx",
+        setup_hint='pip install "structured-pdf-text[ocr-rapidocr-onnx]"',
     ),
     "rapidocr-openvino": BackendEntry(
         name="rapidocr-openvino",
-        display_name="RapidOCR PP-OCRv6 medium + OpenVINO",
+        display_name="RapidOCR + OpenVINO",
         default_runtime="openvino",
-        default_profile="ppocrv6-medium",
-        extras="ocr-rapid-openvino",
-        setup_hint="pdftext setup-models --ocr-engine rapidocr-openvino",
+        default_profile="builtin-ch",
+        extras="ocr-rapidocr-openvino",
+        setup_hint=(
+            "pip install openvino==2024.4.0 && "
+            'pip install "rapidocr-openvino==1.4.4" --no-deps'
+        ),
     ),
     "tesseract": BackendEntry(
         name="tesseract",
@@ -60,7 +63,7 @@ REGISTRY: dict[str, BackendEntry] = {
         default_runtime="torch-cpu",
         default_profile="latin-g2-pt",
         extras="ocr-easyocr",
-        setup_hint="pdftext setup-models --ocr-engine easyocr",
+        setup_hint='pip install "structured-pdf-text[ocr-easyocr]"',
     ),
 }
 
