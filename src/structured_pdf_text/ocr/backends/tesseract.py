@@ -205,6 +205,11 @@ def _run_tesseract_tsv(
             cmd,
             capture_output=True, text=True, encoding="utf-8", timeout=120,
         )
+        if result.returncode != 0:
+            stderr_snippet = (result.stderr or "")[:400].strip()
+            raise RuntimeError(
+                f"tesseract exited with code {result.returncode}: {stderr_snippet}"
+            )
         return result.stdout
     finally:
         if tmp:
@@ -408,6 +413,15 @@ class TesseractBackend:
                 elapsed_total_s=time.perf_counter() - t0,
                 warnings=("tesseract executable not found in PATH",),
             )
+        except subprocess.TimeoutExpired:
+            return OCRResult(
+                status="timeout",
+                tokens=(),
+                text="",
+                engine_identity=self.identity,
+                elapsed_total_s=time.perf_counter() - t0,
+                warnings=("tesseract subprocess timed out",),
+            )
         except Exception as exc:
             return OCRResult(
                 status="runtime_error",
@@ -486,6 +500,8 @@ class TesseractBackend:
                 ["tesseract", "--list-langs"],
                 capture_output=True, text=True, timeout=10,
             )
+            if result.returncode != 0:
+                return "unknown"
             output = result.stdout + result.stderr
             if self._tess_lang in output:
                 return "ready"
