@@ -44,6 +44,19 @@ foreach ($file in @($Corpus, $Reference, $Manifesto, $Validation)) {
     }
 }
 
+# --- RapidOCR Latin model (required for Portuguese diacritics) ---
+$rapidocrCache = "$RepoRoot\.ocr-model-cache\rapidocr"
+$rapidocrRec   = "$rapidocrCache\en_PP-OCRv4_rec_mobile.onnx"
+$rapidocrKeys  = "$rapidocrCache\en_dict.txt"
+if ((Test-Path $rapidocrRec) -and (Test-Path $rapidocrKeys)) {
+    $env:RAPIDOCR_REC_MODEL = $rapidocrRec
+    $env:RAPIDOCR_REC_KEYS  = $rapidocrKeys
+} else {
+    Write-Host "ERROR: RapidOCR Latin model not found in $rapidocrCache" -ForegroundColor Red
+    Write-Host "       Run scripts\setup_ocr_benchmark.ps1 first to download the model." -ForegroundColor Red
+    exit 2
+}
+
 # --- Corpus preflight (mirrors run_benchmark.sh inline Python check) ---
 Write-Host ""
 Write-Host "Running corpus preflight..." -ForegroundColor Cyan

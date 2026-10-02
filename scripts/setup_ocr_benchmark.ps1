@@ -127,6 +127,33 @@ if ($LASTEXITCODE -ne 0) {
 }
 Remove-Item $tmpPy -ErrorAction SilentlyContinue
 
+# Download Latin ONNX model for RapidOCR (Portuguese diacritics: ã ç ê õ).
+# The bundled ch model silently drops diacritics; the en model covers Latin.
+Write-Host ""
+Write-Host "Downloading RapidOCR Latin model (en_PP-OCRv4_rec_mobile) for Portuguese..." -ForegroundColor Yellow
+$rapidocrDir  = "$(Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))\.ocr-model-cache\rapidocr"
+$rapidocrRec  = "$rapidocrDir\en_PP-OCRv4_rec_mobile.onnx"
+$rapidocrKeys = "$rapidocrDir\en_dict.txt"
+New-Item -ItemType Directory -Force -Path $rapidocrDir | Out-Null
+
+if (-not (Test-Path $rapidocrRec)) {
+    Invoke-WebRequest `
+        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile.onnx" `
+        -OutFile $rapidocrRec -UseBasicParsing
+} else {
+    Write-Host "  en_PP-OCRv4_rec_mobile.onnx already present - skipping." -ForegroundColor DarkGray
+}
+if (-not (Test-Path $rapidocrKeys)) {
+    Invoke-WebRequest `
+        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile/en_dict.txt" `
+        -OutFile $rapidocrKeys -UseBasicParsing
+} else {
+    Write-Host "  en_dict.txt already present - skipping." -ForegroundColor DarkGray
+}
+$env:RAPIDOCR_REC_MODEL = $rapidocrRec
+$env:RAPIDOCR_REC_KEYS  = $rapidocrKeys
+Write-Host "  RapidOCR Latin model ready: $rapidocrDir" -ForegroundColor Green
+
 # Run a full preflight across all five engines.
 Write-Host ""
 Write-Host "Running preflight across all five OCR backends..." -ForegroundColor Yellow

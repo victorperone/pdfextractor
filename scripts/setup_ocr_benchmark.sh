@@ -85,6 +85,32 @@ easyocr.Reader(["pt"], gpu=False,
 print("EasyOCR weights ready.")
 PY
 
+# Download Latin ONNX model for RapidOCR (Portuguese diacritics: ã ç ê õ).
+# The bundled ch model silently drops diacritics; the en model covers Latin.
+echo ""
+echo "Downloading RapidOCR Latin model (en_PP-OCRv4_rec_mobile) for Portuguese..."
+RAPIDOCR_MODEL_DIR="$REPO_ROOT/.ocr-model-cache/rapidocr"
+mkdir -p "$RAPIDOCR_MODEL_DIR"
+_RAPIDOCR_REC="$RAPIDOCR_MODEL_DIR/en_PP-OCRv4_rec_mobile.onnx"
+_RAPIDOCR_KEYS="$RAPIDOCR_MODEL_DIR/en_dict.txt"
+if [[ ! -f "$_RAPIDOCR_REC" ]]; then
+    curl -fL \
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile.onnx" \
+        -o "$_RAPIDOCR_REC"
+else
+    echo "  en_PP-OCRv4_rec_mobile.onnx already present — skipping."
+fi
+if [[ ! -f "$_RAPIDOCR_KEYS" ]]; then
+    curl -fL \
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile/en_dict.txt" \
+        -o "$_RAPIDOCR_KEYS"
+else
+    echo "  en_dict.txt already present — skipping."
+fi
+export RAPIDOCR_REC_MODEL="$_RAPIDOCR_REC"
+export RAPIDOCR_REC_KEYS="$_RAPIDOCR_KEYS"
+echo "  RapidOCR Latin model ready: $RAPIDOCR_MODEL_DIR"
+
 # Run a full preflight across all five engines and exit non-zero on any failure.
 echo ""
 echo "Running preflight across all five OCR backends..."
