@@ -150,18 +150,6 @@ def main(argv: list[str] | None = None) -> int:
             "tesseract, easyocr."
         ),
     )
-    extract_parser.add_argument(
-        "--ocr-runtime",
-        default=None,
-        metavar="RUNTIME",
-        help="OCR runtime override (e.g. onnxruntime, openvino). Defaults per engine.",
-    )
-    extract_parser.add_argument(
-        "--ocr-profile",
-        default=None,
-        metavar="PROFILE",
-        help="OCR model profile override (e.g. ppocrv6-medium). Defaults per engine.",
-    )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
     inspect_parser.add_argument("pdf", type=Path)
