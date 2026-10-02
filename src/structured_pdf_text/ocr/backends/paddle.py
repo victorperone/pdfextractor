@@ -35,7 +35,21 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-_WORKER_READ_TIMEOUT_S: float = float(os.environ.get("PADDLE_WORKER_TIMEOUT", "120"))
+# Inference timeout: per-request deadline (one page of OCR).
+# Default 2400 s = 20× the observed 120 s/page average — exists only to kill
+# a truly frozen process, not to race against normal inference.
+# Override with PADDLE_WORKER_REQUEST_TIMEOUT (or legacy PADDLE_WORKER_TIMEOUT).
+_WORKER_REQUEST_TIMEOUT_S: float = float(
+    os.environ.get("PADDLE_WORKER_REQUEST_TIMEOUT")
+    or os.environ.get("PADDLE_WORKER_TIMEOUT")
+    or "2400"
+)
+
+# Init timeout: model loading can be slower than inference on a cold cache.
+# Default 2400 s (same as request) — override with PADDLE_WORKER_INIT_TIMEOUT.
+_WORKER_INIT_TIMEOUT_S: float = float(
+    os.environ.get("PADDLE_WORKER_INIT_TIMEOUT") or "2400"
+)
 
 from structured_pdf_text.config import ExtractorConfig, effective_ocr_quality_policy
 from structured_pdf_text.document import OcrToken, SourceKind
@@ -176,18 +190,19 @@ class PaddleOCRBackend:
         )
         # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
         init_req = {"method": "init", **self._subprocess_config}  # type: ignore[arg-type]
-        response = self._raw_send(init_req)
+        response = self._raw_send(init_req, timeout=_WORKER_INIT_TIMEOUT_S)
         if response.get("status") != "ok":
             raise RuntimeError(
                 f"Paddle worker init failed: {response.get('error')}"
             )
 
-    def _raw_send(self, request: dict) -> dict:
+    def _raw_send(self, request: dict, timeout: float = _WORKER_REQUEST_TIMEOUT_S) -> dict:
         """Write one request and read one response on the raw pipe.
 
         No lock, no request_id injection — callers must hold ``_worker_lock``
-        before calling this.  Used by ``_ensure_worker`` (init handshake) and
-        ``_worker_send`` (normal requests).
+        before calling this.  Used by ``_ensure_worker`` (init handshake, passes
+        ``_WORKER_INIT_TIMEOUT_S``) and ``_worker_send`` (normal requests, passes
+        ``_WORKER_REQUEST_TIMEOUT_S``).
         """
         assert self._worker_proc is not None
         assert self._worker_proc.stdin is not None
@@ -201,12 +216,12 @@ class PaddleOCRBackend:
         with ThreadPoolExecutor(max_workers=1) as pool:
             fut: Future[bytes] = pool.submit(stdout.readline)
             try:
-                response_line = fut.result(timeout=_WORKER_READ_TIMEOUT_S)
+                response_line = fut.result(timeout=timeout)
             except TimeoutError:
                 self._worker_proc.kill()
                 self._worker_proc = None
                 raise RuntimeError(
-                    f"Paddle worker timed out after {_WORKER_READ_TIMEOUT_S}s"
+                    f"Paddle worker timed out after {timeout}s"
                 )
 
         if not response_line:
@@ -230,10 +245,10 @@ class PaddleOCRBackend:
         against the response, making protocol violations immediately visible
         rather than silently returning a stale or misrouted result.
 
-        Enforces a read timeout (PADDLE_WORKER_TIMEOUT env var, default 120 s)
-        so that a hung worker never blocks the parent process indefinitely.
-        readline() runs in a background thread; TimeoutError is raised and the
-        worker process is killed if the deadline expires.
+        Enforces a per-request read timeout (PADDLE_WORKER_REQUEST_TIMEOUT env
+        var, default 2400 s) so that a truly frozen worker never blocks the
+        parent process indefinitely. readline() runs in a background thread;
+        TimeoutError kills the worker and raises RuntimeError.
         """
         with self._worker_lock:
             # Ensure the worker is alive inside the lock so concurrent callers
