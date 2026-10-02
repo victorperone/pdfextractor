@@ -37,6 +37,7 @@ Detection/quality tuning:
 """
 from __future__ import annotations
 
+import inspect
 import os
 import time
 import warnings
@@ -127,6 +128,19 @@ def _clahe_preprocess(img: Any) -> Any:
         return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
     except Exception:
         return img
+
+
+def _rapidocr_accepted_params(cls: type) -> frozenset[str]:
+    """Return the set of parameter names accepted by RapidOCR.__init__.
+
+    Used to filter tuning kwargs so that an older package sub-version that
+    lacks a particular knob is handled without swallowing unrelated TypeErrors.
+    """
+    try:
+        sig = inspect.signature(cls.__init__)
+        return frozenset(sig.parameters.keys()) - {"self"}
+    except (ValueError, TypeError):
+        return frozenset()
 
 
 def _run_rapidocr(engine: Any, img: Any) -> Any:
@@ -265,26 +279,24 @@ class RapidOCRBackend:
         text_score = float(os.environ.get("RAPIDOCR_TEXT_SCORE",   "0.5"))
         angle_cls  = os.environ.get("RAPIDOCR_ANGLE_CLS", "0").lower() in ("1", "true", "yes")
 
-        try:
-            self._engine = RapidOCR(
-                **kwargs,
-                det_db_unclip_ratio=unclip,
-                det_db_box_thresh=box_thresh,
-                det_db_thresh=det_thresh,
-                text_score=text_score,
-                with_angle_cls=angle_cls,
-            )
-        except TypeError:
-            # Older sub-version of the package does not accept these kwargs.
-            # CLAHE preprocessing remains active regardless.
-            self._engine = RapidOCR(**kwargs)
+        tuning_kwargs: dict[str, Any] = {
+            "det_db_unclip_ratio": unclip,
+            "det_db_box_thresh":   box_thresh,
+            "det_db_thresh":       det_thresh,
+            "text_score":          text_score,
+            "with_angle_cls":      angle_cls,
+        }
+        accepted = _rapidocr_accepted_params(RapidOCR)
+        merged = {**kwargs, **{k: v for k, v in tuning_kwargs.items() if k in accepted}}
+        self._engine = RapidOCR(**merged)
 
         self._det_model = det_path
         self._rec_model = rec_path
+        self._rec_keys  = rec_keys
 
-        # Hash custom .onnx files at construction time (only when overridden via
-        # env vars — bundled models are inside the package and not individually
-        # addressable as filesystem paths).
+        # Hash every custom artefact provided via env vars individually so the
+        # manifest can prove exactly which files were used.  Bundled models live
+        # inside the package wheel and are not addressable as ordinary paths.
         hashes: dict[str, str] = {}
         if det_path:
             d = sha256_file(det_path)
@@ -294,6 +306,10 @@ class RapidOCRBackend:
             r = sha256_file(rec_path)
             if r:
                 hashes["rec_model"] = r
+        if rec_keys:
+            k = sha256_file(rec_keys)
+            if k:
+                hashes["rec_keys"] = k
         self._artifact_hashes = hashes
 
     # ------------------------------------------------------------------
