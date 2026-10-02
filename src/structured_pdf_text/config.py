@@ -219,6 +219,49 @@ def best_extraction_config(
     )
 
 
+# Per-engine render scale defaults for the E2E benchmark.
+#
+# Rationale (research-backed, subject to A/B refinement):
+#
+#   Paddle     2.0  — PP-OCRv4/v5 has internal quality variants and
+#                     adaptive upscaling; 2.0 (≈144 DPI) is sufficient
+#                     as the model's internal passes compensate for
+#                     lower input resolution.
+#
+#   EasyOCR    3.0  — CRAFT minimum text height is ~20 px. At 2.0
+#                     (≈144 DPI) characters on A4 are borderline.
+#                     3.0 (≈216 DPI) combined with mag_ratio=1.2 gives
+#                     adequate coverage for small-text and degraded pages.
+#
+#   RapidOCR   3.0  — Shares PP-OCRv4 detection/recognition architecture
+#                     with PaddleOCR but lacks the adaptive quality-
+#                     variant upscaling layer; 3.0 recommended by community
+#                     for reliable diacritic detection.
+#
+#   Tesseract  4.0  — Officially documented minimum is 300 DPI.
+#                     Below 200 DPI error rate roughly doubles.
+#                     4.0 ≈ 288 DPI (72 DPI base × 4.0); the closest
+#                     integer scale to the 300 DPI target (4.17).
+#
+# Override at call time or via OCR_RENDER_SCALE env var in evaluate_e2e.py.
+_ENGINE_RENDER_SCALE: dict[str, float] = {
+    "paddle":             2.0,
+    "easyocr":            3.0,
+    "rapidocr-onnx":      3.0,
+    "rapidocr-openvino":  3.0,
+    "tesseract":          4.0,
+}
+
+
+def best_ocr_render_scale(engine: str) -> float:
+    """Return the recommended ocr_render_scale for the given engine.
+
+    Values are research-backed starting points (not final A/B-validated).
+    Unknown engines fall back to the ExtractorConfig default (2.0).
+    """
+    return _ENGINE_RENDER_SCALE.get(engine, 2.0)
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentContext:
     """Immutable document-level context threaded through the extraction pipeline.

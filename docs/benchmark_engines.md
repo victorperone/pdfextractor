@@ -657,6 +657,31 @@ running the full E2E benchmark.
 Each backend received specific optimizations after analyzing the Phase 8 results.
 Full details are in [`Plano_Comparativo_Paddle.md`](../Plano_Comparativo_Paddle.md).
 
+### Per-Engine PDF Render Scale
+
+The pipeline renders each PDF page to an image before passing it to the OCR engine.
+The `ocr_render_scale` multiplier is applied to the base 72 DPI of the PDF renderer,
+so `scale × 72 DPI` is the effective input resolution.
+
+The default scale was 2.0 for all engines (≈ 144 DPI). Phase 9 introduces
+per-engine defaults exposed via `best_ocr_render_scale(engine)` in
+`src/structured_pdf_text/config.py`:
+
+| Engine | Scale | Effective DPI | Rationale |
+|---|---|---|---|
+| `paddle` | 2.0 | ≈ 144 DPI | PP-OCRv4/v5 has internal quality variants and adaptive upscaling. 2.0 is sufficient because the model's internal passes compensate for lower input resolution. |
+| `easyocr` | 3.0 | ≈ 216 DPI | CRAFT text detector requires a minimum text height of ~20 px. At 2.0 (≈ 144 DPI), characters on an A4 page are borderline. 3.0 combined with `mag_ratio=1.2` gives adequate coverage for small-text and degraded pages. |
+| `rapidocr-onnx` | 3.0 | ≈ 216 DPI | Shares PP-OCRv4 detection/recognition architecture with PaddleOCR but lacks the adaptive quality-variant upscaling layer. 3.0 is the community-recommended minimum for reliable diacritic detection on Portuguese text. |
+| `rapidocr-openvino` | 3.0 | ≈ 216 DPI | Same as RapidOCR ONNX — same model, different runtime. |
+| `tesseract` | 4.0 | ≈ 288 DPI | Tesseract's official documentation states a minimum of 300 DPI; error rate roughly doubles below 200 DPI. 4.0 (≈ 288 DPI) is the closest integer scale to the 300 DPI target (which would require 4.17×). |
+
+These values are research-backed starting points, not A/B-validated results.
+They can be overridden per run with the `OCR_RENDER_SCALE` environment variable:
+
+```bash
+OCR_RENDER_SCALE=3.5 scripts/run_benchmark.sh --engines tesseract --run-suffix scale-test
+```
+
 ### Tesseract
 
 | Parameter | Effect |
@@ -691,7 +716,7 @@ information) before passing the image to the detector. Environment variables:
 | Parameter | Effect |
 |---|---|
 | Separate detect + recognize pipeline | Allows configuring both stages independently |
-| `canvas_size=max(h,w)` | Prevents CRAFT downscaling on large pages |
+| `canvas_size=int(mag_ratio * max(h,w))` | Lets `mag_ratio` actually expand the canvas; the original `max(h,w)` cap neutralized magnification entirely |
 | `mag_ratio=1.5` | Improves detection of small text |
 | `decoder='beamsearch'` | Fewer substitution errors on ambiguous characters |
 | `adjust_contrast=1.0` | Contrast recovery in faded regions |

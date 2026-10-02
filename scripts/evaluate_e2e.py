@@ -108,13 +108,21 @@ def _parse_page_sections(md_text: str) -> dict[int, str]:
 
 
 def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None):
-    """Build an ExtractorConfig for the given engine and extraction mode."""
+    """Build an ExtractorConfig for the given engine and extraction mode.
+
+    render_scale is set per-engine via best_ocr_render_scale(). Override with
+    the OCR_RENDER_SCALE env var for one-off experiments without code changes.
+    """
+    import os
     from structured_pdf_text.config import (
         ExtractionMode,
         best_extraction_config,
+        best_ocr_render_scale,
     )
     base = best_extraction_config(language=language, preserve_headers=False)
-    config = replace(base, ocr_engine=engine, mode=ExtractionMode(mode))
+    render_scale_env = os.environ.get("OCR_RENDER_SCALE")
+    render_scale = float(render_scale_env) if render_scale_env else best_ocr_render_scale(engine)
+    config = replace(base, ocr_engine=engine, mode=ExtractionMode(mode), ocr_render_scale=render_scale)
     if page_indices is not None:
         config = replace(config, page_indices=page_indices)
     return config
