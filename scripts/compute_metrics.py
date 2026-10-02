@@ -339,16 +339,12 @@ def compute_structure_metrics(hyp: str, ref: str) -> dict:
                 level_correct += 1
     heading_level_accuracy = level_correct / level_total if level_total > 0 else 1.0
 
-    # Heading Text CER: CER on matched heading texts
+    # Heading Text CER: align by position order and compute CER on all pairs
+    # (including imperfect matches).  Only computing CER on exact-match pairs
+    # produces an optimistic bias — headings with OCR errors are silently skipped.
     heading_text_cer_vals: list[float] = []
-    for level, text in hyp_headings:
-        norm = _normalize(text)
-        if norm in ref_h_map:
-            # Compare with the original ref heading text
-            for rl, rt in ref_headings:
-                if _normalize(rt) == norm:
-                    heading_text_cer_vals.append(_cer_normalized(text, rt))
-                    break
+    for (_, hyp_ht), (_, ref_ht) in zip(hyp_headings, ref_headings):
+        heading_text_cer_vals.append(_cer_normalized(hyp_ht, ref_ht))
     heading_text_cer = sum(heading_text_cer_vals) / len(heading_text_cer_vals) if heading_text_cer_vals else 0.0
 
     # Block F1: compare block type sequences as multisets
@@ -452,15 +448,17 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
     _, _, table_f1 = _f1(t_tp, t_fp, t_fn)
 
     if not ref_tables or not hyp_tables:
+        both_empty = not ref_tables and not hyp_tables
         return {
             "table_f1": table_f1,
-            "row_f1": 1.0 if (not ref_tables and not hyp_tables) else 0.0,
-            "column_f1": 1.0 if (not ref_tables and not hyp_tables) else 0.0,
-            "table_dimension_accuracy": 1.0 if (not ref_tables and not hyp_tables) else 0.0,
-            "cell_exact_match": 1.0 if (not ref_tables and not hyp_tables) else 0.0,
+            "row_f1": 1.0 if both_empty else 0.0,
+            "column_f1": 1.0 if both_empty else 0.0,
+            "table_dimension_accuracy": 1.0 if both_empty else 0.0,
+            "cell_exact_match": 1.0 if both_empty else 0.0,
             "cell_cer": 0.0,
-            "cell_alignment_accuracy": 1.0 if (not ref_tables and not hyp_tables) else 0.0,
-            "table_structure_similarity": 1.0 if (not ref_tables and not hyp_tables) else 0.0,
+            "cell_alignment_accuracy": 1.0 if both_empty else 0.0,
+            "table_structure_similarity": 1.0 if both_empty else 0.0,
+            "table_content_f1": 1.0 if both_empty else 0.0,
         }
 
     # For matched table pairs (by position order)
@@ -521,12 +519,37 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
             cell_cers.append(0.0)
             alignment_accs.append(1.0)
 
-        # Table Structure Similarity: geometric mean of row_f1 and col_f1
+        # Table Structure Similarity: geometric mean of row_f1 and col_f1.
+        # This measures shape only — two tables with identical dimensions but
+        # completely different content would score 1.0 here.
         struct = (row_f1 * col_f1) ** 0.5 if (row_f1 >= 0 and col_f1 >= 0) else 0.0
         struct_sims.append(struct)
 
     def _mean(lst: list[float]) -> float:
         return sum(lst) / len(lst) if lst else 0.0
+
+    # Table Content F1: cell-level multiset F1 across all paired tables.
+    # Separates content correctness from shape correctness so that a table with
+    # correct dimensions but wrong cell values cannot score perfectly on content.
+    content_f1s: list[float] = []
+    for ref_t, hyp_t in zip(ref_tables, hyp_tables):
+        ref_cells = Counter(
+            _normalize_cell(cell)
+            for row in ref_t for cell in row
+            if _normalize_cell(cell)
+        )
+        hyp_cells = Counter(
+            _normalize_cell(cell)
+            for row in hyp_t for cell in row
+            if _normalize_cell(cell)
+        )
+        c_tp = sum((ref_cells & hyp_cells).values())
+        c_ref = sum(ref_cells.values())
+        c_hyp = sum(hyp_cells.values())
+        cp = c_tp / c_hyp if c_hyp > 0 else 0.0
+        cr = c_tp / c_ref if c_ref > 0 else 1.0
+        cf1 = 2 * cp * cr / (cp + cr) if (cp + cr) > 0 else 0.0
+        content_f1s.append(cf1)
 
     return {
         "table_f1": table_f1,
@@ -537,6 +560,7 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
         "cell_cer": round(_mean(cell_cers), 6),
         "cell_alignment_accuracy": round(_mean(alignment_accs), 4),
         "table_structure_similarity": round(_mean(struct_sims), 4),
+        "table_content_f1": round(_mean(content_f1s), 4),
     }
 
 
@@ -596,16 +620,23 @@ def compute_integrity_metrics(
     else:
         dup_rate = 0.0
 
-    # Duplicate Block Rate (at block-type sequence level)
+    # Duplicate Block Rate: fraction of blocks whose *content fingerprint* has
+    # been seen before.  Using block-type alone would flag every second paragraph
+    # in any normal document as a duplicate.
     hyp_seq = _block_type_sequence(hyp)
-    if len(hyp_seq) > 1:
-        seq_seen: set[str] = set()
-        seq_dups = 0
-        for item in hyp_seq:
-            if item in seq_seen:
-                seq_dups += 1
-            seq_seen.add(item)
-        dup_block_rate = seq_dups / len(hyp_seq)
+    hyp_block_fingerprints: list[str] = []
+    for block in re.split(r"\n{2,}", _strip_md(hyp)):
+        block = block.strip()
+        if len(block) >= 10:
+            hyp_block_fingerprints.append(_normalize(block)[:80])
+    if len(hyp_block_fingerprints) > 1:
+        fp_seen: set[str] = set()
+        fp_dups = 0
+        for fp in hyp_block_fingerprints:
+            if fp in fp_seen:
+                fp_dups += 1
+            fp_seen.add(fp)
+        dup_block_rate = fp_dups / len(hyp_block_fingerprints)
     else:
         dup_block_rate = 0.0
 
@@ -702,33 +733,65 @@ _CNPJ_RE = re.compile(r"\d{2}\.?\d{3}\.?\d{3}/?\d{4}[-\s]?\d{2}")
 _PROC_RE = re.compile(r"\d{7}[-\s.]?\d{2}[-\s.]?\d{4}[-\s.]?\d{1}[-\s.]?\d{2}[-\s.]?\d{4}")
 
 
-def _exact_match_rate(hyp: str, ref: str, pattern: re.Pattern) -> float:
-    """Fraction of regex matches in ref that also appear in hyp."""
-    ref_vals = set(pattern.findall(ref))
-    if not ref_vals:
-        return 1.0
-    hyp_vals = set(pattern.findall(hyp))
-    found = ref_vals & hyp_vals
-    return round(len(found) / len(ref_vals), 4)
+def _exact_match_prf(hyp: str, ref: str, pattern: re.Pattern) -> tuple[float, float, float]:
+    """Compute (precision, recall, F1) for regex pattern matches using multiset matching.
+
+    Multiset matching preserves multiplicity: if ref contains R$10 twice and hyp
+    contains R$10 once, only one match is credited.  Using set() would give recall=1.0
+    even though half the occurrences are missing.  Precision penalises invented values.
+    """
+    ref_counts = Counter(pattern.findall(ref))
+    hyp_counts = Counter(pattern.findall(hyp))
+    if not ref_counts:
+        # Nothing to find — perfect score by convention
+        return 1.0, 1.0, 1.0
+    tp = sum((ref_counts & hyp_counts).values())
+    n_ref = sum(ref_counts.values())
+    n_hyp = sum(hyp_counts.values())
+    precision = round(tp / n_hyp, 4) if n_hyp > 0 else 0.0
+    recall    = round(tp / n_ref, 4) if n_ref > 0 else 0.0
+    f1        = round(2 * precision * recall / (precision + recall), 4) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1
 
 
 def compute_critical_data_metrics(hyp: str, ref: str) -> dict:
     """Compute Group 5 critical data exact-match metrics on the full document.
 
     Checks preservation of numbers, dates, currency values (R$), and identifiers
-    (CPF, CNPJ, process numbers) via regex set intersection.
+    (CPF, CNPJ, process numbers) using multiset matching so that both missing and
+    invented values are penalised.
+
+    Keys ending in ``_exact_match`` are recall (backward-compatible with compare_engines.py).
+    Keys ending in ``_precision`` and ``_f1`` are the additional multiset metrics.
     """
-    identifiers_ref = set(_CPF_RE.findall(ref)) | set(_CNPJ_RE.findall(ref)) | set(_PROC_RE.findall(ref))
-    identifiers_hyp = set(_CPF_RE.findall(hyp)) | set(_CNPJ_RE.findall(hyp)) | set(_PROC_RE.findall(hyp))
-    id_rate = round(
-        len(identifiers_ref & identifiers_hyp) / len(identifiers_ref), 4
-    ) if identifiers_ref else 1.0
+    num_p, num_r, num_f1   = _exact_match_prf(hyp, ref, _NUM_RE)
+    date_p, date_r, date_f1 = _exact_match_prf(hyp, ref, _DATE_RE)
+    cur_p, cur_r, cur_f1   = _exact_match_prf(hyp, ref, _CURRENCY_RE)
+
+    ref_ids = Counter(_CPF_RE.findall(ref)) + Counter(_CNPJ_RE.findall(ref)) + Counter(_PROC_RE.findall(ref))
+    hyp_ids = Counter(_CPF_RE.findall(hyp)) + Counter(_CNPJ_RE.findall(hyp)) + Counter(_PROC_RE.findall(hyp))
+    id_tp  = sum((ref_ids & hyp_ids).values())
+    id_ref = sum(ref_ids.values())
+    id_hyp = sum(hyp_ids.values())
+    id_p   = round(id_tp / id_hyp, 4) if id_hyp > 0 else (1.0 if not ref_ids else 0.0)
+    id_r   = round(id_tp / id_ref, 4) if id_ref > 0 else 1.0
+    id_f1  = round(2 * id_p * id_r / (id_p + id_r), 4) if (id_p + id_r) > 0 else 0.0
 
     return {
-        "numeric_exact_match": _exact_match_rate(hyp, ref, _NUM_RE),
-        "date_exact_match": _exact_match_rate(hyp, ref, _DATE_RE),
-        "currency_exact_match": _exact_match_rate(hyp, ref, _CURRENCY_RE),
-        "identifier_exact_match": id_rate,
+        # Recall — kept under original key names for backward compatibility with compare_engines.py
+        "numeric_exact_match":    num_r,
+        "date_exact_match":       date_r,
+        "currency_exact_match":   cur_r,
+        "identifier_exact_match": id_r,
+        # Precision and F1 — additional multiset metrics
+        "numeric_precision":      num_p,
+        "numeric_f1":             num_f1,
+        "date_precision":         date_p,
+        "date_f1":                date_f1,
+        "currency_precision":     cur_p,
+        "currency_f1":            cur_f1,
+        "identifier_precision":   id_p,
+        "identifier_f1":          id_f1,
     }
 
 
