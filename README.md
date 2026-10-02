@@ -250,10 +250,10 @@ See the full guide at [`docs/benchmark_engines.md`](docs/benchmark_engines.md).
 # Prepare OCR runtimes in .venv and Tesseract in the local prefix
 scripts/setup_ocr_benchmark.sh
 
-# Smoke test — pages 77–81 of Document AI V3
+# Smoke test — pages 77–81 of Stress OCR Markdown V4
 scripts/run_benchmark.sh --run-suffix wsl-smoke
 
-# Full document
+# Full Stress V4 corpus
 scripts/run_benchmark.sh --run-suffix wsl-v1 --all-pages
 ```
 

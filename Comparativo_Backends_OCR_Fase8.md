@@ -605,3 +605,71 @@ pages_missing_in_hypothesis     0          0          0          0          0
 ---
 
 *Generated from `output/fase8/V2/metrics_*_v2-*.json` and `output/fase8/V2/manifesto_e2e_*_v2-*.json`. Corpus: 224 pages, run suffix v2, extraction mode balanced, language pt.*
+
+---
+
+## Appendix B — Follow-up Run on WSL (suffix `wsl-v4`)
+
+- **Execution date:** 2026-10-02
+- **Corpus:** `Corpus_Stress_OCR_Markdown_V4.pdf` — 224 pages
+- **SHA256:** `45c09f2f03eb0dfe99bef5b8ea5b1ee686351cae2fc1244b4dcfce98fd7d0970`
+- **Extraction mode:** `balanced` | Language: `pt`
+- **Run platform:** WSL/Linux
+- **Run suffix:** `wsl-v4`
+- **Output directory:** `output/fase8/stress_v4/`
+- **Coverage:** all five engines evaluated all 224 pages; `pages_missing_in_hypothesis = 0` for each.
+
+### B.1 Executive comparison
+
+| Engine | CER ↓ | WER ↓ | Block F1 ↑ | Table F1 ↑ | Cell Exact ↑ | Failure Rate ↓ | Numeric Exact ↑ | Currency Exact ↑ | Time (s) | s/page |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| EasyOCR | 0.4070 | 0.5082 | **0.4531** | **1.0000** | 0.3049 | **0.0089** | 0.6210 | 0.3351 | 4880.6 | 21.79 |
+| **Paddle** | **0.2294** | **0.2681** | 0.4241 | 0.9811 | **0.4770** | **0.0089** | **0.9443** | **0.7111** | 5935.4 | 26.50 |
+| RapidOCR-ONNX | 0.3669 | 0.5981 | 0.3763 | 0.9875 | 0.4092 | **0.0089** | 0.5201 | 0.3298 | 802.6 | 3.58 |
+| RapidOCR-OpenVINO | 0.3669 | 0.5981 | 0.3763 | 0.9875 | 0.4092 | **0.0089** | 0.5201 | 0.3298 | 375.3 | **1.68** |
+| Tesseract | 0.5094 | 0.7808 | 0.4446 | 0.9747 | 0.3297 | 0.0179 | 0.8012 | 0.6376 | **363.1** | 1.62 |
+
+Paddle leads decisively in text fidelity and critical data in this run. EasyOCR still detects the most tables and has the strongest block F1. RapidOCR-OpenVINO and Tesseract are the fastest, at roughly 1.6–1.7 seconds per page; Paddle is the slowest at 26.5 seconds per page.
+
+### B.2 Change from the original v2 result
+
+The v2 section recorded Paddle in Windows `paddle_subprocess` mode with CER 0.6344, WER 0.6324, insertion rate 0.6079, failure rate 0.4955, table F1 0.6721, numeric exact match 0.4178, and elapsed time 316.4 s. In `wsl-v4`, the recorded runtime is `paddle_static`; Paddle reports CER 0.2294, WER 0.2681, insertion rate 0.0814, failure rate 0.0089, table F1 0.9811, numeric exact match 0.9443, and elapsed time 5935.4 s.
+
+This is a major quality improvement alongside a major throughput regression: the new Paddle run is about **18.8× slower** than the v2 Paddle run, but its CER, WER, insertion, table detection, and critical-data scores are substantially better. The sharp failure-rate decrease is consistent with the earlier hypothesis that the Windows subprocess path contributed to the v2 anomaly. It does not prove that subprocess isolation was the sole cause: the execution platform/runtime and code revision changed, so a controlled comparison would be needed to isolate causality.
+
+The WSL result also agrees with the preceding `wsl-v1` run on the same corpus: Paddle again leads text and critical-data metrics, while its unusually high runtime and header leakage remain. The latest comparative artifact is `output/fase8/stress_v4/comparison_wsl-v4.md`.
+
+### B.3 Strengths and remaining weaknesses
+
+**Strengths**
+
+- Best overall text scores in this run: CER 0.2294 and WER 0.2681; word accuracy is 0.7319.
+- Low insertion rate (0.0814), unlike the 0.6079 recorded in v2 and the approximately 0.50 rates of both RapidOCR variants.
+- Strong table results: table F1 0.9811, best row F1 (0.9188), best column F1 (0.8744), and best cell exact match (0.4770).
+- Best critical-data scores for numeric (0.9443), date (1.0000), and currency (0.7111) extraction. Identifier exact match is 1.0000 for every engine.
+- The benchmark completed all pages, and the integrity `failure_rate` is 0.0089 rather than the v2 outlier of 0.4955.
+
+**Weaknesses**
+
+- Runtime is a serious operational cost: 5935.4 s (about 98.9 minutes) for 224 pages, approximately 15.8× slower than RapidOCR-OpenVINO in this run.
+- Header leakage is 0.3616 and duplicate content is 0.1598, far above the other backends. These remain important risks even though the text scores improved.
+- Markdown structure is not the best: block F1 is 0.4241, below EasyOCR (0.4531) and Tesseract (0.4446). Heading F1 is low for every engine (0.0919–0.0932), and heading-level accuracy is 0.0000 for all.
+- Reading-order accuracy is 0.0523 for every engine. Since the identical low score is shared across backends, investigate the ordering/evaluation pipeline rather than treating this as a Paddle-specific defect.
+- Paddle's table F1 is high but still below EasyOCR (1.0000) and both RapidOCR variants (0.9875); its table-region detection is not perfect despite leading cell-quality metrics.
+
+### B.4 Interpretation and recommendation
+
+The v2 conclusion that Paddle is disqualified by a 49.55% failure rate should be treated as specific to the Windows subprocess run, not as a general conclusion about Paddle. On WSL, the measured quality is strong enough to make Paddle a leading candidate when text fidelity, tables, or numeric and monetary extraction take priority and long processing time is acceptable.
+
+For high-throughput CPU processing, RapidOCR-OpenVINO or Tesseract is more practical in this run: both finish in about 6 minutes, compared with about 99 minutes for Paddle. Paddle should not be selected solely from its aggregate CER, however; first investigate header leakage and duplicated content and validate affected pages against the PDF. For ordering and Markdown hierarchy, all engines remain weak and the pipeline needs separate attention.
+
+The `failure_rate` metric is not the same as missing-page coverage: all engines have 224 evaluated pages and zero missing pages. Interpret the 0.0089/0.0179 values as the benchmark's output-integrity metric, not as failed OCR processes or absent pages. The current run does not include a recomputed weighted score; retain the v2 score only for its original run because platform/runtime and throughput changed substantially.
+
+### B.5 Artifacts
+
+- Comparative table: `output/fase8/stress_v4/comparison_wsl-v4.md`
+- Paddle extraction: `output/fase8/stress_v4/extracted_paddle_wsl-v4-paddle.md`
+- Paddle metrics: `output/fase8/stress_v4/metrics_paddle_wsl-v4-paddle.json`
+- Paddle run manifest: `output/fase8/stress_v4/manifesto_e2e_paddle_wsl-v4-paddle.json`
+
+*Generated from the `wsl-v4` metrics and manifests in `output/fase8/stress_v4/`. Corpus: 224 pages, extraction mode balanced, language pt.*

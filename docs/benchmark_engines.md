@@ -292,17 +292,20 @@ scripts/run_benchmark.sh --engines "easyocr,tesseract" --run-suffix wsl-smoke
 # Install OCR runtimes in .venv and Tesseract in a prefix without sudo
 scripts/setup_ocr_benchmark.sh
 
-# Smoke test on Document AI V3 corpus (pages 77–81)
+# Smoke test on Stress OCR Markdown V4 (pages 77–81)
 scripts/run_benchmark.sh --run-suffix wsl-smoke
 
-# Full document
+# Full Stress V4 corpus, all five engines
 scripts/run_benchmark.sh --run-suffix wsl-v1 --all-pages
 ```
 
-The Bash runner uses `corpus/Document_AI_V3.pdf`, `corpus/Document_AI_V3.md`, and
-`corpus/Document_AI_V3_MANIFESTO.json` by default. The Markdown provides the reference
-text; the manifest provides per-page metadata. Both can be overridden with `--pdf`,
-`--reference`, and `--manifesto`.
+The Bash runner defaults to `corpus/Corpus_Stress_OCR_Markdown_V4.pdf`,
+`corpus/Corpus_Stress_OCR_Markdown_V4_REFERENCIA.md`,
+`corpus/Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json`, and
+`corpus/Corpus_Stress_OCR_Markdown_V4_VALIDACAO.txt`. Before OCR starts, it checks
+that the PDF, Markdown page sections, manifesto, and validation report agree on the
+page count. These inputs can be overridden with `--pdf`, `--reference`, `--manifesto`,
+and `--validation`.
 
 ### Single Engine (PowerShell, single line)
 
@@ -579,8 +582,10 @@ For the Bash runner (Linux/WSL):
 
 ```bash
 scripts/run_benchmark.sh \
-  --pdf      corpus/MeuCorpus.pdf \
+  --pdf        corpus/MeuCorpus.pdf \
+  --reference  corpus/MeuCorpus_REFERENCIA.md \
   --manifesto corpus/MeuCorpus_MANIFESTO.json \
+  --validation corpus/MeuCorpus_VALIDACAO.txt \
   --output-dir output/meu-corpus \
   --run-suffix v1 \
   --all-pages

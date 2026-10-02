@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fase 8 E2E benchmark runner for Linux and WSL.
-# Defaults mirror run_benchmark.ps1's five-page smoke run.
+# Defaults target the validated Stress OCR Markdown V4 corpus.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,25 +12,27 @@ if [[ -x "$REPO_ROOT/.ocr-runtime/bin/tesseract" ]]; then
 fi
 EASYOCR_MODULE_PATH="${EASYOCR_MODULE_PATH:-$REPO_ROOT/.ocr-model-cache/easyocr}"
 export EASYOCR_MODULE_PATH
-PDF="corpus/Document_AI_V3.pdf"
-REFERENCE="corpus/Document_AI_V3.md"
-MANIFESTO="corpus/Document_AI_V3_MANIFESTO.json"
+PDF="corpus/Corpus_Stress_OCR_Markdown_V4.pdf"
+REFERENCE="corpus/Corpus_Stress_OCR_Markdown_V4_REFERENCIA.md"
+MANIFESTO="corpus/Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json"
+VALIDATION="corpus/Corpus_Stress_OCR_Markdown_V4_VALIDACAO.txt"
 PAGES="77-81"
 RUN_SUFFIX="smoke"
-OUT_DIR="output/fase8"
+OUT_DIR="output/fase8/stress_v4"
 ENGINES="tesseract,rapidocr-onnx,rapidocr-openvino,easyocr,paddle"
 ALL_PAGES=0
 
 usage() {
     cat <<'EOF'
 Usage: scripts/run_benchmark.sh [options]
-  --pdf PATH          PDF input (default: corpus/Document_AI_V3.pdf)
-  --reference PATH    Markdown ground truth
-  --manifesto PATH    Corpus metadata JSON
+  --pdf PATH          PDF input (default: corpus/Corpus_Stress_OCR_Markdown_V4.pdf)
+  --reference PATH    Markdown ground truth (Stress V4 by default)
+  --manifesto PATH    Corpus metadata JSON (Stress V4 by default)
+  --validation PATH   Corpus validation report (Stress V4 by default)
   --pages RANGE       1-based page range/list (default: 77-81)
   --all-pages         Evaluate the complete PDF
   --run-suffix NAME   Output run suffix (default: smoke)
-  --output-dir PATH   Artifact directory (default: output/fase8)
+  --output-dir PATH   Artifact directory (default: output/fase8/stress_v4)
   --engines LIST      Comma-separated engines (default: all five)
   --python PATH       Python executable (default: python or PYTHON_BIN)
 EOF
@@ -41,6 +43,7 @@ while (($#)); do
         --pdf) PDF="$2"; shift 2 ;;
         --reference) REFERENCE="$2"; shift 2 ;;
         --manifesto) MANIFESTO="$2"; shift 2 ;;
+        --validation) VALIDATION="$2"; shift 2 ;;
         --pages) PAGES="$2"; shift 2 ;;
         --all-pages) ALL_PAGES=1; shift ;;
         --run-suffix) RUN_SUFFIX="$2"; shift 2 ;;
@@ -56,6 +59,91 @@ cd "$REPO_ROOT"
 [[ -f "$PDF" ]] || { echo "PDF not found: $PDF" >&2; exit 2; }
 [[ -f "$REFERENCE" ]] || { echo "Reference not found: $REFERENCE" >&2; exit 2; }
 [[ -f "$MANIFESTO" ]] || { echo "Manifesto not found: $MANIFESTO" >&2; exit 2; }
+[[ -f "$VALIDATION" ]] || { echo "Validation report not found: $VALIDATION" >&2; exit 2; }
+
+# Confirm that PDF, reference, manifesto, and the supplied validation report
+# describe the same complete corpus before spending time on OCR.
+if ! "$PYTHON_BIN" - "$PDF" "$REFERENCE" "$MANIFESTO" "$VALIDATION" <<'PY_PREFLIGHT'
+import json
+import re
+import sys
+from pathlib import Path
+
+pdf_path, reference_path, manifesto_path, validation_path = map(Path, sys.argv[1:])
+manifest = json.loads(manifesto_path.read_text(encoding="utf-8"))
+pages = manifest.get("pages", [])
+manifest_numbers = [int(page["page"]) for page in pages]
+reference = reference_path.read_text(encoding="utf-8")
+page_pattern = re.compile(r"^##\s+P[áa]gina\s+0*(\d+)", re.M | re.I)
+reference_matches = list(page_pattern.finditer(reference))
+reference_numbers = [int(match.group(1)) for match in reference_matches]
+reference_sections = {
+    int(match.group(1)): reference[match.start():(
+        reference_matches[index + 1].start()
+        if index + 1 < len(reference_matches) else len(reference)
+    )].strip()
+    for index, match in enumerate(reference_matches)
+}
+validation = validation_path.read_text(encoding="utf-8")
+page_match = re.search(r"(?m)^Páginas:\s*(\d+)\s*$", validation)
+if not page_match:
+    raise SystemExit("Validation report has no 'Páginas: N' summary")
+validation_count = int(page_match.group(1))
+
+try:
+    import pypdfium2 as pdfium
+except ImportError as exc:
+    raise SystemExit("pypdfium2 is required to verify the PDF page count") from exc
+pdf = pdfium.PdfDocument(str(pdf_path))
+pdf_count = len(pdf)
+pdf.close()
+
+required_checks = (
+    "[OK] JSON válido",
+    "[OK] Markdown reconstruído do JSON é idêntico byte a byte",
+    "[OK] Hashes expected_markdown válidos",
+)
+missing_checks = [check for check in required_checks if check not in validation]
+if missing_checks:
+    raise SystemExit("Validation report is missing successful checks: " + ", ".join(missing_checks))
+if "[FAIL]" in validation:
+    raise SystemExit("Validation report contains a [FAIL] result")
+if not pages or len(set(manifest_numbers)) != len(manifest_numbers):
+    raise SystemExit("Manifesto has no pages or contains duplicate page numbers")
+blank_pages = {
+    int(page["page"]): str(page.get("expected_markdown", "")).strip()
+    for page in pages if page.get("blank")
+}
+expected_reference_numbers = [number for number in manifest_numbers if number not in blank_pages]
+if reference_numbers != expected_reference_numbers:
+    raise SystemExit("Reference page sections do not match nonblank manifesto pages")
+for page in pages:
+    number = int(page["page"])
+    expected = str(page.get("expected_markdown", "")).strip()
+    if number in blank_pages:
+        if not expected or expected not in reference:
+            raise SystemExit(f"Blank page {number} is not represented in the reference")
+        continue
+    actual = reference_sections.get(number, "")
+    for blank_marker in blank_pages.values():
+        actual = actual.replace(blank_marker, "")
+    if actual.strip() != expected:
+        raise SystemExit(f"Reference content differs from manifesto on page {number}")
+if not (pdf_count == len(pages) == validation_count):
+    raise SystemExit(
+        f"Page count mismatch: PDF={pdf_count}, manifesto={len(pages)}, "
+        f"validation report={validation_count}"
+    )
+expected_pdf_check = f"[OK] Quantidade de páginas no PDF | {pdf_count}"
+if expected_pdf_check not in validation:
+    raise SystemExit("Validation report does not confirm the PDF page count")
+print(f"Corpus preflight OK: {pdf_count} PDF pages, reference and manifesto aligned.")
+PY_PREFLIGHT
+then
+    echo "Corpus preflight failed; benchmark was not started." >&2
+    exit 2
+fi
+
 mkdir -p "$OUT_DIR"
 
 failed=()
@@ -84,7 +172,6 @@ for engine in "${engine_list[@]}"; do
 
     if ! "$PYTHON_BIN" "$SCRIPT_DIR/compute_metrics.py" \
         --hypothesis "$hypothesis" \
-        --reference "$REFERENCE" \
         --manifesto "$MANIFESTO" \
         --engine "$engine" \
         --run-id "$run_id" \
