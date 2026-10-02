@@ -34,6 +34,11 @@ Detection/quality tuning:
     RAPIDOCR_DET_THRESH     — pixel-level binarisation threshold (default 0.25, was 0.3)
     RAPIDOCR_TEXT_SCORE     — minimum line confidence (default 0.5)
     RAPIDOCR_ANGLE_CLS      — enable angle classifier 0/1 (default 0)
+
+Preprocessing:
+    RAPIDOCR_CLAHE          — enable CLAHE LAB preprocessing 0/1 (default 1)
+                              Set to 0 for the controlled/raw benchmark track so
+                              all engines receive identical unmodified pixels.
 """
 from __future__ import annotations
 
@@ -143,11 +148,15 @@ def _rapidocr_accepted_params(cls: type) -> frozenset[str]:
         return frozenset()
 
 
-def _run_rapidocr(engine: Any, img: Any) -> Any:
-    """Run RapidOCR with CLAHE (LAB L-channel) preprocessing."""
+def _run_rapidocr(engine: Any, img: Any, *, clahe: bool = True) -> Any:
+    """Run RapidOCR, optionally applying CLAHE (LAB L-channel) preprocessing.
+
+    Pass clahe=False on the controlled/raw benchmark track so all engines
+    receive identical unmodified pixels.
+    """
     import numpy as np
     arr = np.asarray(img)
-    enhanced = _clahe_preprocess(arr)
+    enhanced = _clahe_preprocess(arr) if clahe else arr
     return engine(enhanced)
 
 
@@ -273,6 +282,8 @@ class RapidOCRBackend:
         else:
             self._profile = "custom-det"
 
+        self._clahe = os.environ.get("RAPIDOCR_CLAHE", "1").lower() not in ("0", "false", "no")
+
         unclip    = float(os.environ.get("RAPIDOCR_UNCLIP_RATIO", "1.8"))
         box_thresh = float(os.environ.get("RAPIDOCR_BOX_THRESH",   "0.45"))
         det_thresh = float(os.environ.get("RAPIDOCR_DET_THRESH",   "0.25"))
@@ -331,6 +342,7 @@ class RapidOCRBackend:
                 runtime_pkg: _package_version(runtime_pkg),
             },
             artifact_hashes=self._artifact_hashes,
+            extra={"clahe": self._clahe},
         )
 
     @property
@@ -352,7 +364,7 @@ class RapidOCRBackend:
         t0 = time.perf_counter()
         try:
             img = _to_numpy(request.image)
-            out = _run_rapidocr(self._engine, img)
+            out = _run_rapidocr(self._engine, img, clahe=self._clahe)
             raw = _extract_raw(out)
             rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
             tokens = tuple(_result_to_ocr_tokens(raw, self._engine_key, offset_x=rx0, offset_y=ry0))
@@ -389,7 +401,7 @@ class RapidOCRBackend:
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
         img = _to_numpy(page_image)
-        out = _run_rapidocr(self._engine, img)
+        out = _run_rapidocr(self._engine, img, clahe=self._clahe)
         return _result_to_pipeline_tokens(_extract_raw(out), page_index, self._language)
 
     def recognize_region(
@@ -404,7 +416,7 @@ class RapidOCRBackend:
         )
         if crop.size == 0:
             return []
-        out = _run_rapidocr(self._engine, crop)
+        out = _run_rapidocr(self._engine, crop, clahe=self._clahe)
         return _result_to_pipeline_tokens(
             _extract_raw(out), page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
