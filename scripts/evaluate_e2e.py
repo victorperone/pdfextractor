@@ -367,6 +367,7 @@ def main() -> int:
                 "device": getattr(ident, "device", None),
                 "package_versions": dict(ident.package_versions),
                 "artifact_hashes": dict(getattr(ident, "artifact_hashes", {})),
+                "extra": dict(getattr(ident, "extra", {})),
             }
         except Exception:
             pass
