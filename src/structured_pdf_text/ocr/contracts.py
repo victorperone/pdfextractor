@@ -98,6 +98,7 @@ class OCRToken:
 _VALID_STATUSES = frozenset({
     "ok", "no_text", "partial", "model_missing",
     "timeout", "runtime_error", "budget_blocked", "invalid_input",
+    "recovered",  # nominal path failed; result obtained via fallback (degraded)
 })
 
 

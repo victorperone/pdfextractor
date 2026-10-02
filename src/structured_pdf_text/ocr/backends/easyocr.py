@@ -12,7 +12,11 @@ Environment variables
 EASYOCR_MODULE_PATH        Path to model cache directory (default: ~/.EasyOCR/model/)
 EASYOCR_RECOG_NETWORK      Recognition model name (default: '' → EasyOCR default = latin_g2)
                            Use 'latin_g1' for the older, larger model.
-EASYOCR_BEAMWIDTH          Beam width for beamsearch decoder (default: 10, min: 1)
+EASYOCR_DECODER            CTC decoder: 'greedy' or 'beamsearch' (default: 'greedy').
+                           beamsearch reduces substitution errors but adds ~20-40%
+                           inference time and can produce overflow warnings on some inputs.
+EASYOCR_BEAMWIDTH          Beam width for beamsearch decoder (default: 5, min: 1).
+                           Only used when EASYOCR_DECODER=beamsearch.
 EASYOCR_WORKERS            DataLoader workers for recognition.
                            Default: auto — 0 on Windows (spawn safety), half of
                            cpu_count() capped at 4 on Linux/macOS.
@@ -35,14 +39,17 @@ EASYOCR_BLOCKLIST          Character blocklist applied to all recognition calls.
 
 Optimization notes
 ------------------
-- Detect/recognize split: uses reader.detect() + reader.recognize() instead of
-  the unified readtext().  The 3-channel image array is passed to both stages so
-  EasyOCR can apply its own internal preprocessing correctly.
-  Falls back to readtext() on any API incompatibility.
-- canvas_size: set to max(image_height, image_width) so CRAFT never downscales
-  the input.  This fixes detection loss on pages rendered at higher DPI.
-- decoder='beamsearch': CTC beamsearch instead of greedy; reduces substitution
-  errors on ambiguous characters at the cost of ~20-40% extra inference time.
+- Detect/recognize split: mirrors EasyOCR's own readtext() implementation.
+  reader.detect() returns aggregate lists (one entry per image); the first
+  element [0] is extracted before passing to reader.recognize(), exactly as
+  the upstream readtext() does.  reader.recognize() receives the grayscale
+  image, matching the upstream contract.
+  Falls back to readtext() on any failure, but marks the result as degraded
+  so the benchmark can flag the run as partial.
+- canvas_size: set to max(h, w) of the reformatted image so CRAFT never
+  downscales the input.  This fixes detection loss on pages rendered at higher DPI.
+- decoder: defaults to 'greedy' (upstream default). Use EASYOCR_DECODER=beamsearch
+  to enable beam search after validating there is a measurable quality gain.
 """
 from __future__ import annotations
 
@@ -151,68 +158,137 @@ def _run_easyocr(
     reader: "Any",
     img: "Any",
     *,
+    decoder: str,
     beamwidth: int,
     adjust_contrast: float,
     allowlist: "str | None",
     blocklist: "str | None",
     workers: int,
-) -> list[Any]:
-    """Run EasyOCR using detect/recognize split with optimized parameters.
+) -> "tuple[list[Any], dict[str, Any] | None]":
+    """Run EasyOCR using detect/recognize split mirroring upstream readtext().
 
-    Falls back to unified readtext() if the split fails (e.g. API version
-    mismatch).  canvas_size is set to max(h, w) so CRAFT never downscales
-    the input for detection.
+    Returns (raw_results, fallback_info).  fallback_info is None on the nominal
+    path; on the recovery path it contains diagnostic metadata so callers can
+    mark the result as degraded.
+
+    The detect/recognize split follows exactly what EasyOCR's own readtext()
+    does internally:
+      1. reformat_input() prepares colour + grayscale arrays.
+      2. detect() is called with reformat=False; its aggregate output [0] is
+         extracted for the single input image.
+      3. recognize() receives the grayscale image and the unwrapped lists,
+         also with reformat=False.
+
+    Falls back to unified readtext() only on exception, with explicit logging.
     """
     import numpy as np
+    mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
     arr = np.asarray(img)
-    h, w = arr.shape[:2]
+
+    # --- Prepare colour + grayscale arrays (mirrors upstream reformat_input) ---
+    try:
+        from easyocr.utils import reformat_input  # type: ignore
+        img_color, img_gray = reformat_input(arr)
+    except Exception:
+        # reformat_input unavailable (unusual packaging); fall back to readtext
+        return _fallback_readtext(
+            reader, arr,
+            decoder=decoder, beamwidth=beamwidth,
+            adjust_contrast=adjust_contrast,
+            allowlist=allowlist, blocklist=blocklist, workers=workers,
+            reason="reformat_input_unavailable",
+        )
+
+    h, w = img_color.shape[:2]
     canvas_size = max(h, w)
 
     # --- Stage 1: text detection (CRAFT) ---
     try:
-        mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
-        horizontal_list, free_list = reader.detect(
-            arr,
+        horizontal_agg, free_agg = reader.detect(
+            img_color,
             canvas_size=canvas_size,
             mag_ratio=mag_ratio,
+            reformat=False,
         )
-    except Exception:
-        horizontal_list, free_list = None, None
-
-    if horizontal_list is None:
-        # Fallback: unified readtext with optimised params
-        return reader.readtext(
-            arr,
-            decoder="beamsearch",
-            beamWidth=beamwidth,
-            canvas_size=canvas_size,
-            mag_ratio=mag_ratio,
+        # detect() returns one entry per image in the batch; unwrap for our
+        # single image — this is what EasyOCR's own readtext() does.
+        horizontal_list = horizontal_agg[0]
+        free_list = free_agg[0]
+    except Exception as exc:
+        return _fallback_readtext(
+            reader, arr,
+            decoder=decoder, beamwidth=beamwidth,
             adjust_contrast=adjust_contrast,
-            allowlist=allowlist,
-            blocklist=blocklist,
-            workers=workers,
+            allowlist=allowlist, blocklist=blocklist, workers=workers,
+            reason=f"detect_failed: {type(exc).__name__}: {exc}",
         )
 
     # --- Stage 2: recognition (CRNN + CTC) ---
     try:
-        return reader.recognize(
-            arr,
-            horizontal_list=horizontal_list,
-            free_list=free_list,
-            decoder="beamsearch",
+        result = reader.recognize(
+            img_gray,
+            horizontal_list,
+            free_list,
+            decoder=decoder,
             beamWidth=beamwidth,
             workers=workers,
+            allowlist=allowlist,
+            blocklist=blocklist,
             detail=1,
             paragraph=False,
             adjust_contrast=adjust_contrast,
-            allowlist=allowlist,
-            blocklist=blocklist,
+            reformat=False,
         )
-    except Exception:
-        # Fallback: unified readtext without the split
-        return reader.readtext(
+        return result, None  # nominal path — no fallback
+    except Exception as exc:
+        return _fallback_readtext(
+            reader, arr,
+            decoder=decoder, beamwidth=beamwidth,
+            adjust_contrast=adjust_contrast,
+            allowlist=allowlist, blocklist=blocklist, workers=workers,
+            reason=f"recognize_failed: {type(exc).__name__}: {exc}",
+        )
+
+
+def _fallback_readtext(
+    reader: "Any",
+    arr: "Any",
+    *,
+    decoder: str,
+    beamwidth: int,
+    adjust_contrast: float,
+    allowlist: "str | None",
+    blocklist: "str | None",
+    workers: int,
+    reason: str,
+) -> "tuple[list[Any], dict[str, Any]]":
+    """Recover via unified readtext() and return explicit fallback metadata.
+
+    readtext() re-runs its own detect() internally, so cost and path differ
+    from the nominal split.  Callers must surface this as a degraded result.
+    """
+    import warnings as _warnings
+    mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
+    h, w = arr.shape[:2]
+    canvas_size = max(h, w)
+
+    fallback_info: "dict[str, Any]" = {
+        "fallback_used": True,
+        "fallback_backend_path": "easyocr.readtext",
+        "primary_error": reason,
+        "ocr_outcome": "recovered",
+    }
+
+    _warnings.warn(
+        f"EasyOCR: falling back to readtext() — {reason}",
+        RuntimeWarning,
+        stacklevel=4,
+    )
+
+    try:
+        result = reader.readtext(
             arr,
-            decoder="beamsearch",
+            decoder=decoder,
             beamWidth=beamwidth,
             canvas_size=canvas_size,
             mag_ratio=mag_ratio,
@@ -221,6 +297,11 @@ def _run_easyocr(
             blocklist=blocklist,
             workers=workers,
         )
+        return result, fallback_info
+    except Exception as exc2:
+        raise RuntimeError(
+            f"EasyOCR: readtext() also failed after primary failure ({reason}): {exc2}"
+        ) from exc2
 
 
 def _result_to_ocr_tokens(raw: list[Any], source_engine: str) -> list[OCRToken]:
@@ -302,7 +383,9 @@ class EasyOCRBackend:
         self._langs = _LANG_MAP.get(config.language, ["pt"])
 
         # --- env-var configuration ---
-        self._beamwidth = max(1, int(os.environ.get("EASYOCR_BEAMWIDTH", "10")))
+        raw_decoder = os.environ.get("EASYOCR_DECODER", "greedy").strip().lower()
+        self._decoder: str = raw_decoder if raw_decoder in ("greedy", "beamsearch") else "greedy"
+        self._beamwidth = max(1, int(os.environ.get("EASYOCR_BEAMWIDTH", "5")))
         self._workers = max(0, int(os.environ.get("EASYOCR_WORKERS", str(_default_workers()))))
         self._adjust_contrast = float(os.environ.get("EASYOCR_ADJUST_CONTRAST", "0.5"))
         allowlist_env = os.environ.get("EASYOCR_ALLOWLIST", "")
@@ -362,9 +445,10 @@ class EasyOCRBackend:
         t0 = time.perf_counter()
         try:
             img = _to_numpy(request.image)
-            raw = _run_easyocr(
+            raw, fallback_info = _run_easyocr(
                 self._reader,
                 img,
+                decoder=self._decoder,
                 beamwidth=self._beamwidth,
                 adjust_contrast=self._adjust_contrast,
                 allowlist=self._allowlist,
@@ -373,7 +457,14 @@ class EasyOCRBackend:
             )
             tokens = tuple(_result_to_ocr_tokens(raw, "easyocr"))
             text = " ".join(t.text for t in tokens)
-            status = "ok" if tokens else "no_text"
+            if fallback_info is not None:
+                status = "recovered"
+                extra_warnings: tuple[str, ...] = (
+                    f"easyocr_fallback: {fallback_info.get('primary_error', 'unknown')}",
+                )
+            else:
+                status = "ok" if tokens else "no_text"
+                extra_warnings = ()
         except Exception as exc:
             return OCRResult(
                 status="runtime_error",
@@ -389,6 +480,7 @@ class EasyOCRBackend:
             text=text,
             engine_identity=self.identity,
             elapsed_total_s=time.perf_counter() - t0,
+            warnings=extra_warnings,
         )
 
     # ------------------------------------------------------------------
@@ -405,9 +497,10 @@ class EasyOCRBackend:
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
         img = _to_numpy(page_image)
-        raw = _run_easyocr(
+        raw, _fallback = _run_easyocr(
             self._reader,
             img,
+            decoder=self._decoder,
             beamwidth=self._beamwidth,
             adjust_contrast=self._adjust_contrast,
             allowlist=self._allowlist,
@@ -426,9 +519,10 @@ class EasyOCRBackend:
         x0, y0 = int(region_bbox.x0), int(region_bbox.y0)
         x1, y1 = int(region_bbox.x1), int(region_bbox.y1)
         crop = img[y0:y1, x0:x1]
-        raw = _run_easyocr(
+        raw, _fallback = _run_easyocr(
             self._reader,
             crop,
+            decoder=self._decoder,
             beamwidth=self._beamwidth,
             adjust_contrast=self._adjust_contrast,
             allowlist=self._allowlist,
