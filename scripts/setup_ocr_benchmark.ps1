@@ -103,12 +103,8 @@ if ($null -eq $tessExe) {
 # the measured benchmark run never triggers a network download.
 Write-Host ""
 Write-Host "Downloading EasyOCR weights (craft + latin_g2) — this may take a few minutes..." -ForegroundColor Yellow
-python -c @"
-import easyocr, os
-cache = os.path.join(os.path.expanduser('~'), '.EasyOCR', 'model')
-easyocr.Reader(['pt'], gpu=False, model_storage_directory=cache, download_enabled=True)
-print('EasyOCR weights ready:', cache)
-"@
+$easyocrScript = 'import easyocr, os; cache = os.path.join(os.path.expanduser(chr(126)), ".EasyOCR", "model"); easyocr.Reader(["pt"], gpu=False, model_storage_directory=cache, download_enabled=True); print("EasyOCR weights ready:", cache)'
+python -c $easyocrScript
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  WARN EasyOCR weight download may have failed — check connectivity." -ForegroundColor Yellow
 }
