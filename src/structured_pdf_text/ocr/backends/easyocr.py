@@ -471,7 +471,7 @@ class EasyOCRBackend:
     """OCRBackend using EasyOCR with PyTorch CPU inference.
 
     Satisfies both OCRBackend (benchmark) and OcrEngine (pipeline) protocols.
-    Models are downloaded to ~/.EasyOCR/model/ on first use (~700 MB total).
+    Models are downloaded to ~/.EasyOCR/model/ on first use (~700 MB for craft_mlt_25k.pth + latin_g2.pth combined).
 
     See module docstring for all tunable environment variables.
     """

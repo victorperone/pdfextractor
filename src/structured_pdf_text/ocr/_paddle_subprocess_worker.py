@@ -19,7 +19,8 @@ Protocol: JSONL over stdin/stdout (one JSON object per line).
       "quality_variants": bool,           # init only
       "quality_policy": str,              # init only
       "quality_thresholds": dict,         # init only
-      "mkldnn": bool                      # init only
+      "mkldnn": bool,                     # init only
+      "disable_pir_api": bool             # init only
     }
     OR the literal string "QUIT" to shut down.
 

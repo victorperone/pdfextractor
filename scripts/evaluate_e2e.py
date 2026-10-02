@@ -263,7 +263,7 @@ def main() -> int:
     # --- Save error manifest if extraction failed ---
     if document is None:
         manifest = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "run_id": run_id,
             "git_sha": _git_sha(),
             "git_dirty": _git_dirty(),

@@ -95,11 +95,11 @@ python -m pip install paddlepaddle paddleocr
 python -m pip install rapidocr-onnxruntime
 
 # RapidOCR OpenVINO
-# openvino==2024.4.0 overrides rapidocr-openvino's conservative internal constraint;
-# a plain install works — no --no-deps required.
-python -m pip install "structured-pdf-text[ocr-rapidocr-openvino]"
-# or manually:
-python -m pip install "openvino==2024.4.0" "rapidocr-openvino==1.4.4"
+# rapidocr-openvino declares openvino<=2024.0.0 (no cp312 win64 wheel);
+# install openvino first, then rapidocr-openvino with --no-deps to keep
+# openvino==2024.4.0 which supports Python 3.12.
+python -m pip install "openvino==2024.4.0"
+python -m pip install "rapidocr-openvino==1.4.4" --no-deps
 
 # EasyOCR (PyTorch CPU)
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -369,7 +369,7 @@ All files are saved to `output/fase8/` by default.
   "run_id": "v1-tesseract",
   "pages_evaluated": 224,
   "pages_reference": 224,
-  "pages_missing_in_hypothesis": 0,
+  "pages_selected_but_missing_count": 0,
   "grupo1_texto": {
     "cer_normalized": 0.042,
     "cer_text_only": 0.038,
@@ -695,7 +695,9 @@ OCR_RENDER_SCALE=3.5 scripts/run_benchmark.sh --engines tesseract --run-suffix s
 | CLAHE grayscale preprocessing | Improves scans with uneven lighting |
 
 Configurable environment variables: `TESSERACT_LANG`, `TESSERACT_PSM`, `TESSERACT_OEM`,
-`TESSERACT_DPI`, `TESSERACT_TESSDATA_DIR`, `TESSERACT_CONF_MIN`.
+`TESSERACT_DPI`, `TESSERACT_TESSDATA_DIR`, `TESSERACT_CONF_MIN`,
+`TESSERACT_OSD` (set to `1` to enable OSD pre-flight rotation; requires `osd.traineddata`),
+`TESSERACT_OSD_CONF_MIN` (minimum OSD orientation confidence to apply rotation; default `2.0`).
 
 ### RapidOCR ONNX and OpenVINO
 
@@ -717,13 +719,13 @@ information) before passing the image to the detector. Environment variables:
 |---|---|
 | Separate detect + recognize pipeline | Allows configuring both stages independently |
 | `canvas_size=int(mag_ratio * max(h,w))` | Lets `mag_ratio` actually expand the canvas; the original `max(h,w)` cap neutralized magnification entirely |
-| `mag_ratio=1.5` | Improves detection of small text |
-| `decoder='beamsearch'` | Fewer substitution errors on ambiguous characters |
-| `adjust_contrast=1.0` | Contrast recovery in faded regions |
-| CLAHE before recognition | Improves low-contrast scans |
+| `mag_ratio=1.2` (default; raise via `EASYOCR_MAG_RATIO`) | Improves detection of small text |
+| `decoder='greedy'` (default; use `EASYOCR_DECODER=beamsearch` to reduce substitution errors) | Fewer substitution errors on ambiguous characters |
+| `adjust_contrast=0.5` (default; raise via `EASYOCR_ADJUST_CONTRAST`) | Contrast recovery in faded regions |
 
-Environment variables: `EASYOCR_MODULE_PATH`, `EASYOCR_RECOG_NETWORK`, `EASYOCR_BEAMWIDTH`,
-`EASYOCR_WORKERS`, `EASYOCR_ALLOWLIST`, `EASYOCR_BLOCKLIST`.
+Environment variables: `EASYOCR_MODULE_PATH`, `EASYOCR_RECOG_NETWORK`, `EASYOCR_ALLOW_DOWNLOAD`,
+`EASYOCR_DECODER`, `EASYOCR_BEAMWIDTH`, `EASYOCR_WORKERS`, `EASYOCR_ADJUST_CONTRAST`,
+`EASYOCR_MAG_RATIO`, `EASYOCR_ALLOWLIST`, `EASYOCR_BLOCKLIST`, `EASYOCR_ROTATION_INFO`.
 
 ---
 

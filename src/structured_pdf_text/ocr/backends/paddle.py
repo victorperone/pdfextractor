@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 # Inference timeout: per-request deadline (one page of OCR).
-# Default 2400 s = 20× the observed 120 s/page average — exists only to kill
+# Default 2400 s = ~25× the observed ~94 s/page average — exists only to kill
 # a truly frozen process, not to race against normal inference.
 # Override with PADDLE_WORKER_REQUEST_TIMEOUT (or legacy PADDLE_WORKER_TIMEOUT).
 _WORKER_REQUEST_TIMEOUT_S: float = float(
@@ -246,7 +246,8 @@ class PaddleOCRBackend:
         rather than silently returning a stale or misrouted result.
 
         Enforces a per-request read timeout (PADDLE_WORKER_REQUEST_TIMEOUT env
-        var, default 2400 s) so that a truly frozen worker never blocks the
+        var, or legacy PADDLE_WORKER_TIMEOUT; default 2400 s) so that a truly
+        frozen worker never blocks the
         parent process indefinitely. readline() runs in a background thread;
         TimeoutError kills the worker and raises RuntimeError.
         """
