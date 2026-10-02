@@ -1,4 +1,4 @@
-# PP-OCRv6 model preparation — Windows Server.
+# PP-OCRv6 model preparation - Windows Server.
 #
 # Downloads the v6 model weights into the evaluation cache, isolated from v5.
 # Run with network available, BEFORE blocking internet access.

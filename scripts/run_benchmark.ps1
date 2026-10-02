@@ -1,4 +1,4 @@
-# Phase 8 — E2E Benchmark: all engines, sequential
+# Phase 8 - E2E Benchmark: all engines, sequential
 #
 # Defaults target the validated Stress OCR Markdown V4 corpus.
 # All paths are relative to the repository root by default.
@@ -234,7 +234,7 @@ if ($failed.Count -gt 0 -or $compareFailed) {
         Write-Host "Failed engines: $($failed -join ', ')" -ForegroundColor Red
     }
     if ($compareFailed) {
-        Write-Host "Comparison step failed — review errors above." -ForegroundColor Red
+        Write-Host "Comparison step failed - review errors above." -ForegroundColor Red
     }
     exit 1
 } else {

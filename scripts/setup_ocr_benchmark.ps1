@@ -153,7 +153,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Remove-Item $tmpPy -ErrorAction SilentlyContinue
 
-# Download Latin ONNX model for RapidOCR (Portuguese diacritics: ã ç ê õ).
+# Download Latin ONNX model for RapidOCR (Portuguese diacritics: a~ c, e^ o~).
 # The bundled ch model silently drops diacritics; the en model covers Latin.
 Write-Host ""
 Write-Host "Downloading RapidOCR Latin model (en_PP-OCRv4_rec_mobile) for Portuguese..." -ForegroundColor Yellow
@@ -192,7 +192,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 if ($verifyFailed) {
-    Write-Host "=== Setup FAILED — one or more mandatory steps did not complete ===" -ForegroundColor Red
+    Write-Host "=== Setup FAILED - one or more mandatory steps did not complete ===" -ForegroundColor Red
     Write-Host "    Review the FAIL entries above, fix the issues, and re-run this script." -ForegroundColor Red
     exit 1
 }
