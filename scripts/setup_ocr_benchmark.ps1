@@ -12,39 +12,60 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# ---------------------------------------------------------------------------
+# Helper: run a native executable and abort if it returns non-zero.
+# $ErrorActionPreference = "Stop" does NOT throw on native exit codes in
+# PowerShell 5.1, so every mandatory native call must use this wrapper.
+# ---------------------------------------------------------------------------
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory=$true)][string]$Command,
+        [Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments
+    )
+    & $Command @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "'$Command $($Arguments -join ' ')' failed with exit code $LASTEXITCODE"
+    }
+}
+
 Write-Host ""
 Write-Host "=== OCR Benchmark Environment Setup ===" -ForegroundColor Cyan
 Write-Host "Python: $(python --version)"
 Write-Host ""
 
+# --- P1-07: install the package itself first so pdftext CLI is available ---
+Write-Host "[0] Installing pdfextractor package (editable)..." -ForegroundColor Yellow
+Invoke-Native python -m pip install -e .
+
 # --- 1. Paddle (engine principal / baseline) ---
+Write-Host ""
 Write-Host "[1/5] PaddleOCR + PaddleX..." -ForegroundColor Yellow
-python -m pip install "paddlepaddle==3.3.1" "paddleocr==3.7.0" "paddlex[ocr]==3.7.2" "psutil>=5.9"
+Invoke-Native python -m pip install "paddlepaddle==3.3.1" "paddleocr==3.7.0" "paddlex[ocr]==3.7.2" "psutil>=5.9"
 
 # --- 2. RapidOCR ONNX Runtime ---
 Write-Host ""
 Write-Host "[2/5] RapidOCR + ONNX Runtime..." -ForegroundColor Yellow
-python -m pip install "rapidocr-onnxruntime==1.4.4" "onnxruntime==1.30.0"
+Invoke-Native python -m pip install "rapidocr-onnxruntime==1.4.4" "onnxruntime==1.30.0"
 
 # --- 3. RapidOCR OpenVINO (two-step install) ---
 Write-Host ""
 Write-Host "[3/5] RapidOCR + OpenVINO 2024.4.0..." -ForegroundColor Yellow
 # openvino requires numpy<2.1.0; install first to resolve conflict
-python -m pip install "openvino==2024.4.0"
+Invoke-Native python -m pip install "openvino==2024.4.0"
 # rapidocr-openvino declares openvino<=2024.0.0 (no cp312 win64 wheel)
 # use --no-deps to keep openvino==2024.4.0 which supports Python 3.12
-python -m pip install "rapidocr-openvino==1.4.4" --no-deps
+Invoke-Native python -m pip install "rapidocr-openvino==1.4.4" --no-deps
 
 # --- 4. EasyOCR + PyTorch CPU ---
 Write-Host ""
 Write-Host "[4/5] PyTorch CPU + EasyOCR..." -ForegroundColor Yellow
-python -m pip install torch==2.14.0+cpu torchvision==0.29.0+cpu --index-url https://download.pytorch.org/whl/cpu
-python -m pip install "easyocr==1.7.2"
+Invoke-Native python -m pip install torch==2.14.0+cpu torchvision==0.29.0+cpu --index-url https://download.pytorch.org/whl/cpu
+Invoke-Native python -m pip install "easyocr==1.7.2"
 
 # --- 5. Pin numpy (conflict: easyocr upgrades to 2.5.x; openvino requires <2.1.0) ---
 Write-Host ""
 Write-Host "[5/5] Pinning numpy==2.0.2 (compatible with openvino + easyocr + paddlex)..." -ForegroundColor Yellow
-python -m pip install "numpy==2.0.2"
+Invoke-Native python -m pip install "numpy==2.0.2"
 
 # --- 6. PaddleOCR model weights ---
 # Models are stored in ~/.cache/pdfextractor/paddlex/official_models/
@@ -75,6 +96,7 @@ $checks = @(
     @("NumPy",              "import numpy; print(numpy.__version__)")
 )
 
+$verifyFailed = $false
 foreach ($check in $checks) {
     $name = $check[0]
     $cmd  = $check[1]
@@ -84,9 +106,11 @@ foreach ($check in $checks) {
             Write-Host "  OK  $name $ver" -ForegroundColor Green
         } else {
             Write-Host "  FAIL $name (exit $LASTEXITCODE)" -ForegroundColor Red
+            $verifyFailed = $true
         }
     } catch {
         Write-Host "  FAIL $name" -ForegroundColor Red
+        $verifyFailed = $true
     }
 }
 
@@ -96,6 +120,7 @@ $tessExe = Get-Command tesseract -ErrorAction SilentlyContinue
 if ($null -eq $tessExe) {
     Write-Host "  FAIL Tesseract not found in PATH" -ForegroundColor Red
     Write-Host "       Install from: https://github.com/UB-Mannheim/tesseract/wiki" -ForegroundColor Red
+    $verifyFailed = $true
 } else {
     $tessVersion = tesseract --version 2>&1 | Out-String
     $tessFirstLine = ($tessVersion -split "`n")[0].Trim()
@@ -107,6 +132,7 @@ if ($null -eq $tessExe) {
         Write-Host "  FAIL tessdata 'por' not found - download from:" -ForegroundColor Red
         Write-Host "       https://github.com/tesseract-ocr/tessdata_best/raw/main/por.traineddata" -ForegroundColor Red
         Write-Host "       Copy to: C:\Program Files\Tesseract-OCR\tessdata\" -ForegroundColor Red
+        $verifyFailed = $true
     }
 }
 
@@ -160,10 +186,17 @@ Write-Host "Running preflight across all five OCR backends..." -ForegroundColor 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 python "$scriptDir\preflight_ocr_backends.py" --language pt
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "One or more engines failed preflight - see output above." -ForegroundColor Red
+    Write-Host "  FAIL One or more engines failed preflight - see output above." -ForegroundColor Red
+    $verifyFailed = $true
 }
 
 Write-Host ""
+if ($verifyFailed) {
+    Write-Host "=== Setup FAILED — one or more mandatory steps did not complete ===" -ForegroundColor Red
+    Write-Host "    Review the FAIL entries above, fix the issues, and re-run this script." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan
 Write-Host "Run the E2E benchmark with:"
 Write-Host "  # Smoke test - 5 pages, all engines"
