@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-E2E benchmark runner — Fase 8.
+E2E benchmark runner.
 
 Runs PdfTextExtractor with the specified OCR engine on a corpus PDF,
-saves the extracted Markdown and a run manifest.
+saves the extracted Markdown and a run manifest (schema v2).
 
 Usage (Windows server):
     python scripts\\evaluate_e2e.py ^
@@ -14,13 +14,26 @@ Usage (Windows server):
     python scripts\\evaluate_e2e.py ^
         corpus\\Corpus_Stress_OCR_Markdown_V4.pdf ^
         --engine tesseract ^
-        --output-dir output\\fase8
+        --output-dir output\\fase8 ^
+        --allow-partial
 
 Engines: paddle | rapidocr-onnx | rapidocr-openvino | tesseract | easyocr
 
 Output:
     output/fase8/extracted_{engine}_{run_id}.md
     output/fase8/manifesto_e2e_{engine}_{run_id}.json
+
+Schema v2 changes vs v1
+-----------------------
+- document_status: the real ExtractionStatus from document.diagnostics.status
+  ("success" | "partial_success" | "failure")
+- benchmark_status: "valid" | "partial" | "invalid" — derived from document_status
+  A "partial" or "invalid" run is NOT eligible for standard ranking.
+- degraded_pages: list of page numbers where OCR or assembly was degraded
+- failed_ocr_pages: list of page numbers where OCR failed entirely
+- Per-page entries now include ocr_outcome, partial_reasons, warnings
+- --allow-partial: if absent and document_status != "success", exits with code 2
+  (run saved, but signalled as ineligible for automatic ranking)
 """
 from __future__ import annotations
 
@@ -147,6 +160,15 @@ def main() -> int:
     ap.add_argument("--pages", default=None, help="Page range: '1-10' or '1,5,10'")
     ap.add_argument("--language", default="pt")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=(
+            "Save and exit 0 even when document_status is partial_success. "
+            "Without this flag a partial run exits with code 2 to signal the "
+            "benchmark orchestrator that the run is ineligible for ranking."
+        ),
+    )
     args = ap.parse_args()
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -250,19 +272,68 @@ def main() -> int:
 
     page_sections = _parse_page_sections(md_text)
 
-    # --- Build per-page entries ---
+    # --- Build per-page entries (schema v2) ---
     page_entries = []
+    degraded_pages: list[int] = []
+    failed_ocr_pages: list[int] = []
+
     for i, page in enumerate(document.pages):
         page_num = page.page_index + 1
         elapsed_page = page_times[i] if i < len(page_times) else 0.0
         content = page_sections.get(page_num, "")
+
+        diag = page.diagnostics
+        page_warnings: list[str] = list(getattr(diag, "warnings", []))
+        partial_reasons: list[str] = [str(r) for r in getattr(diag, "reasons", [])]
+        facts: dict = dict(getattr(diag, "facts", {}))
+
+        # Derive ocr_outcome from diagnostics facts and token counts.
+        ocr_tokens_added: int = getattr(diag, "ocr_tokens_added", 0)
+        ocr_outcome = facts.get("ocr_outcome", None)
+        if ocr_outcome is None:
+            if ocr_tokens_added > 0:
+                ocr_outcome = "success"
+            elif content.strip():
+                ocr_outcome = "not_requested"
+            else:
+                ocr_outcome = "unknown"
+
+        # Classify page-level benchmark status.
+        if "ocr_failed" in facts or ocr_outcome in ("failed", "runtime_error"):
+            page_bstatus = "invalid"
+            failed_ocr_pages.append(page_num)
+        elif ocr_outcome in ("recovered", "degraded", "partial"):
+            page_bstatus = "degraded"
+            degraded_pages.append(page_num)
+        elif not content.strip() and ocr_tokens_added == 0:
+            page_bstatus = "empty"
+        else:
+            page_bstatus = "ok"
+
         page_entries.append({
             "page": page_num,
-            "status": "ok" if content.strip() else "empty",
+            "content_status": "nonempty" if content.strip() else "empty",
+            "benchmark_page_status": page_bstatus,
+            "ocr_outcome": ocr_outcome,
+            "partial_reasons": partial_reasons,
+            "warnings": page_warnings,
             "elapsed_s": round(elapsed_page, 4),
             "char_count": len(content),
-            "strategy": str(getattr(page, "strategy", "unknown")),
+            "ocr_tokens_added": ocr_tokens_added,
+            "strategy": str(getattr(diag, "strategy", "unknown")),
         })
+
+    # --- Document-level benchmark status ---
+    doc_diag = document.diagnostics
+    doc_status_raw: str = str(getattr(doc_diag, "status", "unknown"))
+    doc_warnings: list[str] = list(getattr(doc_diag, "warnings", []))
+
+    if failed_ocr_pages:
+        benchmark_status = "invalid"
+    elif degraded_pages or doc_status_raw == "partial_success":
+        benchmark_status = "partial"
+    else:
+        benchmark_status = "valid"
 
     # --- Engine identity ---
     engine_identity: dict = {}
@@ -275,13 +346,15 @@ def main() -> int:
                 "runtime": ident.runtime,
                 "profile": ident.profile,
                 "language": ident.language,
+                "device": getattr(ident, "device", None),
                 "package_versions": dict(ident.package_versions),
+                "artifact_hashes": dict(getattr(ident, "artifact_hashes", {})),
             }
         except Exception:
             pass
 
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "run_id": run_id,
         "git_sha": _git_sha(),
         "git_dirty": _git_dirty(),
@@ -291,7 +364,12 @@ def main() -> int:
         "language": args.language,
         "pdf_path": str(args.pdf),
         "pdf_sha256": _sha256_file(args.pdf),
-        "status": "ok",
+        "document_status": doc_status_raw,
+        "benchmark_status": benchmark_status,
+        "document_warnings": doc_warnings,
+        "degraded_pages": degraded_pages,
+        "failed_ocr_pages": failed_ocr_pages,
+        "warnings_count": len(doc_warnings),
         "elapsed_s": round(elapsed_s, 3),
         "page_count": len(document.pages),
         "extracted_markdown": str(md_path),
@@ -302,20 +380,35 @@ def main() -> int:
 
     if not args.quiet:
         n_pages = len(document.pages)
-        n_empty = sum(1 for e in page_entries if e["status"] == "empty")
+        n_empty = sum(1 for e in page_entries if e["content_status"] == "empty")
         s_per_page = elapsed_s / n_pages if n_pages else 0
         print(f"\n  Concluído: {n_pages} páginas em {elapsed_s:.1f}s ({s_per_page:.2f}s/pág)")
         if n_empty:
             print(f"  Atenção: {n_empty} páginas vazias")
+        if degraded_pages:
+            print(f"  Atenção: {len(degraded_pages)} páginas degradadas: {degraded_pages}")
+        if failed_ocr_pages:
+            print(f"  ERRO: {len(failed_ocr_pages)} páginas com falha de OCR: {failed_ocr_pages}")
+        print(f"  benchmark_status: {benchmark_status}")
         print(f"\n  Markdown  : {md_path}")
         print(f"  Manifesto : {manifest_path}")
         print()
         print("  Próximo passo — calcular métricas:")
-        print(f"  python scripts\\compute_metrics.py \\")
+        print(f"  python scripts/compute_metrics.py \\")
         print(f"    --hypothesis {md_path} \\")
-        print(f"    --manifesto corpus\\Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json \\")
+        print(f"    --manifesto <MANIFESTO.json> \\")
         print(f"    --engine {args.engine} \\")
         print(f"    --output-dir {args.output_dir}")
+
+    # Exit code 2 signals "run saved but ineligible for standard ranking".
+    if benchmark_status != "valid" and not args.allow_partial:
+        if not args.quiet:
+            print(
+                f"\n  AVISO: benchmark_status={benchmark_status!r}. "
+                "Use --allow-partial para suprimir este exit code.",
+                file=sys.stderr,
+            )
+        return 2
 
     return 0
 
