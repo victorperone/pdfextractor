@@ -56,7 +56,7 @@ manifest = json.loads(manifesto_path.read_text(encoding='utf-8'))
 pages = manifest.get('pages', [])
 manifest_numbers = [int(p['page']) for p in pages]
 reference = reference_path.read_text(encoding='utf-8')
-page_pattern = re.compile(r'^##\s+P[áa]gina\s+0*(\d+)', re.M | re.I)
+page_pattern = re.compile(r'^##\s+P[\xe1a]gina\s+0*(\d+)', re.M | re.I)
 reference_matches = list(page_pattern.finditer(reference))
 reference_numbers = [int(m.group(1)) for m in reference_matches]
 reference_sections = {
@@ -66,9 +66,9 @@ reference_sections = {
     for i, m in enumerate(reference_matches)
 }
 validation = validation_path.read_text(encoding='utf-8')
-page_match = re.search(r'(?m)^P[áa]ginas:\s*(\d+)\s*$', validation)
+page_match = re.search(r'(?m)^P[\xe1a]ginas:\s*(\d+)\s*$', validation)
 if not page_match:
-    raise SystemExit("Validation report has no 'Páginas: N' summary")
+    raise SystemExit("Validation report has no 'P\xe1ginas: N' summary")
 validation_count = int(page_match.group(1))
 
 try:
@@ -80,9 +80,9 @@ pdf_count = len(pdf)
 pdf.close()
 
 required_checks = (
-    '[OK] JSON válido',
-    '[OK] Markdown reconstruído do JSON é idêntico byte a byte',
-    '[OK] Hashes expected_markdown válidos',
+    '[OK] JSON v\xe1lido',
+    '[OK] Markdown reconstru\xeddo do JSON \xe9 id\xeantico byte a byte',
+    '[OK] Hashes expected_markdown v\xe1lidos',
 )
 missing_checks = [c for c in required_checks if c not in validation]
 if missing_checks:
@@ -115,7 +115,7 @@ if not (pdf_count == len(pages) == validation_count):
         f'Page count mismatch: PDF={pdf_count}, manifesto={len(pages)}, '
         f'validation report={validation_count}'
     )
-expected_pdf_check = f'[OK] Quantidade de páginas no PDF | {pdf_count}'
+expected_pdf_check = f'[OK] Quantidade de p\xe1ginas no PDF | {pdf_count}'
 if expected_pdf_check not in validation:
     raise SystemExit('Validation report does not confirm the PDF page count')
 print(f'Corpus preflight OK: {pdf_count} PDF pages, reference and manifesto aligned.')
