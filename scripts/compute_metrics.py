@@ -37,6 +37,7 @@ Output:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -49,6 +50,17 @@ from pathlib import Path
 _SRC = Path(__file__).parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+
+def _sha256_file(path: Path | None) -> str | None:
+    """Return a streaming SHA-256 for an input file when it is available."""
+    if path is None or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # ---------------------------------------------------------------------------
 # Text normalization (mirrors ocr_metrics.py — no external deps)
@@ -1377,6 +1389,13 @@ def main() -> int:
     # Correct set-difference page counts (fixes the cardinality-subtraction bug).
     pages_in_ref_not_hyp = sorted(ref_pages.keys() - hyp_pages.keys())
     pages_in_hyp_not_ref = sorted(hyp_pages.keys() - ref_pages.keys())
+    reference_path = (
+        args.reference
+        if args.reference and args.reference.exists()
+        else args.manifesto
+    )
+    reference_sha256 = _sha256_file(reference_path)
+    manifest_sha256 = _sha256_file(args.manifesto)
 
     summary = {
         "engine": args.engine,
@@ -1385,6 +1404,7 @@ def main() -> int:
         "pages_reference": len(ref_pages),
         "pages_in_hypothesis": len(hyp_pages),
         "pages_selected": len(selected_pages),
+        "selected_pages": sorted(selected_pages),
         "pages_selected_and_present": len(selected_ref_pages & hyp_pages.keys()),
         "pages_selected_but_missing": sorted(selected_but_missing),
         "pages_selected_but_missing_count": len(selected_but_missing),
@@ -1396,6 +1416,8 @@ def main() -> int:
         # without needing to access the nested "run" block.
         "benchmark_status": _run_meta.get("benchmark_status"),
         "pdf_sha256": _run_meta.get("pdf_sha256"),
+        "reference_sha256": reference_sha256,
+        "manifest_sha256": manifest_sha256,
         "mode": _run_meta.get("mode"),
         "run": _run_meta if _run_meta else None,
         "grupo1_texto": full_text_m,

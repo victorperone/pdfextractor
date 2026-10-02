@@ -7,8 +7,9 @@ comparison table in Markdown.
 
 Before building the table the script validates that all runs are comparable:
 same PDF SHA-256 (when available), same reference SHA-256 (when available),
-same selected page set, same extraction mode, and no invalid/partial runs
-unless --allow-partial is passed.
+same manifesto SHA-256 (when available), the exact selected page set, and the
+same extraction mode. Run status and missing-page counts are outcomes and are
+shown in the report rather than used to reject otherwise comparable runs.
 
 Usage (Windows server):
     python scripts\\compare_engines.py ^
@@ -149,22 +150,25 @@ def _best_engines(values: dict[str, float | None], key: str, tol: float = 1e-6) 
 def _comparability_key(data: dict) -> dict:
     """Extract the fields that must be identical across all compared runs.
 
-    Schema v2 metrics JSONs carry a top-level "pdf_sha256", "mode", and a
-    "run.selected_pages" list that let us validate the exact page set rather
-    than just the count.  Fall back to count-only for older files.
+    Only experiment inputs belong here. Missing pages and run status are
+    engine outcomes and must remain visible as metrics instead of making a run
+    incomparable. A missing exact page list is represented as None; callers
+    cannot silently downgrade to matching page counts.
     """
-    missing = data.get("pages_selected_but_missing", [])
-    # Prefer the exact sorted page list from the run block; fall back to count.
     run_block = data.get("run") or {}
     exact_pages = run_block.get("selected_pages")
-    selected = tuple(sorted(exact_pages)) if exact_pages else data.get("pages_selected", data.get("pages_reference"))
+    if not isinstance(exact_pages, list):
+        exact_pages = data.get("selected_pages")
+    try:
+        selected = tuple(sorted(int(page) for page in exact_pages))
+    except (TypeError, ValueError):
+        selected = None
     return {
         "pdf_sha256": data.get("pdf_sha256"),
+        "reference_sha256": data.get("reference_sha256"),
+        "manifest_sha256": data.get("manifest_sha256"),
         "mode": data.get("mode"),
-        "pages_reference": data.get("pages_reference"),
-        "pages_selected": selected,
-        "pages_selected_but_missing": sorted(missing) if isinstance(missing, list) else missing,
-        "missing_pages_penalised": data.get("missing_pages_penalised"),
+        "selected_pages": selected,
     }
 
 
@@ -175,22 +179,20 @@ def _validate_comparability(
 ) -> list[str]:
     """Check that all runs are comparable. Return a list of error strings (empty = OK)."""
     errors: list[str] = []
-
-    # Check benchmark_status — partial/invalid runs must be excluded from ranking
-    # unless --allow-partial is explicitly set.
-    if not allow_partial:
-        for eng, data in all_data:
-            bstatus = data.get("benchmark_status")
-            if bstatus is not None and bstatus != "valid":
-                errors.append(
-                    f"Run '{eng}' has benchmark_status={bstatus!r}. "
-                    "Exclude it from ranking or re-run with --allow-partial."
-                )
+    # Kept as a call/CLI compatibility argument. Partial, recovered, and
+    # invalid statuses are run outcomes; usable metric artifacts still compare.
+    _ = allow_partial
 
     # Check that all runs share the same comparability key.
     if len(all_data) > 1:
         keys = [(eng, _comparability_key(data)) for eng, data in all_data]
         ref_eng, ref_key = keys[0]
+        for eng, key in keys:
+            if key["selected_pages"] is None:
+                errors.append(
+                    f"Run '{eng}' does not contain an exact selected page list. "
+                    "Regenerate its metrics before comparing runs."
+                )
         for eng, key in keys[1:]:
             for field, ref_val in ref_key.items():
                 val = key.get(field)
@@ -396,9 +398,8 @@ def main() -> int:
         "--allow-partial",
         action="store_true",
         help=(
-            "Include runs with benchmark_status=partial in the comparison. "
-            "Without this flag, partial/invalid runs cause an error exit. "
-            "Comparability field mismatches are still reported as errors."
+            "Deprecated compatibility option. Partial runs are included by "
+            "default and their status is shown in the comparison metadata."
         ),
     )
     ap.add_argument(
@@ -452,8 +453,8 @@ def main() -> int:
             for err in errors:
                 print(f"  • {err}", file=sys.stderr)
             print(
-                "\nUse --skip-validation to bypass checks (diagnostic only) "
-                "or --allow-partial to include partial runs.",
+                "\nUse --skip-validation to bypass input checks (diagnostic only). "
+                "Run status and missing-page penalties remain included in the report.",
                 file=sys.stderr,
             )
             return 1
