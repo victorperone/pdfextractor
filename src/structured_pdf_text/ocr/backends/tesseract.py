@@ -25,6 +25,12 @@ TESSERACT_TESSDATA_DIR   Path to a tessdata directory; enables tessdata_best.
                          then: $env:TESSERACT_TESSDATA_DIR = "C:\\tessdata_best"
 TESSERACT_CONF_MIN       Minimum word confidence (0–100, default: 0 = no filter).
                          Values 30–50 can remove low-quality noise tokens.
+TESSERACT_OSD            Set to 1 to enable OSD pre-flight (PSM 0) before each page.
+                         When confidence >= TESSERACT_OSD_CONF_MIN the image is
+                         rotated before recognition. Requires osd.traineddata.
+                         Default: 0 (disabled). Enables page_orientation capability.
+TESSERACT_OSD_CONF_MIN   Minimum OSD orientation confidence to apply rotation
+                         (default: 2.0). Values below this are treated as "no rotation".
 
 Optimization notes (Fase 9)
 ----------------------------
@@ -216,6 +222,57 @@ def _run_tesseract_tsv(
             Path(tmp).unlink(missing_ok=True)
 
 
+def _run_tesseract_osd(image: object, extra_flags: list[str]) -> dict | None:
+    """Run Tesseract PSM 0 (OSD-only) and return orientation info, or None on failure.
+
+    Returns a dict with keys ``rotate`` (int, degrees to apply to correct the
+    image) and ``confidence`` (float) when OSD succeeds with sufficient output.
+    Returns ``None`` when the subprocess fails, times out, or produces no
+    parseable output — callers must treat None as "no rotation detected".
+
+    Requires ``osd.traineddata`` in the active tessdata directory.
+    """
+    pil = _to_pil(image)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp = f.name
+        pil.save(tmp, format="PNG")
+        cmd = [
+            "tesseract", tmp, "stdout",
+            "--psm", "0",
+            "-l", "osd",
+            *extra_flags,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        out = result.stdout
+        rotate: int | None = None
+        confidence: float | None = None
+        for line in out.splitlines():
+            if line.startswith("Rotate:"):
+                try:
+                    rotate = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("Orientation confidence:"):
+                try:
+                    confidence = float(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+        if rotate is None or confidence is None:
+            return None
+        return {"rotate": rotate, "confidence": confidence}
+    except Exception:
+        return None
+    finally:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+
+
 def _parse_tsv(tsv_text: str) -> list[dict]:
     reader = csv.DictReader(io.StringIO(tsv_text), delimiter="\t")
     return list(reader)
@@ -343,6 +400,12 @@ class TesseractBackend:
         # Minimum word confidence filter (0 = no filter, matches previous behaviour).
         self._conf_min = float(os.environ.get("TESSERACT_CONF_MIN", "0"))
 
+        # OSD pre-flight: run PSM 0 before recognition and rotate the image
+        # when orientation confidence is sufficient (>= 2.0).
+        # Disabled by default; enable with TESSERACT_OSD=1.
+        self._osd_enabled: bool = os.environ.get("TESSERACT_OSD", "0") in ("1", "true", "yes")
+        self._osd_conf_min: float = float(os.environ.get("TESSERACT_OSD_CONF_MIN", "2.0"))
+
         info = _tesseract_info()
         self._version = info["version"]
         self._tessdata = info["tessdata"]
@@ -381,6 +444,8 @@ class TesseractBackend:
                 "conf_min": self._conf_min,
                 "clahe": True,
                 "tessdata_dir_override": tessdata_dir_env or None,
+                "active_page_orientation": self._osd_enabled,
+                "osd_conf_min": self._osd_conf_min if self._osd_enabled else None,
             },
         )
 
@@ -390,7 +455,7 @@ class TesseractBackend:
             detection=True,
             recognition=True,
             line_orientation=False,
-            page_orientation=True,  # OSD mode
+            page_orientation=self._osd_enabled,  # True only when TESSERACT_OSD=1
             quadrilateral_boxes=False,  # axis-aligned only
             per_token_confidence=True,
         )
@@ -461,8 +526,15 @@ class TesseractBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        image = page_image
+        if self._osd_enabled:
+            osd = _run_tesseract_osd(image, self._extra_flags)
+            if osd is not None and osd["confidence"] >= self._osd_conf_min and osd["rotate"] != 0:
+                from PIL import Image as _PILImage
+                pil = _to_pil(image)
+                image = pil.rotate(-osd["rotate"], expand=True)
         tsv = _run_tesseract_tsv(
-            page_image, self._tess_lang, self._psm, self._oem,
+            image, self._tess_lang, self._psm, self._oem,
             dpi=self._dpi, extra_flags=self._extra_flags,
         )
         return _tsv_to_pipeline_tokens(
