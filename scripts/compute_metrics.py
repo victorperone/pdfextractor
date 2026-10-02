@@ -423,14 +423,6 @@ def _normalize_cell(text: str) -> str:
     return _normalize(text.strip())
 
 
-def _cell_cer(hyp_cell: str, ref_cell: str) -> float:
-    """Compute character error rate for a single table cell."""
-    ref_n = _normalize_cell(ref_cell)
-    if not ref_n:
-        return 0.0
-    return _lev_distance(list(_normalize_cell(hyp_cell)), list(ref_n)) / len(ref_n)
-
-
 def compute_table_metrics(hyp: str, ref: str) -> dict:
     """Compute Group 3 GFM table metrics on the full document body.
 
@@ -442,125 +434,139 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
 
     n_ref = len(ref_tables)
     n_hyp = len(hyp_tables)
-    t_tp = min(n_ref, n_hyp)
-    t_fp = max(0, n_hyp - n_ref)
-    t_fn = max(0, n_ref - n_hyp)
-    _, _, table_f1 = _f1(t_tp, t_fp, t_fn)
+    table_tp = min(n_ref, n_hyp)
+    table_fp = max(0, n_hyp - n_ref)
+    table_fn = max(0, n_ref - n_hyp)
+    if n_ref == 0 and n_hyp == 0:
+        table_precision = table_recall = table_f1 = 1.0
+    else:
+        table_precision, table_recall, table_f1 = _f1(table_tp, table_fp, table_fn)
 
-    if not ref_tables or not hyp_tables:
-        both_empty = not ref_tables and not hyp_tables
-        return {
-            "table_f1": table_f1,
-            "row_f1": 1.0 if both_empty else 0.0,
-            "column_f1": 1.0 if both_empty else 0.0,
-            "table_dimension_accuracy": 1.0 if both_empty else 0.0,
-            "cell_exact_match": 1.0 if both_empty else 0.0,
-            "cell_cer": 0.0,
-            "cell_alignment_accuracy": 1.0 if both_empty else 0.0,
-            "table_structure_similarity": 1.0 if both_empty else 0.0,
-            "table_content_f1": 1.0 if both_empty else 0.0,
-        }
+    row_f1_sum = column_f1_sum = dimension_accuracy_sum = structure_similarity_sum = 0.0
+    table_metric_count = max(n_ref, n_hyp)
+    cell_ref_count = cell_exact_count = cell_alignment_count = 0
+    cell_edit_sum = cell_ref_char_sum = 0
 
-    # For matched table pairs (by position order)
-    row_f1s: list[float] = []
-    col_f1s: list[float] = []
-    dim_accs: list[float] = []
-    cell_matches: list[float] = []
-    cell_cers: list[float] = []
-    alignment_accs: list[float] = []
-    struct_sims: list[float] = []
+    # Match tables by ordinal for now. Unmatched reference tables are paired
+    # with an empty hypothesis, making every expected row/cell a false negative.
+    for table_index, ref_t in enumerate(ref_tables):
+        hyp_t = hyp_tables[table_index] if table_index < n_hyp else []
+        n_ref_rows, n_hyp_rows = len(ref_t), len(hyp_t)
+        n_ref_cols = max((len(row) for row in ref_t), default=0)
+        n_hyp_cols = max((len(row) for row in hyp_t), default=0)
 
-    for ref_t, hyp_t in zip(ref_tables, hyp_tables):
-        # Row F1
-        n_ref_rows = len(ref_t)
-        n_hyp_rows = len(hyp_t)
-        r_tp = min(n_ref_rows, n_hyp_rows)
-        r_fp = max(0, n_hyp_rows - n_ref_rows)
-        r_fn = max(0, n_ref_rows - n_hyp_rows)
-        _, _, row_f1 = _f1(r_tp, r_fp, r_fn)
-        row_f1s.append(row_f1)
+        _, _, row_f1 = _f1(
+            min(n_ref_rows, n_hyp_rows),
+            max(0, n_hyp_rows - n_ref_rows),
+            max(0, n_ref_rows - n_hyp_rows),
+        )
+        _, _, column_f1 = _f1(
+            min(n_ref_cols, n_hyp_cols),
+            max(0, n_hyp_cols - n_ref_cols),
+            max(0, n_ref_cols - n_hyp_cols),
+        )
+        row_f1_sum += row_f1
+        column_f1_sum += column_f1
+        dimension_accuracy_sum += float(
+            n_ref_rows == n_hyp_rows and n_ref_cols == n_hyp_cols
+        )
+        structure_similarity_sum += (row_f1 * column_f1) ** 0.5
 
-        # Column F1: use max column count per row
-        n_ref_cols = max((len(r) for r in ref_t), default=0)
-        n_hyp_cols = max((len(r) for r in hyp_t), default=0)
-        c_tp = min(n_ref_cols, n_hyp_cols)
-        c_fp = max(0, n_hyp_cols - n_ref_cols)
-        c_fn = max(0, n_ref_cols - n_hyp_cols)
-        _, _, col_f1 = _f1(c_tp, c_fp, c_fn)
-        col_f1s.append(col_f1)
-
-        # Table Dimension Accuracy: exact match on (rows, cols)
-        dim_accs.append(1.0 if (n_ref_rows == n_hyp_rows and n_ref_cols == n_hyp_cols) else 0.0)
-
-        # Cell metrics: iterate matching (row, col) positions
-        total_cells = 0
-        exact_matches = 0
-        cer_sum = 0.0
-        aligned = 0
-
-        for i, ref_row in enumerate(ref_t):
-            hyp_row = hyp_t[i] if i < len(hyp_t) else []
-            for j, ref_cell in enumerate(ref_row):
-                total_cells += 1
-                hyp_cell = hyp_row[j] if j < len(hyp_row) else ""
+        for row_index, ref_row in enumerate(ref_t):
+            hyp_row = hyp_t[row_index] if row_index < len(hyp_t) else []
+            for column_index, ref_cell in enumerate(ref_row):
+                hyp_cell = hyp_row[column_index] if column_index < len(hyp_row) else ""
                 ref_norm = _normalize_cell(ref_cell)
                 hyp_norm = _normalize_cell(hyp_cell)
-                if ref_norm == hyp_norm:
-                    exact_matches += 1
-                    aligned += 1
-                cer_sum += _cell_cer(hyp_cell, ref_cell)
+                cell_ref_count += 1
+                cell_exact_count += int(ref_norm == hyp_norm)
+                cell_alignment_count += int(ref_norm == hyp_norm)
+                cell_edit_sum += _lev_distance(list(hyp_norm), list(ref_norm))
+                cell_ref_char_sum += len(ref_norm)
 
-        if total_cells > 0:
-            cell_matches.append(exact_matches / total_cells)
-            cell_cers.append(cer_sum / total_cells)
-            alignment_accs.append(aligned / total_cells)
-        else:
-            cell_matches.append(1.0)
-            cell_cers.append(0.0)
-            alignment_accs.append(1.0)
+    # Unmatched hypothesis tables count as false positives for table shape.
+    # Their non-empty cells also count as inserted characters for CER.
+    for hyp_t in hyp_tables[n_ref:]:
+        for row in hyp_t:
+            for cell in row:
+                cell_edit_sum += len(_normalize_cell(cell))
 
-        # Table Structure Similarity: geometric mean of row_f1 and col_f1.
-        # This measures shape only — two tables with identical dimensions but
-        # completely different content would score 1.0 here.
-        struct = (row_f1 * col_f1) ** 0.5 if (row_f1 >= 0 and col_f1 >= 0) else 0.0
-        struct_sims.append(struct)
+    ref_cells = Counter(
+        _normalize_cell(cell)
+        for table in ref_tables for row in table for cell in row
+        if _normalize_cell(cell)
+    )
+    hyp_cells = Counter(
+        _normalize_cell(cell)
+        for table in hyp_tables for row in table for cell in row
+        if _normalize_cell(cell)
+    )
+    content_tp = sum((ref_cells & hyp_cells).values())
+    content_fn = sum(ref_cells.values()) - content_tp
+    content_fp = sum(hyp_cells.values()) - content_tp
+    if not ref_cells and not hyp_cells:
+        table_content_f1 = 1.0
+    else:
+        _, _, table_content_f1 = _f1(content_tp, content_fp, content_fn)
 
-    def _mean(lst: list[float]) -> float:
-        return sum(lst) / len(lst) if lst else 0.0
+    # Extra tables have no reference cells to align to. Include them in the
+    # exact-match denominator so invented tables cannot appear cell-perfect.
+    hyp_only_cell_count = sum(
+        1 for table in hyp_tables[n_ref:] for row in table for cell in row
+    )
+    cell_match_denominator = cell_ref_count + hyp_only_cell_count
+    both_without_tables = n_ref == 0 and n_hyp == 0
+    cell_exact_match = (
+        cell_exact_count / cell_match_denominator
+        if cell_match_denominator else float(both_without_tables)
+    )
+    cell_alignment_accuracy = (
+        cell_alignment_count / cell_match_denominator
+        if cell_match_denominator else float(both_without_tables)
+    )
+    if cell_ref_char_sum:
+        cell_cer = cell_edit_sum / cell_ref_char_sum
+    else:
+        cell_cer = float(cell_edit_sum > 0)
+    if table_metric_count:
+        row_f1 = row_f1_sum / table_metric_count
+        column_f1 = column_f1_sum / table_metric_count
+        dimension_accuracy = dimension_accuracy_sum / table_metric_count
+        structure_similarity = structure_similarity_sum / table_metric_count
+    else:
+        row_f1 = column_f1 = dimension_accuracy = structure_similarity = 1.0
 
-    # Table Content F1: cell-level multiset F1 across all paired tables.
-    # Separates content correctness from shape correctness so that a table with
-    # correct dimensions but wrong cell values cannot score perfectly on content.
-    content_f1s: list[float] = []
-    for ref_t, hyp_t in zip(ref_tables, hyp_tables):
-        ref_cells = Counter(
-            _normalize_cell(cell)
-            for row in ref_t for cell in row
-            if _normalize_cell(cell)
-        )
-        hyp_cells = Counter(
-            _normalize_cell(cell)
-            for row in hyp_t for cell in row
-            if _normalize_cell(cell)
-        )
-        c_tp = sum((ref_cells & hyp_cells).values())
-        c_ref = sum(ref_cells.values())
-        c_hyp = sum(hyp_cells.values())
-        cp = c_tp / c_hyp if c_hyp > 0 else 0.0
-        cr = c_tp / c_ref if c_ref > 0 else 1.0
-        cf1 = 2 * cp * cr / (cp + cr) if (cp + cr) > 0 else 0.0
-        content_f1s.append(cf1)
-
+    # The extra counters let the document aggregate compute true micro metrics
+    # instead of averaging page-level F1/CER values.
     return {
+        "table_precision": table_precision,
+        "table_recall": table_recall,
         "table_f1": table_f1,
-        "row_f1": round(_mean(row_f1s), 4),
-        "column_f1": round(_mean(col_f1s), 4),
-        "table_dimension_accuracy": round(_mean(dim_accs), 4),
-        "cell_exact_match": round(_mean(cell_matches), 4),
-        "cell_cer": round(_mean(cell_cers), 6),
-        "cell_alignment_accuracy": round(_mean(alignment_accs), 4),
-        "table_structure_similarity": round(_mean(struct_sims), 4),
-        "table_content_f1": round(_mean(content_f1s), 4),
+        "row_f1": round(row_f1, 4),
+        "column_f1": round(column_f1, 4),
+        "table_dimension_accuracy": round(dimension_accuracy, 4),
+        "cell_exact_match": round(cell_exact_match, 4),
+        "cell_cer": round(cell_cer, 6),
+        "cell_alignment_accuracy": round(cell_alignment_accuracy, 4),
+        "table_structure_similarity": round(structure_similarity, 4),
+        "table_content_f1": table_content_f1,
+        "table_tp": table_tp,
+        "table_fp": table_fp,
+        "table_fn": table_fn,
+        "cell_ref_count": cell_ref_count,
+        "cell_exact_count": cell_exact_count,
+        "cell_alignment_count": cell_alignment_count,
+        "cell_edit_sum": cell_edit_sum,
+        "cell_ref_char_sum": cell_ref_char_sum,
+        "cell_match_denominator": cell_match_denominator,
+        "table_content_tp": content_tp,
+        "table_content_fp": content_fp,
+        "table_content_fn": content_fn,
+        "table_metric_count": table_metric_count,
+        "row_f1_sum": row_f1_sum,
+        "column_f1_sum": column_f1_sum,
+        "table_dimension_accuracy_sum": dimension_accuracy_sum,
+        "table_structure_similarity_sum": structure_similarity_sum,
     }
 
 
@@ -577,72 +583,94 @@ def aggregate_table_metrics_from_pages(
 
     Missing pages contribute empty hypothesis tables (all reference tables become FN).
     """
-    _table_keys = [
-        "row_f1", "column_f1", "table_dimension_accuracy",
-        "cell_exact_match", "cell_cer", "cell_alignment_accuracy",
-        "table_structure_similarity", "table_content_f1",
-    ]
-
-    accum: dict[str, list[float]] = {k: [] for k in _table_keys}
-    total_ref_tables = 0
-    total_hyp_tables = 0
-
-    # Pages evaluated normally (present in both hyp and ref)
+    totals = Counter()
     for entry in per_page_results:
         if entry.get("missing_from_hypothesis"):
             continue
-        for k in _table_keys:
-            if k in entry:
-                accum[k].append(entry[k])
-        # table_f1 numerics come from per-page counts; recompute from totals below.
+        for key in (
+            "table_tp", "table_fp", "table_fn",
+            "cell_ref_count", "cell_exact_count", "cell_alignment_count",
+            "cell_edit_sum", "cell_ref_char_sum", "cell_match_denominator",
+            "table_content_tp", "table_content_fp", "table_content_fn",
+            "table_metric_count", "row_f1_sum", "column_f1_sum",
+            "table_dimension_accuracy_sum", "table_structure_similarity_sum",
+        ):
+            totals[key] += entry.get(key, 0)
 
-    # Missing pages: each reference table is a FN; contribution drives down F1.
+    # Missing pages are empty hypotheses against their selected reference pages.
     for pn in selected_but_missing:
         ref_body = _strip_page_header(ref_pages.get(pn, ""))
-        n_ref = len(_parse_md_tables(ref_body))
-        total_ref_tables += n_ref
-        if n_ref:
-            # per-page metrics: 0 TP → all zeros
-            for k in _table_keys:
-                accum[k].append(0.0)
-            accum["cell_cer"][-1] = 0.0  # no cells present
+        missing_metrics = compute_table_metrics("", ref_body)
+        for key, value in missing_metrics.items():
+            if key in {
+                "table_tp", "table_fp", "table_fn",
+                "cell_ref_count", "cell_exact_count", "cell_alignment_count",
+                "cell_edit_sum", "cell_ref_char_sum", "cell_match_denominator",
+                "table_content_tp", "table_content_fp", "table_content_fn",
+                "table_metric_count", "row_f1_sum", "column_f1_sum",
+                "table_dimension_accuracy_sum", "table_structure_similarity_sum",
+            }:
+                totals[key] += value
 
-    # Recompute table F1 from the page-level counts stored in per_page_results
-    for entry in per_page_results:
-        if entry.get("missing_from_hypothesis"):
-            continue
-        # We don't store n_ref/n_hyp tables per page, so derive from the body.
-        pass
+    table_precision, table_recall, table_f1 = _f1(
+        totals["table_tp"], totals["table_fp"], totals["table_fn"]
+    )
+    # An all-no-table document is a perfect detection result, matching the
+    # page-level true-negative convention without letting TN pages dilute F1.
+    if not any(totals[k] for k in ("table_tp", "table_fp", "table_fn")):
+        table_precision = table_recall = table_f1 = 1.0
 
-    # Simpler approach: sum ref and hyp tables across all evaluated pages.
-    # table_f1 is computed correctly via TP=min(n_ref,n_hyp), etc.
-    evaluated_page_nums = {e["page"] for e in per_page_results if not e.get("missing_from_hypothesis")}
-    for pn in evaluated_page_nums:
-        pass  # counts already accumulated via per-page compute_table_metrics
+    def _ratio(numerator: float, denominator: float, empty_value: float = 1.0) -> float:
+        return numerator / denominator if denominator else empty_value
 
-    # For table F1 (detection), re-derive from hyp+ref concatenated only for
-    # the table *count*, not positional pairing.
-    # Use per-page table_f1 average as the aggregate (consistent with other per-page averages).
-    page_table_f1s = [e.get("table_f1", 0.0) for e in per_page_results if not e.get("missing_from_hypothesis")]
-    # Missing pages contribute 0.0 table_f1 when they have reference tables.
-    for pn in selected_but_missing:
-        ref_body = _strip_page_header(ref_pages.get(pn, ""))
-        if _parse_md_tables(ref_body):
-            page_table_f1s.append(0.0)
+    cell_cer = (
+        totals["cell_edit_sum"] / totals["cell_ref_char_sum"]
+        if totals["cell_ref_char_sum"]
+        else float(totals["cell_edit_sum"] > 0)
+    )
+    content_precision, content_recall, content_f1 = _f1(
+        totals["table_content_tp"],
+        totals["table_content_fp"],
+        totals["table_content_fn"],
+    )
+    if not any(totals[k] for k in (
+        "table_content_tp", "table_content_fp", "table_content_fn"
+    )):
+        content_precision = content_recall = content_f1 = 1.0
 
-    def _avg(lst: list[float]) -> float:
-        return round(sum(lst) / len(lst), 4) if lst else 1.0
-
+    table_count = totals["table_metric_count"]
     return {
-        "table_f1": _avg(page_table_f1s),
-        "row_f1": _avg(accum["row_f1"]),
-        "column_f1": _avg(accum["column_f1"]),
-        "table_dimension_accuracy": _avg(accum["table_dimension_accuracy"]),
-        "cell_exact_match": _avg(accum["cell_exact_match"]),
-        "cell_cer": round(sum(accum["cell_cer"]) / len(accum["cell_cer"]), 6) if accum["cell_cer"] else 0.0,
-        "cell_alignment_accuracy": _avg(accum["cell_alignment_accuracy"]),
-        "table_structure_similarity": _avg(accum["table_structure_similarity"]),
-        "table_content_f1": _avg(accum["table_content_f1"]),
+        "table_precision": table_precision,
+        "table_recall": table_recall,
+        "table_f1": table_f1,
+        "row_f1": round(_ratio(totals["row_f1_sum"], table_count), 4),
+        "column_f1": round(_ratio(totals["column_f1_sum"], table_count), 4),
+        "table_dimension_accuracy": round(
+            _ratio(totals["table_dimension_accuracy_sum"], table_count), 4
+        ),
+        "cell_exact_match": round(
+            _ratio(totals["cell_exact_count"], totals["cell_match_denominator"]), 4
+        ),
+        "cell_cer": round(cell_cer, 6),
+        "cell_alignment_accuracy": round(
+            _ratio(totals["cell_alignment_count"], totals["cell_match_denominator"]), 4
+        ),
+        "table_structure_similarity": round(
+            _ratio(totals["table_structure_similarity_sum"], table_count), 4
+        ),
+        "table_content_precision": content_precision,
+        "table_content_recall": content_recall,
+        "table_content_f1": content_f1,
+        "table_tp": totals["table_tp"],
+        "table_fp": totals["table_fp"],
+        "table_fn": totals["table_fn"],
+        "cell_ref_count": totals["cell_ref_count"],
+        "cell_exact_count": totals["cell_exact_count"],
+        "cell_edit_sum": totals["cell_edit_sum"],
+        "cell_ref_char_sum": totals["cell_ref_char_sum"],
+        "table_content_tp": totals["table_content_tp"],
+        "table_content_fp": totals["table_content_fp"],
+        "table_content_fn": totals["table_content_fn"],
     }
 
 
