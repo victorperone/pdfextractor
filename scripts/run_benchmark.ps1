@@ -47,7 +47,7 @@ foreach ($file in @($Corpus, $Reference, $Manifesto, $Validation)) {
 # --- Corpus preflight (mirrors run_benchmark.sh inline Python check) ---
 Write-Host ""
 Write-Host "Running corpus preflight..." -ForegroundColor Cyan
-$preflightScript = @"
+$preflightScript = @'
 import json, re, sys
 from pathlib import Path
 
@@ -119,9 +119,12 @@ expected_pdf_check = f'[OK] Quantidade de páginas no PDF | {pdf_count}'
 if expected_pdf_check not in validation:
     raise SystemExit('Validation report does not confirm the PDF page count')
 print(f'Corpus preflight OK: {pdf_count} PDF pages, reference and manifesto aligned.')
-"@
+'@
 
-& $PythonBin -c $preflightScript $Corpus $Reference $Manifesto $Validation
+$tmpPreflight = [System.IO.Path]::GetTempFileName() + ".py"
+[System.IO.File]::WriteAllText($tmpPreflight, $preflightScript, [System.Text.Encoding]::UTF8)
+& $PythonBin $tmpPreflight $Corpus $Reference $Manifesto $Validation
+Remove-Item $tmpPreflight -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Corpus preflight failed; benchmark was not started." -ForegroundColor Red
     exit 2
