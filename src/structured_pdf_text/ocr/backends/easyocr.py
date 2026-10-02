@@ -12,6 +12,9 @@ Environment variables
 EASYOCR_MODULE_PATH        Path to model cache directory (default: ~/.EasyOCR/model/)
 EASYOCR_RECOG_NETWORK      Recognition model name (default: '' → EasyOCR default = latin_g2)
                            Use 'latin_g1' for the older, larger model.
+EASYOCR_ALLOW_DOWNLOAD     Set to '1' to allow model downloads during Reader init.
+                           Default: '0' (download disabled). Use only during setup,
+                           never during a measured benchmark run.
 EASYOCR_DECODER            CTC decoder: 'greedy' or 'beamsearch' (default: 'greedy').
                            beamsearch reduces substitution errors but adds ~20-40%
                            inference time and can produce overflow warnings on some inputs.
@@ -136,6 +139,36 @@ def _apply_torch_threads(num_threads: int) -> int:
         return num_threads
     except Exception:
         return 0
+
+
+def _model_cache_dir() -> "Path":
+    """Resolve the effective EasyOCR model cache directory.
+
+    Mirrors EasyOCR's own resolution: EASYOCR_MODULE_PATH env var if set,
+    otherwise ~/.EasyOCR/model/.
+    """
+    from pathlib import Path
+    module_path = os.environ.get("EASYOCR_MODULE_PATH")
+    if module_path:
+        return Path(module_path)
+    return Path.home() / ".EasyOCR" / "model"
+
+
+def _check_model_files(cache_dir: "Path", recog_network: str) -> list[str]:
+    """Return a list of missing model file paths.
+
+    EasyOCR requires two .pth files: the CRAFT detector and the recogniser.
+    File names match EasyOCR's own naming convention.
+    """
+    from pathlib import Path
+    detector = cache_dir / "craft_mlt_25k.pth"
+    recogniser = cache_dir / f"{recog_network}.pth"
+    missing = []
+    if not detector.exists():
+        missing.append(str(detector))
+    if not recogniser.exists():
+        missing.append(str(recogniser))
+    return missing
 
 
 _LANG_MAP: dict[str, list[str]] = {
@@ -423,15 +456,24 @@ class EasyOCRBackend:
         easyocr_mod = _import_easyocr()
         module_path = os.environ.get("EASYOCR_MODULE_PATH")
         recog_network = os.environ.get("EASYOCR_RECOG_NETWORK", "")
+        self._recog_network = recog_network or "latin_g2"
+        self._model_cache_dir = _model_cache_dir()
 
-        kwargs: dict[str, Any] = {"gpu": False, "verbose": False}
+        # Download is disabled by default so a benchmark run never touches the
+        # network. Set EASYOCR_ALLOW_DOWNLOAD=1 only during the setup phase.
+        allow_download = os.environ.get("EASYOCR_ALLOW_DOWNLOAD", "0") == "1"
+
+        kwargs: dict[str, Any] = {
+            "gpu": False,
+            "verbose": False,
+            "download_enabled": allow_download,
+        }
         if module_path:
             kwargs["model_storage_directory"] = module_path
         if recog_network:
             kwargs["recog_network"] = recog_network
 
         self._reader = easyocr_mod.Reader(self._langs, **kwargs)
-        self._recog_network = recog_network or "latin_g2"
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -572,13 +614,24 @@ class EasyOCRBackend:
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        """Check that easyocr is importable and required model files exist on disk.
+
+        Returns one of: "ready", "missing" (package not installed),
+        "model_missing" (package OK but .pth files absent), "unknown" (error).
+        """
         try:
             _import_easyocr()
-            return "ready"
         except ImportError:
             return "missing"
         except Exception:
             return "unknown"
+
+        cache_dir = getattr(self, "_model_cache_dir", None) or _model_cache_dir()
+        recog = getattr(self, "_recog_network", "latin_g2")
+        missing_files = _check_model_files(cache_dir, recog)
+        if missing_files:
+            return "model_missing"
+        return "ready"
 
     def close(self) -> None:
         pass
