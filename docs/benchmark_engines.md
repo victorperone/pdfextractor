@@ -29,7 +29,7 @@ in terms of speed, quality, and dependencies. The benchmark enables:
 | **RapidOCR ONNX** | `rapidocr-onnx` | ONNX Runtime | ~2.76 s/page | `rapidocr-onnxruntime` |
 | **RapidOCR OpenVINO** | `rapidocr-openvino` | Intel OpenVINO | ~0.63 s/page | `rapidocr-openvino` |
 | **Tesseract 5** | `tesseract` | subprocess + TSV | ~0.58 s/page | `tesseract` (binary) |
-| **EasyOCR** | `easyocr` | PyTorch CPU | ~5.4 s/page | `easyocr`, `torch` |
+| **EasyOCR** | `easyocr` | PyTorch CPU | ~5.4 s/page | `easyocr`, `torch` — weights downloaded once by setup script |
 
 > The times above are from a RAW benchmark on 32 dense pages (pp. 72–103 of
 > the corpus). The full E2E benchmark includes native pages (without OCR), which
@@ -68,7 +68,7 @@ pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-onnx --outpu
 # RapidOCR OpenVINO
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-openvino --output markdown
 
-# EasyOCR (downloads models on first use)
+# EasyOCR (weights must be pre-downloaded by setup script before benchmarking)
 pdftext extract documento.pdf --mode balanced --ocr-engine easyocr --output markdown
 ```
 
@@ -89,21 +89,24 @@ The script `scripts/setup_ocr_benchmark.ps1` automates installation on Windows.
 
 ```powershell
 # PaddleOCR
-pip install paddlepaddle paddleocr
+python -m pip install paddlepaddle paddleocr
 
 # RapidOCR ONNX
-pip install rapidocr-onnxruntime
+python -m pip install rapidocr-onnxruntime
 
-# RapidOCR OpenVINO (install without dependencies to avoid numpy conflict)
-pip install openvino
-pip install rapidocr-openvino --no-deps
+# RapidOCR OpenVINO
+# openvino==2024.4.0 overrides rapidocr-openvino's conservative internal constraint;
+# a plain install works — no --no-deps required.
+python -m pip install "structured-pdf-text[ocr-rapidocr-openvino]"
+# or manually:
+python -m pip install "openvino==2024.4.0" "rapidocr-openvino==1.4.4"
 
 # EasyOCR (PyTorch CPU)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install easyocr
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+python -m pip install easyocr
 
 # Fix numpy conflict (CF-3)
-pip install "numpy==2.0.2"
+python -m pip install "numpy==2.0.2"
 ```
 
 ---
@@ -175,6 +178,7 @@ Evaluates the fidelity of extracted GFM tables (pipe tables).
 | `cell_cer` | Average CER per cell. |
 | `cell_alignment_accuracy` | Fraction of cells at the correct [row, column] position. |
 | `table_structure_similarity` | Geometric mean of row_f1 and col_f1. |
+| `table_content_f1` | Cell-level multiset F1 across all paired tables — a table with correct dimensions but wrong content scores low here. |
 
 ### Group 4 — Order and Integrity
 
@@ -185,7 +189,7 @@ Evaluates structural issues that do not depend on OCR quality.
 | `reading_order_accuracy` | LCS of text blocks in document order / total reference blocks. |
 | `block_order_accuracy` | Same proxy as reading_order_accuracy. |
 | `duplicate_content_rate` | Fraction of repeated paragraphs in the extracted document. |
-| `duplicate_block_rate` | Fraction of consecutively repeated block types. |
+| `duplicate_block_rate` | Fraction of blocks whose normalized content fingerprint (first 80 chars) already appeared earlier in the document. |
 | `header_leakage_rate` | Fraction of pages whose first block is identical in > 35% of pages (header leaking). |
 | `footer_leakage_rate` | Same for the last block (footer). |
 | `page_number_leakage_rate` | Rate of lines containing only a number (page number leaking). |
@@ -199,10 +203,18 @@ regex over the full document.
 
 | Metric | Description |
 |---|---|
-| `numeric_exact_match` | Fraction of numbers (integers, decimals, percentages) from the reference found in the hypothesis. |
-| `date_exact_match` | Fraction of dates (dd/mm/yyyy and variants) preserved. |
-| `currency_exact_match` | Fraction of monetary values (R$) preserved. |
-| `identifier_exact_match` | Fraction of CPF, CNPJ, and case numbers preserved. |
+| `numeric_exact_match` | Multiset recall — fraction of numbers (integers, decimals, percentages) from the reference found in the hypothesis. |
+| `numeric_precision` | Fraction of numbers in the hypothesis that also appear in the reference (penalizes invented values). |
+| `numeric_f1` | F1 of the multiset numeric match. |
+| `date_exact_match` | Multiset recall — fraction of dates (dd/mm/yyyy and variants) preserved. |
+| `date_precision` | Precision of date matching (penalizes invented dates). |
+| `date_f1` | F1 of the multiset date match. |
+| `currency_exact_match` | Multiset recall — fraction of monetary values (R$) preserved. |
+| `currency_precision` | Precision of currency matching (penalizes invented values). |
+| `currency_f1` | F1 of the multiset currency match. |
+| `identifier_exact_match` | Multiset recall — fraction of CPF, CNPJ, and case numbers preserved. |
+| `identifier_precision` | Precision of identifier matching (penalizes invented identifiers). |
+| `identifier_f1` | F1 of the multiset identifier match. |
 
 ---
 
@@ -329,8 +341,11 @@ python scripts\compare_engines.py output\fase8\metrics_*_smoke-*.json --output o
 | `-AllPages` | (switch) | Process full document |
 | `-RunSuffix` | `"smoke"` | Output file suffix |
 | `-Corpus` | *(default path)* | PDF path |
+| `-Reference` | *(default path)* | Ground-truth Markdown reference path |
 | `-Manifesto` | *(default path)* | JSON manifest path |
+| `-Validation` | *(default path)* | Corpus validation report (VALIDACAO.txt) |
 | `-OutDir` | `"output\fase8"` | Output directory |
+| `-PythonBin` | `"python"` | Python binary to use (e.g. `.venv\Scripts\python`) |
 
 ---
 

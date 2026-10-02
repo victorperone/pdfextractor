@@ -152,6 +152,7 @@ OCR model home:
 [ok] PP-LCNet_x1_0_textline_ori
 [ok] PP-OCRv6_medium_det
 [ok] PP-OCRv6_medium_rec
+[ok] UVDoc
 
 Offline OCR readiness: READY
 ```
@@ -328,7 +329,7 @@ default.
 | RapidOCR + ONNX Runtime | `rapidocr-onnx` | No model download needed |
 | RapidOCR + Intel OpenVINO | `rapidocr-openvino` | No model download needed |
 | Tesseract 5 | `tesseract` | Requires Tesseract binary in PATH |
-| EasyOCR (PyTorch CPU) | `easyocr` | Downloads models on first use |
+| EasyOCR (PyTorch CPU) | `easyocr` | Weights must be pre-downloaded via `setup_ocr_benchmark.sh/.ps1` |
 
 Non-Paddle engines do not use `--ocr-model-profile`. The engine is also
 selectable through the Python API via `ExtractorConfig(ocr_engine="tesseract")`
