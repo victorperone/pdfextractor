@@ -274,7 +274,7 @@ class PaddleOCRBackend:
                 "paddleocr": _package_version("paddleocr"),
                 "paddlex": _package_version("paddlex"),
             },
-            artifact_hashes={},
+            artifact_hashes={},  # Paddle model dirs contain many files — hashing deferred
         )
 
     @property

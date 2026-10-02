@@ -532,7 +532,7 @@ class EasyOCRBackend:
                 "easyocr": _package_version("easyocr"),
                 "torch": _package_version("torch"),
             },
-            artifact_hashes={},
+            artifact_hashes={},  # .pth files are ~700 MB — hashing at init would add ~30s startup
             extra={
                 "decoder": self._decoder,
                 "beamwidth": self._beamwidth,

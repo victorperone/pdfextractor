@@ -1,11 +1,33 @@
 """Shared validation for quadrilateral OCR parser outputs."""
 from __future__ import annotations
 
+import hashlib
 import math
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
+
+
+def sha256_file(path: "str | Path") -> str | None:
+    """Return the SHA-256 hex digest of a file, or None if it does not exist.
+
+    Reads in 1 MB chunks to avoid loading large model files into memory at once.
+    Returns None silently when the path is missing or unreadable so callers can
+    build artifact_hashes dicts without conditional guards.
+    """
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return None
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
 
 
 def quadrilateral_geometry(value: Any, offset_x: float = 0.0, offset_y: float = 0.0):

@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import safe_crop_array
+from structured_pdf_text.ocr.backends._parser_utils import safe_crop_array, sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -341,6 +341,14 @@ class TesseractBackend:
         self._version = info["version"]
         self._tessdata = info["tessdata"]
 
+        # Hash the .traineddata file at construction time for reproducibility.
+        # Returns None if the file is absent (missing model); stored in identity.
+        traineddata_path = Path(self._tessdata) / f"{self._tess_lang}.traineddata"
+        digest = sha256_file(traineddata_path)
+        self._artifact_hashes: dict[str, str] = (
+            {f"{self._tess_lang}.traineddata": digest} if digest else {}
+        )
+
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
     # ------------------------------------------------------------------
@@ -358,7 +366,7 @@ class TesseractBackend:
                 "tessdata_dir": self._tessdata,
                 "lang": self._tess_lang,
             },
-            artifact_hashes={},
+            artifact_hashes=self._artifact_hashes,
         )
 
     @property

@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, safe_crop_array
+from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, safe_crop_array, sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -251,6 +251,20 @@ class RapidOCRBackend:
         self._det_model = det_path
         self._rec_model = rec_path
 
+        # Hash custom .onnx files at construction time (only when overridden via
+        # env vars — bundled models are inside the package and not individually
+        # addressable as filesystem paths).
+        hashes: dict[str, str] = {}
+        if det_path:
+            d = sha256_file(det_path)
+            if d:
+                hashes["det_model"] = d
+        if rec_path:
+            r = sha256_file(rec_path)
+            if r:
+                hashes["rec_model"] = r
+        self._artifact_hashes = hashes
+
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
     # ------------------------------------------------------------------
@@ -270,7 +284,7 @@ class RapidOCRBackend:
                 pkg_name: _package_version(pkg_name),
                 runtime_pkg: _package_version(runtime_pkg),
             },
-            artifact_hashes={},
+            artifact_hashes=self._artifact_hashes,
         )
 
     @property
