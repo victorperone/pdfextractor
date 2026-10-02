@@ -247,13 +247,23 @@ class PaddleOCRBackend:
         tokens: list[OcrToken] = []
         for item in response.get("tokens", []):
             x0, y0, x1, y1 = item["bbox"]
+            conf = item.get("confidence")
+            # Reconstruct source from the serialized string value; fall back to
+            # OCR_PAGE for responses from older workers that omit the field.
+            raw_source = item.get("source", "ocr_page")
+            try:
+                source = SourceKind(raw_source)
+            except ValueError:
+                source = SourceKind.OCR_PAGE
             tokens.append(
                 OcrToken(
                     text=item["text"],
-                    confidence=float(item["confidence"]),
+                    confidence=float(conf) if conf is not None else None,
                     bbox=BBox(x0, y0, x1, y1),
-                    source=SourceKind.OCR_PAGE,
-                    language=self._config.language,
+                    source=source,
+                    language=item.get("language") or self._config.language,
+                    rotation=int(item.get("rotation", 0)),
+                    provenance=item.get("provenance"),
                 )
             )
         return tokens

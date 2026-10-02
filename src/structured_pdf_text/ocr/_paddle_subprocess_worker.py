@@ -25,7 +25,8 @@ Protocol: JSONL over stdin/stdout (one JSON object per line).
 
   Response:
     {"status": "ok"|"error", "tokens": [...], "error": null|str}
-    Tokens: [{"text": str, "confidence": float, "bbox": [x0,y0,x1,y1]}, ...]
+    Tokens: [{"text": str, "confidence": float|null, "bbox": [x0,y0,x1,y1],
+               "source": str, "language": str|null, "rotation": int, "provenance": str|null}, ...]
 """
 from __future__ import annotations
 
@@ -81,11 +82,16 @@ def _make_engine(config: dict):
 def _tokens_to_json(tokens) -> list[dict]:
     out = []
     for t in tokens:
+        source = getattr(t, "source", None)
         out.append(
             {
                 "text": t.text,
-                "confidence": float(t.confidence),
+                "confidence": float(t.confidence) if t.confidence is not None else None,
                 "bbox": [t.bbox.x0, t.bbox.y0, t.bbox.x1, t.bbox.y1],
+                "source": source.value if hasattr(source, "value") else str(source or "ocr_page"),
+                "language": getattr(t, "language", None),
+                "rotation": getattr(t, "rotation", 0),
+                "provenance": getattr(t, "provenance", None),
             }
         )
     return out
