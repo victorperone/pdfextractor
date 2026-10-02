@@ -29,8 +29,11 @@ import logging
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+_WORKER_READ_TIMEOUT_S: float = float(os.environ.get("PADDLE_WORKER_TIMEOUT", "120"))
 
 from structured_pdf_text.config import ExtractorConfig, effective_ocr_quality_policy
 from structured_pdf_text.document import OcrToken, SourceKind
@@ -161,7 +164,13 @@ class PaddleOCRBackend:
             )
 
     def _worker_send(self, request: dict) -> dict:
-        """Send one JSONL request to the worker and return the parsed response."""
+        """Send one JSONL request to the worker and return the parsed response.
+
+        Enforces a read timeout (PADDLE_WORKER_TIMEOUT env var, default 120 s)
+        so that a hung worker never blocks the parent process indefinitely.
+        readline() runs in a background thread; TimeoutError is raised and the
+        worker process is killed if the deadline expires.
+        """
         assert self._worker_proc is not None
         assert self._worker_proc.stdin is not None
         assert self._worker_proc.stdout is not None
@@ -170,10 +179,27 @@ class PaddleOCRBackend:
         self._worker_proc.stdin.write(line.encode())
         self._worker_proc.stdin.flush()
 
-        response_line = self._worker_proc.stdout.readline()
+        stdout = self._worker_proc.stdout
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut: Future[bytes] = pool.submit(stdout.readline)
+            try:
+                response_line = fut.result(timeout=_WORKER_READ_TIMEOUT_S)
+            except TimeoutError:
+                self._worker_proc.kill()
+                self._worker_proc = None
+                raise RuntimeError(
+                    f"Paddle worker timed out after {_WORKER_READ_TIMEOUT_S}s"
+                )
+
         if not response_line:
             raise RuntimeError("Paddle worker closed unexpectedly")
-        return json.loads(response_line)
+
+        try:
+            return json.loads(response_line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Paddle worker sent malformed JSON: {response_line[:200]!r}"
+            ) from exc
 
     def _call_subprocess(
         self,

@@ -34,6 +34,10 @@ import io
 import json
 import sys
 from pathlib import Path
+from typing import BinaryIO
+
+# Module-level response pipe; set by main() before any _reply() call.
+_response_pipe: BinaryIO = sys.stdout.buffer
 
 # Add src/ to path so structured_pdf_text is importable when the package
 # is not installed in the venv (dev mode via sys.path in the parent script).
@@ -84,8 +88,17 @@ def _tokens_to_json(tokens) -> list[dict]:
 
 
 def main() -> None:
-    # Use line-buffered stdout so each response is flushed immediately
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
+    global _response_pipe
+
+    # Capture the raw stdout binary pipe before redirecting sys.stdout.
+    # All JSONL responses are written directly here so that any print()
+    # calls from PaddleOCR, PIL, or third-party code never contaminate
+    # the framing pipe used by the parent process.
+    _response_pipe = sys.stdout.buffer
+
+    # Redirect sys.stdout → sys.stderr so print() calls from paddle / PIL
+    # go to the parent's stderr (visible in logs) instead of the JSONL pipe.
+    sys.stdout = io.TextIOWrapper(sys.stderr.buffer, line_buffering=True)
 
     engine = None
     init_config: dict = {}
@@ -146,7 +159,8 @@ def main() -> None:
 
 
 def _reply(obj: dict) -> None:
-    print(json.dumps(obj, ensure_ascii=False), flush=True)
+    _response_pipe.write((json.dumps(obj, ensure_ascii=False) + "\n").encode())
+    _response_pipe.flush()
 
 
 if __name__ == "__main__":
