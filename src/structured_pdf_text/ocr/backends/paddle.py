@@ -112,6 +112,13 @@ class PaddleOCRBackend:
         self._subprocess_config: dict | None = None
         self._worker_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
 
+        # Resolve cache_home once at construction time, mirroring PaddleOcrEngine's
+        # own resolution, so healthcheck() checks the same directory the engine uses.
+        self._cache_home: str = os.environ.get(
+            "PADDLE_PDX_CACHE_HOME",
+            str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
+        )
+
         if _has_torch_conflict():
             # Subprocess mode (CF-4): torch DLLs would crash paddle at import time.
             # Store config and defer all OCR work to a clean subprocess.
@@ -379,7 +386,7 @@ class PaddleOCRBackend:
         from structured_pdf_text.ocr.paddle import validate_local_ocr_models
 
         try:
-            validate_local_ocr_models(language=self._config.language)
+            validate_local_ocr_models(language=self._config.language, cache_home=self._cache_home)
             return "ready"
         except PaddleOcrUnavailable:
             return "missing"
