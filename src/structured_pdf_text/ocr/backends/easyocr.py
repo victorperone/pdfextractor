@@ -58,8 +58,9 @@ Optimization notes
   image, matching the upstream contract.
   Falls back to readtext() on any failure, but marks the result as degraded
   so the benchmark can flag the run as partial.
-- canvas_size: set to max(h, w) of the reformatted image so CRAFT never
-  downscales the input.  This fixes detection loss on pages rendered at higher DPI.
+- canvas_size: set to int(mag_ratio * max(h, w)) so the canvas is always large
+  enough for the magnified image.  Using max(h, w) would clamp target_size back
+  to max(h, w) inside resize_aspect_ratio(), neutralising mag_ratio entirely.
 - decoder: defaults to 'greedy' (upstream default). Use EASYOCR_DECODER=beamsearch
   to enable beam search after validating there is a measurable quality gain.
 """
@@ -279,7 +280,10 @@ def _run_easyocr(
         )
 
     h, w = img_color.shape[:2]
-    canvas_size = max(h, w)
+    # canvas_size must be at least mag_ratio * max(h, w); otherwise
+    # resize_aspect_ratio() clamps target_size back to max(h, w) and
+    # the magnification has no effect.
+    canvas_size = int(mag_ratio * max(h, w))
 
     # --- Stage 1: text detection (CRAFT) ---
     try:
@@ -355,7 +359,7 @@ def _fallback_readtext(
     import warnings as _warnings
     mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
     h, w = arr.shape[:2]
-    canvas_size = max(h, w)
+    canvas_size = int(mag_ratio * max(h, w))
 
     fallback_info: "dict[str, Any]" = {
         "fallback_used": True,
