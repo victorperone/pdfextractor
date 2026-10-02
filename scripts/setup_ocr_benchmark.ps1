@@ -153,28 +153,28 @@ if ($LASTEXITCODE -ne 0) {
 }
 Remove-Item $tmpPy -ErrorAction SilentlyContinue
 
-# Download Latin ONNX model for RapidOCR (Portuguese diacritics: a~ c, e^ o~).
-# The bundled ch model silently drops diacritics; the en model covers Latin.
+# Download the official PP-OCRv4 Latin ONNX recognizer and matching dictionary.
+# The bundled Chinese model does not cover Portuguese diacritics.
 Write-Host ""
-Write-Host "Downloading RapidOCR Latin model (en_PP-OCRv4_rec_mobile) for Portuguese..." -ForegroundColor Yellow
+Write-Host "Downloading RapidOCR Latin recognizer and dictionary for Portuguese..." -ForegroundColor Yellow
 $rapidocrDir  = "$(Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))\.ocr-model-cache\rapidocr"
-$rapidocrRec  = "$rapidocrDir\en_PP-OCRv4_rec_mobile.onnx"
-$rapidocrKeys = "$rapidocrDir\en_dict.txt"
+$rapidocrRec  = "$rapidocrDir\latin_PP-OCRv3_rec_mobile.onnx"
+$rapidocrKeys = "$rapidocrDir\latin_dict.txt"
 New-Item -ItemType Directory -Force -Path $rapidocrDir | Out-Null
 
 if (-not (Test-Path $rapidocrRec)) {
     Invoke-WebRequest `
-        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile.onnx" `
+        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile.onnx" `
         -OutFile $rapidocrRec -UseBasicParsing
 } else {
-    Write-Host "  en_PP-OCRv4_rec_mobile.onnx already present - skipping." -ForegroundColor DarkGray
+    Write-Host "  latin_PP-OCRv3_rec_mobile.onnx already present - skipping." -ForegroundColor DarkGray
 }
 if (-not (Test-Path $rapidocrKeys)) {
     Invoke-WebRequest `
-        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile/en_dict.txt" `
+        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile/latin_dict.txt" `
         -OutFile $rapidocrKeys -UseBasicParsing
 } else {
-    Write-Host "  en_dict.txt already present - skipping." -ForegroundColor DarkGray
+    Write-Host "  latin_dict.txt already present - skipping." -ForegroundColor DarkGray
 }
 $env:RAPIDOCR_REC_MODEL = $rapidocrRec
 $env:RAPIDOCR_REC_KEYS  = $rapidocrKeys

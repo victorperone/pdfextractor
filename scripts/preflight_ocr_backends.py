@@ -41,6 +41,24 @@ def _check(engine: str, language: str) -> tuple[str, str]:
             f", hashes={len(hashes)}" if hashes else ", hashes=none"
         )
         detail = f"{versions}{hash_summary}"
+        if engine in {"rapidocr-onnx", "rapidocr-openvino"}:
+            extra = identity.extra
+            detail += (
+                f", language_profile={identity.profile}"
+                f", recognizer={extra.get('rec_model') or 'bundled'}"
+                f", dictionary={extra.get('rec_keys') or 'bundled'}"
+            )
+            if language.lower().startswith("pt"):
+                from structured_pdf_text.ocr.backends.rapidocr import (
+                    portuguese_dictionary_profile,
+                )
+
+                profile, missing = portuguese_dictionary_profile(extra.get("rec_keys"))
+                if profile != "latin/pt-compatible":
+                    missing_detail = "".join(missing) or "unreadable/missing dictionary"
+                    detail += f", missing Portuguese character coverage: {missing_detail}"
+                    backend.close()
+                    return "not_ready_for_pt_comparison", detail
         backend.close()
         return status, detail
     except Exception as exc:

@@ -11,12 +11,11 @@ use PP-OCRv4 models.  PP-OCRv6 ONNX files must be exported on Linux and then
 pointed to via the env vars below.
 
 **Default bundled model is PP-OCRv4 ch (Chinese + basic ASCII), which does NOT
-cover Portuguese diacritics (ã ç ê õ).**  For correct Portuguese recognition,
-set the Latin/English PP-OCRv4 (or PP-OCRv6 if exported) recognition model:
+cover Portuguese diacritics (ã ç ê õ).** For Portuguese, configure the paired
+PP-OCRv4 Latin recognizer and its matching dictionary:
 
-    # PP-OCRv4 Latin (recommended for Portuguese, available pre-built):
-    RAPIDOCR_REC_MODEL=/path/to/en_PP-OCRv4_rec_infer.onnx
-    RAPIDOCR_REC_KEYS=/path/to/en_dict.txt   # required when switching rec model
+    RAPIDOCR_REC_MODEL=/path/to/latin_PP-OCRv3_rec_mobile.onnx
+    RAPIDOCR_REC_KEYS=/path/to/latin_dict.txt
 
     # PP-OCRv6 medium (better quality; export on Linux first — CF-2):
     RAPIDOCR_REC_MODEL=/path/to/PP-OCRv6_medium_rec_infer.onnx
@@ -54,6 +53,29 @@ from structured_pdf_text.ocr.contracts import (
     OCRResult,
     OCRToken,
 )
+
+
+PORTUGUESE_REQUIRED_CHARS = frozenset("ãõçêáéíóú")
+
+
+def portuguese_dictionary_profile(path: str | os.PathLike[str] | None) -> tuple[str, tuple[str, ...]]:
+    """Classify a recognizer dictionary for Portuguese sanity-check purposes.
+
+    This only verifies that the dictionary can represent a small set of
+    Portuguese letters. It does not claim full linguistic/model coverage.
+    """
+    if not path:
+        return "missing-dictionary", tuple(sorted(PORTUGUESE_REQUIRED_CHARS))
+    try:
+        with open(path, "r", encoding="utf-8-sig") as dictionary_file:
+            text = dictionary_file.read()
+    except (OSError, UnicodeError):
+        return "unreadable-dictionary", tuple(sorted(PORTUGUESE_REQUIRED_CHARS))
+    missing = tuple(sorted(PORTUGUESE_REQUIRED_CHARS - set(text)))
+    if not missing:
+        return "latin/pt-compatible", ()
+    return "latin-unverified", missing
+
 
 if TYPE_CHECKING:
     from structured_pdf_text.config import ExtractorConfig
@@ -253,24 +275,30 @@ class RapidOCRBackend:
         rec_keys = os.environ.get("RAPIDOCR_REC_KEYS")
         if det_path:
             kwargs["det_model_path"] = det_path
+        if bool(rec_path) != bool(rec_keys):
+            raise ValueError(
+                "RapidOCR recognition model and dictionary must be configured "
+                "together via RAPIDOCR_REC_MODEL and RAPIDOCR_REC_KEYS."
+            )
         if rec_path:
             kwargs["rec_model_path"] = rec_path
         if rec_keys:
-            kwargs["rec_char_dict_path"] = rec_keys
+            kwargs["rec_keys_path"] = rec_keys
 
         if not rec_path and not det_path:
             warnings.warn(
                 "RapidOCR is using the bundled PP-OCRv4-ch model, which does not "
                 "cover Portuguese diacritics (ã ç ê õ). "
-                "Set RAPIDOCR_REC_MODEL and RAPIDOCR_REC_KEYS to a Latin/en PP-OCRv4 "
-                "or PP-OCRv6 ONNX model for correct Portuguese recognition. "
+                "Set RAPIDOCR_REC_MODEL and RAPIDOCR_REC_KEYS to the paired Latin "
+                "recognizer and dictionary for Portuguese. "
                 "See the module docstring for instructions.",
                 UserWarning,
                 stacklevel=2,
             )
             self._profile = "builtin-ch"
         elif rec_path:
-            self._profile = "custom-rec"
+            profile, _missing = portuguese_dictionary_profile(rec_keys)
+            self._profile = profile if self._language.lower().startswith("pt") else "custom-rec"
         else:
             self._profile = "custom-det"
 
@@ -341,6 +369,7 @@ class RapidOCRBackend:
                 "with_angle_cls":      os.environ.get("RAPIDOCR_ANGLE_CLS", "0").lower() in ("1", "true", "yes"),
                 "rec_model": self._rec_model,
                 "rec_keys":  self._rec_keys,
+                "language_profile": self._profile,
                 "det_model": self._det_model,
             },
         )

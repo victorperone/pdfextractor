@@ -46,14 +46,14 @@ foreach ($file in @($Corpus, $Reference, $Manifesto, $Validation)) {
 
 # --- RapidOCR Latin model (required for Portuguese diacritics) ---
 $rapidocrCache = "$RepoRoot\.ocr-model-cache\rapidocr"
-$rapidocrRec   = "$rapidocrCache\en_PP-OCRv4_rec_mobile.onnx"
-$rapidocrKeys  = "$rapidocrCache\en_dict.txt"
+$rapidocrRec   = "$rapidocrCache\latin_PP-OCRv3_rec_mobile.onnx"
+$rapidocrKeys  = "$rapidocrCache\latin_dict.txt"
 if ((Test-Path $rapidocrRec) -and (Test-Path $rapidocrKeys)) {
     $env:RAPIDOCR_REC_MODEL = $rapidocrRec
     $env:RAPIDOCR_REC_KEYS  = $rapidocrKeys
 } else {
-    Write-Host "ERROR: RapidOCR Latin model not found in $rapidocrCache" -ForegroundColor Red
-    Write-Host "       Run scripts\setup_ocr_benchmark.ps1 first to download the model." -ForegroundColor Red
+    Write-Host "ERROR: RapidOCR Latin recognizer/dictionary pair not found in $rapidocrCache" -ForegroundColor Red
+    Write-Host "       Run scripts\setup_ocr_benchmark.ps1 first to download the pair." -ForegroundColor Red
     exit 2
 }
 

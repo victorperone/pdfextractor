@@ -85,27 +85,27 @@ easyocr.Reader(["pt"], gpu=False,
 print("EasyOCR weights ready.")
 PY
 
-# Download Latin ONNX model for RapidOCR (Portuguese diacritics: ã ç ê õ).
-# The bundled ch model silently drops diacritics; the en model covers Latin.
+# Download the official PP-OCRv4 Latin ONNX recognizer and its matching
+# dictionary (Portuguese diacritics: ã ç ê õ).
 echo ""
-echo "Downloading RapidOCR Latin model (en_PP-OCRv4_rec_mobile) for Portuguese..."
+echo "Downloading RapidOCR Latin recognizer and dictionary for Portuguese..."
 RAPIDOCR_MODEL_DIR="$REPO_ROOT/.ocr-model-cache/rapidocr"
 mkdir -p "$RAPIDOCR_MODEL_DIR"
-_RAPIDOCR_REC="$RAPIDOCR_MODEL_DIR/en_PP-OCRv4_rec_mobile.onnx"
-_RAPIDOCR_KEYS="$RAPIDOCR_MODEL_DIR/en_dict.txt"
+_RAPIDOCR_REC="$RAPIDOCR_MODEL_DIR/latin_PP-OCRv3_rec_mobile.onnx"
+_RAPIDOCR_KEYS="$RAPIDOCR_MODEL_DIR/latin_dict.txt"
 if [[ ! -f "$_RAPIDOCR_REC" ]]; then
     curl -fL \
-        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile.onnx" \
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile.onnx" \
         -o "$_RAPIDOCR_REC"
 else
-    echo "  en_PP-OCRv4_rec_mobile.onnx already present — skipping."
+    echo "  latin_PP-OCRv3_rec_mobile.onnx already present — skipping."
 fi
 if [[ ! -f "$_RAPIDOCR_KEYS" ]]; then
     curl -fL \
-        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/en_PP-OCRv4_rec_mobile/en_dict.txt" \
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile/latin_dict.txt" \
         -o "$_RAPIDOCR_KEYS"
 else
-    echo "  en_dict.txt already present — skipping."
+    echo "  latin_dict.txt already present — skipping."
 fi
 export RAPIDOCR_REC_MODEL="$_RAPIDOCR_REC"
 export RAPIDOCR_REC_KEYS="$_RAPIDOCR_KEYS"

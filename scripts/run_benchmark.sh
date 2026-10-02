@@ -16,14 +16,14 @@ export EASYOCR_MODULE_PATH
 # RapidOCR Latin model (required for Portuguese diacritics — ã ç ê õ).
 # Downloaded by setup_ocr_benchmark.sh into .ocr-model-cache/rapidocr/.
 _RAPIDOCR_CACHE="$REPO_ROOT/.ocr-model-cache/rapidocr"
-_RAPIDOCR_REC="$_RAPIDOCR_CACHE/en_PP-OCRv4_rec_mobile.onnx"
-_RAPIDOCR_KEYS="$_RAPIDOCR_CACHE/en_dict.txt"
+_RAPIDOCR_REC="$_RAPIDOCR_CACHE/latin_PP-OCRv3_rec_mobile.onnx"
+_RAPIDOCR_KEYS="$_RAPIDOCR_CACHE/latin_dict.txt"
 if [[ -f "$_RAPIDOCR_REC" && -f "$_RAPIDOCR_KEYS" ]]; then
     export RAPIDOCR_REC_MODEL="$_RAPIDOCR_REC"
     export RAPIDOCR_REC_KEYS="$_RAPIDOCR_KEYS"
 else
-    echo "ERROR: RapidOCR Latin model not found in $_RAPIDOCR_CACHE" >&2
-    echo "       Run scripts/setup_ocr_benchmark.sh first to download the model." >&2
+    echo "ERROR: RapidOCR Latin recognizer/dictionary pair not found in $_RAPIDOCR_CACHE" >&2
+    echo "       Run scripts/setup_ocr_benchmark.sh first to download the pair." >&2
     exit 2
 fi
 PDF="corpus/Corpus_Stress_OCR_Markdown_V4.pdf"
