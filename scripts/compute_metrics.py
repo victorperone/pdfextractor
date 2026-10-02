@@ -941,6 +941,16 @@ def main() -> int:
         "--manifesto", type=Path, default=None,
         help="Corpus manifesto JSON (preferred over --reference; contains per-page expected_markdown)"
     )
+    ap.add_argument(
+        "--run-manifest", type=Path, default=None,
+        metavar="RUN_MANIFEST",
+        help=(
+            "E2E run manifest JSON (schema v2, output of evaluate_e2e.py). "
+            "When provided, pages listed as 'selected' in the run manifest but "
+            "absent from the hypothesis receive a maximum CER/WER penalty instead "
+            "of being silently excluded from quality metrics."
+        ),
+    )
     ap.add_argument("--engine", default="unknown")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--output-dir", type=Path, default=Path("output/fase8"))
@@ -1000,10 +1010,48 @@ def main() -> int:
             if pn and conds:
                 page_conditions[int(pn)] = ", ".join(conds[:2])
 
+    # --- Determine the selected page set ---
+    # When a run manifest (schema v2 from evaluate_e2e.py) is available, the
+    # "pages" list there tells us exactly which pages the engine was asked to
+    # process.  Pages selected but absent from the hypothesis are penalised with
+    # maximum CER/WER (all reference characters counted as deletions) rather than
+    # silently excluded from quality metrics.
+    #
+    # Without a run manifest we fall back to the reference page set — every
+    # reference page is treated as selected, which is conservative but correct.
+    run_manifest_pages: set[int] | None = None
+    if args.run_manifest and args.run_manifest.exists():
+        with open(args.run_manifest, encoding="utf-8") as f:
+            _rm = json.load(f)
+        run_manifest_pages = {
+            int(e["page"])
+            for e in _rm.get("pages", [])
+            if e.get("page") is not None
+        }
+
+    # Selected = pages the engine was supposed to produce output for.
+    selected_pages: set[int] = run_manifest_pages if run_manifest_pages is not None else set(ref_pages.keys())
+
+    # Pages that are in the reference and selected but completely absent from the
+    # hypothesis output — these receive maximum penalty, not a free pass.
+    selected_ref_pages: set[int] = selected_pages & ref_pages.keys()
+    selected_but_missing: set[int] = selected_ref_pages - hyp_pages.keys()
+    in_hyp_not_selected: set[int] = hyp_pages.keys() - selected_pages
+
+    # Zero-overlap guard: fail clearly rather than producing NaN metrics.
+    eval_page_nums_set: set[int] = (hyp_pages.keys() & ref_pages.keys()) | selected_but_missing
+    if not eval_page_nums_set:
+        print(
+            "ERROR: hypothesis and reference have zero comparable pages. "
+            "Check --hypothesis, --reference/--manifesto, and --run-manifest.",
+            file=sys.stderr,
+        )
+        return 1
+
     # --- Compute per-page metrics (diagnostics) + accumulate for micro-average ---
-    # Only evaluate pages present in both hypothesis and reference.
-    # Pages not extracted (e.g. in a partial smoke test) are not penalized here;
-    # failure_rate in compute_integrity_metrics accounts for them separately.
+    # Pages present in both hypothesis and reference: evaluated normally.
+    # Pages selected but missing from hypothesis: contribute max-penalty to text
+    # accumulators (all ref chars as deletions, all ref words as deletions).
     per_page_results: list[dict] = []
     all_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
 
@@ -1019,19 +1067,27 @@ def main() -> int:
         print(f"  Processando {total_pages} páginas em paralelo "
               f"(workers={os.cpu_count()})...")
 
+    if total_pages == 0 and not selected_but_missing:
+        print(
+            "ERROR: hypothesis and reference have zero comparable pages.",
+            file=sys.stderr,
+        )
+        return 1
+
     page_args = [
         (pn, ref_pages[pn], hyp_pages.get(pn, ""), page_conditions)
         for pn in all_page_nums
     ]
     results = []
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = {executor.submit(_process_page, arg): arg[0] for arg in page_args}
-        done = 0
-        for future in as_completed(futures):
-            results.append(future.result())
-            done += 1
-            if not args.quiet:
-                print(f"\r  {done}/{total_pages} páginas processadas...", end="", flush=True)
+    if page_args:
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+            futures = {executor.submit(_process_page, arg): arg[0] for arg in page_args}
+            done = 0
+            for future in as_completed(futures):
+                results.append(future.result())
+                done += 1
+                if not args.quiet:
+                    print(f"\r  {done}/{total_pages} páginas processadas...", end="", flush=True)
     if not args.quiet:
         print()  # newline after progress output
 
@@ -1046,7 +1102,38 @@ def main() -> int:
         _t_S += a["S"]; _t_D += a["D"]; _t_I += a["I"]
         per_page_results.append(r["entry"])
 
+    # --- Penalise selected pages that are missing from hypothesis ---
+    # All reference characters count as deletions; all reference words as deletions.
+    for pn in sorted(selected_but_missing):
+        ref_text = ref_pages[pn]
+        ref_norm = _normalize(ref_text)
+        ref_stripped = _normalize(_strip_md(ref_text))
+        n_chars_raw = max(1, len(ref_text))
+        n_chars_norm = max(1, len(ref_norm))
+        n_chars_text = max(1, len(ref_stripped))
+        n_words = max(1, len(ref_stripped.split()))
+        _t_chars_raw  += n_chars_raw;  _t_edits_raw  += n_chars_raw
+        _t_chars_norm += n_chars_norm; _t_edits_norm += n_chars_norm
+        _t_chars_text += n_chars_text; _t_edits_text += n_chars_text
+        _t_words      += n_words;      _t_word_edits += n_words
+        _t_D += n_words  # all reference words are deletions
+        per_page_results.append({
+            "page": pn,
+            "missing_from_hypothesis": True,
+            "selected_but_missing": True,
+            "cer_raw": 1.0,
+            "cer_normalized": 1.0,
+            "cer_text_only": 1.0,
+            "wer": 1.0,
+            "ref_chars": n_chars_raw,
+            "hyp_chars": 0,
+        })
+
     # --- Group 1: full-document text (micro-average, weighted by ref length) ---
+    if _t_chars_raw == 0 or _t_words == 0:
+        print("ERROR: zero reference characters/words after page accumulation.", file=sys.stderr)
+        return 1
+
     _wer_val = _t_word_edits / _t_words
     full_text_m = {
         "cer_raw": round(_t_edits_raw / _t_chars_raw, 6),
@@ -1060,7 +1147,9 @@ def main() -> int:
         "omission_rate": round(_t_D / _t_words, 6),
     }
 
-    # --- Groups 2, 3, 4, 5: full-document Markdown (evaluated pages only) ---
+    # --- Groups 2, 3, 4, 5: full-document Markdown ---
+    # Use only the pages present in both for structural/table metrics (missing
+    # pages have no hypothesis text to compare structure against).
     eval_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
     hyp_full_body = "\n\n".join(
         _strip_page_header(hyp_pages[pn])
@@ -1081,12 +1170,24 @@ def main() -> int:
         hyp_full_body, ref_full_body, hyp_pages, ref_pages
     )
 
+    # Correct set-difference page counts (fixes the cardinality-subtraction bug).
+    pages_in_ref_not_hyp = sorted(ref_pages.keys() - hyp_pages.keys())
+    pages_in_hyp_not_ref = sorted(hyp_pages.keys() - ref_pages.keys())
+
     summary = {
         "engine": args.engine,
         "run_id": run_id,
         "pages_evaluated": len(per_page_results),
         "pages_reference": len(ref_pages),
-        "pages_missing_in_hypothesis": len(ref_pages) - len(hyp_pages),
+        "pages_in_hypothesis": len(hyp_pages),
+        "pages_selected": len(selected_pages),
+        "pages_selected_and_present": len(selected_ref_pages & hyp_pages.keys()),
+        "pages_selected_but_missing": sorted(selected_but_missing),
+        "pages_selected_but_missing_count": len(selected_but_missing),
+        "pages_in_hypothesis_not_selected": sorted(in_hyp_not_selected),
+        "pages_in_ref_not_hyp": pages_in_ref_not_hyp,
+        "pages_in_hyp_not_ref": pages_in_hyp_not_ref,
+        "missing_pages_penalised": len(selected_but_missing) > 0,
         "grupo1_texto": full_text_m,
         "grupo2_estrutura_markdown": full_struct_m,
         "grupo3_tabelas": full_table_m,
