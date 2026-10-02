@@ -26,6 +26,8 @@ class OCRBackendIdentity:
     """Fully-qualified identity of one running backend instance.
 
     Every benchmark run must record this; hashes allow reproducibility audits.
+    ``extra`` holds backend-specific runtime parameters (e.g. workers,
+    torch_num_threads, decoder) that do not fit the fixed schema.
     """
 
     engine: str
@@ -35,6 +37,7 @@ class OCRBackendIdentity:
     device: str
     package_versions: dict[str, str] = field(default_factory=dict)
     artifact_hashes: dict[str, str] = field(default_factory=dict)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

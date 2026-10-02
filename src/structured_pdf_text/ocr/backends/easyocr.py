@@ -18,9 +18,11 @@ EASYOCR_DECODER            CTC decoder: 'greedy' or 'beamsearch' (default: 'gree
 EASYOCR_BEAMWIDTH          Beam width for beamsearch decoder (default: 5, min: 1).
                            Only used when EASYOCR_DECODER=beamsearch.
 EASYOCR_WORKERS            DataLoader workers for recognition.
-                           Default: auto — 0 on Windows (spawn safety), half of
+                           Priority: env var > config.num_threads > platform auto.
+                           Platform auto: 0 on Windows (spawn safety), half of
                            cpu_count() capped at 4 on Linux/macOS.
-                           Override only if the auto-detection is wrong.
+                           When config.num_threads > 0, workers = min(4, threads // 2).
+                           Set to 0 explicitly for the controlled benchmark track.
 EASYOCR_ADJUST_CONTRAST    EasyOCR internal contrast multiplier for recognition crops.
                            Default: 0.5 (EasyOCR default).  Range: 0.0–1.0.
                            Higher values help very low-contrast scans but degrade
@@ -87,6 +89,53 @@ def _default_workers() -> int:
         return 0
     cpu = os.cpu_count() or 1
     return min(4, max(1, cpu // 2))
+
+
+def _resolve_workers(config_num_threads: int) -> int:
+    """Resolve effective DataLoader worker count.
+
+    Priority (highest to lowest):
+      1. EASYOCR_WORKERS env var — explicit override, any value.
+      2. config.num_threads > 0 — derive workers proportionally
+         (half of threads, capped at 4; 0 on Windows always).
+      3. Platform auto-detect via _default_workers().
+
+    Windows always returns 0 regardless of config or env var, because
+    PyTorch 'spawn' requires the __main__ guard which is absent in
+    subprocess / library contexts.
+    """
+    import platform
+    is_windows = platform.system() == "Windows"
+
+    env_val = os.environ.get("EASYOCR_WORKERS")
+    if env_val is not None:
+        return 0 if is_windows else max(0, int(env_val))
+
+    if is_windows:
+        return 0
+
+    if config_num_threads > 0:
+        return min(4, max(0, config_num_threads // 2))
+
+    return _default_workers()
+
+
+def _apply_torch_threads(num_threads: int) -> int:
+    """Apply PyTorch intra/inter-op thread limits and return the effective count.
+
+    Only sets torch threads when num_threads > 0 and torch is importable.
+    Does not override values already set by the caller via torch directly.
+    Returns the effective intra-op thread count (0 = unchanged/torch default).
+    """
+    if num_threads <= 0:
+        return 0
+    try:
+        import torch
+        torch.set_num_threads(num_threads)
+        torch.set_num_interop_threads(max(1, num_threads // 2))
+        return num_threads
+    except Exception:
+        return 0
 
 
 _LANG_MAP: dict[str, list[str]] = {
@@ -355,16 +404,20 @@ class EasyOCRBackend:
         self._language = config.language
         self._langs = _LANG_MAP.get(config.language, ["pt"])
 
-        # --- env-var configuration ---
+        # --- env-var + config-derived configuration ---
         raw_decoder = os.environ.get("EASYOCR_DECODER", "greedy").strip().lower()
         self._decoder: str = raw_decoder if raw_decoder in ("greedy", "beamsearch") else "greedy"
         self._beamwidth = max(1, int(os.environ.get("EASYOCR_BEAMWIDTH", "5")))
-        self._workers = max(0, int(os.environ.get("EASYOCR_WORKERS", str(_default_workers()))))
+        self._workers = _resolve_workers(config.num_threads)
         self._adjust_contrast = float(os.environ.get("EASYOCR_ADJUST_CONTRAST", "0.5"))
         allowlist_env = os.environ.get("EASYOCR_ALLOWLIST", "")
         self._allowlist: str | None = allowlist_env if allowlist_env else None
         blocklist_env = os.environ.get("EASYOCR_BLOCKLIST", "")
         self._blocklist: str | None = blocklist_env if blocklist_env else None
+
+        # Apply PyTorch thread limits before the Reader (and its model loading)
+        # initialises, so all inference calls inherit the constrained thread pool.
+        self._torch_num_threads = _apply_torch_threads(config.num_threads)
 
         # --- reader init ---
         easyocr_mod = _import_easyocr()
@@ -397,6 +450,13 @@ class EasyOCRBackend:
                 "torch": _package_version("torch"),
             },
             artifact_hashes={},
+            extra={
+                "decoder": self._decoder,
+                "beamwidth": self._beamwidth,
+                "workers": self._workers,
+                "torch_num_threads": self._torch_num_threads,
+                "adjust_contrast": self._adjust_contrast,
+            },
         )
 
     @property
