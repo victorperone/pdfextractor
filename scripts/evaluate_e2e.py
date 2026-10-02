@@ -206,12 +206,20 @@ def main() -> int:
         print(f"  Output : {args.output_dir}")
         print()
 
-    # Per-page timing tracking
+    # Per-page timing tracking.
+    # on_progress(current, total) fires when page `current` *begins*.
+    # The interval [on_progress(N) → on_progress(N+1)] is the wall-clock time
+    # spent processing page N (render + OCR + assembly combined — not broken
+    # down further without pipeline instrumentation).
+    # The last page interval is closed immediately when extract() returns so
+    # it excludes post-extraction work (markdown rendering, manifest writing).
     page_times: list[float] = []
     _tick: list[float] = [time.perf_counter()]
+    _total_pages: list[int] = [0]
 
     def on_progress(current: int, total: int) -> None:
         now = time.perf_counter()
+        _total_pages[0] = total
         if current > 1:
             page_times.append(now - _tick[0])
         _tick[0] = now
@@ -226,7 +234,8 @@ def main() -> int:
     try:
         extractor = PdfTextExtractor(config)
         document = extractor.extract(args.pdf, progress_callback=on_progress)
-        page_times.append(time.perf_counter() - _tick[0])  # last page
+        # Close the last page interval immediately — before any post-processing.
+        page_times.append(time.perf_counter() - _tick[0])
     except Exception as exc:
         error_msg = str(exc)
         if hasattr(exc, "details") and exc.details:
@@ -373,6 +382,11 @@ def main() -> int:
         "elapsed_s": round(elapsed_s, 3),
         "page_count": len(document.pages),
         "extracted_markdown": str(md_path),
+        "timing_note": (
+            "per-page elapsed_s is the wall-clock interval between progress callbacks "
+            "(render + OCR + assembly combined). Last page interval is closed immediately "
+            "after extract() returns, excluding markdown rendering and manifest writing."
+        ),
         "pages": page_entries,
     }
 
