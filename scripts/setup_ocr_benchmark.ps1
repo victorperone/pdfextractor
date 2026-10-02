@@ -46,6 +46,17 @@ Write-Host ""
 Write-Host "[5/5] Pinning numpy==2.0.2 (compatible with openvino + easyocr + paddlex)..." -ForegroundColor Yellow
 python -m pip install "numpy==2.0.2"
 
+# --- 6. PaddleOCR model weights ---
+# Models are stored in ~/.cache/pdfextractor/paddlex/official_models/
+# Required: PP-LCNet_x1_0_doc_ori, PP-LCNet_x1_0_textline_ori,
+#           PP-OCRv6_medium_det, PP-OCRv6_medium_rec, UVDoc
+Write-Host ""
+Write-Host "[6] PaddleOCR model weights (may download several hundred MB on first run)..." -ForegroundColor Yellow
+pdftext setup-models --ocr-model-profile pt
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  WARN setup-models may have failed - check connectivity and re-run if needed." -ForegroundColor Yellow
+}
+
 # --- Final verification ---
 Write-Host ""
 Write-Host "=== Verifying installations ===" -ForegroundColor Cyan

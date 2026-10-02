@@ -62,6 +62,10 @@ def _make_engine(config: dict):
         )
     )
     from structured_pdf_text.ocr.paddle import PaddleOcrEngine
+    from structured_pdf_text.config import OcrQualityThresholds
+
+    qt_dict = config.get("quality_thresholds") or {}
+    quality_thresholds = OcrQualityThresholds(**qt_dict) if qt_dict else OcrQualityThresholds()
 
     return PaddleOcrEngine(
         language=config.get("language", "pt"),
@@ -69,7 +73,7 @@ def _make_engine(config: dict):
         ocr_batch_size=config.get("ocr_batch_size", 1),
         quality_variants=config.get("quality_variants", False),
         quality_policy=config.get("quality_policy", "fast"),
-        quality_thresholds=config.get("quality_thresholds", {}),
+        quality_thresholds=quality_thresholds,
         enable_mkldnn=config.get("mkldnn", False),
     )
 

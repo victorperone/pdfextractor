@@ -21,6 +21,7 @@ CF-4 (Windows DLL isolation):
 from __future__ import annotations
 
 import base64
+import dataclasses
 import importlib.util
 import io
 import json
@@ -128,7 +129,7 @@ class PaddleOCRBackend:
                 "ocr_batch_size": config.ocr_batch_size,
                 "quality_variants": config.ocr_quality_variants,
                 "quality_policy": effective_ocr_quality_policy(config).value,
-                "quality_thresholds": config.ocr_quality_thresholds,
+                "quality_thresholds": dataclasses.asdict(config.ocr_quality_thresholds),
                 "mkldnn": _enable_mkldnn,
                 "disable_pir_api": self._runtime_policy.disable_pir_api,
             }
@@ -160,7 +161,7 @@ class PaddleOCRBackend:
             [sys.executable, str(_WORKER_SCRIPT)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            bufsize=1,  # line-buffered
+            bufsize=0,  # unbuffered binary I/O — flush() is explicit in _worker_send
         )
         # Send init request
         init_req = {"method": "init", **self._subprocess_config}  # type: ignore[arg-type]
@@ -374,8 +375,19 @@ class PaddleOCRBackend:
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        from structured_pdf_text.ocr.paddle import validate_local_ocr_models
+
+        try:
+            validate_local_ocr_models(language=self._config.language, cache_home=self._cache_home)
+        except PaddleOcrUnavailable:
+            return "missing"
+        except ValueError:
+            return "unknown"
+        except Exception:
+            return "unknown"
+
         if self._subprocess_config is not None:
-            # In subprocess mode: send a lightweight ping to the worker
+            # In subprocess mode: also ping the worker to verify the subprocess runs.
             try:
                 self._ensure_worker()
                 resp = self._worker_send({"method": "healthcheck"})
@@ -383,17 +395,7 @@ class PaddleOCRBackend:
             except Exception:
                 return "unknown"
 
-        from structured_pdf_text.ocr.paddle import validate_local_ocr_models
-
-        try:
-            validate_local_ocr_models(language=self._config.language, cache_home=self._cache_home)
-            return "ready"
-        except PaddleOcrUnavailable:
-            return "missing"
-        except ValueError:
-            return "unknown"
-        except Exception:
-            return "unknown"
+        return "ready"
 
     def close(self) -> None:
         if self._worker_proc is not None:
