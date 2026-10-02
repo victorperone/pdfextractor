@@ -334,7 +334,8 @@ def main() -> int:
 
     # --- Document-level benchmark status ---
     doc_diag = document.diagnostics
-    doc_status_raw: str = str(getattr(doc_diag, "status", "unknown"))
+    _doc_status = getattr(doc_diag, "status", None)
+    doc_status_raw: str = _doc_status.value if hasattr(_doc_status, "value") else str(_doc_status or "unknown")
     doc_warnings: list[str] = list(getattr(doc_diag, "warnings", []))
 
     if failed_ocr_pages:
