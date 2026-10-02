@@ -1211,8 +1211,8 @@ def main() -> int:
     }
 
     # --- Groups 2, 3, 4, 5: full-document Markdown ---
-    # Use only the pages present in both for structural/table metrics (missing
-    # pages have no hypothesis text to compare structure against).
+    # Group 2 (structure) and Group 4 (integrity): only pages present in both —
+    # missing pages have no hypothesis text to compare structure against.
     eval_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
     hyp_full_body = "\n\n".join(
         _strip_page_header(hyp_pages[pn])
@@ -1223,12 +1223,25 @@ def main() -> int:
         for pn in eval_page_nums
     )
 
+    # Groups 3 and 5 (tables, critical data): include selected-but-missing pages
+    # so that absent tables and critical values are penalised (ref content present,
+    # hypothesis contributes empty string).
+    penalised_page_nums = sorted((hyp_pages.keys() & ref_pages.keys()) | selected_but_missing)
+    hyp_penalised_body = "\n\n".join(
+        _strip_page_header(hyp_pages[pn]) if pn in hyp_pages else ""
+        for pn in penalised_page_nums
+    )
+    ref_penalised_body = "\n\n".join(
+        _strip_page_header(ref_pages[pn])
+        for pn in penalised_page_nums
+    )
+
     if not args.quiet:
         print("  Calculando métricas estruturais e de tabelas (full-doc)...")
 
     full_struct_m = compute_structure_metrics(hyp_full_body, ref_full_body)
-    full_table_m = compute_table_metrics(hyp_full_body, ref_full_body)
-    full_crit_m = compute_critical_data_metrics(hyp_full_body, ref_full_body)
+    full_table_m = compute_table_metrics(hyp_penalised_body, ref_penalised_body)
+    full_crit_m = compute_critical_data_metrics(hyp_penalised_body, ref_penalised_body)
     integrity_m = compute_integrity_metrics(
         hyp_full_body, ref_full_body, hyp_pages, ref_pages
     )
