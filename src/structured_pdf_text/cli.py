@@ -143,11 +143,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     extract_parser.add_argument(
         "--ocr-engine",
-        default="paddle",
+        default=None,
         metavar="ENGINE",
         help=(
             "OCR engine to use: paddle (default), rapidocr-onnx, rapidocr-openvino, "
-            "tesseract, easyocr. Phases 4-7 add the non-Paddle backends."
+            "tesseract, easyocr."
         ),
     )
     extract_parser.add_argument(
@@ -345,8 +345,14 @@ def main(argv: list[str] | None = None) -> int:
             print("--ocr-batch-size must be at least 1", file=sys.stderr)
             return 2
         profile_name = args.ocr_model_profile or args.language or "pt"
+        # Resolve effective engine: explicit --ocr-engine wins; default is "paddle".
+        effective_engine: str = args.ocr_engine or "paddle"
         if args.best:
             config = best_extraction_config(language=profile_name)
+            # F05: --best must not silently ignore an explicit --ocr-engine.
+            if args.ocr_engine is not None:
+                from dataclasses import replace as _replace
+                config = _replace(config, ocr_engine=args.ocr_engine)
         else:
             config = ExtractorConfig(
                 mode=args.mode,
@@ -357,13 +363,14 @@ def main(argv: list[str] | None = None) -> int:
                 preserve_headers_footers=not args.omit_repeated_headers_footers,
                 merge_cross_page_tables=args.merge_cross_page_tables,
                 num_threads=args.threads,
-                ocr_engine=args.ocr_engine,
+                ocr_engine=effective_engine,
             )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if _mode_requires_ocr(config.mode) and args.ocr_model_profile is None and args.language is None:
             print("--ocr-model-profile is required when the selected mode can use OCR", file=sys.stderr)
             return 2
-        if _mode_requires_ocr(config.mode):
+        # F04: Paddle model preflight only runs when the selected engine is Paddle.
+        if _mode_requires_ocr(config.mode) and effective_engine == "paddle":
             try:
                 validate_local_ocr_models(
                     language=config.language,
