@@ -587,6 +587,7 @@ def compute_integrity_metrics(
     ref: str,
     hyp_pages: dict[int, str],
     ref_pages: dict[int, str],
+    selected_but_missing: set[int] | None = None,
 ) -> dict:
     """Compute Group 4 order and integrity metrics on the full document.
 
@@ -677,17 +678,18 @@ def compute_integrity_metrics(
     total_lines = hyp.count("\n") + 1
     page_num_leakage = round(min(1.0, standalone_nums / max(total_lines, 1)), 4)
 
-    # Failure Rate: among attempted pages (present in hyp), how many came out empty
-    # despite having content in the reference. Partial runs are not penalized for
-    # pages that were never attempted.
-    attempted = set(hyp_pages.keys())
+    # Failure Rate: among selected pages (attempted + completely absent), how many
+    # produced no content despite having reference content. Completely absent pages
+    # (selected but never written to hypothesis at all) count as failures.
+    absent: set[int] = selected_but_missing if selected_but_missing is not None else set()
+    selected = set(hyp_pages.keys()) | absent
     n_ref_with_content = sum(
         1 for pn, v in ref_pages.items()
-        if pn in attempted and _strip_page_header(v).strip()
+        if pn in selected and _strip_page_header(v).strip()
     )
     n_hyp_empty = sum(
         1 for pn, rv in ref_pages.items()
-        if pn in attempted
+        if pn in selected
         and _strip_page_header(rv).strip()
         and not _strip_page_header(hyp_pages.get(pn, "")).strip()
     )
@@ -1243,7 +1245,7 @@ def main() -> int:
     full_table_m = compute_table_metrics(hyp_penalised_body, ref_penalised_body)
     full_crit_m = compute_critical_data_metrics(hyp_penalised_body, ref_penalised_body)
     integrity_m = compute_integrity_metrics(
-        hyp_full_body, ref_full_body, hyp_pages, ref_pages
+        hyp_full_body, ref_full_body, hyp_pages, ref_pages, selected_but_missing
     )
 
     # Correct set-difference page counts (fixes the cardinality-subtraction bug).
