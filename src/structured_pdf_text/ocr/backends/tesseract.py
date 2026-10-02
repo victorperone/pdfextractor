@@ -285,6 +285,7 @@ def _tsv_to_pipeline_tokens(
     rows: list[dict], page_index: int, language: str,
     offset_x: float = 0.0, offset_y: float = 0.0,
     conf_min: float = 0.0,
+    source: "SourceKind" = SourceKind.OCR_PAGE,
 ) -> list[OcrToken]:
     tokens = []
     for row in rows:
@@ -301,7 +302,7 @@ def _tsv_to_pipeline_tokens(
             bbox=bbox,
             confidence=score / 100.0,
             language=language,
-            source=SourceKind.OCR_PAGE,
+            source=source,
         ))
     return tokens
 
@@ -472,6 +473,7 @@ class TesseractBackend:
             _parse_tsv(tsv), page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
             conf_min=self._conf_min,
+            source=SourceKind.OCR_REGION,
         )
 
     # ------------------------------------------------------------------

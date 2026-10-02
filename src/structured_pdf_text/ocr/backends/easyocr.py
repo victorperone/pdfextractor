@@ -432,6 +432,7 @@ def _result_to_ocr_tokens(
 def _result_to_pipeline_tokens(
     raw: list[Any], page_index: int, language: str,
     offset_x: float = 0.0, offset_y: float = 0.0,
+    source: "SourceKind" = SourceKind.OCR_PAGE,
 ) -> list[OcrToken]:
     if not raw:
         return []
@@ -457,7 +458,7 @@ def _result_to_pipeline_tokens(
         tokens.append(OcrToken(
             text=str(text), bbox=bbox,
             confidence=max(0.0, min(1.0, confidence if confidence is not None else 0.0)),
-            language=language, source=SourceKind.OCR_PAGE,
+            language=language, source=source,
         ))
     return tokens
 
@@ -655,6 +656,7 @@ class EasyOCRBackend:
         return _result_to_pipeline_tokens(
             raw, page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
+            source=SourceKind.OCR_REGION,
         )
 
     # ------------------------------------------------------------------
