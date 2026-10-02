@@ -238,12 +238,13 @@ def main() -> int:
     document = None
     error_msg: str | None = None
     error_details: dict = {}
+    extractor = PdfTextExtractor(config)
 
     try:
-        extractor = PdfTextExtractor(config)
-        document = extractor.extract(args.pdf, progress_callback=on_progress)
-        # Close the last page interval immediately — before any post-processing.
-        page_times.append(time.perf_counter() - _tick[0])
+        with extractor:
+            document = extractor.extract(args.pdf, progress_callback=on_progress)
+            # Close the last page interval immediately — before any post-processing.
+            page_times.append(time.perf_counter() - _tick[0])
     except Exception as exc:
         error_msg = str(exc)
         if hasattr(exc, "details") and exc.details:

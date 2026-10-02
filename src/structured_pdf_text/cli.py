@@ -385,10 +385,11 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.cache_home).expanduser().resolve()
             )
         try:
-            document = PdfTextExtractor(config).extract(
-                args.pdf,
-                progress_callback=callback,
-            )
+            with PdfTextExtractor(config) as extractor:
+                document = extractor.extract(
+                    args.pdf,
+                    progress_callback=callback,
+                )
         except FatalExtractionError as exc:
             if args.progress:
                 print(file=sys.stderr)
@@ -456,7 +457,8 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.cache_home).expanduser().resolve()
             )
         try:
-            document = PdfTextExtractor(config).extract(args.pdf)
+            with PdfTextExtractor(config) as extractor:
+                document = extractor.extract(args.pdf)
         except FatalExtractionError as exc:
             _print_fatal_extraction_error(exc)
             return 1
@@ -515,13 +517,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
         try:
-            document = PdfTextExtractor(
+            with PdfTextExtractor(
                 ExtractorConfig(
                     mode=mode,
                     language=args.ocr_model_profile or "pt",
                     page_indices=(index,),
                 )
-            ).extract(args.pdf)
+            ) as extractor:
+                document = extractor.extract(args.pdf)
         except FatalExtractionError as exc:
             _print_fatal_extraction_error(exc)
             return 1
