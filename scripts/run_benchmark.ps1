@@ -1,5 +1,8 @@
 # Phase 8 — E2E Benchmark: all engines, sequential
 #
+# Defaults target the validated Stress OCR Markdown V4 corpus.
+# All paths are relative to the repository root by default.
+#
 # Smoke test (5 pages):
 #   .\scripts\run_benchmark.ps1
 #
@@ -15,11 +18,116 @@ param(
     [switch]$AllPages,
     [string]$RunSuffix  = "smoke",
     [string]$Engine     = "",
-    [string]$Corpus     = "C:\Users\a_victor.perone\workspace\pdfextractor\corpus\Corpus_Stress_OCR_Markdown_V4.pdf",
-    [string]$Manifesto  = "C:\Users\a_victor.perone\workspace\pdfextractor\corpus\Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json",
-    [string]$OutDir     = "output\fase8"
+    [string]$Corpus     = "corpus\Corpus_Stress_OCR_Markdown_V4.pdf",
+    [string]$Reference  = "corpus\Corpus_Stress_OCR_Markdown_V4_REFERENCIA.md",
+    [string]$Manifesto  = "corpus\Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json",
+    [string]$Validation = "corpus\Corpus_Stress_OCR_Markdown_V4_VALIDACAO.txt",
+    [string]$OutDir     = "output\fase8",
+    [string]$PythonBin  = "python"
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+# Resolve paths relative to the repository root (parent of scripts\).
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot  = Split-Path -Parent $ScriptDir
+
+Push-Location $RepoRoot
+try {
+
+# --- Validate corpus files exist before spending time on OCR ---
+foreach ($file in @($Corpus, $Reference, $Manifesto, $Validation)) {
+    if (-not (Test-Path $file)) {
+        Write-Host "ERROR: file not found: $file" -ForegroundColor Red
+        exit 2
+    }
+}
+
+# --- Corpus preflight (mirrors run_benchmark.sh inline Python check) ---
+Write-Host ""
+Write-Host "Running corpus preflight..." -ForegroundColor Cyan
+$preflightScript = @"
+import json, re, sys
+from pathlib import Path
+
+pdf_path, reference_path, manifesto_path, validation_path = map(Path, sys.argv[1:])
+manifest = json.loads(manifesto_path.read_text(encoding='utf-8'))
+pages = manifest.get('pages', [])
+manifest_numbers = [int(p['page']) for p in pages]
+reference = reference_path.read_text(encoding='utf-8')
+page_pattern = re.compile(r'^##\s+P[áa]gina\s+0*(\d+)', re.M | re.I)
+reference_matches = list(page_pattern.finditer(reference))
+reference_numbers = [int(m.group(1)) for m in reference_matches]
+reference_sections = {
+    int(m.group(1)): reference[m.start():(
+        reference_matches[i+1].start() if i+1 < len(reference_matches) else len(reference)
+    )].strip()
+    for i, m in enumerate(reference_matches)
+}
+validation = validation_path.read_text(encoding='utf-8')
+page_match = re.search(r'(?m)^P[áa]ginas:\s*(\d+)\s*$', validation)
+if not page_match:
+    raise SystemExit("Validation report has no 'Páginas: N' summary")
+validation_count = int(page_match.group(1))
+
+try:
+    import pypdfium2 as pdfium
+except ImportError as exc:
+    raise SystemExit('pypdfium2 is required to verify the PDF page count') from exc
+pdf = pdfium.PdfDocument(str(pdf_path))
+pdf_count = len(pdf)
+pdf.close()
+
+required_checks = (
+    '[OK] JSON válido',
+    '[OK] Markdown reconstruído do JSON é idêntico byte a byte',
+    '[OK] Hashes expected_markdown válidos',
+)
+missing_checks = [c for c in required_checks if c not in validation]
+if missing_checks:
+    raise SystemExit('Validation report is missing checks: ' + ', '.join(missing_checks))
+if '[FAIL]' in validation:
+    raise SystemExit('Validation report contains a [FAIL] result')
+if not pages or len(set(manifest_numbers)) != len(manifest_numbers):
+    raise SystemExit('Manifesto has no pages or contains duplicate page numbers')
+blank_pages = {
+    int(p['page']): str(p.get('expected_markdown', '')).strip()
+    for p in pages if p.get('blank')
+}
+expected_ref_numbers = [n for n in manifest_numbers if n not in blank_pages]
+if reference_numbers != expected_ref_numbers:
+    raise SystemExit('Reference page sections do not match nonblank manifesto pages')
+for p in pages:
+    number = int(p['page'])
+    expected = str(p.get('expected_markdown', '')).strip()
+    if number in blank_pages:
+        if not expected or expected not in reference:
+            raise SystemExit(f'Blank page {number} is not represented in the reference')
+        continue
+    actual = reference_sections.get(number, '')
+    for blank_marker in blank_pages.values():
+        actual = actual.replace(blank_marker, '')
+    if actual.strip() != expected:
+        raise SystemExit(f'Reference content differs from manifesto on page {number}')
+if not (pdf_count == len(pages) == validation_count):
+    raise SystemExit(
+        f'Page count mismatch: PDF={pdf_count}, manifesto={len(pages)}, '
+        f'validation report={validation_count}'
+    )
+expected_pdf_check = f'[OK] Quantidade de páginas no PDF | {pdf_count}'
+if expected_pdf_check not in validation:
+    raise SystemExit('Validation report does not confirm the PDF page count')
+print(f'Corpus preflight OK: {pdf_count} PDF pages, reference and manifesto aligned.')
+"@
+
+& $PythonBin -c $preflightScript $Corpus $Reference $Manifesto $Validation
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Corpus preflight failed; benchmark was not started." -ForegroundColor Red
+    exit 2
+}
+
+# --- Engine loop ---
 $allEngines = @("tesseract", "rapidocr-onnx", "rapidocr-openvino", "easyocr", "paddle")
 
 if ($Engine -ne "") {
@@ -27,12 +135,17 @@ if ($Engine -ne "") {
 } else {
     $engines = $allEngines
 }
-$failed  = @()
+
+$failed      = @()
+$metricFiles = @()
+
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 foreach ($engine in $engines) {
     $runId      = "$RunSuffix-$engine"
     $engineSlug = $engine -replace "-", "_"
     $hyp        = "$OutDir\extracted_${engineSlug}_${runId}.md"
+    $metrics    = "$OutDir\metrics_${engineSlug}_${runId}.json"
 
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
@@ -46,9 +159,9 @@ foreach ($engine in $engines) {
 
     # --- evaluate_e2e ---
     if ($AllPages) {
-        python scripts\evaluate_e2e.py $Corpus --engine $engine --run-id $runId --output-dir $OutDir
+        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --run-id $runId --output-dir $OutDir
     } else {
-        python scripts\evaluate_e2e.py $Corpus --engine $engine --pages $Pages --run-id $runId --output-dir $OutDir
+        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --pages $Pages --run-id $runId --output-dir $OutDir
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -58,11 +171,23 @@ foreach ($engine in $engines) {
     }
 
     # --- compute_metrics ---
-    python scripts\compute_metrics.py --hypothesis $hyp --manifesto $Manifesto --engine $engine --run-id $runId --output-dir $OutDir
+    & $PythonBin scripts\compute_metrics.py `
+        --hypothesis $hyp `
+        --manifesto $Manifesto `
+        --engine $engine `
+        --run-id $runId `
+        --output-dir $OutDir
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [ERROR] compute_metrics failed for $engine" -ForegroundColor Red
         $failed += $engine
+        continue
+    }
+
+    # Collect only metrics files produced by this run (not stale files from
+    # previous runs with the same suffix but different engines).
+    if (Test-Path $metrics) {
+        $metricFiles += $metrics
     }
 }
 
@@ -72,20 +197,21 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " Comparison table" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-$metricsFiles = @(Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" -ErrorAction SilentlyContinue |
-    ForEach-Object { $_.FullName })
-
-if ($metricsFiles) {
-    python scripts\compare_engines.py @metricsFiles --output "$OutDir\comparison_${RunSuffix}.md"
+if ($metricFiles.Count -gt 0) {
+    & $PythonBin scripts\compare_engines.py @metricFiles --output "$OutDir\comparison_${RunSuffix}.md"
     Write-Host "  Table: $OutDir\comparison_${RunSuffix}.md" -ForegroundColor Green
 } else {
-    Write-Host "  No metrics files found in $OutDir" -ForegroundColor Yellow
+    Write-Host "  No metrics files produced in this run." -ForegroundColor Yellow
 }
 
 Write-Host ""
-if ($failed) {
+if ($failed.Count -gt 0) {
     Write-Host "Failed engines: $($failed -join ', ')" -ForegroundColor Red
     exit 1
 } else {
     Write-Host "All engines completed successfully!" -ForegroundColor Green
+}
+
+} finally {
+    Pop-Location
 }
