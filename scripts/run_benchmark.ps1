@@ -215,16 +215,27 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " Comparison table" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
+$compareFailed = $false
 if ($metricFiles.Count -gt 0) {
     & $PythonBin scripts\compare_engines.py @metricFiles --output "$OutDir\comparison_${RunSuffix}.md"
-    Write-Host "  Table: $OutDir\comparison_${RunSuffix}.md" -ForegroundColor Green
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] compare_engines failed (exit $LASTEXITCODE)" -ForegroundColor Red
+        $compareFailed = $true
+    } else {
+        Write-Host "  Table: $OutDir\comparison_${RunSuffix}.md" -ForegroundColor Green
+    }
 } else {
     Write-Host "  No metrics files produced in this run." -ForegroundColor Yellow
 }
 
 Write-Host ""
-if ($failed.Count -gt 0) {
-    Write-Host "Failed engines: $($failed -join ', ')" -ForegroundColor Red
+if ($failed.Count -gt 0 -or $compareFailed) {
+    if ($failed.Count -gt 0) {
+        Write-Host "Failed engines: $($failed -join ', ')" -ForegroundColor Red
+    }
+    if ($compareFailed) {
+        Write-Host "Comparison step failed — review errors above." -ForegroundColor Red
+    }
     exit 1
 } else {
     Write-Host "All engines completed successfully!" -ForegroundColor Green
