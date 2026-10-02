@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry
+from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, safe_crop_array
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -328,13 +328,15 @@ class RapidOCRBackend:
         region_bbox: "BBox",
     ) -> list[OcrToken]:
         img = _to_numpy(page_image)
-        x0, y0 = int(region_bbox.x0), int(region_bbox.y0)
-        x1, y1 = int(region_bbox.x1), int(region_bbox.y1)
-        crop = img[y0:y1, x0:x1]
+        crop, (cx0, cy0, _cx1, _cy1) = safe_crop_array(
+            img, region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1,
+        )
+        if crop.size == 0:
+            return []
         out = _run_rapidocr(self._engine, crop)
         return _result_to_pipeline_tokens(
             _extract_raw(out), page_index, self._language,
-            offset_x=float(x0), offset_y=float(y0),
+            offset_x=float(cx0), offset_y=float(cy0),
         )
 
     # ------------------------------------------------------------------

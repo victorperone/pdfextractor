@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.ocr.backends._parser_utils import safe_crop_array
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -440,9 +441,12 @@ class TesseractBackend:
 
         pil = _to_pil(page_image)
         arr = np.array(pil)
-        x0, y0 = int(region_bbox.x0), int(region_bbox.y0)
-        x1, y1 = int(region_bbox.x1), int(region_bbox.y1)
-        crop_pil = Image.fromarray(arr[y0:y1, x0:x1])
+        crop_arr, (cx0, cy0, _cx1, _cy1) = safe_crop_array(
+            arr, region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1,
+        )
+        if crop_arr.size == 0:
+            return []
+        crop_pil = Image.fromarray(crop_arr)
 
         tsv = _run_tesseract_tsv(
             crop_pil, self._tess_lang, self._psm, self._oem,
@@ -450,7 +454,7 @@ class TesseractBackend:
         )
         return _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
-            offset_x=float(x0), offset_y=float(y0),
+            offset_x=float(cx0), offset_y=float(cy0),
             conf_min=self._conf_min,
         )
 

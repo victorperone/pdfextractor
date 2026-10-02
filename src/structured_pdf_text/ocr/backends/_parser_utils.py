@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 def quadrilateral_geometry(value: Any, offset_x: float = 0.0, offset_y: float = 0.0):
@@ -29,6 +32,35 @@ def quadrilateral_geometry(value: Any, offset_x: float = 0.0, offset_y: float = 
     if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
         return None
     return tuple(points), bounds
+
+
+def safe_crop_array(
+    arr: "np.ndarray",
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> "tuple[np.ndarray, tuple[int, int, int, int]]":
+    """Crop a numpy image array with coordinates clamped to valid bounds.
+
+    Converts float coordinates to int, clamps each edge to [0, dimension],
+    and ensures x0 < x1, y0 < y1.  Returns (crop, (cx0, cy0, cx1, cy1))
+    where the second element is the effective integer crop box after clamping —
+    use it as the offset when projecting token coordinates back to page space.
+
+    Callers should treat an empty crop (zero width or height) as a signal to
+    skip OCR for that region rather than passing an empty array downstream.
+    """
+    h, w = arr.shape[:2]
+    cx0 = max(0, min(int(x0), w))
+    cy0 = max(0, min(int(y0), h))
+    cx1 = max(0, min(int(x1), w))
+    cy1 = max(0, min(int(y1), h))
+    if cx0 > cx1:
+        cx0, cx1 = cx1, cx0
+    if cy0 > cy1:
+        cy0, cy1 = cy1, cy0
+    return arr[cy0:cy1, cx0:cx1], (cx0, cy0, cx1, cy1)
 
 
 def finite_confidence(value: Any) -> float | None:
