@@ -493,6 +493,7 @@ class EasyOCRBackend:
         self._blocklist: str | None = blocklist_env if blocklist_env else None
         rotation_info_env = os.environ.get("EASYOCR_ROTATION_INFO", "")
         self._rotation_info: list[int] | None = _parse_rotation_info(rotation_info_env)
+        self._mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
 
         # Apply PyTorch thread limits before the Reader (and its model loading)
         # initialises, so all inference calls inherit the constrained thread pool.
@@ -539,11 +540,15 @@ class EasyOCRBackend:
             },
             artifact_hashes={},  # .pth files are ~700 MB — hashing at init would add ~30s startup
             extra={
+                "mag_ratio": self._mag_ratio,
+                "canvas_size_policy": "int(mag_ratio * max(h, w))",
                 "decoder": self._decoder,
-                "beamwidth": self._beamwidth,
+                "beamwidth": self._beamwidth if self._decoder == "beamsearch" else None,
                 "workers": self._workers,
                 "torch_num_threads": self._torch_num_threads,
                 "adjust_contrast": self._adjust_contrast,
+                "allowlist": self._allowlist,
+                "blocklist": self._blocklist,
                 "rotation_info": self._rotation_info,
             },
         )

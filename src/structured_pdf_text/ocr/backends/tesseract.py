@@ -361,6 +361,7 @@ class TesseractBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
+        tessdata_dir_env = os.environ.get("TESSERACT_TESSDATA_DIR", "")
         return OCRBackendIdentity(
             engine="tesseract",
             runtime="tesseract-cli",
@@ -373,6 +374,14 @@ class TesseractBackend:
                 "lang": self._tess_lang,
             },
             artifact_hashes=self._artifact_hashes,
+            extra={
+                "psm": self._psm,
+                "oem": self._oem,
+                "effective_dpi": self._dpi,
+                "conf_min": self._conf_min,
+                "clahe": True,
+                "tessdata_dir_override": tessdata_dir_env or None,
+            },
         )
 
     @property

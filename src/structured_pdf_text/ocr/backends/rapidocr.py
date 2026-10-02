@@ -332,7 +332,17 @@ class RapidOCRBackend:
                 runtime_pkg: _package_version(runtime_pkg),
             },
             artifact_hashes=self._artifact_hashes,
-            extra={"clahe": True},
+            extra={
+                "clahe": True,
+                "det_db_unclip_ratio": float(os.environ.get("RAPIDOCR_UNCLIP_RATIO", "1.8")),
+                "det_db_box_thresh":   float(os.environ.get("RAPIDOCR_BOX_THRESH",   "0.45")),
+                "det_db_thresh":       float(os.environ.get("RAPIDOCR_DET_THRESH",   "0.25")),
+                "text_score":          float(os.environ.get("RAPIDOCR_TEXT_SCORE",   "0.5")),
+                "with_angle_cls":      os.environ.get("RAPIDOCR_ANGLE_CLS", "0").lower() in ("1", "true", "yes"),
+                "rec_model": self._rec_model,
+                "rec_keys":  self._rec_keys,
+                "det_model": self._det_model,
+            },
         )
 
     @property
