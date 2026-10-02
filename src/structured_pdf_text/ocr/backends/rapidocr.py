@@ -6,15 +6,28 @@ The only difference is the underlying inference package:
   - rapidocr-openvino 1.x     → runtime="openvino"
 
 CF-2: Direct PP-OCRv6 ONNX export from Paddle is blocked on Windows by a DLL
-incompatibility (paddle2onnx 2.x + PaddlePaddle 3.3.1). Both backends use the
-PP-OCRv4 models bundled in their respective packages.
+incompatibility (paddle2onnx 2.x + PaddlePaddle 3.3.1). Both backends therefore
+use PP-OCRv4 models.  PP-OCRv6 ONNX files must be exported on Linux and then
+pointed to via the env vars below.
 
-**Default bundled model is PP-OCRv4 ch (Chinese + basic ASCII).** For full
-Portuguese diacritics (ã ç ê õ), switch to a Latin model via env vars:
+**Default bundled model is PP-OCRv4 ch (Chinese + basic ASCII), which does NOT
+cover Portuguese diacritics (ã ç ê õ).**  For correct Portuguese recognition,
+set the Latin/English PP-OCRv4 (or PP-OCRv6 if exported) recognition model:
+
+    # PP-OCRv4 Latin (recommended for Portuguese, available pre-built):
     RAPIDOCR_REC_MODEL=/path/to/en_PP-OCRv4_rec_infer.onnx
     RAPIDOCR_REC_KEYS=/path/to/en_dict.txt   # required when switching rec model
 
-Detection/quality tuning (Fase 9):
+    # PP-OCRv6 medium (better quality; export on Linux first — CF-2):
+    RAPIDOCR_REC_MODEL=/path/to/PP-OCRv6_medium_rec_infer.onnx
+    RAPIDOCR_DET_MODEL=/path/to/PP-OCRv6_medium_det_infer.onnx
+    RAPIDOCR_REC_KEYS=/path/to/ppocr_keys_v1.txt
+
+A UserWarning is emitted at init time when neither RAPIDOCR_REC_MODEL nor
+RAPIDOCR_DET_MODEL is set, because the bundled ch model will silently drop
+diacritics and produce incorrect output for Portuguese documents.
+
+Detection/quality tuning:
     RAPIDOCR_DET_MODEL      — override detection model path
     RAPIDOCR_UNCLIP_RATIO   — DB box expansion (default 1.8, was 1.6)
     RAPIDOCR_BOX_THRESH     — per-box score threshold (default 0.45, was 0.5)
@@ -26,6 +39,7 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
@@ -229,6 +243,22 @@ class RapidOCRBackend:
         if rec_keys:
             kwargs["rec_char_dict_path"] = rec_keys
 
+        if not rec_path and not det_path:
+            warnings.warn(
+                "RapidOCR is using the bundled PP-OCRv4-ch model, which does not "
+                "cover Portuguese diacritics (ã ç ê õ). "
+                "Set RAPIDOCR_REC_MODEL and RAPIDOCR_REC_KEYS to a Latin/en PP-OCRv4 "
+                "or PP-OCRv6 ONNX model for correct Portuguese recognition. "
+                "See the module docstring for instructions.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._profile = "builtin-ch"
+        elif rec_path:
+            self._profile = "custom-rec"
+        else:
+            self._profile = "custom-det"
+
         unclip    = float(os.environ.get("RAPIDOCR_UNCLIP_RATIO", "1.8"))
         box_thresh = float(os.environ.get("RAPIDOCR_BOX_THRESH",   "0.45"))
         det_thresh = float(os.environ.get("RAPIDOCR_DET_THRESH",   "0.25"))
@@ -272,13 +302,12 @@ class RapidOCRBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
-        profile = "custom-onnx" if self._det_model else "builtin"
         pkg_name = "rapidocr-onnxruntime" if self._runtime == "onnxruntime" else "rapidocr-openvino"
         runtime_pkg = "onnxruntime" if self._runtime == "onnxruntime" else "openvino"
         return OCRBackendIdentity(
             engine=self._engine_key,
             runtime=self._runtime,
-            profile=profile,
+            profile=self._profile,
             language=self._language,
             device="cpu",
             package_versions={
