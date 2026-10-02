@@ -410,9 +410,11 @@ def main() -> int:
         print("  Próximo passo — calcular métricas:")
         print(f"  python scripts/compute_metrics.py \\")
         print(f"    --hypothesis {md_path} \\")
-        print(f"    --manifesto <MANIFESTO.json> \\")
+        print(f"    --manifesto <CORPUS_MANIFESTO.json> \\")
+        print(f"    --run-manifest {manifest_path} \\")
         print(f"    --engine {args.engine} \\")
         print(f"    --output-dir {args.output_dir}")
+        print(f"  # Replace <CORPUS_MANIFESTO.json> with the corpus reference manifesto path.")
 
     # Exit code 2 signals "run saved but ineligible for standard ranking".
     if benchmark_status != "valid" and not args.allow_partial:
