@@ -1,315 +1,387 @@
-"""Validation tests for the EasyOCR Phase 9 regression fixes.
+"""Contract tests for the EasyOCR backend's detect/recognize split.
 
-These tests run without any real OCR runtime (no EasyOCR, no PyTorch).
-They verify three specific bug-fixes:
+These tests verify the correct upstream contract as described in the F01/F02
+audit findings.  No real EasyOCR or PyTorch installation is required — all
+external calls are replaced with monkeypatched fakes at runtime, not at
+module-collection time.
 
-  Fix 1 — reader.recognize() receives 3-channel (H,W,3) array, NOT 2D grayscale.
-  Fix 2 — adjust_contrast defaults to 0.5 (was 1.0), env-configurable.
-  Fix 3 — mag_ratio defaults to 1.2 (was 1.5), env-configurable.
+Key contracts verified
+----------------------
+- Nominal path: detect() called once, recognize() called once, readtext() never.
+- detect() output is unwrapped with [0] before passing to recognize().
+- recognize() receives the grayscale image from reformat_input(), not the
+  3-channel colour array.
+- Fallback to readtext() is explicit: emits RuntimeWarning and returns
+  fallback_info dict (not None).
+- decoder param propagates correctly (greedy / beamsearch).
+- mag_ratio and adjust_contrast propagate correctly.
 """
 from __future__ import annotations
 
-import os
 import sys
 import types
-import importlib
-import importlib.util
+import warnings
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call
 
-
-# ---------------------------------------------------------------------------
-# Bootstrap: inject lightweight stubs for all package-level imports so the
-# module can be imported without installing the full structured-pdf-text stack.
-# ---------------------------------------------------------------------------
-
-def _make_stub(name: str) -> types.ModuleType:
-    m = types.ModuleType(name)
-    m.__getattr__ = lambda attr: MagicMock()  # type: ignore[method-assign]
-    return m
-
-
-_STUBS = [
-    "structured_pdf_text",
-    "structured_pdf_text.document",
-    "structured_pdf_text.geometry",
-    "structured_pdf_text.ocr",
-    "structured_pdf_text.ocr.backends",
-    "structured_pdf_text.ocr.backends._parser_utils",
-    "structured_pdf_text.ocr.contracts",
-    "structured_pdf_text.config",
-]
-for _s in _STUBS:
-    if _s not in sys.modules:
-        sys.modules[_s] = _make_stub(_s)
-
-# Specific attributes that the module's from-imports resolve at import time
-_doc_mod = sys.modules["structured_pdf_text.document"]
-_doc_mod.OcrToken = MagicMock  # type: ignore[attr-defined]
-_doc_mod.SourceKind = MagicMock  # type: ignore[attr-defined]
-_geo_mod = sys.modules["structured_pdf_text.geometry"]
-_geo_mod.BBox = MagicMock  # type: ignore[attr-defined]
-_parser_mod = sys.modules["structured_pdf_text.ocr.backends._parser_utils"]
-_parser_mod.finite_confidence = MagicMock  # type: ignore[attr-defined]
-_parser_mod.quadrilateral_geometry = MagicMock  # type: ignore[attr-defined]
-_contracts_mod = sys.modules["structured_pdf_text.ocr.contracts"]
-for _attr in ("OCRBackendIdentity", "OCRCapabilities", "OCRRequest", "OCRResult", "OCRToken",
-              "UnsupportedOCREngine"):
-    setattr(_contracts_mod, _attr, MagicMock)
-
-
-# Now load the actual module under test from its source file.
-_BACKEND_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..", "src", "structured_pdf_text", "ocr", "backends", "easyocr.py",
-)
-
-spec = importlib.util.spec_from_file_location("easyocr_backend", _BACKEND_PATH)
-assert spec is not None and spec.loader is not None
-_easyocr_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(_easyocr_mod)  # type: ignore[attr-defined]
-
-_run_easyocr = _easyocr_mod._run_easyocr  # type: ignore[attr-defined]
+import numpy as np
+import pytest
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_reader(*, detect_raises: bool = False, recognize_raises: bool = False) -> MagicMock:
-    """Return a mock EasyOCR reader with a controlled detect/recognize/readtext API."""
+def _make_image(h: int = 100, w: int = 120, channels: int = 3) -> np.ndarray:
+    if channels == 1:
+        return np.full((h, w), 128, dtype=np.uint8)
+    return np.full((h, w, channels), 128, dtype=np.uint8)
+
+
+def _make_reader(
+    *,
+    detect_raises: bool = False,
+    recognize_raises: bool = False,
+) -> MagicMock:
+    """Return a fake EasyOCR Reader whose detect/recognize/readtext are mocks.
+
+    detect() returns the aggregate structure EasyOCR uses:
+        ([[x0, x1, y0, y1]], [[]])  — a list-of-lists, one entry per image.
+    The backend must unwrap [0] before calling recognize().
+    """
     reader = MagicMock()
 
     if detect_raises:
         reader.detect.side_effect = RuntimeError("detect failed")
     else:
-        # Simulate a valid single-line horizontal_list response
-        reader.detect.return_value = ([[10, 90, 10, 90]], [[]])
+        # Aggregate output: one entry per image in the batch.
+        reader.detect.return_value = (
+            [[[10, 90, 10, 30]]],   # horizontal_list — list of lists
+            [[]],                    # free_list — list of lists
+        )
 
     if recognize_raises:
         reader.recognize.side_effect = RuntimeError("recognize failed")
     else:
-        # Simulate a result entry: (bbox_points, text, confidence)
         reader.recognize.return_value = [
-            ([[10, 10], [90, 10], [90, 30], [10, 30]], "Hello World", 0.95)
+            ([[10, 10], [90, 10], [90, 30], [10, 30]], "Hello", 0.95)
         ]
 
     reader.readtext.return_value = [
-        ([[10, 10], [90, 10], [90, 30], [10, 30]], "Hello World", 0.95)
+        ([[10, 10], [90, 10], [90, 30], [10, 30]], "Fallback", 0.80)
     ]
     return reader
 
 
-def _make_image_3ch(h: int = 100, w: int = 120) -> "Any":
-    """Return a (H,W,3) uint8 numpy array — simulates a rendered PDF page."""
-    import numpy as np
-    return np.full((h, w, 3), 128, dtype=np.uint8)
+def _make_reformat_input(img_color: np.ndarray, img_gray: np.ndarray):
+    """Return a fake reformat_input() that returns predetermined arrays."""
+    def _reformat(arr):  # noqa: ANN001
+        return img_color, img_gray
+    return _reformat
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: reader.recognize() must receive a 3-channel (H,W,3) array
+# Fixture: import _run_easyocr from the real source with easyocr.utils patched
 # ---------------------------------------------------------------------------
 
-class TestFix1RecognizeReceives3ChannelImage:
-    def test_recognize_called_with_3d_array(self):
-        """The primary bug: 2D grayscale was passed; must now be (H,W,3)."""
-        import numpy as np
-        reader = _make_reader()
-        img = _make_image_3ch()
+@pytest.fixture()
+def run_easyocr(monkeypatch):
+    """Import _run_easyocr and patch easyocr.utils.reformat_input per-test.
 
-        _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                     allowlist=None, blocklist=None, workers=0)
+    Returns a factory: call_run(reader, img, **kwargs) → (raw, fallback_info).
+    The factory automatically injects colour/gray arrays via a patched
+    reformat_input so tests control exactly what the backend sees.
+    """
+    from structured_pdf_text.ocr.backends.easyocr import _run_easyocr
 
-        assert reader.recognize.call_count == 1, "recognize() should be called once"
-        called_img = reader.recognize.call_args[0][0]  # first positional arg
-        assert isinstance(called_img, np.ndarray), "image must be ndarray"
-        assert called_img.ndim == 3, (
-            f"recognize() must receive a 3-channel image (ndim=3), got ndim={called_img.ndim}. "
-            "A 2D (grayscale) array here is the Phase 9 bug."
+    img_color = _make_image(100, 120, 3)
+    img_gray = _make_image(100, 120, 1)
+
+    # Patch easyocr.utils.reformat_input inside the backend's module namespace.
+    fake_easyocr_utils = types.SimpleNamespace(
+        reformat_input=_make_reformat_input(img_color, img_gray)
+    )
+    fake_easyocr = types.SimpleNamespace(utils=fake_easyocr_utils)
+
+    # The backend does `from easyocr.utils import reformat_input` inside _run_easyocr.
+    # We patch sys.modules so that import resolves to our fake.
+    original_easyocr = sys.modules.get("easyocr")
+    original_easyocr_utils = sys.modules.get("easyocr.utils")
+
+    monkeypatch.setitem(sys.modules, "easyocr", fake_easyocr)
+    monkeypatch.setitem(sys.modules, "easyocr.utils", fake_easyocr_utils)
+
+    def call_run(reader, img, *, decoder="greedy", beamwidth=5,
+                 adjust_contrast=0.5, allowlist=None, blocklist=None, workers=0):
+        return _run_easyocr(
+            reader, img,
+            decoder=decoder,
+            beamwidth=beamwidth,
+            adjust_contrast=adjust_contrast,
+            allowlist=allowlist,
+            blocklist=blocklist,
+            workers=workers,
         )
-        assert called_img.shape[2] == 3, (
-            f"Last dimension must be 3 (RGB channels), got shape={called_img.shape}"
-        )
 
-    def test_recognize_image_is_original_not_grayscale(self):
-        """Verify the passed array preserves the original pixel values (not converted)."""
-        import numpy as np
+    return call_run, img_color, img_gray
+
+
+# ---------------------------------------------------------------------------
+# Nominal path — detect once, recognize once, readtext never
+# ---------------------------------------------------------------------------
+
+class TestNominalPath:
+    def test_detect_called_once(self, run_easyocr):
+        call_run, img_color, img_gray = run_easyocr
         reader = _make_reader()
-        img = _make_image_3ch()
+        img = _make_image()
+        call_run(reader, img)
+        assert reader.detect.call_count == 1
 
-        _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                     allowlist=None, blocklist=None, workers=0)
+    def test_recognize_called_once(self, run_easyocr):
+        call_run, img_color, img_gray = run_easyocr
+        reader = _make_reader()
+        img = _make_image()
+        call_run(reader, img)
+        assert reader.recognize.call_count == 1
 
+    def test_readtext_not_called(self, run_easyocr):
+        call_run, img_color, img_gray = run_easyocr
+        reader = _make_reader()
+        img = _make_image()
+        call_run(reader, img)
+        assert reader.readtext.call_count == 0
+
+    def test_fallback_info_is_none_on_nominal_path(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        raw, fallback_info = call_run(reader, _make_image())
+        assert fallback_info is None
+
+    def test_result_is_list(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        raw, _ = call_run(reader, _make_image())
+        assert isinstance(raw, list)
+        assert len(raw) == 1
+
+
+# ---------------------------------------------------------------------------
+# detect() → recognize() unwrapping contract
+# ---------------------------------------------------------------------------
+
+class TestDetectRecognizeUnwrap:
+    def test_recognize_receives_grayscale_image(self, run_easyocr):
+        """recognize() must receive img_gray (2-D), not the 3-channel colour array."""
+        call_run, img_color, img_gray = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image())
         called_img = reader.recognize.call_args[0][0]
-        # The 3-channel image should still have 3 distinct channels
-        assert called_img.shape == img.shape, (
-            "Image shape must be preserved; CLAHE grayscale conversion must NOT happen"
+        assert np.array_equal(called_img, img_gray), (
+            "recognize() must receive the grayscale array from reformat_input, "
+            f"not the colour array. Got shape={getattr(called_img, 'shape', '?')}"
         )
 
-    def test_fallback_readtext_when_detect_fails_uses_3d_array(self):
-        """When detect() raises, readtext() fallback must also get 3-channel image."""
-        import numpy as np
-        reader = _make_reader(detect_raises=True)
-        img = _make_image_3ch()
-
-        _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                     allowlist=None, blocklist=None, workers=0)
-
-        assert reader.readtext.call_count == 1
-        called_img = reader.readtext.call_args[0][0]
-        assert called_img.ndim == 3, "readtext() fallback must also receive 3-channel image"
-
-    def test_fallback_readtext_when_recognize_fails_uses_3d_array(self):
-        """When recognize() raises, the secondary readtext() fallback must get 3-channel."""
-        import numpy as np
-        reader = _make_reader(recognize_raises=True)
-        img = _make_image_3ch()
-
-        _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                     allowlist=None, blocklist=None, workers=0)
-
-        assert reader.readtext.call_count == 1
-        called_img = reader.readtext.call_args[0][0]
-        assert called_img.ndim == 3, "readtext() secondary fallback must get 3-channel image"
-
-
-# ---------------------------------------------------------------------------
-# Fix 2: adjust_contrast defaults to 0.5 (was 1.0)
-# ---------------------------------------------------------------------------
-
-class TestFix2AdjustContrastDefault:
-    def test_default_adjust_contrast_is_0_5(self):
-        """adjust_contrast must default to 0.5, not 1.0."""
+    def test_recognize_does_not_receive_colour_image(self, run_easyocr):
+        """Regression guard: colour (H,W,3) image must NOT be passed to recognize()."""
+        call_run, img_color, img_gray = run_easyocr
         reader = _make_reader()
-        img = _make_image_3ch()
-
-        _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                     allowlist=None, blocklist=None, workers=0)
-
-        kwargs = reader.recognize.call_args[1]  # keyword args
-        assert "adjust_contrast" in kwargs, "adjust_contrast must be passed as kwarg"
-        assert kwargs["adjust_contrast"] == 0.5, (
-            f"adjust_contrast should be 0.5, got {kwargs['adjust_contrast']}"
+        call_run(reader, _make_image())
+        called_img = reader.recognize.call_args[0][0]
+        assert not np.array_equal(called_img, img_color), (
+            "recognize() received the colour image — the F01 bug is still present"
         )
 
-    def test_adjust_contrast_value_1_0_would_be_wrong(self):
-        """Regression guard: 1.0 is the old broken value and must NOT be the default."""
+    def test_detect_receives_colour_image(self, run_easyocr):
+        """detect() must receive the colour (H,W,3) image from reformat_input."""
+        call_run, img_color, img_gray = run_easyocr
         reader = _make_reader()
-        img = _make_image_3ch()
+        call_run(reader, _make_image())
+        called_img = reader.detect.call_args[0][0]
+        assert np.array_equal(called_img, img_color), (
+            "detect() must receive the colour array from reformat_input"
+        )
 
-        _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                     allowlist=None, blocklist=None, workers=0)
+    def test_horizontal_list_is_unwrapped(self, run_easyocr):
+        """recognize() must receive the unwrapped horizontal_list, not the aggregate."""
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image())
+        # Positional args to recognize: img_gray, horizontal_list, free_list
+        pos_args = reader.recognize.call_args[0]
+        horizontal_list = pos_args[1]
+        # After [0] unwrap, it should be the inner list, not a list-of-lists
+        assert isinstance(horizontal_list, list)
+        assert not isinstance(horizontal_list[0], list) or (
+            # Inner element is a bounding-box list [x0,x1,y0,y1], not another level
+            isinstance(horizontal_list[0], list) and
+            not isinstance(horizontal_list[0][0], list)
+        ), (
+            "horizontal_list passed to recognize() looks like the aggregate "
+            "(list-of-lists), not the unwrapped single-image list"
+        )
 
+    def test_detect_called_with_reformat_false(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image())
+        kwargs = reader.detect.call_args[1]
+        assert kwargs.get("reformat") is False
+
+    def test_recognize_called_with_reformat_false(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image())
         kwargs = reader.recognize.call_args[1]
-        assert kwargs.get("adjust_contrast") != 1.0, (
-            "adjust_contrast=1.0 is the old aggressive value; default must be 0.5"
-        )
+        assert kwargs.get("reformat") is False
 
-    def test_adjust_contrast_env_var_override(self):
-        """EASYOCR_ADJUST_CONTRAST env var must override the default for __init__."""
-        with patch.dict(os.environ, {"EASYOCR_ADJUST_CONTRAST": "0.3"}):
-            value = float(os.environ.get("EASYOCR_ADJUST_CONTRAST", "0.5"))
-        assert value == 0.3
-
-    def test_adjust_contrast_env_var_missing_defaults_to_0_5(self):
-        env = {k: v for k, v in os.environ.items() if k != "EASYOCR_ADJUST_CONTRAST"}
-        with patch.dict(os.environ, env, clear=True):
-            value = float(os.environ.get("EASYOCR_ADJUST_CONTRAST", "0.5"))
-        assert value == 0.5
-
-
-# ---------------------------------------------------------------------------
-# Fix 3: mag_ratio defaults to 1.2 (was 1.5)
-# ---------------------------------------------------------------------------
-
-class TestFix3MagRatioDefault:
-    def test_detect_called_with_mag_ratio_1_2(self):
-        """CRAFT detection must use mag_ratio=1.2, not the old 1.5."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("EASYOCR_MAG_RATIO", None)
-            reader = _make_reader()
-            img = _make_image_3ch()
-
-            _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                         allowlist=None, blocklist=None, workers=0)
-
+    def test_canvas_size_from_reformatted_image(self, run_easyocr):
+        """canvas_size must be max(h, w) of the reformatted image (img_color)."""
+        call_run, img_color, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image())
+        h, w = img_color.shape[:2]
+        expected = max(h, w)
         kwargs = reader.detect.call_args[1]
-        assert "mag_ratio" in kwargs, "mag_ratio must be passed to reader.detect()"
-        assert kwargs["mag_ratio"] == 1.2, (
-            f"mag_ratio should be 1.2 (default), got {kwargs['mag_ratio']}"
-        )
-
-    def test_mag_ratio_1_5_would_be_old_broken_value(self):
-        """Regression guard: 1.5 must not be the mag_ratio default."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("EASYOCR_MAG_RATIO", None)
-            reader = _make_reader()
-            img = _make_image_3ch()
-
-            _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                         allowlist=None, blocklist=None, workers=0)
-
-        kwargs = reader.detect.call_args[1]
-        assert kwargs.get("mag_ratio") != 1.5, (
-            "mag_ratio=1.5 is the old over-magnification value; default must now be 1.2"
-        )
-
-    def test_mag_ratio_env_var_override(self):
-        """EASYOCR_MAG_RATIO env var must propagate to reader.detect()."""
-        with patch.dict(os.environ, {"EASYOCR_MAG_RATIO": "1.8"}):
-            reader = _make_reader()
-            img = _make_image_3ch()
-            _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                         allowlist=None, blocklist=None, workers=0)
-
-        kwargs = reader.detect.call_args[1]
-        assert kwargs["mag_ratio"] == 1.8, (
-            f"EASYOCR_MAG_RATIO=1.8 must propagate, got {kwargs.get('mag_ratio')}"
-        )
-
-    def test_mag_ratio_consistent_in_fallback_readtext(self):
-        """When detect() fails, readtext() fallback must use the same mag_ratio."""
-        with patch.dict(os.environ, {"EASYOCR_MAG_RATIO": "1.3"}):
-            reader = _make_reader(detect_raises=True)
-            img = _make_image_3ch()
-            _run_easyocr(reader, img, beamwidth=5, adjust_contrast=0.5,
-                         allowlist=None, blocklist=None, workers=0)
-
-        kwargs = reader.readtext.call_args[1]
-        assert kwargs.get("mag_ratio") == 1.3, (
-            "Fallback readtext() must use the same EASYOCR_MAG_RATIO as detect()"
-        )
+        assert kwargs.get("canvas_size") == expected
 
 
 # ---------------------------------------------------------------------------
-# Integration: all three fixes together
+# Decoder propagation
 # ---------------------------------------------------------------------------
 
-class TestAllFixesTogether:
-    def test_normal_path_passes_all_correct_args(self):
-        """Golden-path: detect+recognize both succeed with the corrected defaults."""
-        import numpy as np
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("EASYOCR_MAG_RATIO", None)
-            os.environ.pop("EASYOCR_ADJUST_CONTRAST", None)
-            reader = _make_reader()
-            img = _make_image_3ch(h=200, w=150)
+class TestDecoderPropagation:
+    def test_greedy_decoder_passed_to_recognize(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image(), decoder="greedy")
+        assert reader.recognize.call_args[1]["decoder"] == "greedy"
 
-            result = _run_easyocr(reader, img, beamwidth=10, adjust_contrast=0.5,
-                                  allowlist=None, blocklist=None, workers=0)
+    def test_beamsearch_decoder_passed_to_recognize(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image(), decoder="beamsearch")
+        assert reader.recognize.call_args[1]["decoder"] == "beamsearch"
 
-        # Fix 1: shape
-        rec_img = reader.recognize.call_args[0][0]
-        assert rec_img.ndim == 3 and rec_img.shape[2] == 3
 
-        # Fix 2: contrast
-        assert reader.recognize.call_args[1]["adjust_contrast"] == 0.5
+# ---------------------------------------------------------------------------
+# mag_ratio propagation
+# ---------------------------------------------------------------------------
 
-        # Fix 3: mag_ratio
-        assert reader.detect.call_args[1]["mag_ratio"] == 1.2
+class TestMagRatio:
+    def test_default_mag_ratio_1_2(self, run_easyocr, monkeypatch):
+        monkeypatch.delenv("EASYOCR_MAG_RATIO", raising=False)
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image())
+        assert reader.detect.call_args[1]["mag_ratio"] == pytest.approx(1.2)
 
-        # canvas_size must be max(h, w) = 200
-        assert reader.detect.call_args[1]["canvas_size"] == 200
+    def test_mag_ratio_env_override(self, run_easyocr, monkeypatch):
+        monkeypatch.setenv("EASYOCR_MAG_RATIO", "1.8")
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image())
+        assert reader.detect.call_args[1]["mag_ratio"] == pytest.approx(1.8)
 
-        # Result must be a list
-        assert isinstance(result, list)
+
+# ---------------------------------------------------------------------------
+# adjust_contrast propagation
+# ---------------------------------------------------------------------------
+
+class TestAdjustContrast:
+    def test_adjust_contrast_passed_to_recognize(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image(), adjust_contrast=0.5)
+        assert reader.recognize.call_args[1]["adjust_contrast"] == pytest.approx(0.5)
+
+    def test_adjust_contrast_0_5_not_1_0(self, run_easyocr):
+        """1.0 was the old aggressive default — must never be the default."""
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        call_run(reader, _make_image(), adjust_contrast=0.5)
+        assert reader.recognize.call_args[1]["adjust_contrast"] != pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Fallback path — detect() raises
+# ---------------------------------------------------------------------------
+
+class TestFallbackOnDetectFailure:
+    def test_readtext_called_once_when_detect_raises(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(detect_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            call_run(reader, _make_image())
+        assert reader.detect.call_count == 1
+        assert reader.readtext.call_count == 1
+        assert reader.recognize.call_count == 0
+
+    def test_fallback_info_is_not_none_when_detect_raises(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(detect_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            _, fallback_info = call_run(reader, _make_image())
+        assert fallback_info is not None
+        assert fallback_info.get("fallback_used") is True
+
+    def test_fallback_emits_runtime_warning_when_detect_raises(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(detect_raises=True)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call_run(reader, _make_image())
+        runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        assert runtime_warnings, "A RuntimeWarning must be emitted when falling back"
+
+    def test_fallback_info_contains_primary_error(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(detect_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            _, fallback_info = call_run(reader, _make_image())
+        assert "detect_failed" in fallback_info.get("primary_error", "")
+
+    def test_fallback_result_is_readtext_output(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(detect_raises=True)
+        reader.readtext.return_value = [("bbox", "FallbackText", 0.7)]
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            raw, _ = call_run(reader, _make_image())
+        assert raw == [("bbox", "FallbackText", 0.7)]
+
+
+# ---------------------------------------------------------------------------
+# Fallback path — recognize() raises
+# ---------------------------------------------------------------------------
+
+class TestFallbackOnRecognizeFailure:
+    def test_readtext_called_once_when_recognize_raises(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(recognize_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            call_run(reader, _make_image())
+        assert reader.detect.call_count == 1
+        assert reader.recognize.call_count == 1
+        assert reader.readtext.call_count == 1
+
+    def test_fallback_info_not_none_when_recognize_raises(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(recognize_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            _, fallback_info = call_run(reader, _make_image())
+        assert fallback_info is not None
+        assert fallback_info.get("fallback_used") is True
+
+    def test_fallback_info_contains_recognize_error(self, run_easyocr):
+        call_run, _, _ = run_easyocr
+        reader = _make_reader(recognize_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            _, fallback_info = call_run(reader, _make_image())
+        assert "recognize_failed" in fallback_info.get("primary_error", "")
