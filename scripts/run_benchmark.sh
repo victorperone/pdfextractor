@@ -170,9 +170,11 @@ for engine in "${engine_list[@]}"; do
         continue
     fi
 
+    run_manifest="$OUT_DIR/manifesto_e2e_${engine_slug}_${run_id}.json"
     if ! "$PYTHON_BIN" "$SCRIPT_DIR/compute_metrics.py" \
         --hypothesis "$hypothesis" \
         --manifesto "$MANIFESTO" \
+        --run-manifest "$run_manifest" \
         --engine "$engine" \
         --run-id "$run_id" \
         --output-dir "$OUT_DIR"; then

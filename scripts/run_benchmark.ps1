@@ -174,9 +174,11 @@ foreach ($engine in $engines) {
     }
 
     # --- compute_metrics ---
+    $runManifest = "$OutDir\manifesto_e2e_${engineSlug}_${runId}.json"
     & $PythonBin scripts\compute_metrics.py `
         --hypothesis $hyp `
         --manifesto $Manifesto `
+        --run-manifest $runManifest `
         --engine $engine `
         --run-id $runId `
         --output-dir $OutDir
