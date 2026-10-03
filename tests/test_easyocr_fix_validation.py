@@ -238,14 +238,16 @@ class TestDetectRecognizeUnwrap:
         assert kwargs.get("reformat") is False
 
     def test_canvas_size_from_reformatted_image(self, run_easyocr):
-        """canvas_size must be max(h, w) of the reformatted image (img_color)."""
+        """canvas_size must retain the requested magnification of img_color."""
         call_run, img_color, _ = run_easyocr
         reader = _make_reader()
         call_run(reader, _make_image())
         h, w = img_color.shape[:2]
-        expected = max(h, w)
+        mag_ratio = reader.detect.call_args[1]["mag_ratio"]
+        expected = int(mag_ratio * max(h, w))
         kwargs = reader.detect.call_args[1]
         assert kwargs.get("canvas_size") == expected
+        assert kwargs.get("canvas_size") >= max(h, w)
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +286,26 @@ class TestMagRatio:
         reader = _make_reader()
         call_run(reader, _make_image())
         assert reader.detect.call_args[1]["mag_ratio"] == pytest.approx(1.8)
+        assert reader.detect.call_args[1]["canvas_size"] == int(1.8 * 120)
+
+
+def test_easyocr_fallback_diagnostics_accumulate_until_consumed():
+    from structured_pdf_text.ocr.backends.easyocr import EasyOCRBackend
+
+    backend = EasyOCRBackend.__new__(EasyOCRBackend)
+    backend.reset_page_diagnostics()
+    backend._record_call({"primary_error": "first region failed"})
+    backend._record_call(None)
+    backend._record_call({"primary_error": "third region failed"})
+
+    diagnostics = backend.consume_page_diagnostics()
+    assert diagnostics == {
+        "easyocr_calls": 3,
+        "easyocr_fallback_count": 2,
+        "easyocr_fallback_rate": pytest.approx(2 / 3),
+        "easyocr_fallback_reasons": ["first region failed", "third region failed"],
+    }
+    assert backend.consume_page_diagnostics()["easyocr_fallback_count"] == 0
 
 
 # ---------------------------------------------------------------------------

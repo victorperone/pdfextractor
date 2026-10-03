@@ -521,6 +521,38 @@ class EasyOCRBackend:
             kwargs["recog_network"] = recog_network
 
         self._reader = easyocr_mod.Reader(self._langs, **kwargs)
+        self.reset_page_diagnostics()
+
+    def reset_page_diagnostics(self) -> None:
+        """Start a fresh per-page fallback counter for the extraction pipeline."""
+        self._easyocr_calls = 0
+        self._easyocr_fallback_count = 0
+        self._easyocr_fallback_reasons: list[str] = []
+        self.last_easyocr_fallback_used = False
+        self.last_easyocr_fallback_reason: str | None = None
+
+    def consume_page_diagnostics(self) -> dict[str, Any]:
+        """Return and reset accumulated fallback diagnostics for one page."""
+        result = {
+            "easyocr_calls": self._easyocr_calls,
+            "easyocr_fallback_count": self._easyocr_fallback_count,
+            "easyocr_fallback_rate": (
+                self._easyocr_fallback_count / self._easyocr_calls
+                if self._easyocr_calls else 0.0
+            ),
+            "easyocr_fallback_reasons": list(self._easyocr_fallback_reasons),
+        }
+        self.reset_page_diagnostics()
+        return result
+
+    def _record_call(self, fallback: dict[str, Any] | None) -> None:
+        self._easyocr_calls += 1
+        if fallback is not None:
+            self._easyocr_fallback_count += 1
+            reason = str(fallback.get("primary_error", "unknown"))
+            self._easyocr_fallback_reasons.append(reason)
+            self.last_easyocr_fallback_used = True
+            self.last_easyocr_fallback_reason = reason
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -540,6 +572,8 @@ class EasyOCRBackend:
             },
             artifact_hashes={},  # .pth files are ~700 MB — hashing at init would add ~30s startup
             extra={
+                "render_scale": self._config.ocr_render_scale,
+                "recognition_network": self._recog_network,
                 "mag_ratio": self._mag_ratio,
                 "canvas_size_policy": "int(mag_ratio * max(h, w))",
                 "decoder": self._decoder,
@@ -583,6 +617,7 @@ class EasyOCRBackend:
                 workers=self._workers,
                 rotation_info=self._rotation_info,
             )
+            self._record_call(fallback_info)
             rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
             tokens = tuple(_result_to_ocr_tokens(raw, "easyocr", offset_x=rx0, offset_y=ry0))
             text = " ".join(t.text for t in tokens)
@@ -637,10 +672,7 @@ class EasyOCRBackend:
             workers=self._workers,
             rotation_info=self._rotation_info,
         )
-        self.last_easyocr_fallback_used: bool = fallback is not None
-        self.last_easyocr_fallback_reason: str | None = (
-            fallback.get("primary_error") if fallback else None
-        )
+        self._record_call(fallback)
         return _result_to_pipeline_tokens(raw, page_index, self._language)
 
     def recognize_region(
@@ -654,8 +686,6 @@ class EasyOCRBackend:
             img, region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1,
         )
         if crop.size == 0:
-            self.last_easyocr_fallback_used = False
-            self.last_easyocr_fallback_reason = None
             return []
         raw, fallback = _run_easyocr(
             self._reader,
@@ -668,10 +698,7 @@ class EasyOCRBackend:
             workers=self._workers,
             rotation_info=self._rotation_info,
         )
-        self.last_easyocr_fallback_used = fallback is not None
-        self.last_easyocr_fallback_reason = (
-            fallback.get("primary_error") if fallback else None
-        )
+        self._record_call(fallback)
         return _result_to_pipeline_tokens(
             raw, page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),

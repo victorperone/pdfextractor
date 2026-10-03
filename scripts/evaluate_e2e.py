@@ -107,6 +107,47 @@ def _parse_page_sections(md_text: str) -> dict[int, str]:
     return pages
 
 
+def _page_body(content: str) -> str:
+    return re.sub(r"^##\s+P[áa]gina\s+[^\n]*\n?", "", content, count=1, flags=re.I).strip()
+
+
+def _classify_page_status(
+    ocr_outcome: str, facts: dict, has_content: bool, ocr_tokens_added: int
+) -> tuple[str, str]:
+    """Return content/benchmark status and stability as separate dimensions."""
+    if "ocr_failed" in facts or ocr_outcome in ("failed", "runtime_error"):
+        return "invalid", "failed"
+    if facts.get("partial_reasons"):
+        return "degraded", "degraded"
+    if ocr_outcome == "recovered" and has_content:
+        return "ok", "recovered"
+    if ocr_outcome in ("degraded", "partial"):
+        return "degraded", "degraded"
+    if not has_content and ocr_tokens_added == 0:
+        return "empty", "unknown"
+    return "ok", "clean"
+
+
+def _classify_document_status(
+    doc_status: str, failed_pages: list[int], degraded_pages: list[int]
+) -> str:
+    if doc_status == "failure" or failed_pages:
+        return "invalid"
+    if degraded_pages or doc_status == "partial_success":
+        return "partial"
+    return "valid"
+
+
+def _diagnostic_reasons(diag) -> tuple[list[str], list[str]]:
+    facts = dict(getattr(diag, "facts", {}))
+    partial = sorted({str(value) for value in facts.get("partial_reasons", [])})
+    complexity = [
+        reason.value if hasattr(reason, "value") else str(reason)
+        for reason in getattr(diag, "reasons", [])
+    ]
+    return partial, complexity
+
+
 def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None):
     """Build an ExtractorConfig for the given engine and extraction mode.
 
@@ -294,6 +335,7 @@ def main() -> int:
     page_entries = []
     degraded_pages: list[int] = []
     failed_ocr_pages: list[int] = []
+    recovered_pages: list[int] = []
 
     for i, page in enumerate(document.pages):
         page_num = page.page_index + 1
@@ -302,8 +344,9 @@ def main() -> int:
 
         diag = page.diagnostics
         page_warnings: list[str] = list(getattr(diag, "warnings", []))
-        partial_reasons: list[str] = [r.value if hasattr(r, "value") else str(r) for r in getattr(diag, "reasons", [])]
         facts: dict = dict(getattr(diag, "facts", {}))
+        has_page_content = bool(_page_body(content))
+        partial_reasons, complexity_reasons = _diagnostic_reasons(diag)
 
         # Derive ocr_outcome from diagnostics facts and token counts.
         ocr_tokens_added: int = getattr(diag, "ocr_tokens_added", 0)
@@ -311,31 +354,50 @@ def main() -> int:
         if ocr_outcome is None:
             if ocr_tokens_added > 0:
                 ocr_outcome = "success"
-            elif content.strip():
+            elif has_page_content:
                 ocr_outcome = "not_requested"
             else:
                 ocr_outcome = "unknown"
 
         # Classify page-level benchmark status.
-        if "ocr_failed" in facts or ocr_outcome in ("failed", "runtime_error"):
-            page_bstatus = "invalid"
+        page_bstatus, stability_status = _classify_page_status(
+            str(ocr_outcome), facts, has_page_content, ocr_tokens_added
+        )
+        if page_bstatus == "invalid":
             failed_ocr_pages.append(page_num)
-        elif ocr_outcome in ("recovered", "degraded", "partial"):
-            page_bstatus = "degraded"
+        elif stability_status == "recovered":
+            recovered_pages.append(page_num)
+        elif stability_status == "degraded":
             degraded_pages.append(page_num)
-        elif not content.strip() and ocr_tokens_added == 0:
-            page_bstatus = "empty"
-        else:
-            page_bstatus = "ok"
+
+        page_timings = dict(facts.get("timings_ms", {}))
+        render_s = sum(page_timings.get(k, 0.0) for k in ("render_lowres_ms", "render_ocr_ms")) / 1000
+        ocr_s = sum(page_timings.get(k, 0.0) for k in ("ocr_ms", "ocr_figure_ms", "ocr_targeted_refinement_ms")) / 1000
+        assembly_s = max(0.0, elapsed_page - render_s - ocr_s)
 
         page_entries.append({
             "page": page_num,
-            "content_status": "nonempty" if content.strip() else "empty",
+            "content_status": (
+                "invalid" if page_bstatus == "invalid"
+                else "empty" if not has_page_content
+                else "partial" if page_bstatus == "degraded"
+                else "valid"
+            ),
             "benchmark_page_status": page_bstatus,
+            "stability_status": stability_status,
             "ocr_outcome": ocr_outcome,
             "partial_reasons": partial_reasons,
+            "complexity_reasons": complexity_reasons,
             "warnings": page_warnings,
             "elapsed_s": round(elapsed_page, 4),
+            "render_s": round(render_s, 4),
+            "ocr_s": round(ocr_s, 4),
+            "assembly_s": round(assembly_s, 4),
+            "timings_ms": page_timings,
+            "easyocr_calls": int(facts.get("easyocr_calls", 0)),
+            "easyocr_fallback_count": int(facts.get("easyocr_fallback_count", 0)),
+            "easyocr_fallback_rate": float(facts.get("easyocr_fallback_rate", 0.0)),
+            "easyocr_fallback_reasons": list(facts.get("easyocr_fallback_reasons", [])),
             "char_count": len(content),
             "ocr_tokens_added": ocr_tokens_added,
             "strategy": getattr(getattr(diag, "strategy", None), "value", None) or "unknown",
@@ -347,12 +409,9 @@ def main() -> int:
     doc_status_raw: str = _doc_status.value if hasattr(_doc_status, "value") else str(_doc_status or "unknown")
     doc_warnings: list[str] = list(getattr(doc_diag, "warnings", []))
 
-    if failed_ocr_pages:
-        benchmark_status = "invalid"
-    elif degraded_pages or doc_status_raw == "partial_success":
-        benchmark_status = "partial"
-    else:
-        benchmark_status = "valid"
+    benchmark_status = _classify_document_status(
+        doc_status_raw, failed_ocr_pages, degraded_pages
+    )
 
     # --- Engine identity ---
     engine_identity: dict = {}
@@ -393,8 +452,24 @@ def main() -> int:
         "document_warnings": doc_warnings,
         "degraded_pages": degraded_pages,
         "failed_ocr_pages": failed_ocr_pages,
+        "recovered_pages": recovered_pages,
+        "recovery_count": sum(p["easyocr_fallback_count"] for p in page_entries),
+        "fallback_rate": (
+            sum(p["easyocr_fallback_count"] for p in page_entries)
+            / max(1, sum(p["easyocr_calls"] for p in page_entries))
+        ),
+        "stability_status": (
+            "failed" if benchmark_status == "invalid"
+            else "degraded" if degraded_pages or benchmark_status == "partial"
+            else "recovered" if recovered_pages
+            else "clean"
+        ),
         "warnings_count": len(doc_warnings),
         "elapsed_s": round(elapsed_s, 3),
+        "timings": {
+            key: round(sum(page[key] for page in page_entries), 4)
+            for key in ("render_s", "ocr_s", "assembly_s")
+        },
         "page_count": len(document.pages),
         "memory": memory_stats,
         "extracted_markdown": str(md_path),

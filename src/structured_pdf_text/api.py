@@ -151,6 +151,8 @@ class PdfTextExtractor:
                 page_memory_start = _process_memory_snapshot()
                 source_metrics_start = source.metrics_snapshot()
                 timings: dict[str, float] = {}
+                if self.ocr_engine is not None and hasattr(self.ocr_engine, "reset_page_diagnostics"):
+                    self.ocr_engine.reset_page_diagnostics()
                 native_start = time.perf_counter()
                 try:
                     native_page = source.extract_page(page_index)
@@ -796,21 +798,30 @@ class PdfTextExtractor:
                 elif (region_ocr_requested or figure_ocr_requested) and ocr_tokens:
                     actual_strategy = PageStrategy.MIXED
                 ocr_any_requested = ocr_requested or figure_ocr_requested
+                easyocr_page_diagnostics = (
+                    self.ocr_engine.consume_page_diagnostics()
+                    if self.ocr_engine is not None
+                    and hasattr(self.ocr_engine, "consume_page_diagnostics")
+                    else {
+                        "easyocr_calls": 0,
+                        "easyocr_fallback_count": 0,
+                        "easyocr_fallback_rate": 0.0,
+                        "easyocr_fallback_reasons": [],
+                    }
+                )
                 if not ocr_any_requested:
                     ocr_outcome = "not_requested"
                     ocr_degraded = False
                     ocr_degraded_reasons: list[str] = []
                 elif ocr_tokens:
                     # Check if EasyOCR used its readtext() fallback path.
-                    _easyocr_fallback = bool(
-                        getattr(self.ocr_engine, "last_easyocr_fallback_used", False)
-                    )
+                    _easyocr_fallback = easyocr_page_diagnostics["easyocr_fallback_count"] > 0
                     if _easyocr_fallback:
                         ocr_outcome = "recovered"
                         ocr_degraded = True
                         ocr_degraded_reasons = [
                             "easyocr_readtext_fallback:"
-                            + str(getattr(self.ocr_engine, "last_easyocr_fallback_reason", "unknown"))
+                            + "; ".join(easyocr_page_diagnostics["easyocr_fallback_reasons"])
                         ]
                     else:
                         ocr_outcome = "success"
@@ -860,8 +871,9 @@ class PdfTextExtractor:
                         "ocr_quality_policy": effective_ocr_quality_policy(self.config).value,
                         "ocr_baseline_quality": _quality_to_dict(getattr(ocr_diag_engine, "last_baseline_quality", None)),
                         "ocr_image_profile": _image_profile_to_dict(getattr(ocr_diag_engine, "last_image_profile", None)),
-                        "easyocr_fallback_used": bool(getattr(ocr_diag_engine, "last_easyocr_fallback_used", False)),
-                        "easyocr_fallback_reason": getattr(ocr_diag_engine, "last_easyocr_fallback_reason", None),
+                        "easyocr_fallback_used": easyocr_page_diagnostics["easyocr_fallback_count"] > 0,
+                        "easyocr_fallback_reason": "; ".join(easyocr_page_diagnostics["easyocr_fallback_reasons"]) or None,
+                        **easyocr_page_diagnostics,
                         "ocr_recovery_triggered": bool(getattr(ocr_diag_engine, "last_recovery_triggered", False)),
                         "ocr_recovery_reasons": list(getattr(ocr_diag_engine, "last_recovery_reasons", [])),
                         "ocr_selected_variant": getattr(ocr_diag_engine, "last_selected_variant", None),
