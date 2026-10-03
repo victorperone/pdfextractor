@@ -113,6 +113,16 @@ def _strip_page_header(text: str) -> str:
     ).strip()
 
 
+def _selected_document_bodies(
+    hyp_pages: dict[int, str], ref_pages: dict[int, str], selected_ref_pages: set[int]
+) -> tuple[str, str]:
+    """Build structure-comparison bodies, retaining missing selected pages as empty."""
+    page_numbers = sorted(selected_ref_pages)
+    hyp = "\n\n".join(_strip_page_header(hyp_pages.get(pn, "")) for pn in page_numbers)
+    ref = "\n\n".join(_strip_page_header(ref_pages[pn]) for pn in page_numbers)
+    return hyp, ref
+
+
 # ---------------------------------------------------------------------------
 # Levenshtein — char and word level with S/D/I traceback
 # ---------------------------------------------------------------------------
@@ -387,6 +397,8 @@ def compute_structure_metrics(hyp: str, ref: str) -> dict:
     l_fp = max(0, hyp_list_blocks - ref_list_blocks)
     l_fn = max(0, ref_list_blocks - hyp_list_blocks)
     _, _, list_f1 = _f1(l_tp, l_fp, l_fn)
+    if ref_list_blocks == 0 and hyp_list_blocks == 0:
+        list_f1 = 1.0
 
     # Markdown AST Similarity: LCS of block type sequences / max length
     lcs = _lcs_len(ref_seq, hyp_seq)
@@ -459,10 +471,14 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
     cell_ref_count = cell_exact_count = cell_alignment_count = 0
     cell_edit_sum = cell_ref_char_sum = 0
 
-    # Match tables by ordinal for now. Unmatched reference tables are paired
-    # with an empty hypothesis, making every expected row/cell a false negative.
+    # Match tables within the page by content and shape. Greedy best-pairing
+    # prevents an extra leading hypothesis table from shifting every match.
+    pairs = _match_tables(ref_tables, hyp_tables)
+    hyp_for_ref = {ref_i: hyp_i for ref_i, hyp_i in pairs}
+    matched_hyp = {hyp_i for _, hyp_i in pairs}
     for table_index, ref_t in enumerate(ref_tables):
-        hyp_t = hyp_tables[table_index] if table_index < n_hyp else []
+        hyp_i = hyp_for_ref.get(table_index)
+        hyp_t = hyp_tables[hyp_i] if hyp_i is not None else []
         n_ref_rows, n_hyp_rows = len(ref_t), len(hyp_t)
         n_ref_cols = max((len(row) for row in ref_t), default=0)
         n_hyp_cols = max((len(row) for row in hyp_t), default=0)
@@ -498,7 +514,9 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
 
     # Unmatched hypothesis tables count as false positives for table shape.
     # Their non-empty cells also count as inserted characters for CER.
-    for hyp_t in hyp_tables[n_ref:]:
+    for hyp_i, hyp_t in enumerate(hyp_tables):
+        if hyp_i in matched_hyp:
+            continue
         for row in hyp_t:
             for cell in row:
                 cell_edit_sum += len(_normalize_cell(cell))
@@ -524,7 +542,8 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
     # Extra tables have no reference cells to align to. Include them in the
     # exact-match denominator so invented tables cannot appear cell-perfect.
     hyp_only_cell_count = sum(
-        1 for table in hyp_tables[n_ref:] for row in table for cell in row
+        1 for hyp_i, table in enumerate(hyp_tables) if hyp_i not in matched_hyp
+        for row in table for cell in row
     )
     cell_match_denominator = cell_ref_count + hyp_only_cell_count
     both_without_tables = n_ref == 0 and n_hyp == 0
@@ -580,6 +599,38 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
         "table_dimension_accuracy_sum": dimension_accuracy_sum,
         "table_structure_similarity_sum": structure_similarity_sum,
     }
+
+
+def _match_tables(
+    ref_tables: list[list[list[str]]], hyp_tables: list[list[list[str]]]
+) -> list[tuple[int, int]]:
+    """Greedily pair the most similar tables on a page.
+
+    Content overlap dominates shape so an inserted table does not displace
+    otherwise exact matches. Ordinal distance is only a deterministic tie-break.
+    """
+    candidates: list[tuple[float, int, int]] = []
+    for ri, ref in enumerate(ref_tables):
+        ref_cells = Counter(_normalize_cell(cell) for row in ref for cell in row if _normalize_cell(cell))
+        ref_shape = (len(ref), max((len(row) for row in ref), default=0))
+        for hi, hyp in enumerate(hyp_tables):
+            hyp_cells = Counter(_normalize_cell(cell) for row in hyp for cell in row if _normalize_cell(cell))
+            overlap = sum((ref_cells & hyp_cells).values())
+            union = sum((ref_cells | hyp_cells).values())
+            content_score = overlap / union if union else 1.0
+            hyp_shape = (len(hyp), max((len(row) for row in hyp), default=0))
+            shape_score = sum(a == b for a, b in zip(ref_shape, hyp_shape)) / 2
+            score = content_score * 0.8 + shape_score * 0.2
+            candidates.append((score, ri, hi))
+    result: list[tuple[int, int]] = []
+    used_ref: set[int] = set()
+    used_hyp: set[int] = set()
+    for _, ri, hi in sorted(candidates, key=lambda item: (-item[0], abs(item[1] - item[2]), item[1], item[2])):
+        if ri not in used_ref and hi not in used_hyp:
+            result.append((ri, hi))
+            used_ref.add(ri)
+            used_hyp.add(hi)
+    return result
 
 
 def aggregate_table_metrics_from_pages(
@@ -1017,7 +1068,8 @@ def _build_error_report(
         cer_n = entry.get("cer_normalized", 0.0)
         wer = entry.get("wer", 0.0)
         table_f1 = entry.get("table_f1", None)
-        cond = entry.get("conditions", "")
+        cond_value = entry.get("conditions", [])
+        cond = ", ".join(cond_value) if isinstance(cond_value, list) else cond_value
         lines += [
             f"### Página {pn} — CER={cer_n:.4f} WER={wer:.4f}"
             + (f" [{cond}]" if cond else ""),
@@ -1047,15 +1099,15 @@ def _process_page(args: tuple) -> dict:
     be computed in any order and sorted by page number afterward.
 
     Args:
-        args: (page_number, ref_content, hyp_content, page_conditions) —
+        args: (page_number, ref_content, hyp_content, page_metadata) —
             page_number is 1-based; ref/hyp_content are raw page-section
-            strings (including the '## Página N' header); page_conditions
-            is a {page_num: condition_string} dict from the manifesto.
+            strings (including the '## Página N' header); page_metadata maps page
+            numbers to their family and complete list of conditions.
 
     Returns:
         {"pn": int, "acc": accumulated_counters_dict, "entry": per_page_metrics_dict}
     """
-    pn, ref_content, hyp_content, page_conditions = args
+    pn, ref_content, hyp_content, page_metadata = args
     ref_body = _strip_page_header(ref_content)
     hyp_body = _strip_page_header(hyp_content)
 
@@ -1097,7 +1149,9 @@ def _process_page(args: tuple) -> dict:
 
     entry = {
         "page": pn,
-        "conditions": page_conditions.get(pn, ""),
+        "failure_rate": float(bool(ref_body.strip()) and not bool(hyp_body.strip())),
+        "family": page_metadata.get(pn, {}).get("family"),
+        "conditions": list(page_metadata.get(pn, {}).get("conditions", [])),
         **text_m,
         **struct_m,
         **table_m,
@@ -1187,15 +1241,17 @@ def main() -> int:
         print(f"  Hyp pages  : {len(hyp_pages)}")
 
     # Load conditions metadata from manifesto (for error report)
-    page_conditions: dict[int, str] = {}
+    page_metadata: dict[int, dict] = {}
     if args.manifesto and args.manifesto.exists():
         with open(args.manifesto, encoding="utf-8") as f:
             mdata = json.load(f)
         for entry in mdata.get("pages", []):
             pn = entry.get("page")
-            conds = entry.get("conditions", [])
-            if pn and conds:
-                page_conditions[int(pn)] = ", ".join(conds[:2])
+            if pn:
+                page_metadata[int(pn)] = {
+                    "family": entry.get("family"),
+                    "conditions": list(entry.get("conditions", []) or []),
+                }
 
     # --- Determine the selected page set ---
     # When a run manifest (schema v2 from evaluate_e2e.py) is available, the
@@ -1208,6 +1264,7 @@ def main() -> int:
     # reference page is treated as selected, which is conservative but correct.
     run_manifest_pages: set[int] | None = None
     _run_meta: dict = {}
+    run_page_meta: dict[int, dict] = {}
     if args.run_manifest and args.run_manifest.exists():
         with open(args.run_manifest, encoding="utf-8") as f:
             _rm = json.load(f)
@@ -1215,6 +1272,10 @@ def main() -> int:
             int(e["page"])
             for e in _rm.get("pages", [])
             if e.get("page") is not None
+        }
+        run_page_meta = {
+            int(page["page"]): page for page in _rm.get("pages", [])
+            if page.get("page") is not None
         }
         # Propagate E2E run metadata so compare_engines.py can validate runs
         # and display benchmark_status without needing to re-read the manifest.
@@ -1226,7 +1287,13 @@ def main() -> int:
             "engine_identity":   _rm.get("engine_identity", {}),
             "degraded_pages":    _rm.get("degraded_pages", []),
             "failed_ocr_pages":  _rm.get("failed_ocr_pages", []),
+            "recovered_pages":   _rm.get("recovered_pages", []),
+            "recovery_count":    _rm.get("recovery_count", 0),
+            "fallback_rate":     _rm.get("fallback_rate", 0.0),
+            "stability_status":  _rm.get("stability_status"),
             "elapsed_s":         _rm.get("elapsed_s"),
+            "timings":           _rm.get("timings", {}),
+            "memory":            _rm.get("memory", {}),
             "selected_pages":    sorted(run_manifest_pages) if run_manifest_pages else [],
         }
 
@@ -1276,7 +1343,7 @@ def main() -> int:
         return 1
 
     page_args = [
-        (pn, ref_pages[pn], hyp_pages.get(pn, ""), page_conditions)
+        (pn, ref_pages[pn], hyp_pages.get(pn, ""), page_metadata)
         for pn in all_page_nums
     ]
     results = []
@@ -1307,6 +1374,7 @@ def main() -> int:
     # All reference characters count as deletions; all reference words as deletions.
     for pn in sorted(selected_but_missing):
         ref_text = ref_pages[pn]
+        ref_body = _strip_page_header(ref_text)
         ref_norm = _normalize(ref_text)
         ref_stripped = _normalize(_strip_md(ref_text))
         n_chars_raw = max(1, len(ref_text))
@@ -1322,13 +1390,26 @@ def main() -> int:
             "page": pn,
             "missing_from_hypothesis": True,
             "selected_but_missing": True,
+            "family": page_metadata.get(pn, {}).get("family"),
+            "conditions": list(page_metadata.get(pn, {}).get("conditions", [])),
             "cer_raw": 1.0,
             "cer_normalized": 1.0,
             "cer_text_only": 1.0,
             "wer": 1.0,
+            "failure_rate": float(bool(_strip_page_header(ref_text).strip())),
             "ref_chars": n_chars_raw,
             "hyp_chars": 0,
+            **compute_structure_metrics("", ref_body),
+            **compute_table_metrics("", ref_body),
+            **compute_critical_data_metrics("", ref_body),
         })
+
+    for page_result in per_page_results:
+        run_page = run_page_meta.get(page_result["page"], {})
+        page_result["stability_status"] = run_page.get("stability_status", "unknown")
+        page_result["easyocr_fallback_count"] = int(run_page.get("easyocr_fallback_count", 0))
+        page_result["easyocr_fallback_rate"] = float(run_page.get("easyocr_fallback_rate", 0.0))
+        page_result["missing_page_rate"] = float(bool(page_result.get("missing_from_hypothesis")))
 
     # --- Group 1: full-document text (micro-average, weighted by ref length) ---
     if _t_chars_raw == 0 or _t_words == 0:
@@ -1349,16 +1430,10 @@ def main() -> int:
     }
 
     # --- Groups 2, 3, 4, 5: full-document Markdown ---
-    # Group 2 (structure) and Group 4 (integrity): only pages present in both —
-    # missing pages have no hypothesis text to compare structure against.
-    eval_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
-    hyp_full_body = "\n\n".join(
-        _strip_page_header(hyp_pages[pn])
-        for pn in eval_page_nums
-    )
-    ref_full_body = "\n\n".join(
-        _strip_page_header(ref_pages[pn])
-        for pn in eval_page_nums
+    # Structure must include every selected reference page. A missing page has
+    # an empty hypothesis so its expected headings, lists and blocks are FNs.
+    hyp_full_body, ref_full_body = _selected_document_bodies(
+        hyp_pages, ref_pages, selected_ref_pages
     )
 
     # Groups 3 and 5 (tables, critical data): include selected-but-missing pages
@@ -1385,6 +1460,27 @@ def main() -> int:
     integrity_m = compute_integrity_metrics(
         hyp_full_body, ref_full_body, hyp_pages, ref_pages, selected_but_missing
     )
+
+    def _breakdown(key_name: str) -> dict:
+        groups: dict[str, list[dict]] = {}
+        for page in per_page_results:
+            values = page.get(key_name) or []
+            if isinstance(values, str):
+                values = [values] if values else []
+            for value in values:
+                groups.setdefault(str(value), []).append(page)
+        output = {}
+        for name, pages in sorted(groups.items()):
+            output[name] = {
+                "pages": len(pages),
+                "cer_text_only_macro": round(sum(p.get("cer_text_only", 1.0) for p in pages) / len(pages), 6),
+                "wer_macro": round(sum(p.get("wer", 1.0) for p in pages) / len(pages), 6),
+                "missing_pages": sum(bool(p.get("missing_from_hypothesis")) for p in pages),
+                "table_f1_macro": round(sum(p.get("table_f1", 1.0) for p in pages) / len(pages), 6),
+                "currency_f1_macro": round(sum(p.get("currency_f1", 1.0) for p in pages) / len(pages), 6),
+                "identifier_f1_macro": round(sum(p.get("identifier_f1", 1.0) for p in pages) / len(pages), 6),
+            }
+        return output
 
     # Correct set-difference page counts (fixes the cardinality-subtraction bug).
     pages_in_ref_not_hyp = sorted(ref_pages.keys() - hyp_pages.keys())
@@ -1415,6 +1511,12 @@ def main() -> int:
         # Top-level shorthands so compare_engines.py can read them directly
         # without needing to access the nested "run" block.
         "benchmark_status": _run_meta.get("benchmark_status"),
+        "stability_status": _run_meta.get("stability_status"),
+        "recovered_pages": _run_meta.get("recovered_pages", []),
+        "recovery_count": _run_meta.get("recovery_count", 0),
+        "fallback_rate": _run_meta.get("fallback_rate", 0.0),
+        "timings": _run_meta.get("timings", {}),
+        "memory": _run_meta.get("memory", {}),
         "pdf_sha256": _run_meta.get("pdf_sha256"),
         "reference_sha256": reference_sha256,
         "manifest_sha256": manifest_sha256,
@@ -1426,6 +1528,8 @@ def main() -> int:
         "grupo4_ordem_integridade": integrity_m,
         "grupo5_dados_criticos": full_crit_m,
         "per_page": per_page_results,
+        "by_family": _breakdown("family"),
+        "by_condition": _breakdown("conditions"),
     }
 
     # --- Save metrics JSON ---

@@ -91,3 +91,35 @@ def test_comparison_requires_exact_page_list_for_multiple_runs():
     )
 
     assert any("exact selected page list" in error for error in errors)
+
+
+def test_condition_lists_are_split_and_profile_recovery_metadata_is_reported():
+    report = _render_comparison_table([
+        ("rapidocr-onnx", _run(
+            stability_status="recovered",
+            recovery_count=2,
+            elapsed_s=12.5,
+            memory={"peak_rss_bytes": 1024 * 1024},
+            engine_identity={
+                "runtime": "onnxruntime", "profile": "latin/pt-compatible",
+                "language": "pt", "extra": {"rec_model": "latin.onnx"},
+            },
+            per_page=[{
+                "conditions": ["small_text", "low_contrast"],
+                "family": "OCR de tabelas",
+                "cer_text_only": 0.1,
+                "wer": 0.2,
+                "deletion_rate": 0.1,
+                "currency_f1": 0.9,
+                "identifier_f1": 0.8,
+                "cell_cer": 0.1,
+                "missing_page_rate": 1.0,
+                "easyocr_fallback_rate": 0.0,
+            }],
+        ))
+    ])
+    assert "small_text" in report and "low_contrast" in report
+    assert "OCR de tabelas" in report
+    assert "latin/pt-compatible" in report
+    assert "recovered" in report and "2" in report
+    assert "Peak RSS MB" in report

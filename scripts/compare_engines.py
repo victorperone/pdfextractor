@@ -100,6 +100,7 @@ _LOWER_IS_BETTER = {
     "cell_cer", "duplicate_content_rate", "header_leakage_rate",
     "footer_leakage_rate", "page_number_leakage_rate", "failure_rate",
     "invalid_markdown_rate",
+    "missing_page_rate", "easyocr_fallback_rate",
 }
 
 
@@ -276,8 +277,8 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
         "",
         "## Metadados dos Runs",
         "",
-        "| Engine | Run ID | Páginas avaliadas | Selecionadas ausentes | benchmark_status | Missing penalizado |",
-        "|---|---|---|---|---|---|",
+        "| Engine | Run ID | Páginas avaliadas | Selecionadas ausentes | Content status | Stability | Recoveries | Render s | OCR s | Processing s | Elapsed s | Peak RSS MB | Missing penalizado |",
+        "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for eng, data in all_data:
         run_id = data.get("run_id", "—")
@@ -288,20 +289,45 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
             data.get("pages_missing_in_hypothesis", "—"),
         )
         bstatus = data.get("benchmark_status", "—")
+        stability = data.get("stability_status", "—")
+        recoveries = data.get("recovery_count", 0)
+        elapsed = data.get("elapsed_s")
+        timings = data.get("timings", {})
+        render_s = timings.get("render_s", "—")
+        ocr_s = timings.get("ocr_s", "—")
+        processing_s = timings.get("assembly_s", "—")
+        memory = data.get("memory", {})
+        peak_rss = memory.get("peak_rss_bytes")
+        peak_rss_mb = f"{peak_rss / (1024 * 1024):.1f}" if peak_rss is not None else "—"
         penalised = "sim" if data.get("missing_pages_penalised") else "não"
         lines.append(
-            f"| `{eng}` | {run_id} | {n_eval} | {n_missing} | {bstatus} | {penalised} |"
+            f"| `{eng}` | {run_id} | {n_eval} | {n_missing} | {bstatus} | {stability} | {recoveries} | {render_s} | {ocr_s} | {processing_s} | {elapsed if elapsed is not None else '—'} | {peak_rss_mb} | {penalised} |"
         )
+
+    lines += ["", "### Perfis efetivos dos engines", "", "| Engine | Perfil registrado |", "|---|---|"]
+    for eng, data in all_data:
+        identity = data.get("engine_identity") or (data.get("run") or {}).get("engine_identity", {})
+        profile = {
+            key: identity.get(key)
+            for key in ("runtime", "profile", "language", "device", "extra")
+            if identity.get(key) not in (None, {}, "")
+        }
+        profile_text = json.dumps(profile, ensure_ascii=False, sort_keys=True)
+        profile_text = profile_text.replace("|", "\\|") if profile else "—"
+        lines.append(f"| `{eng}` | `{profile_text}` |")
 
     lines += ["", ""]
 
     # --- By-condition breakdown ---
     # Groups per_page results by the "conditions" tag from the corpus manifest
-    # and micro-averages key metrics.  Requires per_page to be present in each
+    # and macro-averages key metrics. Requires per_page to be present in each
     # metrics file (it always is when produced by compute_metrics.py).
-    condition_section = _render_by_condition(all_data)
+    condition_section = _render_by_condition(all_data, "conditions", "Condição")
     if condition_section:
         lines += condition_section
+    family_section = _render_by_condition(all_data, "family", "Família")
+    if family_section:
+        lines += family_section
 
     return "\n".join(lines)
 
@@ -312,12 +338,18 @@ _BY_CONDITION_METRICS: list[tuple[str, str]] = [
     ("WER ↓",           "wer"),
     ("Deletion ↓",      "deletion_rate"),
     ("Currency F1 ↑",   "currency_f1"),
+    ("Identifier F1 ↑", "identifier_f1"),
     ("Cell CER ↓",      "cell_cer"),
+    ("Failure Rate ↓", "failure_rate"),
+    ("Missing Page Rate ↓", "missing_page_rate"),
+    ("Recovery Fallback Rate ↓", "easyocr_fallback_rate"),
 ]
 
 
-def _render_by_condition(all_data: list[tuple[str, dict]]) -> list[str]:
-    """Render a by-condition CER/WER breakdown section.
+def _render_by_condition(
+    all_data: list[tuple[str, dict]], field: str = "conditions", title: str = "Condição"
+) -> list[str]:
+    """Render a macro-averaged breakdown by a corpus metadata field.
 
     Returns an empty list when no per_page data is available (old files).
     """
@@ -331,9 +363,12 @@ def _render_by_condition(all_data: list[tuple[str, dict]]) -> list[str]:
             continue
         engine_by_cond[eng] = {}
         for entry in per_page:
-            cond = entry.get("conditions") or "sem condição"
-            all_conditions.add(cond)
-            engine_by_cond.setdefault(eng, {}).setdefault(cond, []).append(entry)
+            labels = entry.get(field) or ("sem condição" if field == "conditions" else "sem família")
+            if isinstance(labels, str):
+                labels = [labels]
+            for cond in labels:
+                all_conditions.add(str(cond))
+                engine_by_cond.setdefault(eng, {}).setdefault(str(cond), []).append(entry)
 
     if not all_conditions:
         return []
@@ -346,9 +381,9 @@ def _render_by_condition(all_data: list[tuple[str, dict]]) -> list[str]:
     lines: list[str] = [
         "---",
         "",
-        "## Breakdown por Condição do Corpus",
+        f"## Breakdown por {title} do Corpus",
         "",
-        "> Micro-média das páginas agrupadas pela tag `conditions` do manifesto.",
+        f"> Macro-média das páginas agrupadas por `{field}` do manifesto.",
         "",
     ]
 
