@@ -175,9 +175,9 @@ foreach ($engine in $engines) {
 
     # --- evaluate_e2e ---
     if ($AllPages) {
-        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --run-id $runId --output-dir $OutDir
+        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --run-id $runId --output-dir $OutDir --allow-partial
     } else {
-        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --pages $Pages --run-id $runId --output-dir $OutDir
+        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --pages $Pages --run-id $runId --output-dir $OutDir --allow-partial
     }
 
     if ($LASTEXITCODE -ne 0) {

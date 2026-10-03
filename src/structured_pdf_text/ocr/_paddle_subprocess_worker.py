@@ -34,12 +34,26 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from typing import BinaryIO
 
 # Module-level response pipe; set by main() before any _reply() call.
 _response_pipe: BinaryIO = sys.stdout.buffer
+
+
+def _redirect_protocol_stdout() -> None:
+    """Reserve stdout for protocol messages and route fd 1 noise to stderr."""
+    global _response_pipe
+    stdout_fd = sys.stdout.fileno()
+    response_fd = os.dup(stdout_fd)
+    _response_pipe = os.fdopen(response_fd, "wb", buffering=0)
+    os.dup2(sys.stderr.fileno(), stdout_fd)
+    sys.stdout = io.TextIOWrapper(
+        os.fdopen(os.dup(sys.stderr.fileno()), "wb", buffering=0),
+        line_buffering=True,
+    )
 
 # Add src/ to path so structured_pdf_text is importable when the package
 # is not installed in the venv (dev mode via sys.path in the parent script).
@@ -99,17 +113,7 @@ def _tokens_to_json(tokens) -> list[dict]:
 
 
 def main() -> None:
-    global _response_pipe
-
-    # Capture the raw stdout binary pipe before redirecting sys.stdout.
-    # All JSONL responses are written directly here so that any print()
-    # calls from PaddleOCR, PIL, or third-party code never contaminate
-    # the framing pipe used by the parent process.
-    _response_pipe = sys.stdout.buffer
-
-    # Redirect sys.stdout → sys.stderr so print() calls from paddle / PIL
-    # go to the parent's stderr (visible in logs) instead of the JSONL pipe.
-    sys.stdout = io.TextIOWrapper(sys.stderr.buffer, line_buffering=True)
+    _redirect_protocol_stdout()
 
     engine = None
     init_config: dict = {}

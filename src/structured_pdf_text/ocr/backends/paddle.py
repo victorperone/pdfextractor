@@ -31,7 +31,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +172,25 @@ class PaddleOCRBackend:
     # Subprocess worker management (CF-4)
     # ------------------------------------------------------------------
 
+    def _discard_worker(self) -> None:
+        """Stop and forget a worker after any protocol framing failure."""
+        proc = self._worker_proc
+        self._worker_proc = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
     def _ensure_worker(self) -> None:
         """Start the subprocess worker if not already running.
 
@@ -190,8 +209,13 @@ class PaddleOCRBackend:
         )
         # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
         init_req = {"method": "init", **self._subprocess_config}  # type: ignore[arg-type]
-        response = self._raw_send(init_req, timeout=_WORKER_INIT_TIMEOUT_S)
+        try:
+            response = self._raw_send(init_req, timeout=_WORKER_INIT_TIMEOUT_S)
+        except Exception:
+            self._discard_worker()
+            raise
         if response.get("status") != "ok":
+            self._discard_worker()
             raise RuntimeError(
                 f"Paddle worker init failed: {response.get('error')}"
             )
@@ -213,26 +237,29 @@ class PaddleOCRBackend:
         self._worker_proc.stdin.flush()
 
         stdout = self._worker_proc.stdout
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            fut: Future[bytes] = pool.submit(stdout.readline)
-            try:
-                response_line = fut.result(timeout=timeout)
-            except TimeoutError:
-                self._worker_proc.kill()
-                self._worker_proc = None
-                raise RuntimeError(
-                    f"Paddle worker timed out after {timeout}s"
-                )
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut: Future[bytes] = pool.submit(stdout.readline)
+        try:
+            response_line = fut.result(timeout=timeout)
+        except FuturesTimeoutError:
+            self._discard_worker()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise RuntimeError(f"Paddle worker timed out after {timeout}s")
+        else:
+            pool.shutdown(wait=True)
 
         if not response_line:
             raise RuntimeError("Paddle worker closed unexpectedly")
 
         try:
-            return json.loads(response_line)
+            response = json.loads(response_line)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 f"Paddle worker sent malformed JSON: {response_line[:200]!r}"
             ) from exc
+        if not isinstance(response, dict) or response.get("status") not in ("ok", "error"):
+            raise RuntimeError("Paddle worker sent an invalid response object")
+        return response
 
     def _worker_send(self, request: dict) -> dict:
         """Send one JSONL request to the worker and return the parsed response.
@@ -260,11 +287,16 @@ class PaddleOCRBackend:
             req_id = self._worker_req_seq
             request = {**request, "request_id": req_id}
 
+        try:
             response = self._raw_send(request)
+        except Exception:
+            self._discard_worker()
+            raise
 
             # Verify the response belongs to this request.
             resp_id = response.get("request_id")
-            if resp_id is not None and resp_id != req_id:
+            if resp_id != req_id:
+                self._discard_worker()
                 raise RuntimeError(
                     f"Paddle worker request_id mismatch: sent {req_id}, got {resp_id}"
                 )
@@ -347,6 +379,16 @@ class PaddleOCRBackend:
                 "paddlex": _package_version("paddlex"),
             },
             artifact_hashes={},  # Paddle model dirs contain many files — hashing deferred
+            extra={
+                "render_scale": self._config.ocr_render_scale,
+                "quality_policy": effective_ocr_quality_policy(self._config).value,
+                "quality_variants": self._config.ocr_quality_variants,
+                "ocr_batch_size": self._config.ocr_batch_size,
+                "num_threads": _resolve_num_threads(self._config.num_threads),
+                "one_dnn": self._runtime_policy.enable_mkldnn,
+                "orientation_classifier": True,
+                "unwarping": True,
+            },
         )
 
     @property
@@ -367,14 +409,21 @@ class PaddleOCRBackend:
     def recognize(self, request: OCRRequest) -> OCRResult:
         t0 = time.perf_counter()
 
+        if request.input_kind == "region" and request.region_bbox is None:
+            return OCRResult(
+                status="invalid_input",
+                tokens=(),
+                text="",
+                engine_identity=self.identity,
+                elapsed_total_s=time.perf_counter() - t0,
+                warnings=("region input requires region_bbox",),
+            )
+
         try:
-            is_region = request.input_kind == "region" and request.region_id is not None
+            is_region = request.input_kind == "region"
             region_box: BBox | None = None
             if is_region:
-                if request.region_bbox is not None:
-                    region_box = BBox(*request.region_bbox)
-                else:
-                    region_box = BBox(0.0, 0.0, 1.0, 1.0)
+                region_box = BBox(*request.region_bbox)
 
             if self._subprocess_config is not None:
                 method = "recognize_region" if is_region else "recognize_page"

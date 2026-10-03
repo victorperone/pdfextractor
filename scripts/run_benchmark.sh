@@ -176,7 +176,7 @@ for engine in "${engine_list[@]}"; do
     if ((ALL_PAGES)); then echo " Pages: all"; else echo " Pages: $PAGES"; fi
     echo "========================================"
 
-    eval_args=("$PDF" --engine "$engine" --run-id "$run_id" --output-dir "$OUT_DIR")
+    eval_args=("$PDF" --engine "$engine" --run-id "$run_id" --output-dir "$OUT_DIR" --allow-partial)
     if ((!ALL_PAGES)); then eval_args+=(--pages "$PAGES"); fi
     if ! "$PYTHON_BIN" "$SCRIPT_DIR/evaluate_e2e.py" "${eval_args[@]}"; then
         echo "[ERROR] E2E extraction failed for $engine" >&2
@@ -200,8 +200,11 @@ for engine in "${engine_list[@]}"; do
 done
 
 if ((${#metric_files[@]})); then
-    "$PYTHON_BIN" "$SCRIPT_DIR/compare_engines.py" "${metric_files[@]}" \
-        --output "$OUT_DIR/comparison_${RUN_SUFFIX}.md"
+    if ! "$PYTHON_BIN" "$SCRIPT_DIR/compare_engines.py" "${metric_files[@]}" \
+        --output "$OUT_DIR/comparison_${RUN_SUFFIX}.md"; then
+        echo "[ERROR] Engine comparison failed" >&2
+        exit 1
+    fi
 fi
 
 if ((${#failed[@]})); then

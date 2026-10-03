@@ -438,6 +438,7 @@ class TesseractBackend:
             },
             artifact_hashes=self._artifact_hashes,
             extra={
+                "render_scale": self._config.ocr_render_scale,
                 "psm": self._psm,
                 "oem": self._oem,
                 "effective_dpi": self._dpi,

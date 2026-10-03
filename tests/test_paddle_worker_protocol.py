@@ -48,6 +48,7 @@ def _fake_worker_proc(script: str) -> subprocess.Popen:  # type: ignore[type-arg
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         bufsize=0,
+        env=_WORKER_ENV,
     )
 
 
@@ -102,12 +103,17 @@ def _make_harness(fake_proc: subprocess.Popen) -> Any:  # type: ignore[type-arg]
             # Worker is dead or None — signal so tests can detect restart logic.
             raise RuntimeError("_ensure_worker: worker is dead (no restart in harness)")
 
+        def _discard_worker(self) -> None:
+            proc, self._worker_proc = self._worker_proc, None
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+
         def _raw_send(self, request: dict) -> dict:
             assert self._worker_proc is not None
             assert self._worker_proc.stdin is not None
             assert self._worker_proc.stdout is not None
 
-            from concurrent.futures import Future, ThreadPoolExecutor
+            from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
             line = json.dumps(request, ensure_ascii=False) + "\n"
             try:
@@ -117,14 +123,16 @@ def _make_harness(fake_proc: subprocess.Popen) -> Any:  # type: ignore[type-arg]
                 raise RuntimeError("Paddle worker closed unexpectedly")
 
             stdout = self._worker_proc.stdout
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                fut: Future[bytes] = pool.submit(stdout.readline)
-                try:
-                    response_line = fut.result(timeout=_TIMEOUT)
-                except TimeoutError:
-                    self._worker_proc.kill()
-                    self._worker_proc = None
-                    raise RuntimeError(f"Paddle worker timed out after {_TIMEOUT}s")
+            pool = ThreadPoolExecutor(max_workers=1)
+            fut: Future[bytes] = pool.submit(stdout.readline)
+            try:
+                response_line = fut.result(timeout=_TIMEOUT)
+            except FuturesTimeoutError:
+                self._discard_worker()
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise RuntimeError(f"Paddle worker timed out after {_TIMEOUT}s")
+            else:
+                pool.shutdown(wait=True)
 
             if not response_line:
                 raise RuntimeError("Paddle worker closed unexpectedly")
@@ -142,9 +150,14 @@ def _make_harness(fake_proc: subprocess.Popen) -> Any:  # type: ignore[type-arg]
                 self._worker_req_seq += 1
                 req_id = self._worker_req_seq
                 request = {**request, "request_id": req_id}
-                response = self._raw_send(request)
+                try:
+                    response = self._raw_send(request)
+                except Exception:
+                    self._discard_worker()
+                    raise
                 resp_id = response.get("request_id")
-                if resp_id is not None and resp_id != req_id:
+                if resp_id != req_id:
+                    self._discard_worker()
                     raise RuntimeError(
                         f"Paddle worker request_id mismatch: sent {req_id}, got {resp_id}"
                     )
@@ -258,6 +271,26 @@ def test_real_worker_print_noise_does_not_corrupt_pipe() -> None:
     proc.wait(timeout=3)
 
 
+def test_protocol_stdout_redirects_native_fd1_noise() -> None:
+    """Native writes to fd 1 are sent to stderr, leaving JSONL intact."""
+    script = textwrap.dedent("""
+        import os
+        from structured_pdf_text.ocr._paddle_subprocess_worker import (
+            _redirect_protocol_stdout, _reply,
+        )
+        _redirect_protocol_stdout()
+        print("python noise")
+        os.write(1, b"native noise\\n")
+        _reply({"status": "ok", "tokens": [], "error": None}, 17)
+    """)
+    proc = _fake_worker_proc(script)
+    raw = proc.stdout.readline()  # type: ignore[union-attr]
+    assert json.loads(raw) == {
+        "status": "ok", "tokens": [], "error": None, "request_id": 17
+    }
+    assert proc.wait(timeout=3) == 0
+
+
 # ---------------------------------------------------------------------------
 # 5. request_id mismatch → RuntimeError
 # ---------------------------------------------------------------------------
@@ -283,8 +316,25 @@ def test_request_id_mismatch_raises() -> None:
     with pytest.raises(RuntimeError, match="request_id mismatch"):
         h._worker_send({"method": "healthcheck"})
 
+    assert h._worker_proc is None
     proc.kill()
     proc.wait()
+
+
+def test_missing_request_id_discards_worker() -> None:
+    script = textwrap.dedent("""
+        import sys, json
+        for line in sys.stdin:
+            if line.strip() == "QUIT": break
+            sys.stdout.write('{"status":"ok","tokens":[],"error":null}\\n')
+            sys.stdout.flush()
+    """)
+    proc = _fake_worker_proc(script)
+    h = _make_harness(proc)
+    with pytest.raises(RuntimeError, match="request_id mismatch"):
+        h._worker_send({"method": "healthcheck"})
+    assert h._worker_proc is None
+    proc.wait(timeout=3)
 
 
 # ---------------------------------------------------------------------------

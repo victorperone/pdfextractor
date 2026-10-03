@@ -361,6 +361,7 @@ class RapidOCRBackend:
             },
             artifact_hashes=self._artifact_hashes,
             extra={
+                "render_scale": self._config.ocr_render_scale,
                 "clahe": True,
                 "det_db_unclip_ratio": float(os.environ.get("RAPIDOCR_UNCLIP_RATIO", "1.8")),
                 "det_db_box_thresh":   float(os.environ.get("RAPIDOCR_BOX_THRESH",   "0.45")),
