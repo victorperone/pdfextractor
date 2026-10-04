@@ -10,12 +10,12 @@ if [[ -x "$REPO_ROOT/.ocr-runtime/bin/tesseract" ]]; then
     PATH="$REPO_ROOT/.ocr-runtime/bin:$PATH"
     export PATH
 fi
-EASYOCR_MODULE_PATH="${EASYOCR_MODULE_PATH:-$REPO_ROOT/.ocr-model-cache/easyocr}"
+EASYOCR_MODULE_PATH="${EASYOCR_MODULE_PATH:-$HOME/.cache/pdfextractor/easyocr}"
 export EASYOCR_MODULE_PATH
 
 # RapidOCR Latin model (required for Portuguese diacritics — ã ç ê õ).
 # Downloaded by setup_ocr_benchmark.sh into .ocr-model-cache/rapidocr/.
-_RAPIDOCR_CACHE="$REPO_ROOT/.ocr-model-cache/rapidocr"
+_RAPIDOCR_CACHE="$HOME/.cache/pdfextractor/rapidocr"
 _RAPIDOCR_REC="$_RAPIDOCR_CACHE/latin_PP-OCRv3_rec_mobile.onnx"
 _RAPIDOCR_KEYS="$_RAPIDOCR_CACHE/latin_dict.txt"
 if [[ -f "$_RAPIDOCR_REC" && -f "$_RAPIDOCR_KEYS" ]]; then
@@ -30,10 +30,11 @@ PDF="corpus/Corpus_Stress_OCR_Markdown_V4.pdf"
 REFERENCE="corpus/Corpus_Stress_OCR_Markdown_V4_REFERENCIA.md"
 MANIFESTO="corpus/Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json"
 VALIDATION="corpus/Corpus_Stress_OCR_Markdown_V4_VALIDACAO.txt"
+CORPUS_LOCK="corpus/acceptance-corpus.lock.json"
 PAGES="77-81"
 RUN_SUFFIX="smoke"
 OUT_DIR="output/fase8/stress_v4"
-ENGINES="tesseract,rapidocr-onnx,rapidocr-openvino,easyocr,paddle"
+CONFIGURATIONS="tesseract,rapidocr-onnxruntime,rapidocr-openvino,easyocr,paddle"
 ALL_PAGES=0
 
 usage() {
@@ -43,11 +44,13 @@ Usage: scripts/run_benchmark.sh [options]
   --reference PATH    Markdown ground truth (Stress V4 by default)
   --manifesto PATH    Corpus metadata JSON (Stress V4 by default)
   --validation PATH   Corpus validation report (Stress V4 by default)
+  --corpus-lock PATH  SHA-256 lock manifest for those local corpus files
   --pages RANGE       1-based page range/list (default: 77-81)
   --all-pages         Evaluate the complete PDF
   --run-suffix NAME   Output run suffix (default: smoke)
   --output-dir PATH   Artifact directory (default: output/fase8/stress_v4)
-  --engines LIST      Comma-separated engines (default: all five)
+  --configurations LIST  Comma-separated deployment configurations (four families, five configurations)
+  --engines LIST         Deprecated option alias for --configurations
   --python PATH       Python executable (default: python or PYTHON_BIN)
 EOF
 }
@@ -58,11 +61,13 @@ while (($#)); do
         --reference) REFERENCE="$2"; shift 2 ;;
         --manifesto) MANIFESTO="$2"; shift 2 ;;
         --validation) VALIDATION="$2"; shift 2 ;;
+        --corpus-lock) CORPUS_LOCK="$2"; shift 2 ;;
         --pages) PAGES="$2"; shift 2 ;;
         --all-pages) ALL_PAGES=1; shift ;;
         --run-suffix) RUN_SUFFIX="$2"; shift 2 ;;
         --output-dir) OUT_DIR="$2"; shift 2 ;;
-        --engines) ENGINES="$2"; shift 2 ;;
+        --configurations) CONFIGURATIONS="$2"; shift 2 ;;
+        --engines) echo "Warning: --engines is deprecated; use --configurations" >&2; CONFIGURATIONS="$2"; shift 2 ;;
         --python) PYTHON_BIN="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -74,6 +79,8 @@ cd "$REPO_ROOT"
 [[ -f "$REFERENCE" ]] || { echo "Reference not found: $REFERENCE" >&2; exit 2; }
 [[ -f "$MANIFESTO" ]] || { echo "Manifesto not found: $MANIFESTO" >&2; exit 2; }
 [[ -f "$VALIDATION" ]] || { echo "Validation report not found: $VALIDATION" >&2; exit 2; }
+
+"$PYTHON_BIN" "$SCRIPT_DIR/provision_acceptance_corpus.py" --manifest "$CORPUS_LOCK"
 
 # Confirm that PDF, reference, manifesto, and the supplied validation report
 # describe the same complete corpus before spending time on OCR.
@@ -162,21 +169,28 @@ mkdir -p "$OUT_DIR"
 
 failed=()
 metric_files=()
-IFS=',' read -r -a engine_list <<< "$ENGINES"
+IFS=',' read -r -a engine_list <<< "$CONFIGURATIONS"
 for engine in "${engine_list[@]}"; do
     engine="${engine//[[:space:]]/}"
     run_id="$RUN_SUFFIX-$engine"
-    engine_slug="${engine//-/_}"
-    hypothesis="$OUT_DIR/extracted_${engine_slug}_${run_id}.md"
-    metrics="$OUT_DIR/metrics_${engine_slug}_${run_id}.json"
+    config_slug="${engine//-/_}"
+    metrics="$OUT_DIR/metrics_${config_slug}_${run_id}.json"
+    backend="$engine"
+    provider=""
+    case "$engine" in
+        rapidocr-onnxruntime) backend="rapidocr"; provider="onnxruntime" ;;
+        rapidocr-openvino) backend="rapidocr"; provider="openvino" ;;
+    esac
+    engine_slug="${backend//-/_}"
 
     echo
     echo "========================================"
-    echo " Engine: $engine"
+    echo " Deployment configuration: $engine"
     if ((ALL_PAGES)); then echo " Pages: all"; else echo " Pages: $PAGES"; fi
     echo "========================================"
 
-    eval_args=("$PDF" --engine "$engine" --run-id "$run_id" --output-dir "$OUT_DIR" --allow-partial)
+    eval_args=("$PDF" --engine "$backend" --run-id "$run_id" --output-dir "$OUT_DIR" --allow-partial)
+    if [[ -n "$provider" ]]; then eval_args+=(--provider "$provider"); fi
     if ((!ALL_PAGES)); then eval_args+=(--pages "$PAGES"); fi
     if ! "$PYTHON_BIN" "$SCRIPT_DIR/evaluate_e2e.py" "${eval_args[@]}"; then
         echo "[ERROR] E2E extraction failed for $engine" >&2

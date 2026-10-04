@@ -1,5 +1,11 @@
 # Execution result of the correction plan
 
+> **Historical record.** This file describes an earlier branch and is not the
+> current OCR contract. Its claims about Paddle-only profiles, OCR preflight,
+> and timeout behavior have been superseded by `README.md`,
+> `docs/benchmark_engines.md`, and `docs/acceptance-checklist.md`. Use the
+> current source and acceptance checklist for release decisions.
+
 ## Starting point and validation
 
 - Branch: `fix/pdfextractor-correcoes`.

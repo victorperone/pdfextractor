@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "corpus_id": "CORPUS-STRESS-OCR-MARKDOWN-V4",
+  "source": "Operator-provided local acceptance corpus; files are not redistributed by this repository.",
+  "license": "Not asserted here; the operator must retain the source corpus terms.",
+  "page_count": 224,
+  "artifacts": {
+    "pdf": {
+      "path": "Corpus_Stress_OCR_Markdown_V4.pdf",
+      "size_bytes": 40011303,
+      "sha256": "45c09f2f03eb0dfe99bef5b8ea5b1ee686351cae2fc1244b4dcfce98fd7d0970"
+    },
+    "reference": {
+      "path": "Corpus_Stress_OCR_Markdown_V4_REFERENCIA.md",
+      "size_bytes": 680823,
+      "sha256": "ae9da694a612ead55da26e39bd3e88c6d24c43e38675c0e1027af6a053ddd1fa"
+    },
+    "manifest": {
+      "path": "Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json",
+      "size_bytes": 1689456,
+      "sha256": "c21c164a3c473c0506965e586d63c7b1058715e31d1a1124e992f11a350e3813"
+    },
+    "validation": {
+      "path": "Corpus_Stress_OCR_Markdown_V4_VALIDACAO.txt",
+      "size_bytes": 25824,
+      "sha256": "5ecfa90178ee525ee12eeb6c7db42fcf0475102873d974064e5f50c798e7cffe"
+    }
+  }
+}

@@ -190,8 +190,16 @@ class TestRegistry:
         assert "paddle" in REGISTRY
 
     def test_all_planned_engines_registered(self) -> None:
-        for name in ("paddle", "rapidocr", "rapidocr-onnx", "rapidocr-openvino", "tesseract", "easyocr"):
+        from structured_pdf_text.ocr.registry import LEGACY_ENGINE_ALIASES, PUBLIC_ENGINES
+        for name in PUBLIC_ENGINES:
             assert name in REGISTRY, f"{name} not in registry"
+        for alias in LEGACY_ENGINE_ALIASES:
+            assert alias not in REGISTRY, f"{alias} must remain a compatibility alias only"
+
+    def test_legacy_registry_alias_resolves_to_public_family(self) -> None:
+        with pytest.warns(DeprecationWarning):
+            entry = get_entry("rapidocr-openvino")
+        assert entry.name == "rapidocr"
 
     def test_get_entry_returns_entry(self) -> None:
         entry = get_entry("paddle")
@@ -210,10 +218,10 @@ class TestRegistry:
 class TestFactory:
     def test_factory_raises_for_unknown_engine(self) -> None:
         from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.errors import ConfigurationError
         from structured_pdf_text.ocr.factory import build_ocr_backend
-        config = ExtractorConfig(ocr_engine="nonexistent")
-        with pytest.raises(UnsupportedOCREngine):
-            build_ocr_backend(config)
+        with pytest.raises(ConfigurationError, match="Unsupported OCR engine"):
+            ExtractorConfig(ocr_engine="nonexistent")
 
     def test_factory_builds_rapidocr_when_optional_runtime_is_stubbed(self, monkeypatch, tmp_path) -> None:
         from structured_pdf_text.config import ExtractorConfig
@@ -273,10 +281,10 @@ class TestConfigRetrocompat:
         config = ExtractorConfig()
         assert config.ocr_engine == "paddle"
 
-    def test_default_ocr_runtime_is_paddle_static(self) -> None:
+    def test_deprecated_ocr_runtime_is_not_a_default_second_source_of_truth(self) -> None:
         from structured_pdf_text.config import ExtractorConfig
         config = ExtractorConfig()
-        assert config.ocr_runtime == "paddle_static"
+        assert config.ocr_runtime is None
 
     def test_existing_code_still_constructs_config(self) -> None:
         from structured_pdf_text.config import ExtractorConfig, ExtractionMode

@@ -644,7 +644,7 @@ def test_real_worker_unknown_method_returns_error() -> None:
         env=_WORKER_ENV,
         bufsize=0,
     )
-    resp = _send(proc, {"protocol_version": 2, "method": "fly_to_the_moon", "request_id": 7})
+    resp = _send(proc, {"protocol_version": 3, "method": "fly_to_the_moon", "request_id": 7})
     assert resp["status"] == "error"
     assert "unknown method" in (resp.get("error") or "")
     assert resp.get("request_id") == 7

@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Preflight check for all five OCR backends.
+"""Check static OCR readiness or run deep pt-BR smoke tests.
 
-Imports each backend, calls healthcheck(), and prints a status table.
-Exit code 0 when all backends report "ready", 1 when any report otherwise.
-
-Usage:
-    python scripts/preflight_ocr_backends.py [--language pt]
-
-Environment variables are read from the current shell (TESSERACT_TESSDATA_DIR,
-EASYOCR_MODULE_PATH, RAPIDOCR_REC_MODEL, PADDLE_PDX_CACHE_HOME, etc.).
+Static mode inspects packages, executables, model files and language data
+without constructing heavy inference runtimes. Pass ``--deep-smoke`` to load
+each deployment configuration and OCR a generated pt-BR sample.
 """
 from __future__ import annotations
 
@@ -19,84 +14,56 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from structured_pdf_text.config import ExtractorConfig, ExtractionMode
+from structured_pdf_text.ocr.readiness import ReadinessResult, probe_deep, probe_static
 
 
-def _check(engine: str, language: str) -> tuple[str, str]:
-    """Return (status, detail) for one engine."""
+CONFIGURATIONS = (
+    ("paddle", "paddle", None),
+    ("rapidocr [onnxruntime]", "rapidocr", "onnxruntime"),
+    ("rapidocr [openvino]", "rapidocr", "openvino"),
+    ("easyocr", "easyocr", None),
+    ("tesseract", "tesseract", None),
+)
+
+
+def _check(engine: str, provider: str | None, language: str, deep: bool) -> ReadinessResult:
     try:
         config = ExtractorConfig(
             mode=ExtractionMode.OCR,
             language=language,
             ocr_engine=engine,
+            ocr_provider=provider,
         )
-        from structured_pdf_text.ocr.factory import build_ocr_backend
-        backend = build_ocr_backend(config)
-        identity = backend.identity
-        status = backend.healthcheck()
-        versions = ", ".join(
-            f"{k}={v}" for k, v in identity.package_versions.items()
-        )
-        hashes = identity.artifact_hashes
-        hash_summary = (
-            f", hashes={len(hashes)}" if hashes else ", hashes=none"
-        )
-        detail = f"{versions}{hash_summary}"
-        if engine in {"rapidocr-onnx", "rapidocr-openvino"}:
-            extra = identity.extra
-            detail += (
-                f", language_profile={identity.profile}"
-                f", recognizer={extra.get('rec_model') or 'bundled'}"
-                f", dictionary={extra.get('rec_keys') or 'bundled'}"
-            )
-            if language.lower().startswith("pt"):
-                from structured_pdf_text.ocr.backends.rapidocr import (
-                    portuguese_dictionary_profile,
-                )
-
-                profile, missing = portuguese_dictionary_profile(extra.get("rec_keys"))
-                if profile != "latin/pt-compatible":
-                    missing_detail = "".join(missing) or "unreadable/missing dictionary"
-                    detail += f", missing Portuguese character coverage: {missing_detail}"
-                    backend.close()
-                    return "not_ready_for_pt_comparison", detail
-        backend.close()
-        return status, detail
+        return probe_deep(config) if deep else probe_static(config)
     except Exception as exc:
-        return "error", str(exc)
+        from structured_pdf_text.ocr.readiness import ReadinessStatus
+        return ReadinessResult(ReadinessStatus.UNKNOWN, "configuration_error", {"message": str(exc)})
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--language", default="pt")
+    parser.add_argument("--language", default="pt-BR")
+    parser.add_argument("--deep-smoke", action="store_true", help="Load each backend and OCR a generated pt-BR sample")
     args = parser.parse_args()
 
-    engines = [
-        "paddle",
-        "rapidocr-onnx",
-        "rapidocr-openvino",
-        "easyocr",
-        "tesseract",
-    ]
-
-    col = max(len(e) for e in engines) + 2
-    print(f"\n{'Engine':<{col}}  {'Status':<10}  Detail")
-    print("-" * 80)
-
+    name_width = max(len(label) for label, _, _ in CONFIGURATIONS) + 2
+    print(f"\n{'Configuration':<{name_width}}  {'Status':<12}  Reason / details")
+    print("-" * 100)
     all_ready = True
-    for engine in engines:
-        status, detail = _check(engine, args.language)
-        marker = "[ok]" if status == "ready" else "[!!]"
-        if status != "ready":
+    for label, engine, provider in CONFIGURATIONS:
+        result = _check(engine, provider, args.language, args.deep_smoke)
+        if result.status.value != "ready":
             all_ready = False
-        print(f"{marker}  {engine:<{col}}  {status:<10}  {detail}")
+        extra = result.reason_code or ""
+        if result.details:
+            extra = (extra + " " if extra else "") + str(result.details)
+        print(f"{'[ok]' if result.status.value == 'ready' else '[!!]'}  {label:<{name_width}}  {result.status.value:<12}  {extra}")
 
-    print()
     if all_ready:
-        print("All engines: READY")
+        print("\nAll selected OCR configurations: READY")
         return 0
-    else:
-        print("One or more engines are NOT READY — check setup before running benchmarks.")
-        return 1
+    print("\nOne or more OCR configurations are not ready.")
+    return 1
 
 
 if __name__ == "__main__":

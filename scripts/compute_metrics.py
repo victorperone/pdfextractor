@@ -1533,9 +1533,8 @@ def main() -> int:
     }
 
     # --- Save metrics JSON ---
-    metrics_path.write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    from structured_pdf_text.atomic_io import atomic_write_json, atomic_write_text
+    atomic_write_json(metrics_path, summary)
 
     # --- Build error report for summary ---
     flat_summary = {
@@ -1546,7 +1545,7 @@ def main() -> int:
         **summary["grupo5_dados_criticos"],
     }
     error_report = _build_error_report(args.engine, run_id, per_page_results, flat_summary)
-    errors_path.write_text(error_report, encoding="utf-8")
+    atomic_write_text(errors_path, error_report)
 
     if not args.quiet:
         g1 = summary["grupo1_texto"]

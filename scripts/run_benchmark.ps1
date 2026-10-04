@@ -1,4 +1,4 @@
-# Phase 8 - E2E Benchmark: all engines, sequential
+# Phase 8 - E2E Benchmark: five deployment configurations, sequential
 #
 # Defaults target the validated Stress OCR Markdown V4 corpus.
 # All paths are relative to the repository root by default.
@@ -9,19 +9,20 @@
 # Full document:
 #   .\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
 #
-# Single engine:
-#   .\scripts\run_benchmark.ps1 -Engine easyocr -AllPages -RunSuffix "v2"
-#   .\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
+# Single configuration or a subset:
+#   .\scripts\run_benchmark.ps1 -Configuration easyocr -AllPages -RunSuffix "v2"
+#   .\scripts\run_benchmark.ps1 -Configuration "easyocr,tesseract" -AllPages -RunSuffix "v2"
 
 param(
     [string]$Pages      = "77-81",
     [switch]$AllPages,
     [string]$RunSuffix  = "smoke",
-    [string]$Engine     = "",
+    [Alias("Engine")][string]$Configuration = "",
     [string]$Corpus     = "corpus\Corpus_Stress_OCR_Markdown_V4.pdf",
     [string]$Reference  = "corpus\Corpus_Stress_OCR_Markdown_V4_REFERENCIA.md",
     [string]$Manifesto  = "corpus\Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json",
     [string]$Validation = "corpus\Corpus_Stress_OCR_Markdown_V4_VALIDACAO.txt",
+    [string]$CorpusLock = "corpus\acceptance-corpus.lock.json",
     [string]$OutDir     = "output\fase8",
     [string]$PythonBin  = "python"
 )
@@ -32,6 +33,10 @@ $ErrorActionPreference = "Stop"
 # Resolve paths relative to the repository root (parent of scripts\).
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $ScriptDir
+$env:EASYOCR_MODULE_PATH = if ($env:EASYOCR_MODULE_PATH) { $env:EASYOCR_MODULE_PATH } else { Join-Path $HOME ".cache\pdfextractor\easyocr" }
+$rapidocrCache = Join-Path $HOME ".cache\pdfextractor\rapidocr"
+$env:RAPIDOCR_REC_MODEL = if ($env:RAPIDOCR_REC_MODEL) { $env:RAPIDOCR_REC_MODEL } else { Join-Path $rapidocrCache "latin_PP-OCRv3_rec_mobile.onnx" }
+$env:RAPIDOCR_REC_KEYS = if ($env:RAPIDOCR_REC_KEYS) { $env:RAPIDOCR_REC_KEYS } else { Join-Path $rapidocrCache "latin_dict.txt" }
 
 Push-Location $RepoRoot
 try {
@@ -44,8 +49,14 @@ foreach ($file in @($Corpus, $Reference, $Manifesto, $Validation)) {
     }
 }
 
+& $PythonBin scripts\provision_acceptance_corpus.py --manifest $CorpusLock
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Acceptance corpus lock verification failed; benchmark was not started." -ForegroundColor Red
+    exit 2
+}
+
 # --- RapidOCR Latin model (required for Portuguese diacritics) ---
-$rapidocrCache = "$RepoRoot\.ocr-model-cache\rapidocr"
+$rapidocrCache = Join-Path $HOME ".cache\pdfextractor\rapidocr"
 $rapidocrRec   = "$rapidocrCache\latin_PP-OCRv3_rec_mobile.onnx"
 $rapidocrKeys  = "$rapidocrCache\latin_dict.txt"
 if ((Test-Path $rapidocrRec) -and (Test-Path $rapidocrKeys)) {
@@ -143,13 +154,13 @@ if ($LASTEXITCODE -ne 0) {
     exit 2
 }
 
-# --- Engine loop ---
-$allEngines = @("tesseract", "rapidocr-onnx", "rapidocr-openvino", "easyocr", "paddle")
+# --- Deployment configuration loop ---
+$allConfigurations = @("tesseract", "rapidocr-onnxruntime", "rapidocr-openvino", "easyocr", "paddle")
 
-if ($Engine -ne "") {
-    $engines = $Engine -split "," | ForEach-Object { $_.Trim() }
+if ($Configuration -ne "") {
+    $engines = $Configuration -split "," | ForEach-Object { $_.Trim() }
 } else {
-    $engines = $allEngines
+    $engines = $allConfigurations
 }
 
 $failed      = @()
@@ -159,13 +170,18 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 foreach ($engine in $engines) {
     $runId      = "$RunSuffix-$engine"
-    $engineSlug = $engine -replace "-", "_"
+    $configSlug = $engine -replace "-", "_"
+    $backend    = $engine
+    $provider   = $null
+    if ($engine -eq "rapidocr-onnxruntime") { $backend = "rapidocr"; $provider = "onnxruntime" }
+    if ($engine -eq "rapidocr-openvino") { $backend = "rapidocr"; $provider = "openvino" }
+    $engineSlug = $backend -replace "-", "_"
     $hyp        = "$OutDir\extracted_${engineSlug}_${runId}.md"
-    $metrics    = "$OutDir\metrics_${engineSlug}_${runId}.json"
+    $metrics    = "$OutDir\metrics_${configSlug}_${runId}.json"
 
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host " Engine: $engine" -ForegroundColor Cyan
+    Write-Host " Deployment configuration: $engine" -ForegroundColor Cyan
     if ($AllPages) {
         Write-Host " Pages: all" -ForegroundColor Cyan
     } else {
@@ -174,10 +190,12 @@ foreach ($engine in $engines) {
     Write-Host "========================================" -ForegroundColor Cyan
 
     # --- evaluate_e2e ---
+    $evalArgs = @("scripts\evaluate_e2e.py", $Corpus, "--engine", $backend, "--run-id", $runId, "--output-dir", $OutDir, "--allow-partial")
+    if ($provider) { $evalArgs += @("--provider", $provider) }
     if ($AllPages) {
-        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --run-id $runId --output-dir $OutDir --allow-partial
+        & $PythonBin @evalArgs
     } else {
-        & $PythonBin scripts\evaluate_e2e.py $Corpus --engine $engine --pages $Pages --run-id $runId --output-dir $OutDir --allow-partial
+        & $PythonBin @evalArgs --pages $Pages
     }
 
     if ($LASTEXITCODE -ne 0) {

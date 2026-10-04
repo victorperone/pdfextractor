@@ -167,15 +167,18 @@ class OCRBackend(Protocol):
         ...
 
     def recognize_region(
-        self, page_image: object, page_index: int, region_bbox: BBox
+        self, page_image: object, page_index: int, region_bbox: BBox,
+        *, page_bbox: BBox | None = None,
     ) -> list[OcrToken]:
         """Pipeline-layer region OCR — same signature as ``OcrEngine.recognize_region``."""
         ...
 
     def healthcheck(self) -> str:
-        """Check model readiness without loading the runtime.
+        """Run the backend's legacy health probe, which may load its runtime.
 
-        Returns one of: "ready", "missing", "incomplete", "corrupt", "unknown".
+        Use ``ocr.readiness.probe_static`` for checks that must not construct a
+        model, and ``probe_deep`` for an explicit inference smoke test. Returned
+        values follow: ready, missing, incomplete, corrupt, unknown.
         """
         ...
 

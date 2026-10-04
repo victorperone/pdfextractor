@@ -382,12 +382,14 @@ class TesseractBackend:
 
     def __init__(self, config: "ExtractorConfig") -> None:
         self._config = config
+        from structured_pdf_text.ocr.env import env_bool, env_float, env_int
         from structured_pdf_text.ocr.languages import backend_language, canonical_language
         self._language = canonical_language(config.language)
         self._tesseract_cmd = os.environ.get("TESSERACT_CMD") or shutil.which("tesseract") or "tesseract"
         self._profile = os.environ.get("TESSERACT_PROFILE", "default")
         if self._profile not in {"default", "tesseract-pt-financial-v1", "tesseract-degraded-scan-v1"}:
-            raise ValueError(f"Unsupported TESSERACT_PROFILE: {self._profile!r}")
+            from structured_pdf_text.errors import ConfigurationError
+            raise ConfigurationError(f"Unsupported TESSERACT_PROFILE: {self._profile!r}")
         tessdata_dir = os.environ.get("TESSERACT_TESSDATA_DIR", "")
         self._effective_tessdata_dir = tessdata_dir or None
         self._extra_flags: list[str] = ["--tessdata-dir", tessdata_dir] if tessdata_dir else []
@@ -395,25 +397,26 @@ class TesseractBackend:
             "TESSERACT_LANG",
             backend_language(config.language, "tesseract"),
         )
-        self._psm = int(os.environ.get("TESSERACT_PSM", "3"))
-        self._oem = int(os.environ.get("TESSERACT_OEM", "1"))
+        self._psm = env_int("TESSERACT_PSM", 3, allowed=set(range(14)))
+        self._oem = env_int("TESSERACT_OEM", 1, allowed={0, 1, 2, 3})
 
         # DPI: computed from render scale so Tesseract never falls back to 70 DPI.
         default_dpi = int(72 * config.effective_ocr_render_scale())
-        self._dpi = int(os.environ.get("TESSERACT_DPI", str(default_dpi)))
+        self._dpi = env_int("TESSERACT_DPI", default_dpi, minimum=1)
 
         languages = self._tess_lang.split("+")
         if not languages or any(language not in {"por", "eng"} for language in languages):
-            raise ValueError(f"Unsupported Tesseract language list: {self._tess_lang!r}")
+            from structured_pdf_text.errors import ConfigurationError
+            raise ConfigurationError(f"Unsupported Tesseract language list: {self._tess_lang!r}")
 
         # Minimum word confidence filter (0 = no filter, matches previous behaviour).
-        self._conf_min = float(os.environ.get("TESSERACT_CONF_MIN", "0"))
+        self._conf_min = env_float("TESSERACT_CONF_MIN", 0.0, minimum=0.0, maximum=100.0)
 
         # OSD pre-flight: run PSM 0 before recognition and rotate the image
         # when orientation confidence is sufficient (>= 2.0).
         # Disabled by default; enable with TESSERACT_OSD=1.
-        self._osd_enabled: bool = os.environ.get("TESSERACT_OSD", "0") in ("1", "true", "yes")
-        self._osd_conf_min: float = float(os.environ.get("TESSERACT_OSD_CONF_MIN", "2.0"))
+        self._osd_enabled: bool = env_bool("TESSERACT_OSD", False)
+        self._osd_conf_min: float = env_float("TESSERACT_OSD_CONF_MIN", 2.0, minimum=0.0)
 
         info = _tesseract_info(self._tesseract_cmd, self._extra_flags)
         self._version = info["version"]
@@ -428,6 +431,31 @@ class TesseractBackend:
             if digest:
                 self._artifact_hashes[f"{language}.traineddata"] = digest
 
+    def _run_effective_tesseract(self, image: object, dpi: int) -> tuple[str, int, int, int]:
+        """Run the configured executable/profile/thread policy for either API.
+
+        Returns TSV, selected OSD rotation, and original image dimensions.
+        Keeping this in one place prevents RAW benchmarks and document OCR
+        from silently measuring different Tesseract installations.
+        """
+        pil = _to_pil(image)
+        original_width, original_height = pil.size
+        osd_rotation = 0
+        if self._osd_enabled:
+            osd = _run_tesseract_osd(pil, self._extra_flags, self._tesseract_cmd)
+            if osd is not None and osd["confidence"] >= self._osd_conf_min and osd["rotate"] != 0:
+                pil = pil.rotate(-osd["rotate"], expand=True)
+                osd_rotation = int(osd["rotate"]) % 360
+        tsv = _run_tesseract_tsv(
+            pil, self._tess_lang, self._psm, self._oem,
+            dpi=dpi,
+            extra_flags=self._extra_flags,
+            executable=self._tesseract_cmd,
+            profile=self._profile,
+            num_threads=self._config.num_threads,
+        )
+        return tsv, osd_rotation, original_width, original_height
+
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
     # ------------------------------------------------------------------
@@ -435,11 +463,15 @@ class TesseractBackend:
     @property
     def identity(self) -> OCRBackendIdentity:
         tessdata_dir_env = os.environ.get("TESSERACT_TESSDATA_DIR", "")
+        effective_language = "+".join(
+            "pt-BR" if item == "por" else "en" if item == "eng" else item
+            for item in self._tess_lang.split("+")
+        )
         return OCRBackendIdentity(
             engine="tesseract",
             runtime="tesseract-cli",
             profile=self._profile,
-            language=self._language,
+            language=effective_language,
             device="cpu",
             package_versions={
                 "tesseract": self._version,
@@ -449,6 +481,9 @@ class TesseractBackend:
             artifact_hashes=self._artifact_hashes,
             extra={
                 "render_scale": self._config.effective_ocr_render_scale(),
+                "requested_language": self._language,
+                "effective_language": effective_language,
+                "effective_tesseract_lang": self._tess_lang,
                 "psm": self._psm,
                 "oem": self._oem,
                 "effective_dpi": self._dpi,
@@ -483,10 +518,7 @@ class TesseractBackend:
         # Use DPI from request when available (benchmark sets it explicitly).
         dpi = request.dpi if request.dpi else self._dpi
         try:
-            tsv = _run_tesseract_tsv(
-                request.image, self._tess_lang, self._psm, self._oem,
-                dpi=dpi, extra_flags=self._extra_flags,
-            )
+            tsv, _rotation, _width, _height = self._run_effective_tesseract(request.image, dpi)
             rows = _parse_tsv(tsv)
             rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
             tokens = tuple(_tsv_to_ocr_tokens(rows, "tesseract", self._conf_min, offset_x=rx0, offset_y=ry0))
@@ -540,22 +572,8 @@ class TesseractBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
-        image = page_image
-        original_width, original_height = _to_pil(page_image).size
-        osd_rotation = 0
-        if self._osd_enabled:
-            osd = _run_tesseract_osd(image, self._extra_flags, self._tesseract_cmd)
-            if osd is not None and osd["confidence"] >= self._osd_conf_min and osd["rotate"] != 0:
-                from PIL import Image as _PILImage
-                pil = _to_pil(image)
-                image = pil.rotate(-osd["rotate"], expand=True)
-                osd_rotation = int(osd["rotate"]) % 360
-        tsv = _run_tesseract_tsv(
-            image, self._tess_lang, self._psm, self._oem,
-            dpi=self._dpi, extra_flags=self._extra_flags,
-            executable=self._tesseract_cmd,
-            profile=self._profile,
-            num_threads=self._config.num_threads,
+        tsv, osd_rotation, original_width, original_height = self._run_effective_tesseract(
+            page_image, self._dpi
         )
         tokens = _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
@@ -571,15 +589,16 @@ class TesseractBackend:
         page_image: object,
         page_index: int,
         region_bbox: "BBox",
+        *,
+        page_bbox: "BBox | None" = None,
     ) -> list[OcrToken]:
         import numpy as np
         from PIL import Image
 
         pil = _to_pil(page_image)
         arr = np.array(pil)
-        crop_arr, (cx0, cy0, _cx1, _cy1) = safe_crop_array(
-            arr, region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1,
-        )
+        from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
+        crop_arr, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(arr, region_bbox, page_bbox)
         if crop_arr.size == 0:
             return []
         crop_pil = Image.fromarray(crop_arr)
@@ -591,12 +610,14 @@ class TesseractBackend:
             profile=self._profile,
             num_threads=self._config.num_threads,
         )
-        return _tsv_to_pipeline_tokens(
+        tokens = _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
             conf_min=self._conf_min,
             source=SourceKind.OCR_REGION,
         )
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        return map_tokens_to_page(tokens, page_bbox, width, height)
 
     # ------------------------------------------------------------------
     # Lifecycle

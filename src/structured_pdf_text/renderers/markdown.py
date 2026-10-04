@@ -77,16 +77,16 @@ def _render_content_block(
         # canonical blocks rely exclusively on ``suppressed``.
         if not preserve_hf and not block.line_ids:
             return ""
-        return _escape_inline_text(block.text)
+        return _escape_inline_text(block.text, context="paragraph")
 
     if block.kind == ContentKind.TITLE:
         level = block.heading_level or 1
         prefix = "#" * max(1, min(level, 6))
-        return f"{prefix} {_escape_inline_text(block.text)}" if block.text else ""
+        return f"{prefix} {_escape_inline_text(block.text, context='heading')}" if block.text else ""
 
     if block.kind == ContentKind.LIST and block.list_items:
         return "\n".join(
-            f"{'  ' * max(0, item.level)}{item.marker} {_escape_inline_text(item.text)}"
+            f"{'  ' * max(0, item.level)}{item.marker} {_escape_inline_text(item.text, context='list')}"
             for item in block.list_items
         )
 
@@ -102,9 +102,9 @@ def _render_content_block(
     if block.kind == ContentKind.FIGURE:
         # No semantic representation yet. Preserve OCR text when present so it
         # is not silently lost. Empty figures produce no Markdown output.
-        return _escape_inline_text(block.text) if block.text else ""
+        return _escape_inline_text(block.text, context="paragraph") if block.text else ""
 
-    return _escape_inline_text(block.text)
+    return _escape_inline_text(block.text, context="paragraph")
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ def _render_page_legacy(
         page_parts: list[str] = []
         body = page.reading_text.strip()
         if body:
-            page_parts.append(_escape_inline_text(body))
+            page_parts.append(_escape_inline_text(body, context="paragraph"))
         for table, rendered in rendered_tables:
             page_parts.append(rendered)
         return page_parts
@@ -156,7 +156,7 @@ def _render_page_legacy(
                 if line.text.strip()
             )
             if title_text:
-                page_parts.append(f"{prefix} {_escape_inline_text(title_text)}")
+                page_parts.append(f"{prefix} {_escape_inline_text(title_text, context='heading')}")
             continue
 
         body = "\n".join(
@@ -165,7 +165,7 @@ def _render_page_legacy(
             if line.text.strip()
         ).strip()
         if body:
-            page_parts.append(_escape_inline_text(body))
+            page_parts.append(_escape_inline_text(body, context="paragraph"))
 
     for table, rendered in rendered_tables:
         page_parts.append(rendered)
@@ -301,18 +301,41 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
 
 def _escape_cell(value: str) -> str:
     return (
-        _escape_inline_text(value)
+        _escape_inline_text(value, context="table")
         .replace("\r\n", "<br>")
         .replace("\n", "<br>")
     )
 
 
-_MARKDOWN_PUNCTUATION = frozenset(string.punctuation)
-
-
-def _escape_inline_text(value: str) -> str:
-    """Escape literal PDF text so it cannot create Markdown structure."""
-    return "".join(("\\" + char) if char in _MARKDOWN_PUNCTUATION else char for char in value)
+def _escape_inline_text(value: str, *, context: str = "paragraph") -> str:
+    """Escape Markdown syntax only where literal text could change structure."""
+    if context not in {"paragraph", "heading", "list", "table"}:
+        raise ValueError(f"Unknown Markdown text context: {context!r}")
+    escaped = set("\\`*_[]<>!")
+    if context == "table":
+        escaped.add("|")
+    lines = value.splitlines(keepends=True)
+    if not lines:
+        lines = [value]
+    output: list[str] = []
+    for line in lines:
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        stripped = content.lstrip()
+        leading = content[: len(content) - len(stripped)]
+        if context == "heading" and stripped.startswith("#"):
+            escaped.add("#")
+        if context in {"paragraph", "list"}:
+            if stripped.startswith((">", "#")):
+                escaped.add(stripped[0])
+            if stripped.startswith(("- ", "+ ", "* ")):
+                escaped.add(stripped[0])
+            if len(stripped) > 1 and stripped[0].isdigit():
+                marker = stripped.split(maxsplit=1)[0]
+                if marker.endswith((".", ")")):
+                    escaped.add(marker[-1])
+        output.append(leading + "".join(("\\" + char) if char in escaped else char for char in stripped) + ending)
+    return "".join(output)
 
 
 def _escape_html(value: str) -> str:

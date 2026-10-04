@@ -46,10 +46,9 @@ from structured_pdf_text.geometry import BBox
 
 _MIB = 1024 * 1024
 
-# Default: 8 MiB.  Override with PDFEXTRACTOR_OCR_RGB_BUDGET_MIB.
-_OCR_RGB_BUDGET_MIB: float = float(
-    os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "8.0")
-)
+def _ocr_rgb_budget_mib() -> float:
+    from structured_pdf_text.ocr.env import env_float
+    return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", 8.0, minimum=0.01)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +84,7 @@ def plan_ocr_scales(
     width: int,
     height: int,
     scale_factors: tuple[float, ...],
-    max_rgb_mib: float = _OCR_RGB_BUDGET_MIB,
+    max_rgb_mib: float | None = None,
 ) -> tuple[list[ScalePlan], list[ScalePlan]]:
     """Partition scale factors into allowed and budget-blocked lists.
 
@@ -124,6 +123,8 @@ def plan_ocr_scales(
     """
     if width <= 0 or height <= 0:
         raise ValueError(f"Image dimensions must be positive, got {width}×{height}.")
+    if max_rgb_mib is None:
+        max_rgb_mib = _ocr_rgb_budget_mib()
     if not isfinite(max_rgb_mib) or max_rgb_mib <= 0:
         raise ValueError(f"max_rgb_mib must be a positive finite number, got {max_rgb_mib}.")
 
@@ -388,12 +389,13 @@ class OcrRegionRefiner:
             f" quality_reasons=[{reasons_str}]"
         )
 
+        rgb_budget_mib = _ocr_rgb_budget_mib()
         allowed_plans, blocked_plans = plan_ocr_scales(
-            crop_w, crop_h, scales_raw, _OCR_RGB_BUDGET_MIB
+            crop_w, crop_h, scales_raw, rgb_budget_mib
         )
         _recovery_debug(
             f"OCR_SCALE_PLAN page={page_index}"
-            f" limit_rgb_mib={_OCR_RGB_BUDGET_MIB:.1f}"
+            f" limit_rgb_mib={rgb_budget_mib:.1f}"
             f" allowed_scales={','.join(str(p.scale) for p in allowed_plans) or 'none'}"
             f" blocked_scales={','.join(str(p.scale) for p in blocked_plans) or 'none'}"
         )
@@ -413,7 +415,7 @@ class OcrRegionRefiner:
                 f"OCR_SCALE_ALL_BLOCKED page={page_index}"
                 f" base_width={crop_w} base_height={crop_h}"
                 f" estimated_1x_mib={crop_w * crop_h * 3 / _MIB:.3f}"
-                f" limit_rgb_mib={_OCR_RGB_BUDGET_MIB:.1f}"
+                f" limit_rgb_mib={rgb_budget_mib:.1f}"
                 f" action=recovery_skipped"
             )
             return RegionRefinementResult(
@@ -424,6 +426,8 @@ class OcrRegionRefiner:
                 selected_rotation=None,
                 ocr_passes=0,
                 ocr_batches=0,
+                status="budget_blocked",
+                reason_code="ocr_no_scale_within_budget",
             )
 
         allowed_scale_set = frozenset(p.scale for p in allowed_plans)

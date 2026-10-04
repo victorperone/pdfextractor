@@ -1,0 +1,16 @@
+# Supported native Windows all-OCR environment, Python 3.12.
+# Refresh deliberately with a clean install and commit the resulting diff.
+pypdfium2==5.13.0
+Pillow==12.3.0
+numpy==2.0.2
+opencv-python-headless==4.10.0.84
+psutil==7.2.2
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+paddlex==3.7.2
+rapidocr==3.9.2
+onnxruntime==1.30.0
+openvino==2024.4.0
+torch==2.14.0+cpu
+torchvision==0.29.0+cpu
+easyocr==1.7.2

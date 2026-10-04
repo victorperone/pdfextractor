@@ -7,6 +7,7 @@ actual backend classes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,12 @@ class BackendEntry:
     setup_hint: str
 
 
+PUBLIC_ENGINES = ("paddle", "rapidocr", "easyocr", "tesseract")
+LEGACY_ENGINE_ALIASES = {
+    "rapidocr-onnx": ("rapidocr", "onnxruntime"),
+    "rapidocr-openvino": ("rapidocr", "openvino"),
+}
+
 REGISTRY: dict[str, BackendEntry] = {
     "paddle": BackendEntry(
         name="paddle",
@@ -28,7 +35,7 @@ REGISTRY: dict[str, BackendEntry] = {
         default_runtime="paddle_static",
         default_profile="pt",
         extras="ocr",
-        setup_hint="pdftext setup-models --language pt",
+        setup_hint="pdftext setup-paddle-models --paddle-model-profile pt",
     ),
     "rapidocr": BackendEntry(
         name="rapidocr",
@@ -37,22 +44,6 @@ REGISTRY: dict[str, BackendEntry] = {
         default_profile="latin/pt-compatible",
         extras="ocr-rapidocr-onnx",
         setup_hint='pip install "structured-pdf-text[ocr-rapidocr-onnx]"',
-    ),
-    "rapidocr-onnx": BackendEntry(
-        name="rapidocr-onnx",
-        display_name="RapidOCR + ONNX Runtime",
-        default_runtime="onnxruntime",
-        default_profile="latin/pt-compatible",
-        extras="ocr-rapidocr-onnx",
-        setup_hint='pip install "structured-pdf-text[ocr-rapidocr-onnx]"',
-    ),
-    "rapidocr-openvino": BackendEntry(
-        name="rapidocr-openvino",
-        display_name="RapidOCR + OpenVINO",
-        default_runtime="openvino",
-        default_profile="latin/pt-compatible",
-        extras="ocr-rapidocr-openvino",
-        setup_hint='pip install "structured-pdf-text[ocr-rapidocr-openvino]"',
     ),
     "tesseract": BackendEntry(
         name="tesseract",
@@ -79,6 +70,13 @@ def get_entry(engine: str) -> BackendEntry:
     Raises ``KeyError`` for unknown names.  Callers that want a softer error
     should check ``engine in REGISTRY`` first.
     """
+    if engine in LEGACY_ENGINE_ALIASES:
+        warnings.warn(
+            f"{engine!r} is deprecated; use ocr_engine='rapidocr' and set ocr_provider explicitly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        engine = LEGACY_ENGINE_ALIASES[engine][0]
     if engine not in REGISTRY:
         raise KeyError(
             f"Unknown OCR engine: {engine!r}. "

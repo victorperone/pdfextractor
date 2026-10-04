@@ -88,31 +88,16 @@ def _package_version(name: str) -> str:
 
 
 def _import_rapidocr(runtime: str) -> type:
-    """Import the unified RapidOCR family, retaining legacy import fallback."""
+    """Import only the maintained unified RapidOCR package."""
     try:
         from rapidocr import RapidOCR  # type: ignore
         return RapidOCR
-    except ImportError:
-        pass
-    if runtime == "openvino":
-        try:
-            from rapidocr_openvino import RapidOCR  # type: ignore
-            return RapidOCR
-        except ImportError as exc:
-            raise ImportError(
-                "rapidocr-openvino is not installed. "
-                "Install with: pip install openvino==2024.4.0 && "
-                'pip install "rapidocr-openvino==1.4.4" --no-deps'
-            ) from exc
-    else:
-        try:
-            from rapidocr_onnxruntime import RapidOCR  # type: ignore
-            return RapidOCR
-        except ImportError as exc:
-            raise ImportError(
-                "rapidocr-onnxruntime is not installed. "
-                'Install with: pip install "structured-pdf-text[ocr-rapidocr-onnx]"'
-            ) from exc
+    except ImportError as exc:
+        provider_hint = "ocr-rapidocr-openvino" if runtime == "openvino" else "ocr-rapidocr-onnx"
+        raise ImportError(
+            "The unified rapidocr package is not installed. "
+            f'Install with: pip install "structured-pdf-text[{provider_hint}]"'
+        ) from exc
 
 
 def _to_numpy(image: object):
@@ -263,6 +248,8 @@ class RapidOCRBackend:
 
     def __init__(self, config: "ExtractorConfig", runtime: str = "onnxruntime") -> None:
         self._config = config
+        self._closed = False
+        from structured_pdf_text.ocr.env import env_float
         self._language = config.language
         self._runtime = runtime
         self._engine_key = "rapidocr"
@@ -274,6 +261,13 @@ class RapidOCRBackend:
         det_path = os.environ.get("RAPIDOCR_DET_MODEL")
         rec_path = os.environ.get("RAPIDOCR_REC_MODEL")
         rec_keys = os.environ.get("RAPIDOCR_REC_KEYS")
+        if not rec_path and not rec_keys:
+            cache = Path.home() / ".cache" / "pdfextractor" / "rapidocr"
+            cached_rec = cache / "latin_PP-OCRv3_rec_mobile.onnx"
+            cached_keys = cache / "latin_dict.txt"
+            if cached_rec.is_file() or cached_keys.is_file():
+                rec_path = str(cached_rec)
+                rec_keys = str(cached_keys)
         if det_path and not self._unified:
             kwargs["det_model_path"] = det_path
         if bool(rec_path) != bool(rec_keys):
@@ -305,10 +299,10 @@ class RapidOCRBackend:
         else:
             self._profile = "custom-det"
 
-        unclip    = float(os.environ.get("RAPIDOCR_UNCLIP_RATIO", "1.8"))
-        box_thresh = float(os.environ.get("RAPIDOCR_BOX_THRESH",   "0.45"))
-        det_thresh = float(os.environ.get("RAPIDOCR_DET_THRESH",   "0.25"))
-        text_score = float(os.environ.get("RAPIDOCR_TEXT_SCORE",   "0.5"))
+        unclip    = env_float("RAPIDOCR_UNCLIP_RATIO", 1.8, minimum=0.0)
+        box_thresh = env_float("RAPIDOCR_BOX_THRESH", 0.45, minimum=0.0, maximum=1.0)
+        det_thresh = env_float("RAPIDOCR_DET_THRESH", 0.25, minimum=0.0, maximum=1.0)
+        text_score = env_float("RAPIDOCR_TEXT_SCORE", 0.5, minimum=0.0, maximum=1.0)
         angle_cls  = os.environ.get("RAPIDOCR_ANGLE_CLS", "0").lower() in ("1", "true", "yes")
         self._effective_tuning = {
             "det_db_unclip_ratio": unclip,
@@ -425,6 +419,11 @@ class RapidOCRBackend:
 
     def recognize(self, request: OCRRequest) -> OCRResult:
         t0 = time.perf_counter()
+        if self._closed:
+            return OCRResult(
+                status="runtime_error", tokens=(), text="", engine_identity=self.identity,
+                elapsed_total_s=0.0, warnings=("RapidOCR backend is closed",),
+            )
         try:
             img = _to_numpy(request.image)
             out = _run_rapidocr(self._engine, img)
@@ -463,6 +462,8 @@ class RapidOCRBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        if self._closed:
+            raise RuntimeError("RapidOCR backend is closed")
         img = _to_numpy(page_image)
         out = _run_rapidocr(self._engine, img)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
@@ -474,19 +475,24 @@ class RapidOCRBackend:
         page_image: object,
         page_index: int,
         region_bbox: "BBox",
+        *,
+        page_bbox: "BBox | None" = None,
     ) -> list[OcrToken]:
+        if self._closed:
+            raise RuntimeError("RapidOCR backend is closed")
         img = _to_numpy(page_image)
-        crop, (cx0, cy0, _cx1, _cy1) = safe_crop_array(
-            img, region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1,
-        )
+        from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
+        crop, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(img, region_bbox, page_bbox)
         if crop.size == 0:
             return []
         out = _run_rapidocr(self._engine, crop)
-        return _result_to_pipeline_tokens(
+        tokens = _result_to_pipeline_tokens(
             _extract_raw(out), page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
             source=SourceKind.OCR_REGION,
         )
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        return map_tokens_to_page(tokens, page_bbox, width, height)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -511,7 +517,14 @@ class RapidOCRBackend:
             return "unknown"
 
     def close(self) -> None:
-        pass
+        if self._closed:
+            return
+        engine = getattr(self, "_engine", None)
+        close = getattr(engine, "close", None)
+        if callable(close):
+            close()
+        self._engine = None
+        self._closed = True
 
 
 # Convenience aliases used by factory.py

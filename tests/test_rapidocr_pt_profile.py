@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from structured_pdf_text.config import ExtractorConfig
@@ -81,33 +79,24 @@ def test_rapidocr_requires_recognizer_and_dictionary_as_a_pair(monkeypatch):
 
 
 def test_pt_preflight_rejects_english_dictionary(tmp_path, monkeypatch):
-    from scripts.preflight_ocr_backends import _check
+    from structured_pdf_text.config import ExtractorConfig
+    from structured_pdf_text.ocr.readiness import ReadinessStatus, probe_static
 
     dictionary = tmp_path / "en_dict.txt"
     dictionary.write_text("\n".join("abcdefghijklmnopqrstuvwxyz"), encoding="utf-8")
-    identity = SimpleNamespace(
-        package_versions={},
-        artifact_hashes={},
-        extra={"rec_model": "/models/english.onnx", "rec_keys": str(dictionary)},
-        profile="latin-unverified",
-    )
-
-    class FakeBackend:
-        def __init__(self):
-            self.identity = identity
-
-        def healthcheck(self):
-            return "ready"
-
-        def close(self):
-            pass
-
+    detector = tmp_path / "det.onnx"
+    recognizer = tmp_path / "rec.onnx"
+    detector.write_bytes(b"detector")
+    recognizer.write_bytes(b"recognizer")
+    monkeypatch.setenv("RAPIDOCR_DET_MODEL", str(detector))
+    monkeypatch.setenv("RAPIDOCR_REC_MODEL", str(recognizer))
+    monkeypatch.setenv("RAPIDOCR_REC_KEYS", str(dictionary))
     monkeypatch.setattr(
-        "structured_pdf_text.ocr.factory.build_ocr_backend",
-        lambda _config: FakeBackend(),
+        "structured_pdf_text.ocr.readiness.importlib.util.find_spec",
+        lambda name: object() if name in {"rapidocr", "onnxruntime"} else None,
     )
 
-    status, detail = _check("rapidocr-onnx", "pt")
+    result = probe_static(ExtractorConfig(ocr_engine="rapidocr", ocr_provider="onnxruntime"))
 
-    assert status == "not_ready_for_pt_comparison"
-    assert "missing Portuguese character coverage" in detail
+    assert result.status == ReadinessStatus.INCOMPLETE
+    assert result.reason_code == "pt_br_dictionary_incomplete"

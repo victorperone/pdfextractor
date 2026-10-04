@@ -72,7 +72,7 @@ from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, safe_crop_array
+from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, safe_crop_array, sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -120,7 +120,8 @@ def _resolve_workers(config_num_threads: int) -> int:
 
     env_val = os.environ.get("EASYOCR_WORKERS")
     if env_val is not None:
-        return 0 if is_windows else max(0, int(env_val))
+        from structured_pdf_text.ocr.env import env_int
+        return 0 if is_windows else env_int("EASYOCR_WORKERS", 0, minimum=0)
 
     if is_windows:
         return 0
@@ -131,35 +132,44 @@ def _resolve_workers(config_num_threads: int) -> int:
     return _default_workers()
 
 
-def _apply_torch_threads(num_threads: int) -> int:
-    """Apply PyTorch intra/inter-op thread limits and return the effective count.
-
-    Only sets torch threads when num_threads > 0 and torch is importable.
-    Does not override values already set by the caller via torch directly.
-    Returns the effective intra-op thread count (0 = unchanged/torch default).
-    """
-    if num_threads <= 0:
-        return 0
+def _apply_torch_threads(num_threads: int) -> tuple[int | None, int | None]:
+    """Apply global PyTorch thread limits and return both effective values."""
     try:
         import torch
-        torch.set_num_threads(num_threads)
-        torch.set_num_interop_threads(max(1, num_threads // 2))
-        return num_threads
     except Exception:
-        return 0
+        return None, None
+    if num_threads > 0:
+        try:
+            torch.set_num_threads(num_threads)
+        except Exception:
+            pass
+        try:
+            torch.set_num_interop_threads(max(1, num_threads // 2))
+        except Exception:
+            # Torch can reject inter-op changes after work starts. Report its
+            # actual value and the separately effective intra-op value.
+            pass
+    try:
+        intra = int(torch.get_num_threads())
+    except Exception:
+        intra = None
+    try:
+        inter = int(torch.get_num_interop_threads())
+    except Exception:
+        inter = None
+    return intra, inter
 
 
 def _model_cache_dir() -> "Path":
     """Resolve the effective EasyOCR model cache directory.
 
-    Mirrors EasyOCR's own resolution: EASYOCR_MODULE_PATH env var if set,
-    otherwise ~/.EasyOCR/model/.
+    Uses the project cache convention unless EasyOCR's explicit override is set.
     """
     from pathlib import Path
     module_path = os.environ.get("EASYOCR_MODULE_PATH")
     if module_path:
         return Path(module_path)
-    return Path.home() / ".EasyOCR" / "model"
+    return Path.home() / ".cache" / "pdfextractor" / "easyocr"
 
 
 def _check_model_files(cache_dir: "Path", recog_network: str) -> list[str]:
@@ -197,9 +207,14 @@ def _parse_rotation_info(env_val: str) -> "list[int] | None":
     if not val:
         return None
     try:
-        return [int(a.strip()) for a in val.split(",") if a.strip()]
+        angles = [int(a.strip()) for a in val.split(",") if a.strip()]
     except ValueError:
-        return None
+        from structured_pdf_text.errors import ConfigurationError
+        raise ConfigurationError(f"Environment variable EASYOCR_ROTATION_INFO={env_val!r} must be a comma-separated list of angles") from None
+    if any(angle not in {90, 180, 270} for angle in angles):
+        from structured_pdf_text.errors import ConfigurationError
+        raise ConfigurationError(f"Environment variable EASYOCR_ROTATION_INFO={env_val!r} allows only 90,180,270")
+    return angles
 
 
 def _package_version(name: str) -> str:
@@ -262,7 +277,8 @@ def _run_easyocr(
     The fallback receives the same rotation_info so behaviour is consistent.
     """
     import numpy as np
-    mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
+    from structured_pdf_text.ocr.env import env_float
+    mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
     arr = np.asarray(img)
 
     # --- Prepare colour + grayscale arrays (mirrors upstream reformat_input) ---
@@ -357,7 +373,8 @@ def _fallback_readtext(
     consistent between the two paths.
     """
     import warnings as _warnings
-    mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
+    from structured_pdf_text.ocr.env import env_float
+    mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
     h, w = arr.shape[:2]
     canvas_size = int(mag_ratio * max(h, w))
 
@@ -478,6 +495,8 @@ class EasyOCRBackend:
 
     def __init__(self, config: "ExtractorConfig") -> None:
         self._config = config
+        self._closed = False
+        from structured_pdf_text.ocr.env import env_float, env_int
         from structured_pdf_text.ocr.languages import backend_language, canonical_language
         self._language = canonical_language(config.language)
         self._langs = [backend_language(config.language, "easyocr")]
@@ -485,20 +504,20 @@ class EasyOCRBackend:
         # --- env-var + config-derived configuration ---
         raw_decoder = os.environ.get("EASYOCR_DECODER", "greedy").strip().lower()
         self._decoder: str = raw_decoder if raw_decoder in ("greedy", "beamsearch") else "greedy"
-        self._beamwidth = max(1, int(os.environ.get("EASYOCR_BEAMWIDTH", "5")))
+        self._beamwidth = env_int("EASYOCR_BEAMWIDTH", 5, minimum=1)
         self._workers = _resolve_workers(config.num_threads)
-        self._adjust_contrast = float(os.environ.get("EASYOCR_ADJUST_CONTRAST", "0.5"))
+        self._adjust_contrast = env_float("EASYOCR_ADJUST_CONTRAST", 0.5, minimum=0.0, maximum=1.0)
         allowlist_env = os.environ.get("EASYOCR_ALLOWLIST", "")
         self._allowlist: str | None = allowlist_env if allowlist_env else None
         blocklist_env = os.environ.get("EASYOCR_BLOCKLIST", "")
         self._blocklist: str | None = blocklist_env if blocklist_env else None
         rotation_info_env = os.environ.get("EASYOCR_ROTATION_INFO", "")
         self._rotation_info: list[int] | None = _parse_rotation_info(rotation_info_env)
-        self._mag_ratio = float(os.environ.get("EASYOCR_MAG_RATIO", "1.2"))
+        self._mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
 
         # Apply PyTorch thread limits before the Reader (and its model loading)
         # initialises, so all inference calls inherit the constrained thread pool.
-        self._torch_num_threads = _apply_torch_threads(config.num_threads)
+        self._torch_num_threads, self._torch_num_interop_threads = _apply_torch_threads(config.num_threads)
 
         # --- reader init ---
         easyocr_mod = _import_easyocr()
@@ -571,7 +590,14 @@ class EasyOCRBackend:
                 "easyocr": _package_version("easyocr"),
                 "torch": _package_version("torch"),
             },
-            artifact_hashes={},  # .pth files are ~700 MB — hashing at init would add ~30s startup
+            artifact_hashes={
+                name: digest
+                for name, path in (
+                    ("craft_mlt_25k.pth", self._model_cache_dir / "craft_mlt_25k.pth"),
+                    (f"{self._recog_network}.pth", self._model_cache_dir / f"{self._recog_network}.pth"),
+                )
+                if (digest := sha256_file(path)) is not None
+            },
             extra={
                 "render_scale": self._config.effective_ocr_render_scale(),
                 "recognition_network": self._recog_network,
@@ -581,6 +607,8 @@ class EasyOCRBackend:
                 "beamwidth": self._beamwidth if self._decoder == "beamsearch" else None,
                 "workers": self._workers,
                 "torch_num_threads": self._torch_num_threads,
+                "torch_num_interop_threads": self._torch_num_interop_threads,
+                "torch_thread_settings_process_global": True,
                 "adjust_contrast": self._adjust_contrast,
                 "allowlist": self._allowlist,
                 "blocklist": self._blocklist,
@@ -605,6 +633,11 @@ class EasyOCRBackend:
 
     def recognize(self, request: OCRRequest) -> OCRResult:
         t0 = time.perf_counter()
+        if self._closed:
+            return OCRResult(
+                status="runtime_error", tokens=(), text="", engine_identity=self.identity,
+                elapsed_total_s=0.0, warnings=("EasyOCR backend is closed",),
+            )
         try:
             img = _to_numpy(request.image)
             raw, fallback_info = _run_easyocr(
@@ -661,6 +694,8 @@ class EasyOCRBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        if self._closed:
+            raise RuntimeError("EasyOCR backend is closed")
         img = _to_numpy(page_image)
         raw, fallback = _run_easyocr(
             self._reader,
@@ -683,11 +718,14 @@ class EasyOCRBackend:
         page_image: object,
         page_index: int,
         region_bbox: "BBox",
+        *,
+        page_bbox: "BBox | None" = None,
     ) -> list[OcrToken]:
+        if self._closed:
+            raise RuntimeError("EasyOCR backend is closed")
         img = _to_numpy(page_image)
-        crop, (cx0, cy0, _cx1, _cy1) = safe_crop_array(
-            img, region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1,
-        )
+        from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
+        crop, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(img, region_bbox, page_bbox)
         if crop.size == 0:
             return []
         raw, fallback = _run_easyocr(
@@ -702,11 +740,13 @@ class EasyOCRBackend:
             rotation_info=self._rotation_info,
         )
         self._record_call(fallback)
-        return _result_to_pipeline_tokens(
+        tokens = _result_to_pipeline_tokens(
             raw, page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
             source=SourceKind.OCR_REGION,
         )
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        return map_tokens_to_page(tokens, page_bbox, width, height)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -716,7 +756,7 @@ class EasyOCRBackend:
         """Check that easyocr is importable and required model files exist on disk.
 
         Returns one of: "ready", "missing" (package not installed),
-        "model_missing" (package OK but .pth files absent), "unknown" (error).
+        "incomplete" (package OK but .pth files absent), "unknown" (error).
         """
         try:
             _import_easyocr()
@@ -729,8 +769,11 @@ class EasyOCRBackend:
         recog = getattr(self, "_recog_network", "latin_g2")
         missing_files = _check_model_files(cache_dir, recog)
         if missing_files:
-            return "model_missing"
+            return "incomplete"
         return "ready"
 
     def close(self) -> None:
-        pass
+        if self._closed:
+            return
+        self._reader = None
+        self._closed = True

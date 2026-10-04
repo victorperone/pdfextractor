@@ -13,6 +13,7 @@ def _run(**updates):
         "reference_sha256": "reference-sha",
         "manifest_sha256": "manifest-sha",
         "mode": "balanced",
+        "benchmark_protocol_id": "protocol-v1",
         "selected_pages": [1, 2],
         "pages_selected": 2,
         "pages_selected_but_missing": [],

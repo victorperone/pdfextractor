@@ -124,7 +124,7 @@ fails immediately with a clear error before processing any page.**
 ### Step 1 — Download models
 
 ```bash
-python -m structured_pdf_text.cli setup-models
+python -m structured_pdf_text.cli setup-paddle-models
 ```
 
 This downloads the required OCR models to
@@ -136,10 +136,15 @@ This downloads the required OCR models to
 - `PP-OCRv6_medium_rec` — text recognition (default)
 - `UVDoc` — document unwarping
 
+Benchmark-managed EasyOCR and RapidOCR files use stable per-user locations at
+`~/.cache/pdfextractor/easyocr/` and `~/.cache/pdfextractor/rapidocr/`. The
+runtime and static preflight resolve those defaults in a fresh shell; explicit
+environment variables still override them.
+
 ### Step 2 — Verify readiness
 
 ```bash
-python -m structured_pdf_text.cli models-status
+python -m structured_pdf_text.cli paddle-models-status
 ```
 
 Expected output when ready:
@@ -162,13 +167,13 @@ Offline OCR readiness: READY
 ```bash
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
-  --ocr-model-profile pt \
+  --paddle-model-profile pt \
   --output markdown \
   -o documento.md
 ```
 
 Extraction runs completely offline. If models are missing, the process fails
-before reading any page and prints the path to run `setup-models`.
+before reading any page and prints the path to run `setup-paddle-models`.
 
 ### Optional network-isolation check on Linux/WSL
 
@@ -183,33 +188,33 @@ sudo --preserve-env=PADDLE_PDX_CACHE_HOME unshare --net -- bash -lc '
 cd /path/to/pdfextractor
 source .venv/bin/activate
 
-python -m structured_pdf_text.cli models-status
+python -m structured_pdf_text.cli paddle-models-status
 
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
-  --ocr-model-profile pt \
+  --paddle-model-profile pt \
   --output markdown \
   -o documento.md
 '
 ```
 
-`models-status` must report `Offline OCR readiness: READY`. During extraction,
+`paddle-models-status` must report `Offline OCR readiness: READY`. During extraction,
 no model hoster lookup or download should occur.
 
 If the local `sudo` policy does not allow preserving environment variables,
 set `PADDLE_PDX_CACHE_HOME` explicitly inside the isolated shell instead.
-Use the same cache directory that was used during `setup-models`; do not copy
+Use the same cache directory that was used during `setup-paddle-models`; do not copy
 models into `/root` only for this validation.
 
 If model hosts are blocked by organizational network policy, use offline model
 provisioning from an approved machine or an internal artifact repository. Copy
-the four model directories from an approved installation into:
+all model directories required by the selected profile from an approved installation into:
 
 ```text
 <cache>/official_models/
 ```
 
-Then run `models-status`; it must report `Offline OCR readiness: READY`.
+Then run `paddle-models-status`; it must report `Offline OCR readiness: READY`.
 
 If the network allows the model hosts but TLS inspection requires a custom
 corporate CA, configure Python/PaddleX using the CA and proxy settings approved
@@ -220,12 +225,14 @@ network controls.
 
 ```bash
 pytest
+python -m pytest
 ```
 
 ## Comparative benchmark of OCR engines
 
-The project includes an E2E benchmark pipeline that evaluates five OCR engines
-(PaddleOCR, RapidOCR ONNX, RapidOCR OpenVINO, Tesseract 5, EasyOCR) across
+The project includes an E2E benchmark pipeline that evaluates four OCR families
+(PaddleOCR, RapidOCR, Tesseract 5, EasyOCR) in five deployment configurations
+(including RapidOCR with ONNX Runtime and OpenVINO) across
 five metric groups: text (CER/WER), Markdown structure, tables,
 order and integrity, and critical data.
 
@@ -277,20 +284,19 @@ pdftext extract documento.pdf
 pdftext extract documento.pdf --output raw
 pdftext extract documento.pdf --output json
 
-# OCR-assisted extraction with PaddleOCR (default engine, requires setup-models)
-pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output markdown
-pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy adaptive
-pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy baseline
-pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --ocr-quality-policy exhaustive
-pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output json
-pdftext extract documento.pdf --mode ocr --ocr-model-profile pt --output reading
-pdftext extract documento.pdf --best --ocr-model-profile pt --output markdown -o output.md
+# OCR-assisted extraction with PaddleOCR (default engine, requires Paddle models)
+pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --output markdown
+pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --ocr-quality-policy adaptive
+pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --ocr-quality-policy baseline
+pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --ocr-quality-policy exhaustive
+pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --output json
+pdftext extract documento.pdf --mode ocr --paddle-model-profile pt --output reading
+pdftext extract documento.pdf --best --paddle-model-profile pt --output markdown -o output.md
 
-# Select a different OCR engine (no --ocr-model-profile needed for these engines)
+# Select another OCR family (Paddle profile is not required)
 pdftext extract documento.pdf --mode balanced --ocr-engine tesseract --output markdown
-pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-onnx --output markdown
-pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-openvino --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr --ocr-provider openvino --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr --ocr-provider onnxruntime --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine easyocr --output markdown
 
 # Inspection and diagnostics
@@ -298,23 +304,21 @@ pdftext inspect documento.pdf --page 1
 pdftext inspect documento.pdf --page 1 --raw-page-json
 # Native overlay is the default and needs no OCR models
 pdftext overlay documento.pdf --page 1 --out page-1.png
-# OCR-capable overlay requires an explicit profile
-pdftext overlay documento.pdf --page 1 --out page-1.png --mode balanced --ocr-model-profile pt
+# OCR-capable overlay selects its engine; Paddle profile is optional
+pdftext overlay documento.pdf --page 1 --out page-1.png --mode balanced --ocr-engine tesseract
 pdftext report corpus/*.pdf --mode native
-pdftext report corpus/*.pdf --mode balanced --ocr-model-profile pt --merge-cross-page-tables
+pdftext report corpus/*.pdf --mode balanced --ocr-engine rapidocr --ocr-provider onnxruntime --merge-cross-page-tables
 pdftext report corpus/*.pdf --mode native --workers 2
 pdftext compare documento.pdf --adapters structured-native pdfium-raw pymupdf
 
 # OCR model management
-pdftext setup-models
-pdftext setup-models --language pt
-pdftext models-status
+pdftext setup-paddle-models --paddle-model-profile pt
+pdftext paddle-models-status --paddle-model-profile pt
 ```
 
-`--mode` selects the extraction strategy; `--ocr-model-profile` selects the
-models. Commands that can invoke OCR require an explicit profile via
-`--ocr-model-profile` or an explicit `--language` value. In the API and model
-management commands, `pt` is the default and selects PP-OCRv6 medium
+`--mode` selects the extraction strategy; `--language` identifies recognized
+text and defaults to `pt-BR`; `--paddle-model-profile` selects Paddle weights.
+The Paddle profile defaults to `pt` and selects PP-OCRv6 medium
 (`pt-v6-medium` is a supported alias for backward compatibility). `pt-v5`
 selects PP-OCRv5 only when explicitly requested. `--ocr-quality-policy` is
 independent: it selects the OCR variant strategy. `exhaustive` emits an
@@ -326,7 +330,7 @@ default.
 
 | Engine | Flag value | Notes |
 |---|---|---|
-| PaddleOCR PP-OCRv6 | `paddle` (default) | Requires `pdftext setup-models` |
+| PaddleOCR PP-OCRv6 | `paddle` (default) | Requires `pdftext setup-paddle-models` |
 | RapidOCR | `rapidocr` | Choose provider with `--ocr-provider`; Portuguese needs a configured Latin recognizer |
 | RapidOCR ONNX alias (deprecated) | `rapidocr-onnx` | Kept for command compatibility |
 | RapidOCR OpenVINO alias (deprecated) | `rapidocr-openvino` | Kept for command compatibility |
@@ -334,14 +338,14 @@ default.
 | EasyOCR (PyTorch CPU) | `easyocr` | Weights must be pre-downloaded via `setup_ocr_benchmark.sh/.ps1` |
 
 The public language tag `pt-BR` is accepted (with `pt` and `por` aliases).
-Non-Paddle engines do not use `--ocr-model-profile`. The engine is also
+Non-Paddle engines do not use `--paddle-model-profile`. The engine is also
 selectable through the Python API via `ExtractorConfig(ocr_engine="rapidocr", ocr_provider="openvino")` or `ExtractorConfig(ocr_engine="tesseract")`
-or `dataclasses.replace(config, ocr_engine="rapidocr-onnx")`.
+or `dataclasses.replace(config, ocr_engine="rapidocr", ocr_provider="onnxruntime")`.
 CPU OCR disables MKL-DNN/oneDNN by default because the current Paddle 3.x
 PIR/oneDNN path is known to fail on some Linux/WSL CPU stacks. Set
 `PADDLE_ENABLE_MKLDNN=1` to opt in explicitly; this can re-enable that upstream
 failure on affected versions. Document unwarping (UVDoc) is enabled by default
-and is checked alongside the profile models by `setup-models`, `models-status`,
+and is checked alongside the profile models by `setup-paddle-models`, `paddle-models-status`,
 and the runtime. Models are loaded from explicit local paths; remote
 model-source checks are disabled at runtime. Model paths and behavior can be
 overridden through `PaddleOcrEngine` constructor options.
@@ -360,10 +364,16 @@ consensus decisions in `page.diagnostics.facts`.
 
 Performance diagnostics are available in `page.diagnostics.facts` under
 `timings_ms` and `ocr_passes`, and in `document.diagnostics.facts` under
-`total_ms` and `assemble_ms`. The application does not impose execution
-timeouts. A long-running OCR, I/O, or external dependency call can remain
-blocked until it completes, the user cancels it, or the operating
-system/dependency fails. Elapsed time and progress continue to be recorded.
+`total_ms` and `assemble_ms`. Tesseract calls use a subprocess timeout, and
+Paddle calls routed through its worker use configurable initialization and
+request deadlines (`PADDLE_WORKER_INIT_TIMEOUT` and
+`PADDLE_WORKER_REQUEST_TIMEOUT`, in seconds). A deadline kills the worker and
+returns a runtime failure. RapidOCR and EasyOCR currently run in-process, so
+their native inference calls cannot be forcibly cancelled.
+EasyOCR also sets PyTorch thread pools process-wide when an explicit thread
+count is configured; its effective intra-op/inter-op values are recorded in the
+engine identity. Callers sharing Torch with other components should use a
+dedicated OCR process or leave the thread count at automatic.
 
 Rasterization preserves the requested scale when the resulting dimensions are
 within `max_render_pixels`. It reduces scale only when PDFium's rounded pixel
@@ -415,8 +425,8 @@ thousands of low-level PDFium objects in long documents. Set
 `ExtractorConfig(retain_native_evidence=True)` when an in-memory evidence audit
 is required; `inspect --raw-page-json` does this automatically and processes
 only the requested page. `overlay --page` is likewise page-targeted. Overlay
-uses native extraction by default; OCR-capable modes require
-`--ocr-model-profile` and never impose `balanced` implicitly.
+uses native extraction by default; OCR-capable modes accept the same
+engine/provider selection as extraction and never impose `balanced` implicitly.
 
 OCR variants are batched in bounded groups inside one model process. The
 default batch size is 3 and can be changed with `--ocr-batch-size`; use
@@ -447,8 +457,9 @@ The two controlling environment variables are:
 | `PDFEXTRACTOR_OCR_RGB_BUDGET_MIB` | `8.0` | Max uncompressed RGB size (MiB) per OCR scale variant.  Variants whose estimated `width × height × 3` bytes exceed this limit are skipped. |
 | `PDFEXTRACTOR_OCR_DEBUG_LOG` | (unset) | Absolute path to append a machine-readable debug log.  When set, every OCR call writes `CALL_START` / `CALL_END` entries with memory metrics, and every recovery decision writes `REGION_SELECTED` / `OCR_SCALE_PLAN` / `OCR_SCALE_BLOCKED` entries. |
 
-Both variables are read at module import time and remain constant for the
-lifetime of the process.  Restart the process to apply a new budget.
+The RGB budget is parsed when OCR recovery first needs it. Invalid values
+produce a configuration error that identifies the variable. The debug log path
+is resolved when diagnostics are emitted.
 
 The detection model's `limit_side_len` is also derived from the budget
 (`max(960, round(√(budget_bytes/3) × 1.2 / 32) × 32)`) so that variants

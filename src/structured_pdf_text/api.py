@@ -15,6 +15,7 @@ from .config import (
     ExtractorConfig,
     OcrQualityThresholds,
     effective_ocr_quality_policy,
+    effective_ocr_quality_thresholds,
 )
 from .document import (
     Baseline,
@@ -84,8 +85,11 @@ class PdfTextExtractor:
         self.layout_engine = layout_engine or NativeHeuristicLayoutEngine()
         self.ocr_engine = ocr_engine
         self._ocr_factory_pending = ocr_engine is None and _ocr_enabled(self.config)
+        self._closed = False
 
     def _ensure_ocr_engine(self) -> None:
+        if self._closed:
+            raise RuntimeError("PdfTextExtractor is closed")
         if self.ocr_engine is None and self._ocr_factory_pending:
             from .ocr.factory import build_ocr_backend
             self.ocr_engine = build_ocr_backend(self.config)
@@ -93,8 +97,13 @@ class PdfTextExtractor:
 
     def close(self) -> None:
         """Release resources held by the OCR backend (e.g. the Paddle subprocess)."""
+        if self._closed:
+            return
         if self.ocr_engine is not None and hasattr(self.ocr_engine, "close"):
             self.ocr_engine.close()
+        self.ocr_engine = None
+        self._ocr_factory_pending = False
+        self._closed = True
 
     def __enter__(self) -> "PdfTextExtractor":
         return self
@@ -133,6 +142,8 @@ class PdfTextExtractor:
         *,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> StructuredDocument:
+        if self._closed:
+            raise RuntimeError("PdfTextExtractor is closed")
         pages = []
         document_start = time.perf_counter()
         memory_start = _process_memory_snapshot()
@@ -607,7 +618,7 @@ class PdfTextExtractor:
                                 native_page.bbox,
                             ),
                             quality_policy=effective_ocr_quality_policy(self.config).value,
-                            thresholds=self.config.ocr_quality_thresholds,
+                            thresholds=effective_ocr_quality_thresholds(self.config),
                             page_rotation=native_page.objects.rotation,
                             enforce_policy=True,
                         )
@@ -1075,8 +1086,8 @@ class PdfTextExtractor:
             else:
                 # Legacy OcrEngine (Paddle direct, no OCRBackend wrapper):
                 # fall back to the Paddle-specific model profile.
-                profile = get_profile(self.config.language)
-                document.diagnostics.facts["ocr_profile"] = self.config.language
+                profile = get_profile(self.config.paddle_model_profile)
+                document.diagnostics.facts["ocr_profile"] = self.config.paddle_model_profile
                 document.diagnostics.facts["ocr_models"] = {
                     "detection": profile.detection,
                     "recognition": profile.recognition,

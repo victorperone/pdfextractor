@@ -131,6 +131,7 @@ corpus/**
 !corpus/.gitkeep
 !corpus/README.md
 !corpus/README.example.md
+!corpus/acceptance-corpus.lock.json
 private-corpus/**
 local-corpus/**
 acceptance-corpus/**

@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
+
+
+_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+_HASH_LOCK = threading.Lock()
 
 
 def sha256_file(path: "str | Path") -> str | None:
@@ -21,11 +26,20 @@ def sha256_file(path: "str | Path") -> str | None:
         p = Path(path)
         if not p.is_file():
             return None
+        stat = p.stat()
+        key = (str(p.resolve()), stat.st_size, stat.st_mtime_ns)
+        with _HASH_LOCK:
+            cached = _HASH_CACHE.get(key)
+        if cached is not None:
+            return cached
         h = hashlib.sha256()
         with p.open("rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
-        return h.hexdigest()
+        digest = h.hexdigest()
+        with _HASH_LOCK:
+            _HASH_CACHE[key] = digest
+        return digest
     except OSError:
         return None
 
@@ -83,6 +97,29 @@ def safe_crop_array(
     if cy0 > cy1:
         cy0, cy1 = cy1, cy0
     return arr[cy0:cy1, cx0:cx1], (cx0, cy0, cx1, cy1)
+
+
+def crop_region_in_raster(page_image: Any, region_bbox: Any, page_bbox: Any | None = None):
+    """Crop a page image from a PDF-point region or legacy raster-pixel region.
+
+    With ``page_bbox`` the input region uses canonical page points and is
+    transformed to the actual raster dimensions before cropping. Without it,
+    ``region_bbox`` retains the legacy raster-pixel interpretation.
+    """
+    import numpy as np
+    from structured_pdf_text.geometry import BBox
+    from structured_pdf_text.ocr.coordinates import PageTransform, RasterGeometry
+
+    arr = np.asarray(page_image)
+    height, width = arr.shape[:2]
+    raster_box = (
+        PageTransform(page_bbox, RasterGeometry(width, height)).page_bbox_to_raster(region_bbox)
+        if page_bbox is not None else region_bbox
+    )
+    crop, (cx0, cy0, cx1, cy1) = safe_crop_array(
+        arr, raster_box.x0, raster_box.y0, raster_box.x1, raster_box.y1
+    )
+    return crop, (cx0, cy0, cx1, cy1), (width, height)
 
 
 def finite_confidence(value: Any) -> float | None:

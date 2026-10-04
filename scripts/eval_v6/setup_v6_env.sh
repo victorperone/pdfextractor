@@ -20,15 +20,15 @@ echo ""
 source .venv/bin/activate
 
 echo "Downloading pt-v6-medium models..."
-PADDLE_PDX_CACHE_HOME="$CACHE" pdftext setup-models --ocr-model-profile pt-v6-medium --cache-home "$CACHE"
+PADDLE_PDX_CACHE_HOME="$CACHE" pdftext setup-paddle-models --paddle-model-profile pt-v6-medium --cache-home "$CACHE"
 
 echo ""
 echo "Downloading pt-v6-small models..."
-PADDLE_PDX_CACHE_HOME="$CACHE" pdftext setup-models --ocr-model-profile pt-v6-small --cache-home "$CACHE"
+PADDLE_PDX_CACHE_HOME="$CACHE" pdftext setup-paddle-models --paddle-model-profile pt-v6-small --cache-home "$CACHE"
 
 echo ""
 echo "Status:"
-pdftext models-status --ocr-model-profile pt-v6-medium --cache-home "$CACHE"
+pdftext paddle-models-status --paddle-model-profile pt-v6-medium --cache-home "$CACHE"
 
 echo ""
 echo "Available models in: $CACHE/official_models/"

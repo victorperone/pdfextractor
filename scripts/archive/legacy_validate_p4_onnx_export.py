@@ -1,11 +1,17 @@
-"""P4-pre: Validate PP-OCRv6 ONNX export for RapidOCR compatibility.
+"""ARCHIVED HISTORICAL TOOL — not part of the supported OCR installation.
+
+This P4-pre validator is retained for historical model-export experiments.
+It is not covered by the current backend contract and must not be used as the
+runtime setup path. Any legacy package references below describe old behavior.
+
+Validate PP-OCRv6 ONNX export for RapidOCR compatibility.
 
 Runs in two sequential phases:
   Phase A — Export Paddle models → ONNX  (requires paddle2onnx)
   Phase B — Validate ONNX with onnxruntime and RapidOCR
 
 Usage (server — PowerShell):
-    python scripts\\validate_p4_onnx_export.py `
+    python scripts\\archive\\legacy_validate_p4_onnx_export.py `
         --onnx-dir output\\onnx_models
 
 Optional parameters:

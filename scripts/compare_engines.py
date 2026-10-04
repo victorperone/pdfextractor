@@ -170,6 +170,9 @@ def _comparability_key(data: dict) -> dict:
         "manifest_sha256": data.get("manifest_sha256"),
         "mode": data.get("mode"),
         "selected_pages": selected,
+        "benchmark_protocol_id": (data.get("run") or {}).get(
+            "benchmark_protocol_id", data.get("benchmark_protocol_id")
+        ),
     }
 
 
@@ -193,6 +196,11 @@ def _validate_comparability(
                 errors.append(
                     f"Run '{eng}' does not contain an exact selected page list. "
                     "Regenerate its metrics before comparing runs."
+                )
+            if key["benchmark_protocol_id"] is None:
+                errors.append(
+                    f"Run '{eng}' has no benchmark_protocol_id. Regenerate its metrics "
+                    "with the versioned benchmark protocol before comparing runs."
                 )
         for eng, key in keys[1:]:
             for field, ref_val in ref_key.items():
@@ -225,7 +233,9 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
     }
 
     lines = [
-        "# Comparativo de Engines OCR — Fase 8",
+        "# Comparativo de perfis de implantação OCR",
+        "",
+        "Este relatório compara configurações de implantação completas. Diferenças de família, modelo, provider e pré-processamento fazem parte do perfil registrado.",
         "",
         f"Engines avaliadas: {', '.join(f'`{e}`' for e in engines)}",
         "",
@@ -277,8 +287,8 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
         "",
         "## Metadados dos Runs",
         "",
-        "| Engine | Run ID | Páginas avaliadas | Selecionadas ausentes | Content status | Stability | Recoveries | Render s | OCR s | Processing s | Elapsed s | Peak RSS MB | Missing penalizado |",
-        "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| Configuração de implantação | Run ID | Páginas avaliadas | Selecionadas ausentes | Content status | Stability | Recoveries | Render s | OCR s | Processing s | Elapsed s | Parent Peak RSS MB | Process Tree Peak RSS MB | Missing penalizado |",
+        "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for eng, data in all_data:
         run_id = data.get("run_id", "—")
@@ -297,14 +307,16 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
         ocr_s = timings.get("ocr_s", "—")
         processing_s = timings.get("assembly_s", "—")
         memory = data.get("memory", {})
-        peak_rss = memory.get("peak_rss_bytes")
-        peak_rss_mb = f"{peak_rss / (1024 * 1024):.1f}" if peak_rss is not None else "—"
+        parent_peak = memory.get("peak_rss_bytes")
+        tree_peak = memory.get("sampled_process_tree_peak_rss_bytes")
+        parent_peak_mb = f"{parent_peak / (1024 * 1024):.1f}" if parent_peak is not None else "—"
+        tree_peak_mb = f"{tree_peak / (1024 * 1024):.1f}" if tree_peak is not None else "—"
         penalised = "sim" if data.get("missing_pages_penalised") else "não"
         lines.append(
-            f"| `{eng}` | {run_id} | {n_eval} | {n_missing} | {bstatus} | {stability} | {recoveries} | {render_s} | {ocr_s} | {processing_s} | {elapsed if elapsed is not None else '—'} | {peak_rss_mb} | {penalised} |"
+            f"| `{eng}` | {run_id} | {n_eval} | {n_missing} | {bstatus} | {stability} | {recoveries} | {render_s} | {ocr_s} | {processing_s} | {elapsed if elapsed is not None else '—'} | {parent_peak_mb} | {tree_peak_mb} | {penalised} |"
         )
 
-    lines += ["", "### Perfis efetivos dos engines", "", "| Engine | Perfil registrado |", "|---|---|"]
+    lines += ["", "### Perfis efetivos das configurações", "", "| Configuração | Perfil registrado |", "|---|---|"]
     for eng, data in all_data:
         identity = data.get("engine_identity") or (data.get("run") or {}).get("engine_identity", {})
         profile = {
@@ -438,7 +450,7 @@ def main() -> int:
         ),
     )
     ap.add_argument(
-        "--skip-validation",
+        "--skip-validation", "--allow-incompatible",
         action="store_true",
         help=(
             "Skip all comparability checks and generate the table regardless. "
@@ -497,9 +509,15 @@ def main() -> int:
         print("  WARNING: comparability validation skipped (--skip-validation)")
 
     table = _render_comparison_table(all_data)
+    if args.skip_validation:
+        table += (
+            "\n> **Heterogeneous comparison:** comparability validation was bypassed. "
+            "Do not treat this report as a homogeneous benchmark.\n"
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(table, encoding="utf-8")
+    from structured_pdf_text.atomic_io import atomic_write_text
+    atomic_write_text(args.output, table)
 
     if not args.quiet:
         print(f"\n  Tabela comparativa: {args.output}")

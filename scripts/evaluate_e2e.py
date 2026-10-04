@@ -210,8 +210,8 @@ def main() -> int:
     ap.add_argument(
         "--engine",
         default="paddle",
-        choices=["paddle", "rapidocr", "rapidocr-onnx", "rapidocr-openvino", "tesseract", "easyocr"],
-        help="OCR engine (default: paddle)",
+        choices=["paddle", "rapidocr", "tesseract", "easyocr"],
+        help="OCR family (default: paddle); choose RapidOCR provider with --provider",
     )
     ap.add_argument("--provider", choices=["onnxruntime", "openvino"], default=None)
     ap.add_argument(
@@ -300,7 +300,10 @@ def main() -> int:
     error_msg: str | None = None
     error_details: dict = {}
     extractor = PdfTextExtractor(config)
+    from structured_pdf_text.memory import ProcessTreeMemorySampler
+    memory_sampler = ProcessTreeMemorySampler()
 
+    memory_sampler.__enter__()
     try:
         with extractor:
             document = extractor.extract(args.pdf, progress_callback=on_progress)
@@ -318,11 +321,14 @@ def main() -> int:
             if error_details:
                 for k, v in error_details.items():
                     print(f"  {k}: {v}", file=sys.stderr)
+    finally:
+        memory_sampler.__exit__(None, None, None)
 
     elapsed_s = time.perf_counter() - t0
 
     # --- Save error manifest if extraction failed ---
     if document is None:
+        from structured_pdf_text.benchmark_protocol import protocol_manifest
         manifest = {
             "schema_version": "2.0",
             "run_id": run_id,
@@ -332,16 +338,23 @@ def main() -> int:
             "engine": args.engine,
             "mode": args.mode,
             "language": args.language,
+            **protocol_manifest(
+                language=config.language,
+                mode=config.normalized_mode().value,
+                quality_policy=config.effective_ocr_quality_policy().value,
+            ),
             "pdf_path": str(args.pdf),
             "pdf_sha256": _sha256_file(args.pdf),
             "status": "error",
             "error": error_msg,
             "error_details": error_details,
             "elapsed_s": round(elapsed_s, 3),
+            "memory": memory_sampler.snapshot(),
             "page_count": 0,
             "pages": [],
         }
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        from structured_pdf_text.atomic_io import atomic_write_json
+        atomic_write_json(manifest_path, manifest)
         print(f"\nERROR manifest: {manifest_path}")
         return 1
 
@@ -349,7 +362,8 @@ def main() -> int:
     from structured_pdf_text.renderers.markdown import render_markdown
     # This artifact is for page-aligned diagnostics and structural metrics.
     md_text = render_markdown(document, diagnostic=True)
-    md_path.write_text(md_text, encoding="utf-8")
+    from structured_pdf_text.atomic_io import atomic_write_text
+    atomic_write_text(md_path, md_text)
 
     # --- Build per-page entries (schema v2) ---
     page_entries = []
@@ -453,7 +467,9 @@ def main() -> int:
     # --- Memory snapshot (set by api.py after extraction completes) ---
     doc_facts: dict = dict(getattr(doc_diag, "facts", {}))
     memory_stats: dict = dict(doc_facts.get("memory", {}))
+    memory_stats.update(memory_sampler.as_dict())
 
+    from structured_pdf_text.benchmark_protocol import protocol_manifest
     manifest = {
         "schema_version": "2.0",
         "run_id": run_id,
@@ -464,6 +480,11 @@ def main() -> int:
         "engine_identity": engine_identity,
         "mode": args.mode,
         "language": args.language,
+        **protocol_manifest(
+            language=config.language,
+            mode=config.normalized_mode().value,
+            quality_policy=config.effective_ocr_quality_policy().value,
+        ),
         "pdf_path": str(args.pdf),
         "pdf_sha256": _sha256_file(args.pdf),
         "document_status": doc_status_raw,
@@ -517,7 +538,8 @@ def main() -> int:
         "pages": page_entries,
     }
 
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    from structured_pdf_text.atomic_io import atomic_write_json
+    atomic_write_json(manifest_path, manifest)
 
     if not args.quiet:
         n_pages = len(document.pages)

@@ -22,15 +22,15 @@ Write-Host ""
 
 # Download pt-v6-medium models
 Write-Host "Downloading pt-v6-medium models..."
-pdftext setup-models --ocr-model-profile pt-v6-medium --cache-home $CacheHome
+pdftext setup-paddle-models --paddle-model-profile pt-v6-medium --cache-home $CacheHome
 
 Write-Host ""
 Write-Host "Downloading pt-v6-small models..."
-pdftext setup-models --ocr-model-profile pt-v6-small --cache-home $CacheHome
+pdftext setup-paddle-models --paddle-model-profile pt-v6-small --cache-home $CacheHome
 
 Write-Host ""
 Write-Host "v6 model status:"
-pdftext models-status --ocr-model-profile pt-v6-medium --cache-home $CacheHome
+pdftext paddle-models-status --paddle-model-profile pt-v6-medium --cache-home $CacheHome
 
 Write-Host ""
 Write-Host "Modelos em: $CacheHome\official_models\"

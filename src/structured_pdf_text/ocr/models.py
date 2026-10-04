@@ -1,7 +1,7 @@
 """OCR model profiles.
 
-Single source of truth for model names used by runtime, setup-models and
-models-status. Adding a new language or model variant requires only a new entry
+Single source of truth for model names used by runtime, Paddle model setup, and
+Paddle model status. Adding a new language or model variant requires one entry
 in PROFILES; all consumers derive their configuration from here automatically.
 
 Supported profiles

@@ -10,7 +10,7 @@ Protocol: JSONL over stdin/stdout (one JSON object per line).
   Request:
     {
       "method": "init" | "recognize_page" | "recognize_region" | "healthcheck",
-      "image_b64": "<base64 PNG>",        # recognize_* only
+      "image_path": "<temporary PNG path>", # recognize_* only
       "page_index": int,                  # recognize_* only
       "region_bbox": [x0,y0,x1,y1]|null, # recognize_region only
       "language": str,                    # init only
@@ -31,7 +31,6 @@ Protocol: JSONL over stdin/stdout (one JSON object per line).
 """
 from __future__ import annotations
 
-import base64
 import io
 import json
 import os
@@ -86,6 +85,7 @@ def _make_engine(config: dict):
     return PaddleOcrEngine(
         language=config.get("language", "pt"),
         num_threads=config.get("num_threads", -1),
+        model_profile=config.get("model_profile", "pt"),
         ocr_batch_size=config.get("ocr_batch_size", 1),
         quality_variants=config.get("quality_variants", False),
         quality_policy=config.get("quality_policy", "fast"),
@@ -135,7 +135,7 @@ def main() -> None:
 
         try:
             protocol_version = req.get("protocol_version")
-            if protocol_version != 2:
+            if protocol_version != 3:
                 raise ValueError(f"unsupported protocol_version: {protocol_version!r}")
             if method == "init":
                 init_config = req
@@ -152,10 +152,8 @@ def main() -> None:
                 if engine is None:
                     engine = _make_engine(init_config)
 
-                image_bytes = base64.b64decode(req["image_b64"])
                 from PIL import Image
-
-                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                image = Image.open(req["image_path"]).convert("RGB")
                 page_index = int(req.get("page_index", 0))
 
                 if method == "recognize_page":

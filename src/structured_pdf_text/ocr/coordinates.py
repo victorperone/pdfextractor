@@ -62,3 +62,16 @@ def map_tokens_to_page(tokens: list[OcrToken], page_bbox: BBox | None, width_px:
                  rotation=t.rotation, provenance=t.provenance)
         for t in tokens
     ]
+
+
+def offset_tokens(tokens: list[OcrToken], x: float, y: float) -> list[OcrToken]:
+    """Translate raster-space token boxes by a crop's top-left pixel offset."""
+    if not x and not y:
+        return tokens
+    return [
+        OcrToken(text=t.text, bbox=BBox(t.bbox.x0 + x, t.bbox.y0 + y,
+                                      t.bbox.x1 + x, t.bbox.y1 + y),
+                 confidence=t.confidence, language=t.language, source=t.source,
+                 rotation=t.rotation, provenance=t.provenance)
+        for t in tokens
+    ]

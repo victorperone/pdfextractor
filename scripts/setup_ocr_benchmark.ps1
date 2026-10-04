@@ -11,6 +11,8 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$Constraints = Join-Path $PSScriptRoot "..\constraints-ocr-windows-py312.txt"
+if (-not (Test-Path $Constraints)) { throw "OCR constraints file not found: $Constraints" }
 
 # ---------------------------------------------------------------------------
 # Helper: run a native executable and abort if it returns non-zero.
@@ -35,33 +37,33 @@ Write-Host ""
 
 # --- P1-07: install the package itself first so pdftext CLI is available ---
 Write-Host "[0] Installing pdfextractor package (editable)..." -ForegroundColor Yellow
-Invoke-Native python -m pip install -e .
+Invoke-Native python -m pip install -c $Constraints -e .
 
 # --- 1. Paddle (engine principal / baseline) ---
 Write-Host ""
 Write-Host "[1/5] PaddleOCR + PaddleX..." -ForegroundColor Yellow
-Invoke-Native python -m pip install "paddlepaddle==3.3.1" "paddleocr==3.7.0" "paddlex[ocr]==3.7.2" "psutil>=5.9"
+Invoke-Native python -m pip install -c $Constraints "paddlepaddle==3.3.1" "paddleocr==3.7.0" "paddlex[ocr]==3.7.2" "psutil==7.2.2"
 
 # --- 2. RapidOCR ONNX Runtime ---
 Write-Host ""
 Write-Host "[2/5] RapidOCR + ONNX Runtime..." -ForegroundColor Yellow
-Invoke-Native python -m pip install "rapidocr==3.9.2" "onnxruntime==1.30.0"
+Invoke-Native python -m pip install -c $Constraints "rapidocr==3.9.2" "onnxruntime==1.30.0"
 
 # --- 3. RapidOCR OpenVINO (two-step install) ---
 Write-Host ""
 Write-Host "[3/5] RapidOCR + OpenVINO 2024.4.0..." -ForegroundColor Yellow
-Invoke-Native python -m pip install "openvino==2024.4.0"
+Invoke-Native python -m pip install -c $Constraints "openvino==2024.4.0"
 
 # --- 4. EasyOCR + PyTorch CPU ---
 Write-Host ""
 Write-Host "[4/5] PyTorch CPU + EasyOCR..." -ForegroundColor Yellow
-Invoke-Native python -m pip install torch==2.14.0+cpu torchvision==0.29.0+cpu --index-url https://download.pytorch.org/whl/cpu
-Invoke-Native python -m pip install "easyocr==1.7.2"
+Invoke-Native python -m pip install -c $Constraints torch==2.14.0+cpu torchvision==0.29.0+cpu --index-url https://download.pytorch.org/whl/cpu
+Invoke-Native python -m pip install -c $Constraints "easyocr==1.7.2"
 
 # --- 5. Pin numpy (conflict: easyocr upgrades to 2.5.x; openvino requires <2.1.0) ---
 Write-Host ""
 Write-Host "[5/5] Pinning numpy==2.0.2 (compatible with openvino + easyocr + paddlex)..." -ForegroundColor Yellow
-Invoke-Native python -m pip install "numpy==2.0.2"
+Invoke-Native python -m pip install -c $Constraints "numpy==2.0.2"
 
 # --- 6. PaddleOCR model weights ---
 # Models are stored in ~/.cache/pdfextractor/paddlex/official_models/
@@ -69,14 +71,16 @@ Invoke-Native python -m pip install "numpy==2.0.2"
 #           PP-OCRv6_medium_det, PP-OCRv6_medium_rec, UVDoc
 Write-Host ""
 Write-Host "[6] PaddleOCR model weights (may download several hundred MB on first run)..." -ForegroundColor Yellow
-pdftext setup-models --ocr-model-profile pt
+pdftext setup-paddle-models --paddle-model-profile pt
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  WARN setup-models may have failed - check connectivity and re-run if needed." -ForegroundColor Yellow
+    Write-Host "  WARN setup-paddle-models may have failed - check connectivity and re-run if needed." -ForegroundColor Yellow
 }
 
 # --- Final verification ---
 Write-Host ""
 Write-Host "=== Verifying installations ===" -ForegroundColor Cyan
+Invoke-Native python -m pip check
+Invoke-Native python scripts\check_ocr_install.py --imports
 
 $checks = @(
     @("PaddlePaddle",       "import paddle; print(paddle.__version__)"),
@@ -136,9 +140,12 @@ if ($null -eq $tessExe) {
 Write-Host ""
 Write-Host "Downloading EasyOCR weights (craft + latin_g2) - this may take a few minutes..." -ForegroundColor Yellow
 $tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+$easyOcrCache = Join-Path $HOME ".cache\pdfextractor\easyocr"
+$env:EASYOCR_MODULE_PATH = $easyOcrCache
+New-Item -ItemType Directory -Force -Path $easyOcrCache | Out-Null
 Set-Content -Path $tmpPy -Encoding UTF8 -Value @(
     "import easyocr, os",
-    "cache = os.path.join(os.path.expanduser('~'), '.EasyOCR', 'model')",
+    "cache = os.environ['EASYOCR_MODULE_PATH']",
     "easyocr.Reader(['pt'], gpu=False, model_storage_directory=cache, download_enabled=True)",
     "print('EasyOCR weights ready:', cache)"
 )
@@ -152,7 +159,7 @@ Remove-Item $tmpPy -ErrorAction SilentlyContinue
 # The bundled Chinese model does not cover Portuguese diacritics.
 Write-Host ""
 Write-Host "Downloading RapidOCR Latin recognizer and dictionary for Portuguese..." -ForegroundColor Yellow
-$rapidocrDir  = "$(Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))\.ocr-model-cache\rapidocr"
+$rapidocrDir  = Join-Path $HOME ".cache\pdfextractor\rapidocr"
 $rapidocrRec  = "$rapidocrDir\latin_PP-OCRv3_rec_mobile.onnx"
 $rapidocrKeys = "$rapidocrDir\latin_dict.txt"
 New-Item -ItemType Directory -Force -Path $rapidocrDir | Out-Null
@@ -171,15 +178,16 @@ if (-not (Test-Path $rapidocrKeys)) {
 } else {
     Write-Host "  latin_dict.txt already present - skipping." -ForegroundColor DarkGray
 }
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Invoke-Native python "$scriptDir\verify_rapidocr_artifacts.py" --recognizer $rapidocrRec --dictionary $rapidocrKeys
 $env:RAPIDOCR_REC_MODEL = $rapidocrRec
 $env:RAPIDOCR_REC_KEYS  = $rapidocrKeys
 Write-Host "  RapidOCR Latin model ready: $rapidocrDir" -ForegroundColor Green
 
-# Run a full preflight across all five engines.
+# Run static readiness across four OCR families and five configurations.
 Write-Host ""
-Write-Host "Running preflight across all five OCR backends..." -ForegroundColor Yellow
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-python "$scriptDir\preflight_ocr_backends.py" --language pt
+Write-Host "Running static preflight across all five OCR configurations..." -ForegroundColor Yellow
+python "$scriptDir\preflight_ocr_backends.py" --language pt-BR
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  FAIL One or more engines failed preflight - see output above." -ForegroundColor Red
     $verifyFailed = $true
@@ -201,5 +209,5 @@ Write-Host "  # Full document"
 Write-Host "  .\scripts\run_benchmark.ps1 -RunSuffix v2 -AllPages"
 Write-Host ""
 Write-Host "  # Single engine"
-Write-Host "  .\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix v2"
-Write-Host "  .\scripts\run_benchmark.ps1 -Engine rapidocr-onnx -AllPages -RunSuffix v2"
+Write-Host "  .\scripts\run_benchmark.ps1 -Configuration tesseract -AllPages -RunSuffix v2"
+Write-Host "  .\scripts\run_benchmark.ps1 -Configuration rapidocr-onnxruntime -AllPages -RunSuffix v2"

@@ -3,6 +3,18 @@
 Place real PDFs here for manual validation of the extractor. PDF files
 are ignored by Git by default.
 
+The local Stress V4 acceptance set is verified against
+[`acceptance-corpus.lock.json`](acceptance-corpus.lock.json). After placing the
+PDF, reference, manifest, and validation report alongside the lock, run:
+
+```bash
+python scripts/provision_acceptance_corpus.py
+```
+
+The lock records sizes, page count, and SHA-256 values but does not redistribute
+the corpus or assert its license. Operators remain responsible for the source
+corpus terms.
+
 Suggested organization:
 
 ```text
