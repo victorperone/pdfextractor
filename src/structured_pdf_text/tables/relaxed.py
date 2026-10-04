@@ -25,6 +25,7 @@ from structured_pdf_text.document import (
     TextToken,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.tables.headers import infer_header_rows
 from structured_pdf_text.tables.text_join import join_table_tokens
 
 
@@ -104,6 +105,7 @@ def detect_relaxed_table(
         row_count=len(lines),
         confidence=0.55 * coverage + 0.45 * min(1.0, len(anchors) / 4.0),
         method=TableMethod.RELAXED_GRID,
+        header_rows=infer_header_rows(cells),
     )
 
 

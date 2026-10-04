@@ -17,7 +17,7 @@ Usage (Windows server):
         --output-dir output\\fase8 ^
         --allow-partial
 
-Engines: paddle | rapidocr-onnx | rapidocr-openvino | tesseract | easyocr
+Engines: paddle | rapidocr (onnxruntime/openvino) | tesseract | easyocr
 
 Output:
     output/fase8/extracted_{engine}_{run_id}.md
@@ -40,10 +40,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import platform
 import re
 import subprocess
 import sys
 import time
+import statistics
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,15 +66,23 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def _git_dirty() -> bool:
-    """Return True if the working tree has uncommitted changes."""
+def _git_dirty() -> bool | None:
+    """Return dirty state, or None when Git could not determine it."""
     try:
         out = subprocess.check_output(
             ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
         )
         return bool(out.strip())
     except Exception:
-        return False
+        return None
+
+
+def _git_status_error() -> str | None:
+    try:
+        subprocess.check_output(["git", "status", "--porcelain"], text=True, stderr=subprocess.PIPE)
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
 
 
 def _sha256_file(path: Path) -> str:
@@ -148,7 +159,7 @@ def _diagnostic_reasons(diag) -> tuple[list[str], list[str]]:
     return partial, complexity
 
 
-def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None):
+def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None, provider: str | None = None):
     """Build an ExtractorConfig for the given engine and extraction mode.
 
     render_scale is set per-engine via best_ocr_render_scale(). Override with
@@ -163,7 +174,7 @@ def _build_config(engine: str, mode: str, language: str, page_indices: tuple | N
     base = best_extraction_config(language=language, preserve_headers=False)
     render_scale_env = os.environ.get("OCR_RENDER_SCALE")
     render_scale = float(render_scale_env) if render_scale_env else best_ocr_render_scale(engine)
-    config = replace(base, ocr_engine=engine, mode=ExtractionMode(mode), ocr_render_scale=render_scale)
+    config = replace(base, ocr_engine=engine, ocr_provider=provider, mode=ExtractionMode(mode), ocr_render_scale=render_scale)
     if page_indices is not None:
         config = replace(config, page_indices=page_indices)
     return config
@@ -174,11 +185,19 @@ def _parse_pages_arg(pages_arg: str) -> tuple[int, ...]:
     indices: list[int] = []
     for part in pages_arg.split(","):
         part = part.strip()
+        if not part:
+            raise ValueError(f"Malformed page range: {pages_arg!r}")
         if "-" in part:
             lo, hi = part.split("-", 1)
-            indices.extend(range(int(lo) - 1, int(hi)))  # 1-based → 0-based
+            start, end = int(lo), int(hi)
+            if start < 1 or end < start:
+                raise ValueError(f"Invalid page range {part!r}; expected 1 <= start <= end")
+            indices.extend(range(start - 1, end))
         else:
-            indices.append(int(part) - 1)
+            page = int(part)
+            if page < 1:
+                raise ValueError(f"Page numbers are 1-based and must be positive: {part!r}")
+            indices.append(page - 1)
     return tuple(sorted(set(indices)))
 
 
@@ -191,9 +210,10 @@ def main() -> int:
     ap.add_argument(
         "--engine",
         default="paddle",
-        choices=["paddle", "rapidocr-onnx", "rapidocr-openvino", "tesseract", "easyocr"],
+        choices=["paddle", "rapidocr", "rapidocr-onnx", "rapidocr-openvino", "tesseract", "easyocr"],
         help="OCR engine (default: paddle)",
     )
+    ap.add_argument("--provider", choices=["onnxruntime", "openvino"], default=None)
     ap.add_argument(
         "--mode",
         default="balanced",
@@ -242,7 +262,7 @@ def main() -> int:
     page_indices = _parse_pages_arg(args.pages) if args.pages else None
 
     try:
-        config = _build_config(args.engine, args.mode, args.language, page_indices)
+        config = _build_config(args.engine, args.mode, args.language, page_indices, args.provider)
     except Exception as exc:
         print(f"ERROR: cannot build config: {exc}", file=sys.stderr)
         return 1
@@ -308,6 +328,7 @@ def main() -> int:
             "run_id": run_id,
             "git_sha": _git_sha(),
             "git_dirty": _git_dirty(),
+            "git_dirty_error": _git_status_error(),
             "engine": args.engine,
             "mode": args.mode,
             "language": args.language,
@@ -326,10 +347,9 @@ def main() -> int:
 
     # --- Render markdown and save ---
     from structured_pdf_text.renderers.markdown import render_markdown
-    md_text = render_markdown(document)
+    # This artifact is for page-aligned diagnostics and structural metrics.
+    md_text = render_markdown(document, diagnostic=True)
     md_path.write_text(md_text, encoding="utf-8")
-
-    page_sections = _parse_page_sections(md_text)
 
     # --- Build per-page entries (schema v2) ---
     page_entries = []
@@ -340,12 +360,10 @@ def main() -> int:
     for i, page in enumerate(document.pages):
         page_num = page.page_index + 1
         elapsed_page = page_times[i] if i < len(page_times) else 0.0
-        content = page_sections.get(page_num, "")
-
         diag = page.diagnostics
         page_warnings: list[str] = list(getattr(diag, "warnings", []))
         facts: dict = dict(getattr(diag, "facts", {}))
-        has_page_content = bool(_page_body(content))
+        has_page_content = bool(page.reading_text.strip())
         partial_reasons, complexity_reasons = _diagnostic_reasons(diag)
 
         # Derive ocr_outcome from diagnostics facts and token counts.
@@ -441,6 +459,7 @@ def main() -> int:
         "run_id": run_id,
         "git_sha": _git_sha(),
         "git_dirty": _git_dirty(),
+        "git_dirty_error": _git_status_error(),
         "engine": args.engine,
         "engine_identity": engine_identity,
         "mode": args.mode,
@@ -472,6 +491,23 @@ def main() -> int:
         },
         "page_count": len(document.pages),
         "memory": memory_stats,
+        "runtime_environment": {
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "cpu_count": os.cpu_count(),
+            "requested_threads": getattr(config, "num_threads", None),
+            "ocr_provider": getattr(config, "ocr_provider", None),
+            "render_scale": getattr(config, "ocr_render_scale", None),
+            "thread_environment": {
+                key: os.environ.get(key)
+                for key in ("OMP_NUM_THREADS", "OMP_THREAD_LIMIT", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+            },
+        },
+        "startup_and_throughput": {
+            "first_page_latency_s": round(page_times[0], 4) if page_times else None,
+            "warm_page_median_s": round(statistics.median(page_times[1:]), 4) if len(page_times) > 1 else None,
+            "warm_page_p95_s": round(sorted(page_times[1:])[int(0.95 * (len(page_times[1:]) - 1))], 4) if len(page_times) > 2 else None,
+        },
         "extracted_markdown": str(md_path),
         "timing_note": (
             "per-page elapsed_s is the wall-clock interval between progress callbacks "

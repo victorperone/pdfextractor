@@ -53,6 +53,7 @@ from structured_pdf_text.document import (
     TextLine,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.tables.headers import infer_header_rows
 from structured_pdf_text.tables.text_join import join_table_tokens, recover_cell_text
 from structured_pdf_text.tables.cells import tokens_in_cell
 from structured_pdf_text.tables.relaxed import detect_relaxed_table
@@ -425,6 +426,7 @@ def _table_from_grid(
         row_count=n_rows,
         confidence=grid.coherence,
         method=TableMethod.STRICT_GRID,
+        header_rows=infer_header_rows(cells),
     )
 
 

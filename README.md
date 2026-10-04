@@ -25,7 +25,7 @@ native evidence, conservative text reconstruction, complexity analysis,
 heuristic layout regions and deterministic reading order. The layout and
 reading-order adapters are intentionally vendor-neutral while the native path
 is being validated against the local corpus. OCR integration is available
-through an optional, lazy PaddleOCR adapter; the runtime/model must be
+through an optional, lazily loaded OCR adapter; the selected runtime/model must be
 installed separately. Document assembly now also aggregates page diagnostics,
 detects repeated edge regions and renders page-bounded Markdown with detected
 tables.
@@ -286,10 +286,11 @@ pdftext extract documento.pdf --mode balanced --ocr-model-profile pt --output js
 pdftext extract documento.pdf --mode ocr --ocr-model-profile pt --output reading
 pdftext extract documento.pdf --best --ocr-model-profile pt --output markdown -o output.md
 
-# Select a different OCR engine (no --ocr-model-profile needed for non-Paddle engines)
+# Select a different OCR engine (no --ocr-model-profile needed for these engines)
 pdftext extract documento.pdf --mode balanced --ocr-engine tesseract --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-onnx --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr-openvino --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr --ocr-provider openvino --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine easyocr --output markdown
 
 # Inspection and diagnostics
@@ -321,18 +322,20 @@ informational resource-use warning and does not automatically reduce OCR
 quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter by
 default.
 
-`--ocr-engine` selects the OCR backend. The five available engines are:
+`--ocr-engine` selects one of the four OCR families. RapidOCR has separate ONNX Runtime and OpenVINO providers; the old provider-specific names remain as deprecated aliases.
 
 | Engine | Flag value | Notes |
 |---|---|---|
 | PaddleOCR PP-OCRv6 | `paddle` (default) | Requires `pdftext setup-models` |
-| RapidOCR + ONNX Runtime | `rapidocr-onnx` | No model download needed |
-| RapidOCR + Intel OpenVINO | `rapidocr-openvino` | No model download needed |
+| RapidOCR | `rapidocr` | Choose provider with `--ocr-provider`; Portuguese needs a configured Latin recognizer |
+| RapidOCR ONNX alias (deprecated) | `rapidocr-onnx` | Kept for command compatibility |
+| RapidOCR OpenVINO alias (deprecated) | `rapidocr-openvino` | Kept for command compatibility |
 | Tesseract 5 | `tesseract` | Requires Tesseract binary in PATH |
 | EasyOCR (PyTorch CPU) | `easyocr` | Weights must be pre-downloaded via `setup_ocr_benchmark.sh/.ps1` |
 
+The public language tag `pt-BR` is accepted (with `pt` and `por` aliases).
 Non-Paddle engines do not use `--ocr-model-profile`. The engine is also
-selectable through the Python API via `ExtractorConfig(ocr_engine="tesseract")`
+selectable through the Python API via `ExtractorConfig(ocr_engine="rapidocr", ocr_provider="openvino")` or `ExtractorConfig(ocr_engine="tesseract")`
 or `dataclasses.replace(config, ocr_engine="rapidocr-onnx")`.
 CPU OCR disables MKL-DNN/oneDNN by default because the current Paddle 3.x
 PIR/oneDNN path is known to fail on some Linux/WSL CPU stacks. Set

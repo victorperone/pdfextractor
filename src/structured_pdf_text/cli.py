@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
+import getpass
 import sys
 from pathlib import Path
 
@@ -19,7 +21,7 @@ from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
 from .diagnostics.corpus import corpus_report
 from .diagnostics.compare import compare_extractors
-from .errors import FatalExtractionError
+from .errors import ConfigurationError, FatalExtractionError
 from .ocr.models import (
     PADDLE_OCR_FEATURE_DEFAULTS,
     UV_DOC_MODEL,
@@ -28,6 +30,7 @@ from .ocr.models import (
     required_model_directories,
 )
 from .ocr.runtime_policy import apply_paddle_runtime_policy, resolve_paddle_runtime_policy
+from .ocr.registry import REGISTRY
 from .ocr.paddle import (
     PaddleOcrUnavailable,
     _local_model_root,
@@ -56,6 +59,14 @@ def _warn_if_exhaustive(policy: str, *, emitted: bool = False) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main_impl(argv)
+    except (ConfigurationError, FileNotFoundError, PermissionError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _main_impl(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pdftext",
         description="PDF text extraction. CPU OCR defaults to oneDNN disabled; set PADDLE_ENABLE_MKLDNN=1 to opt in.",
@@ -129,6 +140,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print page progress to stderr during extraction",
     )
+    password_group = extract_parser.add_mutually_exclusive_group()
+    password_group.add_argument("--password-stdin", action="store_true", help="Read the PDF password from stdin")
+    password_group.add_argument("--ask-password", action="store_true", help="Prompt securely for the PDF password")
     extract_parser.add_argument(
         "--threads",
         type=int,
@@ -145,11 +159,14 @@ def main(argv: list[str] | None = None) -> int:
         "--ocr-engine",
         default=None,
         metavar="ENGINE",
+        choices=tuple(REGISTRY),
         help=(
-            "OCR engine to use: paddle (default), rapidocr-onnx, rapidocr-openvino, "
-            "tesseract, easyocr."
+            "OCR engine family: paddle (default), rapidocr, tesseract, easyocr. "
+            "RapidOCR runtime selection uses --ocr-provider."
         ),
     )
+    extract_parser.add_argument("--ocr-provider", choices=["onnxruntime", "openvino"], default=None,
+                                help="Inference provider when --ocr-engine rapidocr is selected")
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
     inspect_parser.add_argument("pdf", type=Path)
@@ -338,9 +355,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.best:
             config = best_extraction_config(language=profile_name)
             # F05: --best must not silently ignore an explicit --ocr-engine.
-            if args.ocr_engine is not None:
+            if args.ocr_engine is not None or args.ocr_provider is not None:
                 from dataclasses import replace as _replace
-                config = _replace(config, ocr_engine=args.ocr_engine)
+                config = _replace(
+                    config,
+                    ocr_engine=args.ocr_engine or config.ocr_engine,
+                    ocr_provider=args.ocr_provider,
+                )
         else:
             config = ExtractorConfig(
                 mode=args.mode,
@@ -352,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
                 merge_cross_page_tables=args.merge_cross_page_tables,
                 num_threads=args.threads,
                 ocr_engine=effective_engine,
+                ocr_provider=args.ocr_provider,
             )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if _mode_requires_ocr(config.mode) and args.ocr_model_profile is None and args.language is None:
@@ -380,6 +402,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\rExtraindo página {current}/{total}...", end="", file=sys.stderr, flush=True)
 
         callback = _progress if args.progress else None
+        password = None
+        if args.password_stdin:
+            password = sys.stdin.readline().rstrip("\r\n")
+        elif args.ask_password:
+            password = getpass.getpass("PDF password: ")
         if args.cache_home:
             os.environ["PADDLE_PDX_CACHE_HOME"] = str(
                 Path(args.cache_home).expanduser().resolve()
@@ -388,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
             with PdfTextExtractor(config) as extractor:
                 document = extractor.extract(
                     args.pdf,
+                    password=password,
                     progress_callback=callback,
                 )
         except FatalExtractionError as exc:
@@ -410,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.output_file is not None:
             try:
                 args.output_file.parent.mkdir(parents=True, exist_ok=True)
-                args.output_file.write_text(result, encoding="utf-8")
+                _atomic_write_text(args.output_file, result)
             except OSError as exc:
                 print(f"Could not write output file: {exc}", file=sys.stderr)
                 return 1
@@ -654,6 +682,28 @@ def _print_fatal_extraction_error(exc: FatalExtractionError) -> None:
         "Extraction aborted. The document was not completed.",
         file=sys.stderr,
     )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace a result file atomically using a temporary sibling file."""
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as stream:
+            temp_name = stream.name
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+        temp_name = None
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
 
 
 def _model_is_ready(model_dir: "Path") -> bool:

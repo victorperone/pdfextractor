@@ -284,7 +284,7 @@ def test_cross_page_table_is_rendered_on_each_physical_page():
         [logical_table],
     )
 
-    markdown = render_markdown(document)
+    markdown = render_markdown(document, diagnostic=True)
 
     page_1_markdown = markdown.split(
         "## Página 2",

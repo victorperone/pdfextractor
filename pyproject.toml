@@ -7,7 +7,7 @@ name = "structured-pdf-text"
 version = "0.1.0"
 description = "Local, auditable structured PDF text extraction with native evidence first."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "structured-pdf-text maintainers"}]
@@ -27,24 +27,14 @@ ocr = [
     "paddlex[ocr]>=3.7",
     "psutil>=5.9",
 ]
-# Fase 4: RapidOCR com ONNX Runtime (CPU)
-# Instalar: pip install "structured-pdf-text[ocr-rapidocr-onnx]"
-# Requer também: pip install paddle2onnx  (para exportar modelos Paddle → ONNX)
+# RapidOCR family with selectable inference provider.
 ocr-rapidocr-onnx = [
-    "rapidocr-onnxruntime>=1.3.0",
+    "rapidocr>=3.9.2",
     "onnxruntime>=1.18",
 ]
-# Fase 5: RapidOCR com OpenVINO (Intel CPU)
-# Instalar: pip install "structured-pdf-text[ocr-rapidocr-openvino]"
-#
-# rapidocr-openvino 1.4.4 declara internamente openvino<=2024.0.0, mas essa
-# restrição é conservadora — a biblioteca funciona corretamente com
-# openvino==2024.4.0 (versão mais estável com suporte a Python 3.12/Windows).
-# O pip instalará openvino==2024.4.0 e sobrescreverá o constraint interno do
-# rapidocr-openvino; isso é equivalente ao que o setup manual fazia com --no-deps.
 ocr-rapidocr-openvino = [
-    "rapidocr-openvino==1.4.4",
-    "openvino==2024.4.0",
+    "rapidocr>=3.9.2",
+    "openvino>=2024.4",
 ]
 # Fase 6: Tesseract (executável externo obrigatório: tesseract 5.x + por.traineddata)
 # Sem dependência Python adicional (usa subprocess)

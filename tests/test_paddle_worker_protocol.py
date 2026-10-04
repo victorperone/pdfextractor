@@ -145,23 +145,9 @@ def _make_harness(fake_proc: subprocess.Popen) -> Any:  # type: ignore[type-arg]
                 ) from exc
 
         def _worker_send(self, request: dict) -> dict:
-            with self._worker_lock:
-                self._ensure_worker()
-                self._worker_req_seq += 1
-                req_id = self._worker_req_seq
-                request = {**request, "request_id": req_id}
-                try:
-                    response = self._raw_send(request)
-                except Exception:
-                    self._discard_worker()
-                    raise
-                resp_id = response.get("request_id")
-                if resp_id != req_id:
-                    self._discard_worker()
-                    raise RuntimeError(
-                        f"Paddle worker request_id mismatch: sent {req_id}, got {resp_id}"
-                    )
-                return response
+            # Exercise the production implementation; the harness only fakes IO.
+            from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
+            return PaddleOCRBackend._worker_send(self, request)
 
     return Harness(fake_proc)
 
@@ -658,7 +644,7 @@ def test_real_worker_unknown_method_returns_error() -> None:
         env=_WORKER_ENV,
         bufsize=0,
     )
-    resp = _send(proc, {"method": "fly_to_the_moon", "request_id": 7})
+    resp = _send(proc, {"protocol_version": 2, "method": "fly_to_the_moon", "request_id": 7})
     assert resp["status"] == "error"
     assert "unknown method" in (resp.get("error") or "")
     assert resp.get("request_id") == 7

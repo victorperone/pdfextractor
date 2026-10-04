@@ -13,7 +13,7 @@ paddlex[ocr]==3.7.2
 
 # Required by PaddleOCR internals
 numpy==2.3.5
-opencv-contrib-python==4.10.0.84
+opencv-python-headless==4.10.0.84
 psutil==7.2.2
 
 # Development
@@ -24,11 +24,11 @@ pytest==9.1.1
 # Model weights must be downloaded once while online. They are stored in:
 #   ~/.cache/pdfextractor/paddlex/official_models/
 #
-# Models required (PP-OCRv5 / PP-LCNet series):
+# Models required by the active PP-OCRv6 profile:
 #   - PP-LCNet_x1_0_doc_ori          (document orientation classifier)
 #   - PP-LCNet_x1_0_textline_ori      (text-line orientation classifier)
-#   - PP-OCRv5_server_det             (text detection)
-#   - latin_PP-OCRv5_mobile_rec       (text recognition — Latin script)
+#   - PP-OCRv6_medium_det             (text detection)
+#   - PP-OCRv6_medium_rec             (text recognition — Latin script)
 #
 # Setup steps:
 #   1. Install dependencies:
