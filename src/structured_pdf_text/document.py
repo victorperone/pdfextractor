@@ -372,6 +372,7 @@ class StructuredTable:
     row_count: int
     confidence: float
     method: TableMethod
+    header_rows: tuple[int, ...] = ()
     continued_from_previous_page: bool = False
     continues_to_next_page: bool = False
 

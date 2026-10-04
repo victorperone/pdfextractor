@@ -281,6 +281,8 @@ class RegionRefinementResult:
     selected_rotation: float | None
     ocr_passes: int
     ocr_batches: int
+    status: str = "ok"
+    reason_code: str | None = None
 
 
 class OcrRegionRefiner:
@@ -347,6 +349,8 @@ class OcrRegionRefiner:
                 selected_rotation=None,
                 ocr_passes=0,
                 ocr_batches=0,
+                status="invalid_region",
+                reason_code="region_outside_page_or_empty",
             )
 
         try:
@@ -503,6 +507,15 @@ class OcrRegionRefiner:
                     raise
 
         if not candidates:
+            errors = [attempt.error or "" for attempt in attempts if attempt.error]
+            timed_out = any("timeout" in error.casefold() for error in errors)
+            failed = bool(errors) and len(errors) == len(attempts)
+            status = "timeout" if timed_out else "runtime_error" if failed else "no_text"
+            reason_code = (
+                "ocr_timeout" if timed_out else
+                "ocr_runtime_error" if failed else
+                "ocr_returned_no_tokens"
+            )
             return RegionRefinementResult(
                 bbox=region_bbox,
                 tokens=(),
@@ -511,6 +524,8 @@ class OcrRegionRefiner:
                 selected_rotation=None,
                 ocr_passes=total_passes,
                 ocr_batches=total_batches,
+                status=status if attempts else "budget_blocked",
+                reason_code=reason_code if attempts else "ocr_no_scale_within_budget",
             )
         _, scale_factor, rotation, tokens = max(candidates, key=lambda item: item[0])
         if request.goal == RegionRefinementGoal.NUMERIC and len(candidates) > 1:
@@ -523,6 +538,8 @@ class OcrRegionRefiner:
             selected_rotation=rotation,
             ocr_passes=total_passes,
             ocr_batches=total_batches,
+            status="ok" if tokens else "no_text",
+            reason_code=None if tokens else "ocr_returned_no_tokens",
         )
 
     def refine_many(

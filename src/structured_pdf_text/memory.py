@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-def process_memory_snapshot() -> dict[str, Any]:
+def _current_process_memory_snapshot() -> dict[str, Any]:
     """Return current and peak RSS in bytes, or ``None`` when unavailable.
 
     Metrics describe this process only, never its child processes. Linux and
@@ -103,6 +103,50 @@ def process_memory_snapshot() -> dict[str, Any]:
                 f"{type(exc).__name__}: {exc}; "
                 f"fallback {type(fallback_exc).__name__}: {fallback_exc}"
             )
+
+
+def process_memory_snapshot() -> dict[str, Any]:
+    """Return parent and sampled process-tree RSS when psutil is available."""
+    snapshot = _current_process_memory_snapshot()
+    parent_current = snapshot.get("current_rss_bytes")
+    child_current = 0
+    child_peak = 0
+    child_count = 0
+    child_peaks_available = True
+    error = None
+    try:
+        import psutil
+
+        parent = psutil.Process(os.getpid())
+        for child in parent.children(recursive=True):
+            try:
+                info = child.memory_info()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            child_current += int(info.rss)
+            peak = getattr(info, "peak_wset", None)
+            if peak is None:
+                child_peaks_available = False
+            else:
+                child_peak += int(peak)
+            child_count += 1
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+
+    snapshot.update({
+        "parent_current_rss_bytes": parent_current,
+        "children_current_rss_bytes": child_current if child_count or error is None else None,
+        "process_tree_current_rss_bytes": (
+            parent_current + child_current if parent_current is not None and error is None else parent_current
+        ),
+        "process_tree_peak_rss_bytes": (
+            snapshot.get("peak_rss_bytes") + child_peak
+            if snapshot.get("peak_rss_bytes") is not None and error is None and child_peaks_available else None
+        ),
+        "child_process_count": child_count,
+        "process_tree_error": error,
+    })
+    return snapshot
 
 
 def _unavailable(reason: str) -> dict[str, Any]:

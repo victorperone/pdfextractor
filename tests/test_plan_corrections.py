@@ -43,6 +43,11 @@ def test_render_scale_reduces_only_above_pixel_limit() -> None:
     assert (10 * scale).__ceil__() * (10 * scale).__ceil__() <= 99
 
 
+def test_render_scale_respects_rgb_byte_limit() -> None:
+    scale = _safe_complexity_scale(100, 100, 1_000_000, 2.0, max_bytes=30_000)
+    assert scale <= 1.0
+
+
 def test_security_limits_no_longer_expose_project_timeout() -> None:
     assert not hasattr(SecurityLimits(), "document_timeout_seconds")
 

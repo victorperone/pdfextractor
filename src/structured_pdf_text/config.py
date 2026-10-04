@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 from pathlib import Path
+
+from structured_pdf_text.errors import ConfigurationError
 
 
 class ExtractionMode(str, Enum):
@@ -87,6 +90,13 @@ class SecurityLimits:
     max_pages: int = 5000
     max_file_size_bytes: int = 1_000_000_000
     max_render_pixels: int = 100_000_000
+    max_render_bytes: int = 256 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for name in ("max_pages", "max_file_size_bytes", "max_render_pixels", "max_render_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ConfigurationError(f"{name} must be a positive integer, got {value!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +109,9 @@ class ExtractorConfig:
     Attributes:
         mode: Top-level extraction strategy (see :class:`ExtractionMode`).
         language: OCR language hint used to select the model profile.
-        enable_ocr: Activate the PaddleOCR adapter.  Set automatically
-            when ``mode`` is ``BALANCED`` or ``OCR``.
+        enable_ocr: Optional override for ``balanced`` mode. ``None`` enables
+            its normal selective OCR behavior; ``False`` disables it. Native and
+            fast modes never render, while ``ocr`` always requires OCR.
         enable_layout: Activate heuristic layout region detection.
         enable_tables: Activate vector-grid, relaxed-grid and text-track
             table detectors.
@@ -113,8 +124,8 @@ class ExtractorConfig:
             rendered-pixel uniformity checks.
         complexity_render_scale: Scale factor for complexity analysis renders
             (default 0.5 × OCR render scale).
-        ocr_render_scale: Scale factor applied when rendering pages for OCR
-            (default 2.0 — approximately 144 DPI for a typical 72 DPI PDF).
+        ocr_render_scale: Optional scale override for OCR rendering. When omitted,
+            the selected engine's registered default is used.
         ocr_quality_variants: Compatibility alias for policy selection.
             ``False`` forces ``BASELINE`` policy regardless of
             ``ocr_quality_policy``.
@@ -138,7 +149,7 @@ class ExtractorConfig:
 
     mode: ExtractionMode | str = ExtractionMode.NATIVE
     language: str = "pt"
-    enable_ocr: bool = False
+    enable_ocr: bool | None = None
     enable_layout: bool = False
     enable_tables: bool = False
     merge_cross_page_tables: bool = False
@@ -149,7 +160,7 @@ class ExtractorConfig:
     enable_experimental_occlusion_redaction: bool = True
 
     complexity_render_scale: float = 0.5
-    ocr_render_scale: float = 2.0
+    ocr_render_scale: float | None = None
     # OCR quality passes trade throughput and memory for recall. The default
     # keeps the high-recall behavior used by the corpus validations.
     ocr_quality_variants: bool = True
@@ -170,9 +181,40 @@ class ExtractorConfig:
 
     # OCR engine selection — new fields, both with defaults so existing code
     # that constructs ExtractorConfig without these args continues to work.
-    # "paddle" is the baseline; future phases add "rapidocr-onnx", "tesseract", etc.
+    # Public engine family. RapidOCR providers remain available as legacy aliases.
     ocr_engine: str = "paddle"
     ocr_runtime: str = "paddle_static"
+    ocr_provider: str | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            ExtractionMode(self.mode)
+            OcrQualityPolicy(self.ocr_quality_policy)
+        except (ValueError, TypeError) as exc:
+            raise ConfigurationError(str(exc)) from exc
+        if self.enable_ocr is not None and not isinstance(self.enable_ocr, bool):
+            raise ConfigurationError(f"enable_ocr must be True, False, or None, got {self.enable_ocr!r}")
+        if ExtractionMode(self.mode) == ExtractionMode.OCR and self.enable_ocr is False:
+            raise ConfigurationError("mode='ocr' requires OCR and cannot set enable_ocr=False")
+        if ExtractionMode(self.mode) in (ExtractionMode.NATIVE, ExtractionMode.FAST) and self.enable_ocr is True:
+            raise ConfigurationError("native/fast modes are raster-free and cannot enable OCR")
+        for name in ("complexity_render_scale",):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"{name} must be a finite positive number, got {value!r}")
+        if self.ocr_render_scale is not None and (
+            isinstance(self.ocr_render_scale, bool)
+            or not isinstance(self.ocr_render_scale, (int, float))
+            or not math.isfinite(self.ocr_render_scale)
+            or self.ocr_render_scale <= 0
+        ):
+            raise ConfigurationError(f"ocr_render_scale must be None or a finite positive number, got {self.ocr_render_scale!r}")
+        if self.ocr_batch_size < 1:
+            raise ConfigurationError(f"ocr_batch_size must be >= 1, got {self.ocr_batch_size!r}")
+        if self.num_threads < -1:
+            raise ConfigurationError(f"num_threads must be -1, 0, or positive, got {self.num_threads!r}")
+        if self.page_indices is not None and any(index < 0 for index in self.page_indices):
+            raise ConfigurationError("page_indices must contain zero-based non-negative integers")
 
     def normalized_mode(self) -> ExtractionMode:
         if isinstance(self.mode, ExtractionMode):
@@ -186,6 +228,9 @@ class ExtractorConfig:
         if isinstance(self.ocr_quality_policy, OcrQualityPolicy):
             return self.ocr_quality_policy
         return OcrQualityPolicy(self.ocr_quality_policy)
+
+    def effective_ocr_render_scale(self) -> float:
+        return float(self.ocr_render_scale if self.ocr_render_scale is not None else best_ocr_render_scale(self.ocr_engine))
 
 
 def effective_ocr_quality_policy(config: ExtractorConfig) -> OcrQualityPolicy:
@@ -223,7 +268,7 @@ def best_extraction_config(
 #
 # Rationale (research-backed, subject to A/B refinement):
 #
-#   Paddle     2.0  — PP-OCRv4/v5 has internal quality variants and
+#   Paddle     2.0  — Paddle has internal quality variants and
 #                     adaptive upscaling; 2.0 (≈144 DPI) is sufficient
 #                     as the model's internal passes compensate for
 #                     lower input resolution.
@@ -233,7 +278,7 @@ def best_extraction_config(
 #                     3.0 (≈216 DPI) combined with mag_ratio=1.2 gives
 #                     adequate coverage for small-text and degraded pages.
 #
-#   RapidOCR   3.0  — Shares PP-OCRv4 detection/recognition architecture
+#   RapidOCR   3.0  — Shares PP-OCR family detection/recognition architecture
 #                     with PaddleOCR but lacks the adaptive quality-
 #                     variant upscaling layer; 3.0 recommended by community
 #                     for reliable diacritic detection.
@@ -247,6 +292,7 @@ def best_extraction_config(
 _ENGINE_RENDER_SCALE: dict[str, float] = {
     "paddle":             2.0,
     "easyocr":            3.0,
+    "rapidocr":            3.0,
     "rapidocr-onnx":      3.0,
     "rapidocr-openvino":  3.0,
     "tesseract":          4.0,

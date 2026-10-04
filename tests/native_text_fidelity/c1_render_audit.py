@@ -226,7 +226,7 @@ def run(pdf: Path, output: Path, pages: list[int] | None = None) -> Path:
     )
     document = PdfTextExtractor(config=config).extract(pdf)
     json_output = render_json(document)
-    markdown_output = render_markdown(document)
+    markdown_output = render_markdown(document, diagnostic=True)
     summary, findings = audit_rendered_outputs(document, json_output, markdown_output)
     output.mkdir(parents=True, exist_ok=True)
     write_json(output / "c1_summary.json", summary.to_dict())

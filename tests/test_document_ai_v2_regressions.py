@@ -22,7 +22,7 @@ def _extract(
         pytest.skip("Document_AI_V2.pdf is not present")
     return PdfTextExtractor(
         ExtractorConfig(
-            mode=ExtractionMode.NATIVE,
+            mode=(ExtractionMode.BALANCED if experimental_occlusion_redaction else ExtractionMode.NATIVE),
             page_indices=(page - 1,),
             enable_tables=tables,
             enable_experimental_occlusion_redaction=(
@@ -88,7 +88,7 @@ def test_document_ai_v2_native_text_reconciles_hyphens_ligatures_and_tables():
     markdown = render_markdown(
         PdfTextExtractor(
             ExtractorConfig(mode=ExtractionMode.NATIVE, page_indices=(17,), enable_tables=True)
-        ).extract(CORPUS)
+        ).extract(CORPUS), diagnostic=True
     )
     assert 'rowspan="2"' in markdown
     assert 'colspan="2"' in markdown

@@ -10,6 +10,10 @@ class ExtractionError(RuntimeError):
     """Base exception for extraction failures."""
 
 
+class ConfigurationError(ValueError):
+    """Invalid or unsupported user configuration."""
+
+
 class FatalExtractionError(ExtractionError):
     """An extraction failure that makes the document incomplete."""
 
