@@ -190,7 +190,7 @@ class TestRegistry:
         assert "paddle" in REGISTRY
 
     def test_all_planned_engines_registered(self) -> None:
-        for name in ("paddle", "rapidocr-onnx", "rapidocr-openvino", "tesseract", "easyocr"):
+        for name in ("paddle", "rapidocr", "rapidocr-onnx", "rapidocr-openvino", "tesseract", "easyocr"):
             assert name in REGISTRY, f"{name} not in registry"
 
     def test_get_entry_returns_entry(self) -> None:
@@ -215,7 +215,7 @@ class TestFactory:
         with pytest.raises(UnsupportedOCREngine):
             build_ocr_backend(config)
 
-    def test_factory_builds_rapidocr_when_optional_runtime_is_stubbed(self, monkeypatch) -> None:
+    def test_factory_builds_rapidocr_when_optional_runtime_is_stubbed(self, monkeypatch, tmp_path) -> None:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr import factory
         from structured_pdf_text.ocr.backends.rapidocr import RapidOCRBackend
@@ -228,9 +228,31 @@ class TestFactory:
             "structured_pdf_text.ocr.backends.rapidocr._import_rapidocr",
             lambda runtime: DummyRapidOCR,
         )
+        model = tmp_path / "recognizer.onnx"
+        dictionary = tmp_path / "dictionary.txt"
+        model.write_bytes(b"mock model")
+        dictionary.write_text("\n".join("ãõçêáéíóú"), encoding="utf-8")
+        monkeypatch.setenv("RAPIDOCR_REC_MODEL", str(model))
+        monkeypatch.setenv("RAPIDOCR_REC_KEYS", str(dictionary))
         backend = factory.build_ocr_backend(ExtractorConfig(ocr_engine="rapidocr-onnx"))
         assert isinstance(backend, RapidOCRBackend)
         assert backend._runtime == "onnxruntime"
+
+    def test_factory_rejects_chinese_default_for_brazilian_portuguese(self, monkeypatch) -> None:
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr import factory
+        from structured_pdf_text.ocr.backends.rapidocr import RapidOCRBackend
+
+        class DummyRapidOCR:
+            def __init__(self, **kwargs):
+                pass
+
+        monkeypatch.setattr(
+            "structured_pdf_text.ocr.backends.rapidocr._import_rapidocr",
+            lambda runtime: DummyRapidOCR,
+        )
+        with pytest.raises(ValueError, match="not compatible with pt-BR"):
+            factory.build_ocr_backend(ExtractorConfig(ocr_engine="rapidocr"))
 
     def test_factory_builds_tesseract_backend(self) -> None:
         from structured_pdf_text.config import ExtractorConfig

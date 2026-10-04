@@ -134,6 +134,9 @@ def main() -> None:
         method = req.get("method", "")
 
         try:
+            protocol_version = req.get("protocol_version")
+            if protocol_version != 2:
+                raise ValueError(f"unsupported protocol_version: {protocol_version!r}")
             if method == "init":
                 init_config = req
                 engine = _make_engine(req)
@@ -156,8 +159,14 @@ def main() -> None:
                 page_index = int(req.get("page_index", 0))
 
                 if method == "recognize_page":
+                    from structured_pdf_text.geometry import BBox
+
+                    raw_bbox = req.get("page_bbox")
+                    page_bbox = BBox(*raw_bbox) if raw_bbox is not None else None
                     tokens = engine.recognize_page(
-                        image, page_index, quality_policy=req.get("quality_policy")
+                        image, page_index, page_bbox,
+                        quality_variants=req.get("quality_variants"),
+                        quality_policy=req.get("quality_policy")
                     )
                 else:
                     from structured_pdf_text.geometry import BBox

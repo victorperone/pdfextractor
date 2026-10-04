@@ -1,9 +1,7 @@
-"""RapidOCR backends — OCRBackend implementations for ONNX Runtime and OpenVINO.
+"""RapidOCR backend with ONNX Runtime and OpenVINO inference providers.
 
-Both runtimes use the same Python API (RapidOCR class) and bundled models.
-The only difference is the underlying inference package:
-  - rapidocr-onnxruntime 1.x  → runtime="onnxruntime"
-  - rapidocr-openvino 1.x     → runtime="openvino"
+Both providers use the unified rapidocr package. Imports from the retired
+provider packages are retained only as a runtime compatibility fallback.
 
 CF-2: Direct PP-OCRv6 ONNX export from Paddle is blocked on Windows by a DLL
 incompatibility (paddle2onnx 2.x + PaddlePaddle 3.3.1). Both backends therefore
@@ -39,8 +37,8 @@ from __future__ import annotations
 
 import inspect
 import os
+from pathlib import Path
 import time
-import warnings
 from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
@@ -90,7 +88,12 @@ def _package_version(name: str) -> str:
 
 
 def _import_rapidocr(runtime: str) -> type:
-    """Import RapidOCR from the appropriate runtime package."""
+    """Import the unified RapidOCR family, retaining legacy import fallback."""
+    try:
+        from rapidocr import RapidOCR  # type: ignore
+        return RapidOCR
+    except ImportError:
+        pass
     if runtime == "openvino":
         try:
             from rapidocr_openvino import RapidOCR  # type: ignore
@@ -253,10 +256,7 @@ def _result_to_pipeline_tokens(
 
 
 class RapidOCRBackend:
-    """OCRBackend using RapidOCR with either onnxruntime or OpenVINO.
-
-    runtime="onnxruntime" → rapidocr-onnxruntime (engine key: "rapidocr-onnx")
-    runtime="openvino"    → rapidocr-openvino    (engine key: "rapidocr-openvino")
+    """OCRBackend using the unified RapidOCR package with a selected provider.
 
     Satisfies both OCRBackend (benchmark) and OcrEngine (pipeline) protocols.
     """
@@ -265,39 +265,42 @@ class RapidOCRBackend:
         self._config = config
         self._language = config.language
         self._runtime = runtime
-        self._engine_key = "rapidocr-onnx" if runtime == "onnxruntime" else "rapidocr-openvino"
+        self._engine_key = "rapidocr"
 
         RapidOCR = _import_rapidocr(runtime)
+        self._unified = getattr(RapidOCR, "__module__", "").split(".")[0] == "rapidocr"
         kwargs: dict[str, Any] = {}
 
         det_path = os.environ.get("RAPIDOCR_DET_MODEL")
         rec_path = os.environ.get("RAPIDOCR_REC_MODEL")
         rec_keys = os.environ.get("RAPIDOCR_REC_KEYS")
-        if det_path:
+        if det_path and not self._unified:
             kwargs["det_model_path"] = det_path
         if bool(rec_path) != bool(rec_keys):
             raise ValueError(
                 "RapidOCR recognition model and dictionary must be configured "
                 "together via RAPIDOCR_REC_MODEL and RAPIDOCR_REC_KEYS."
             )
-        if rec_path:
+        if rec_path and not self._unified:
             kwargs["rec_model_path"] = rec_path
-        if rec_keys:
+        if rec_keys and not self._unified:
             kwargs["rec_keys_path"] = rec_keys
+        for artifact in (det_path, rec_path, rec_keys):
+            if artifact:
+                candidate = Path(artifact).expanduser()
+                if not candidate.is_file() or candidate.stat().st_size <= 0:
+                    raise ValueError(f"RapidOCR artifact is missing or empty: {artifact}")
 
-        if not rec_path and not det_path:
-            warnings.warn(
-                "RapidOCR is using the bundled PP-OCRv4-ch model, which does not "
-                "cover Portuguese diacritics (ã ç ê õ). "
-                "Set RAPIDOCR_REC_MODEL and RAPIDOCR_REC_KEYS to the paired Latin "
-                "recognizer and dictionary for Portuguese. "
-                "See the module docstring for instructions.",
-                UserWarning,
-                stacklevel=2,
-            )
+        if not rec_path and self._language.casefold() in {"pt", "pt-br", "por"}:
             self._profile = "builtin-ch"
+            raise ValueError(
+                "RapidOCR's bundled Chinese recognizer is not compatible with pt-BR; "
+                "configure a paired Latin recognizer and dictionary"
+            )
         elif rec_path:
-            profile, _missing = portuguese_dictionary_profile(rec_keys)
+            profile, missing = portuguese_dictionary_profile(rec_keys)
+            if self._language.casefold() in {"pt", "pt-br", "por"} and missing:
+                raise ValueError(f"RapidOCR dictionary cannot represent Portuguese: missing {''.join(missing)}")
             self._profile = profile if self._language.lower().startswith("pt") else "custom-rec"
         else:
             self._profile = "custom-det"
@@ -307,6 +310,13 @@ class RapidOCRBackend:
         det_thresh = float(os.environ.get("RAPIDOCR_DET_THRESH",   "0.25"))
         text_score = float(os.environ.get("RAPIDOCR_TEXT_SCORE",   "0.5"))
         angle_cls  = os.environ.get("RAPIDOCR_ANGLE_CLS", "0").lower() in ("1", "true", "yes")
+        self._effective_tuning = {
+            "det_db_unclip_ratio": unclip,
+            "det_db_box_thresh": box_thresh,
+            "det_db_thresh": det_thresh,
+            "text_score": text_score,
+            "with_angle_cls": angle_cls,
+        }
 
         tuning_kwargs: dict[str, Any] = {
             "det_db_unclip_ratio": unclip,
@@ -315,9 +325,29 @@ class RapidOCRBackend:
             "text_score":          text_score,
             "with_angle_cls":      angle_cls,
         }
-        accepted = _rapidocr_accepted_params(RapidOCR)
-        merged = {**kwargs, **{k: v for k, v in tuning_kwargs.items() if k in accepted}}
-        self._engine = RapidOCR(**merged)
+        if self._unified:
+            provider = {"Det.engine_type": runtime, "Cls.engine_type": runtime, "Rec.engine_type": runtime}
+            requested_threads = config.num_threads
+            effective_threads = max(1, os.cpu_count() or 1) if requested_threads == 0 else requested_threads
+            if effective_threads > 0 and runtime == "onnxruntime":
+                provider["EngineConfig.onnxruntime.intra_op_num_threads"] = effective_threads
+            elif effective_threads > 0 and runtime == "openvino":
+                provider["EngineConfig.openvino.inference_num_threads"] = effective_threads
+            if det_path:
+                provider["Det.model_path"] = det_path
+            if rec_path:
+                provider["Rec.model_path"] = rec_path
+                provider["Rec.rec_keys_path"] = rec_keys
+            provider.update({
+                "Det.unclip_ratio": unclip,
+                "Det.box_thresh": box_thresh,
+                "Det.thresh": det_thresh,
+            })
+            self._engine = RapidOCR(params=provider)
+        else:
+            accepted = _rapidocr_accepted_params(RapidOCR)
+            merged = {**kwargs, **{k: v for k, v in tuning_kwargs.items() if k in accepted}}
+            self._engine = RapidOCR(**merged)
 
         self._det_model = det_path
         self._rec_model = rec_path
@@ -347,7 +377,9 @@ class RapidOCRBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
-        pkg_name = "rapidocr-onnxruntime" if self._runtime == "onnxruntime" else "rapidocr-openvino"
+        pkg_name = "rapidocr" if self._unified else (
+            "rapidocr-onnxruntime" if self._runtime == "onnxruntime" else "rapidocr-openvino"
+        )
         runtime_pkg = "onnxruntime" if self._runtime == "onnxruntime" else "openvino"
         return OCRBackendIdentity(
             engine=self._engine_key,
@@ -361,13 +393,14 @@ class RapidOCRBackend:
             },
             artifact_hashes=self._artifact_hashes,
             extra={
-                "render_scale": self._config.ocr_render_scale,
+                "render_scale": self._config.effective_ocr_render_scale(),
                 "clahe": True,
-                "det_db_unclip_ratio": float(os.environ.get("RAPIDOCR_UNCLIP_RATIO", "1.8")),
-                "det_db_box_thresh":   float(os.environ.get("RAPIDOCR_BOX_THRESH",   "0.45")),
-                "det_db_thresh":       float(os.environ.get("RAPIDOCR_DET_THRESH",   "0.25")),
-                "text_score":          float(os.environ.get("RAPIDOCR_TEXT_SCORE",   "0.5")),
-                "with_angle_cls":      os.environ.get("RAPIDOCR_ANGLE_CLS", "0").lower() in ("1", "true", "yes"),
+                **self._effective_tuning,
+                "requested_threads": self._config.num_threads,
+                "effective_threads": (
+                    max(1, os.cpu_count() or 1) if self._config.num_threads == 0
+                    else self._config.num_threads
+                ),
                 "rec_model": self._rec_model,
                 "rec_keys":  self._rec_keys,
                 "language_profile": self._profile,
@@ -432,7 +465,9 @@ class RapidOCRBackend:
     ) -> list[OcrToken]:
         img = _to_numpy(page_image)
         out = _run_rapidocr(self._engine, img)
-        return _result_to_pipeline_tokens(_extract_raw(out), page_index, self._language)
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        tokens = _result_to_pipeline_tokens(_extract_raw(out), page_index, self._language)
+        return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0])
 
     def recognize_region(
         self,

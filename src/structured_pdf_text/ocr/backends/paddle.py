@@ -208,7 +208,7 @@ class PaddleOCRBackend:
             bufsize=0,  # unbuffered binary I/O — flush() is explicit in _raw_send
         )
         # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
-        init_req = {"method": "init", **self._subprocess_config}  # type: ignore[arg-type]
+        init_req = {"protocol_version": 2, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
         try:
             response = self._raw_send(init_req, timeout=_WORKER_INIT_TIMEOUT_S)
         except Exception:
@@ -285,15 +285,13 @@ class PaddleOCRBackend:
 
             self._worker_req_seq += 1
             req_id = self._worker_req_seq
-            request = {**request, "request_id": req_id}
+            request = {**request, "protocol_version": 2, "request_id": req_id}
+            try:
+                response = self._raw_send(request)
+            except Exception:
+                self._discard_worker()
+                raise
 
-        try:
-            response = self._raw_send(request)
-        except Exception:
-            self._discard_worker()
-            raise
-
-            # Verify the response belongs to this request.
             resp_id = response.get("request_id")
             if resp_id != req_id:
                 self._discard_worker()
@@ -311,6 +309,8 @@ class PaddleOCRBackend:
         region_bbox: BBox | None = None,
         *,
         quality_policy: str | None = None,
+        page_bbox: BBox | None = None,
+        quality_variants: bool | None = None,
     ) -> list[OcrToken]:
         """Serialize image, send to worker, deserialize OcrToken list."""
         from PIL import Image
@@ -329,6 +329,10 @@ class PaddleOCRBackend:
         }
         if quality_policy is not None:
             req["quality_policy"] = quality_policy
+        if page_bbox is not None:
+            req["page_bbox"] = [page_bbox.x0, page_bbox.y0, page_bbox.x1, page_bbox.y1]
+        if quality_variants is not None:
+            req["quality_variants"] = quality_variants
         if region_bbox is not None:
             req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
 
@@ -380,7 +384,7 @@ class PaddleOCRBackend:
             },
             artifact_hashes={},  # Paddle model dirs contain many files — hashing deferred
             extra={
-                "render_scale": self._config.ocr_render_scale,
+                "render_scale": self._config.effective_ocr_render_scale(),
                 "quality_policy": effective_ocr_quality_policy(self._config).value,
                 "quality_variants": self._config.ocr_quality_variants,
                 "ocr_batch_size": self._config.ocr_batch_size,
@@ -473,7 +477,8 @@ class PaddleOCRBackend:
     ) -> list[OcrToken]:
         if self._subprocess_config is not None:
             return self._call_subprocess(
-                "recognize_page", page_image, page_index, quality_policy=quality_policy
+                "recognize_page", page_image, page_index, page_bbox=page_bbox,
+                quality_variants=quality_variants, quality_policy=quality_policy
             )
         return self._engine.recognize_page(  # type: ignore[union-attr]
             page_image,
@@ -518,15 +523,16 @@ class PaddleOCRBackend:
         return "ready"
 
     def close(self) -> None:
-        if self._worker_proc is not None:
-            try:
-                self._worker_proc.stdin.write(b"QUIT\n")  # type: ignore[union-attr]
-                self._worker_proc.stdin.flush()  # type: ignore[union-attr]
-                self._worker_proc.wait(timeout=10)
-            except Exception:
-                self._worker_proc.kill()
-            finally:
-                self._worker_proc = None
+        with self._worker_lock:
+            if self._worker_proc is not None:
+                try:
+                    self._worker_proc.stdin.write(b"QUIT\n")  # type: ignore[union-attr]
+                    self._worker_proc.stdin.flush()  # type: ignore[union-attr]
+                    self._worker_proc.wait(timeout=10)
+                except Exception:
+                    self._worker_proc.kill()
+                finally:
+                    self._worker_proc = None
 
     # ------------------------------------------------------------------
     # Forward diagnostic attributes accessed by api.py

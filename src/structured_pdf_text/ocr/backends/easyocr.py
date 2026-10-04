@@ -478,8 +478,9 @@ class EasyOCRBackend:
 
     def __init__(self, config: "ExtractorConfig") -> None:
         self._config = config
-        self._language = config.language
-        self._langs = _LANG_MAP.get(config.language, ["pt"])
+        from structured_pdf_text.ocr.languages import backend_language, canonical_language
+        self._language = canonical_language(config.language)
+        self._langs = [backend_language(config.language, "easyocr")]
 
         # --- env-var + config-derived configuration ---
         raw_decoder = os.environ.get("EASYOCR_DECODER", "greedy").strip().lower()
@@ -572,7 +573,7 @@ class EasyOCRBackend:
             },
             artifact_hashes={},  # .pth files are ~700 MB — hashing at init would add ~30s startup
             extra={
-                "render_scale": self._config.ocr_render_scale,
+                "render_scale": self._config.effective_ocr_render_scale(),
                 "recognition_network": self._recog_network,
                 "mag_ratio": self._mag_ratio,
                 "canvas_size_policy": "int(mag_ratio * max(h, w))",
@@ -673,7 +674,9 @@ class EasyOCRBackend:
             rotation_info=self._rotation_info,
         )
         self._record_call(fallback)
-        return _result_to_pipeline_tokens(raw, page_index, self._language)
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        tokens = _result_to_pipeline_tokens(raw, page_index, self._language)
+        return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0])
 
     def recognize_region(
         self,

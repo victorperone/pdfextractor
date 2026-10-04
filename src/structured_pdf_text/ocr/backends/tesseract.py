@@ -32,26 +32,11 @@ TESSERACT_OSD            Set to 1 to enable OSD pre-flight (PSM 0) before each p
 TESSERACT_OSD_CONF_MIN   Minimum OSD orientation confidence to apply rotation
                          (default: 2.0). Values below this are treated as "no rotation".
 
-Optimization notes (Fase 9)
-----------------------------
-- --dpi: DPI hint computed from config.ocr_render_scale (72 × scale).
-  Without this, Tesseract defaults to 70 DPI internally, treating small text
-  as noise and deleting it — the primary cause of the 27.4% deletion_rate.
-- textord_min_linesize=2.5: fixes a Tesseract bug where Portuguese diacritics
-  (ã, ç, ê, õ) are read as a separate line of marks above the text (issue #4276).
-- tessedit_char_blacklist=`: backtick in output creates invalid Markdown fences;
-  blacklisting it eliminates the 3.57% invalid_markdown_rate entirely.
-- textord_noise_rejrows/words=0: disables aggressive line/word deletion that
-  misclassifies valid text as noise on low-DPI or uneven-scan pages.
-- crunch_del_rating=40 (default 60): raises the confidence floor at which words
-  are silently deleted; preserves more borderline-quality tokens.
-- language_model_penalty_non_dict_word=0.05 (default 0.15): reduces the penalty
-  for financial vocabulary (CNPJ, ATIVO, EBITDA, etc.) not in the PT dictionary.
-- preserve_interword_spaces=1: preserves column spacing in table output.
-- CLAHE preprocessing: local contrast enhancement applied before OCR using
-  cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).  Falls back gracefully
-  if OpenCV is unavailable.  Result is saved as grayscale PNG (Tesseract reads
-  grayscale directly; saving as 'L' mode avoids redundant color conversion).
+Named profiles
+--------------
+The default profile uses upstream Tesseract segmentation and recognition
+settings. ``tesseract-pt-financial-v1`` and ``tesseract-degraded-scan-v1``
+enable corpus-tuned parameters; the degraded profile also applies CLAHE.
 
 OMP_THREAD_LIMIT note: set OMP_THREAD_LIMIT=1 in the environment when running
 many Tesseract processes in parallel — the default 4 OMP threads per process
@@ -64,6 +49,7 @@ import io
 import math
 import os
 import subprocess
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -100,12 +86,12 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _tesseract_info() -> dict[str, str]:
+def _tesseract_info(executable: str = "tesseract", extra_flags: list[str] | None = None) -> dict[str, str]:
     """Return version and tessdata directory from the installed Tesseract."""
     info: dict[str, str] = {"version": "unknown", "tessdata": "unknown"}
     try:
         result = subprocess.run(
-            ["tesseract", "--version"],
+            [executable, "--version"],
             capture_output=True, text=True, timeout=10,
         )
         output = result.stdout or result.stderr or ""
@@ -115,7 +101,7 @@ def _tesseract_info() -> dict[str, str]:
                 info["version"] = stripped.split()[-1]
         # tessdata dir is reported by --list-langs
         langs_result = subprocess.run(
-            ["tesseract", "--list-langs"],
+            [executable, *(extra_flags or []), "--list-langs"],
             capture_output=True, text=True, timeout=10,
         )
         langs_output = langs_result.stdout + langs_result.stderr
@@ -182,34 +168,51 @@ def _run_tesseract_tsv(
     oem: int,
     dpi: int,
     extra_flags: list[str],
+    executable: str = "tesseract",
+    profile: str = "default",
+    num_threads: int = -1,
 ) -> str:
     """Run tesseract on image, return TSV output string."""
     pil = _to_pil(image)
-    pil = _clahe_preprocess(pil)
+    if profile == "tesseract-degraded-scan-v1":
+        pil = _clahe_preprocess(pil)
+    profile_options = {
+        "default": [],
+        "tesseract-pt-financial-v1": [
+            "textord_min_linesize=2.5", "textord_noise_rejrows=0",
+            "textord_noise_rejwords=0", "crunch_del_rating=40",
+            "language_model_penalty_non_dict_word=0.05", "preserve_interword_spaces=1",
+        ],
+        "tesseract-degraded-scan-v1": [
+            "textord_min_linesize=2.5", "textord_noise_rejrows=0",
+            "textord_noise_rejwords=0", "crunch_del_rating=40",
+            "language_model_penalty_non_dict_word=0.05", "preserve_interword_spaces=1",
+        ],
+    }
+    if profile not in profile_options:
+        raise ValueError(f"Unknown Tesseract profile: {profile!r}")
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp = f.name
         pil.save(tmp, format="PNG")
         cmd = [
-            "tesseract", tmp, "stdout",
+            executable, tmp, "stdout",
             "--oem", str(oem),
             "--psm", str(psm),
             "-l", lang,
             "--dpi", str(dpi),
-            "-c", "textord_min_linesize=2.5",
-            "-c", "tessedit_char_blacklist=`",
-            "-c", "textord_noise_rejrows=0",
-            "-c", "textord_noise_rejwords=0",
-            "-c", "crunch_del_rating=40",
-            "-c", "language_model_penalty_non_dict_word=0.05",
-            "-c", "preserve_interword_spaces=1",
+            *[arg for option in profile_options[profile] for arg in ("-c", option)],
             *extra_flags,
             "tsv",
         ]
+        env = None
+        if num_threads != -1:
+            env = dict(os.environ)
+            env["OMP_THREAD_LIMIT"] = str(max(1, os.cpu_count() or 1) if num_threads == 0 else num_threads)
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, encoding="utf-8", timeout=120,
+            capture_output=True, text=True, encoding="utf-8", timeout=120, env=env,
         )
         if result.returncode != 0:
             stderr_snippet = (result.stderr or "")[:400].strip()
@@ -222,7 +225,7 @@ def _run_tesseract_tsv(
             Path(tmp).unlink(missing_ok=True)
 
 
-def _run_tesseract_osd(image: object, extra_flags: list[str]) -> dict | None:
+def _run_tesseract_osd(image: object, extra_flags: list[str], executable: str = "tesseract") -> dict | None:
     """Run Tesseract PSM 0 (OSD-only) and return orientation info, or None on failure.
 
     Returns a dict with keys ``rotate`` (int, degrees to apply to correct the
@@ -239,7 +242,7 @@ def _run_tesseract_osd(image: object, extra_flags: list[str]) -> dict | None:
             tmp = f.name
         pil.save(tmp, format="PNG")
         cmd = [
-            "tesseract", tmp, "stdout",
+            executable, tmp, "stdout",
             "--psm", "0",
             "-l", "osd",
             *extra_flags,
@@ -379,23 +382,29 @@ class TesseractBackend:
 
     def __init__(self, config: "ExtractorConfig") -> None:
         self._config = config
-        self._language = config.language
+        from structured_pdf_text.ocr.languages import backend_language, canonical_language
+        self._language = canonical_language(config.language)
+        self._tesseract_cmd = os.environ.get("TESSERACT_CMD") or shutil.which("tesseract") or "tesseract"
+        self._profile = os.environ.get("TESSERACT_PROFILE", "default")
+        if self._profile not in {"default", "tesseract-pt-financial-v1", "tesseract-degraded-scan-v1"}:
+            raise ValueError(f"Unsupported TESSERACT_PROFILE: {self._profile!r}")
+        tessdata_dir = os.environ.get("TESSERACT_TESSDATA_DIR", "")
+        self._effective_tessdata_dir = tessdata_dir or None
+        self._extra_flags: list[str] = ["--tessdata-dir", tessdata_dir] if tessdata_dir else []
         self._tess_lang = os.environ.get(
             "TESSERACT_LANG",
-            _LANG_MAP.get(config.language, "por"),
+            backend_language(config.language, "tesseract"),
         )
         self._psm = int(os.environ.get("TESSERACT_PSM", "3"))
         self._oem = int(os.environ.get("TESSERACT_OEM", "1"))
 
         # DPI: computed from render scale so Tesseract never falls back to 70 DPI.
-        default_dpi = int(72 * getattr(config, "ocr_render_scale", 2.0))
+        default_dpi = int(72 * config.effective_ocr_render_scale())
         self._dpi = int(os.environ.get("TESSERACT_DPI", str(default_dpi)))
 
-        # Optional tessdata_best directory.
-        tessdata_dir = os.environ.get("TESSERACT_TESSDATA_DIR", "")
-        self._extra_flags: list[str] = (
-            ["--tessdata-dir", tessdata_dir] if tessdata_dir else []
-        )
+        languages = self._tess_lang.split("+")
+        if not languages or any(language not in {"por", "eng"} for language in languages):
+            raise ValueError(f"Unsupported Tesseract language list: {self._tess_lang!r}")
 
         # Minimum word confidence filter (0 = no filter, matches previous behaviour).
         self._conf_min = float(os.environ.get("TESSERACT_CONF_MIN", "0"))
@@ -406,17 +415,18 @@ class TesseractBackend:
         self._osd_enabled: bool = os.environ.get("TESSERACT_OSD", "0") in ("1", "true", "yes")
         self._osd_conf_min: float = float(os.environ.get("TESSERACT_OSD_CONF_MIN", "2.0"))
 
-        info = _tesseract_info()
+        info = _tesseract_info(self._tesseract_cmd, self._extra_flags)
         self._version = info["version"]
-        self._tessdata = info["tessdata"]
+        self._tessdata = self._effective_tessdata_dir or info["tessdata"]
 
         # Hash the .traineddata file at construction time for reproducibility.
         # Returns None if the file is absent (missing model); stored in identity.
-        traineddata_path = Path(self._tessdata) / f"{self._tess_lang}.traineddata"
-        digest = sha256_file(traineddata_path)
-        self._artifact_hashes: dict[str, str] = (
-            {f"{self._tess_lang}.traineddata": digest} if digest else {}
-        )
+        self._artifact_hashes = {}
+        for language in languages:
+            traineddata_path = Path(self._tessdata) / f"{language}.traineddata"
+            digest = sha256_file(traineddata_path)
+            if digest:
+                self._artifact_hashes[f"{language}.traineddata"] = digest
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -428,7 +438,7 @@ class TesseractBackend:
         return OCRBackendIdentity(
             engine="tesseract",
             runtime="tesseract-cli",
-            profile=f"{self._tess_lang}-psm{self._psm}-oem{self._oem}",
+            profile=self._profile,
             language=self._language,
             device="cpu",
             package_versions={
@@ -438,13 +448,16 @@ class TesseractBackend:
             },
             artifact_hashes=self._artifact_hashes,
             extra={
-                "render_scale": self._config.ocr_render_scale,
+                "render_scale": self._config.effective_ocr_render_scale(),
                 "psm": self._psm,
                 "oem": self._oem,
                 "effective_dpi": self._dpi,
                 "conf_min": self._conf_min,
-                "clahe": True,
+                "clahe": self._profile == "tesseract-degraded-scan-v1",
                 "tessdata_dir_override": tessdata_dir_env or None,
+                "tesseract_cmd": self._tesseract_cmd,
+                "requested_threads": self._config.num_threads,
+                "effective_threads": max(1, os.cpu_count() or 1) if self._config.num_threads == 0 else self._config.num_threads,
                 "active_page_orientation": self._osd_enabled,
                 "osd_conf_min": self._osd_conf_min if self._osd_enabled else None,
             },
@@ -528,20 +541,30 @@ class TesseractBackend:
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
         image = page_image
+        original_width, original_height = _to_pil(page_image).size
+        osd_rotation = 0
         if self._osd_enabled:
-            osd = _run_tesseract_osd(image, self._extra_flags)
+            osd = _run_tesseract_osd(image, self._extra_flags, self._tesseract_cmd)
             if osd is not None and osd["confidence"] >= self._osd_conf_min and osd["rotate"] != 0:
                 from PIL import Image as _PILImage
                 pil = _to_pil(image)
                 image = pil.rotate(-osd["rotate"], expand=True)
+                osd_rotation = int(osd["rotate"]) % 360
         tsv = _run_tesseract_tsv(
             image, self._tess_lang, self._psm, self._oem,
             dpi=self._dpi, extra_flags=self._extra_flags,
+            executable=self._tesseract_cmd,
+            profile=self._profile,
+            num_threads=self._config.num_threads,
         )
-        return _tsv_to_pipeline_tokens(
+        tokens = _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
             conf_min=self._conf_min,
         )
+        if osd_rotation:
+            tokens = _map_rotated_tokens_to_original(tokens, osd_rotation, original_width, original_height)
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        return map_tokens_to_page(tokens, page_bbox, original_width, original_height)
 
     def recognize_region(
         self,
@@ -564,6 +587,9 @@ class TesseractBackend:
         tsv = _run_tesseract_tsv(
             crop_pil, self._tess_lang, self._psm, self._oem,
             dpi=self._dpi, extra_flags=self._extra_flags,
+            executable=self._tesseract_cmd,
+            profile=self._profile,
+            num_threads=self._config.num_threads,
         )
         return _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
@@ -579,13 +605,18 @@ class TesseractBackend:
     def healthcheck(self) -> str:
         try:
             result = subprocess.run(
-                ["tesseract", "--list-langs"],
+                [self._tesseract_cmd, *self._extra_flags, "--list-langs"],
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode != 0:
                 return "unknown"
             output = result.stdout + result.stderr
-            if self._tess_lang in output:
+            available = {
+                line.strip() for line in output.splitlines()
+                if line.strip() and "tessdata" not in line.casefold()
+            }
+            required_languages = self._tess_lang.split("+") + (["osd"] if self._osd_enabled else [])
+            if all(language in available for language in required_languages):
                 return "ready"
             return "missing"
         except FileNotFoundError:
@@ -595,3 +626,25 @@ class TesseractBackend:
 
     def close(self) -> None:
         pass
+
+
+def _map_rotated_tokens_to_original(
+    tokens: list[OcrToken], clockwise_rotation: int, original_width: int, original_height: int
+) -> list[OcrToken]:
+    """Map boxes from Tesseract's OSD-corrected raster back to input pixels."""
+    mapped: list[OcrToken] = []
+    for token in tokens:
+        box = token.bbox
+        if clockwise_rotation == 90:
+            bbox = BBox(box.y0, original_height - box.x1, box.y1, original_height - box.x0)
+        elif clockwise_rotation == 180:
+            bbox = BBox(original_width - box.x1, original_height - box.y1,
+                        original_width - box.x0, original_height - box.y0)
+        elif clockwise_rotation == 270:
+            bbox = BBox(original_width - box.y1, box.x0, original_width - box.y0, box.x1)
+        else:
+            bbox = box
+        mapped.append(OcrToken(text=token.text, bbox=bbox, confidence=token.confidence,
+                               language=token.language, source=token.source,
+                               rotation=token.rotation, provenance=token.provenance))
+    return mapped
