@@ -45,16 +45,12 @@ Invoke-Native python -m pip install "paddlepaddle==3.3.1" "paddleocr==3.7.0" "pa
 # --- 2. RapidOCR ONNX Runtime ---
 Write-Host ""
 Write-Host "[2/5] RapidOCR + ONNX Runtime..." -ForegroundColor Yellow
-Invoke-Native python -m pip install "rapidocr-onnxruntime==1.4.4" "onnxruntime==1.30.0"
+Invoke-Native python -m pip install "rapidocr==3.9.2" "onnxruntime==1.30.0"
 
 # --- 3. RapidOCR OpenVINO (two-step install) ---
 Write-Host ""
 Write-Host "[3/5] RapidOCR + OpenVINO 2024.4.0..." -ForegroundColor Yellow
-# openvino requires numpy<2.1.0; install first to resolve conflict
 Invoke-Native python -m pip install "openvino==2024.4.0"
-# rapidocr-openvino declares openvino<=2024.0.0 (no cp312 win64 wheel)
-# use --no-deps to keep openvino==2024.4.0 which supports Python 3.12
-Invoke-Native python -m pip install "rapidocr-openvino==1.4.4" --no-deps
 
 # --- 4. EasyOCR + PyTorch CPU ---
 Write-Host ""
@@ -86,9 +82,8 @@ $checks = @(
     @("PaddlePaddle",       "import paddle; print(paddle.__version__)"),
     @("PaddleOCR",          "from importlib.metadata import version; print(version('paddleocr'))"),
     @("PaddleX",            "from importlib.metadata import version; print(version('paddlex'))"),
-    @("RapidOCR ONNX",     "from importlib.metadata import version; print(version('rapidocr-onnxruntime'))"),
+    @("RapidOCR",          "from importlib.metadata import version; print(version('rapidocr'))"),
     @("ONNX Runtime",       "from importlib.metadata import version; print(version('onnxruntime'))"),
-    @("RapidOCR OpenVINO", "from importlib.metadata import version; print(version('rapidocr-openvino'))"),
     @("OpenVINO",           "from importlib.metadata import version; print(version('openvino'))"),
     @("EasyOCR",            "from importlib.metadata import version; print(version('easyocr'))"),
     @("PyTorch",            "import torch; print(torch.__version__)"),

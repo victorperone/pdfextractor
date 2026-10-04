@@ -30,11 +30,19 @@ REGISTRY: dict[str, BackendEntry] = {
         extras="ocr",
         setup_hint="pdftext setup-models --language pt",
     ),
+    "rapidocr": BackendEntry(
+        name="rapidocr",
+        display_name="RapidOCR",
+        default_runtime="onnxruntime",
+        default_profile="latin/pt-compatible",
+        extras="ocr-rapidocr-onnx",
+        setup_hint='pip install "structured-pdf-text[ocr-rapidocr-onnx]"',
+    ),
     "rapidocr-onnx": BackendEntry(
         name="rapidocr-onnx",
         display_name="RapidOCR + ONNX Runtime",
         default_runtime="onnxruntime",
-        default_profile="builtin-ch",
+        default_profile="latin/pt-compatible",
         extras="ocr-rapidocr-onnx",
         setup_hint='pip install "structured-pdf-text[ocr-rapidocr-onnx]"',
     ),
@@ -42,12 +50,9 @@ REGISTRY: dict[str, BackendEntry] = {
         name="rapidocr-openvino",
         display_name="RapidOCR + OpenVINO",
         default_runtime="openvino",
-        default_profile="builtin-ch",
+        default_profile="latin/pt-compatible",
         extras="ocr-rapidocr-openvino",
-        setup_hint=(
-            "pip install openvino==2024.4.0 && "
-            'pip install "rapidocr-openvino==1.4.4" --no-deps'
-        ),
+        setup_hint='pip install "structured-pdf-text[ocr-rapidocr-openvino]"',
     ),
     "tesseract": BackendEntry(
         name="tesseract",

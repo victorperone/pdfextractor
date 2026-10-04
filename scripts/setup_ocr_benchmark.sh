@@ -22,12 +22,9 @@ if [[ ! -x "$OCR_PREFIX/bin/tesseract" ]]; then
 fi
 
 "$PYTHON_BIN" -m pip install \
-    'rapidocr-onnxruntime==1.4.4' \
+    'rapidocr==3.9.2' \
     'onnxruntime==1.30.0' \
     'openvino==2024.4.0'
-# rapidocr-openvino 1.4.4 pins OpenVINO <=2024.0.0, which lacks the required
-# CPython 3.12 wheel here. The tested setup uses OpenVINO 2024.4.0 explicitly.
-"$PYTHON_BIN" -m pip install 'rapidocr-openvino==1.4.4' --no-deps
 "$PYTHON_BIN" -m pip install \
     'torch==2.14.0+cpu' 'torchvision==0.29.0+cpu' \
     --index-url https://download.pytorch.org/whl/cpu
@@ -56,13 +53,14 @@ import torch
 import torchvision
 
 for name in (
-    "paddleocr", "paddlex", "rapidocr-onnxruntime", "onnxruntime",
-    "openvino", "rapidocr-openvino", "easyocr", "torch", "torchvision",
+    "paddleocr", "paddlex", "rapidocr", "onnxruntime",
+    "openvino", "easyocr", "torch", "torchvision",
 ):
     print(f"{name} {metadata.version(name)}")
 print(f"numpy {numpy.__version__}")
 print(f"torch device cpu={not torch.cuda.is_available()}")
 PY
+"$PYTHON_BIN" -m pip check
 
 if ! "$REPO_ROOT/.venv/bin/tesseract" --list-langs 2>&1 | grep -qx 'por'; then
     echo "Tesseract Portuguese traineddata (por) is unavailable." >&2

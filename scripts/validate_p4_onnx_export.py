@@ -248,7 +248,8 @@ def _import_rapidocr() -> tuple[type | None, str]:
     rapidocr-onnxruntime 1.x  → import rapidocr_onnxruntime
     rapidocr 3.x (newer)      → import rapidocr
     """
-    # New package (rapidocr>=3.x — not yet on PyPI as of 2026-09)
+    # Unified package import path. This validator also retains a legacy importer
+    # below because its fixtures exercise the historical ONNX export artifacts.
     try:
         from rapidocr import RapidOCR  # type: ignore
         return RapidOCR, "new"
