@@ -1280,6 +1280,7 @@ def main() -> int:
         # Propagate E2E run metadata so compare_engines.py can validate runs
         # and display benchmark_status without needing to re-read the manifest.
         _run_meta = {
+            "benchmark_protocol_id": _rm.get("benchmark_protocol_id"),
             "benchmark_status":  _rm.get("benchmark_status"),
             "document_status":   _rm.get("document_status"),
             "pdf_sha256":        _rm.get("pdf_sha256"),

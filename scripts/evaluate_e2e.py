@@ -297,6 +297,7 @@ def main() -> int:
 
     t0 = time.perf_counter()
     document = None
+    engine_identity: dict = {}
     error_msg: str | None = None
     error_details: dict = {}
     extractor = PdfTextExtractor(config)
@@ -307,6 +308,26 @@ def main() -> int:
     try:
         with extractor:
             document = extractor.extract(args.pdf, progress_callback=on_progress)
+            # PdfTextExtractor closes its backend on context exit and clears
+            # ``ocr_engine``. Snapshot the effective runtime identity while
+            # the backend is still available so the run manifest retains its
+            # package versions, model hashes, provider and profile.
+            ocr_eng = getattr(extractor, "ocr_engine", None)
+            if ocr_eng is not None and hasattr(ocr_eng, "identity"):
+                try:
+                    ident = ocr_eng.identity
+                    engine_identity = {
+                        "engine": ident.engine,
+                        "runtime": ident.runtime,
+                        "profile": ident.profile,
+                        "language": ident.language,
+                        "device": getattr(ident, "device", None),
+                        "package_versions": dict(ident.package_versions),
+                        "artifact_hashes": dict(getattr(ident, "artifact_hashes", {})),
+                        "extra": dict(getattr(ident, "extra", {})),
+                    }
+                except Exception:
+                    pass
             # Close the last page interval immediately — before any post-processing.
             page_times.append(time.perf_counter() - _tick[0])
     except Exception as exc:
@@ -430,7 +451,7 @@ def main() -> int:
             "easyocr_fallback_count": int(facts.get("easyocr_fallback_count", 0)),
             "easyocr_fallback_rate": float(facts.get("easyocr_fallback_rate", 0.0)),
             "easyocr_fallback_reasons": list(facts.get("easyocr_fallback_reasons", [])),
-            "char_count": len(content),
+            "char_count": len(page.reading_text),
             "ocr_tokens_added": ocr_tokens_added,
             "strategy": getattr(getattr(diag, "strategy", None), "value", None) or "unknown",
         })
@@ -444,25 +465,6 @@ def main() -> int:
     benchmark_status = _classify_document_status(
         doc_status_raw, failed_ocr_pages, degraded_pages
     )
-
-    # --- Engine identity ---
-    engine_identity: dict = {}
-    ocr_eng = getattr(extractor, "ocr_engine", None)
-    if ocr_eng is not None and hasattr(ocr_eng, "identity"):
-        try:
-            ident = ocr_eng.identity
-            engine_identity = {
-                "engine": ident.engine,
-                "runtime": ident.runtime,
-                "profile": ident.profile,
-                "language": ident.language,
-                "device": getattr(ident, "device", None),
-                "package_versions": dict(ident.package_versions),
-                "artifact_hashes": dict(getattr(ident, "artifact_hashes", {})),
-                "extra": dict(getattr(ident, "extra", {})),
-            }
-        except Exception:
-            pass
 
     # --- Memory snapshot (set by api.py after extraction completes) ---
     doc_facts: dict = dict(getattr(doc_diag, "facts", {}))

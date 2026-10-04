@@ -139,10 +139,14 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
 
         image = Image.new("RGB", (1500, 300), "white")
         draw = ImageDraw.Draw(image)
-        draw.text((20, 20), "ã õ á é í ó ú ç ê ô", fill="black")
-        draw.text((20, 90), "R$ 1.234,56 03/10/2026 12,5%", fill="black")
-        draw.text((20, 160), "CPF 123.456.789-09 CNPJ 12.345.678/0001-90", fill="black")
-        draw.text((20, 230), "palavra com hífen", fill="black")
+        # The default Pillow bitmap font is too small for OCR detectors at
+        # this image scale. Use a large built-in font so deep readiness checks
+        # exercise the backend instead of reporting a false no-text failure.
+        font = ImageFont.load_default(size=42)
+        draw.text((20, 12), "ã õ á é í ó ú ç ê ô", fill="black", font=font)
+        draw.text((20, 78), "R$ 1.234,56 03/10/2026 12,5%", fill="black", font=font)
+        draw.text((20, 144), "CPF 123.456.789-09 CNPJ 12.345.678/0001-90", fill="black", font=font)
+        draw.text((20, 210), "palavra com hífen", fill="black", font=font)
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         payload = buffer.getvalue()

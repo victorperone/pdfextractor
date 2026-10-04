@@ -165,6 +165,15 @@ def _run_rapidocr(engine: Any, img: Any) -> Any:
 def _extract_raw(out: Any) -> Any:
     if isinstance(out, tuple) and len(out) >= 1:
         return out[0]
+    # RapidOCR 3.x returns a RapidOCROutput dataclass rather than the legacy
+    # list of ``(box, text, score)`` rows. Normalize its parallel fields to the
+    # representation consumed by the coordinate/token parsers below.
+    boxes = getattr(out, "boxes", None)
+    texts = getattr(out, "txts", None)
+    scores = getattr(out, "scores", None)
+    if boxes is not None and texts is not None:
+        score_values = scores if scores is not None else [None] * len(texts)
+        return list(zip(boxes, texts, score_values))
     if hasattr(out, "__iter__") and not isinstance(out, (str, bytes)):
         return out
     return None
@@ -320,7 +329,18 @@ class RapidOCRBackend:
             "with_angle_cls":      angle_cls,
         }
         if self._unified:
-            provider = {"Det.engine_type": runtime, "Cls.engine_type": runtime, "Rec.engine_type": runtime}
+            # RapidOCR 3.x validates enum-typed parameters before applying
+            # overrides. Passing the provider name as a plain string raises
+            # TypeError during backend construction, so use the package's
+            # EngineType enum for all three stages.
+            from rapidocr.utils.typings import EngineType
+
+            engine_type = EngineType(runtime)
+            provider = {
+                "Det.engine_type": engine_type,
+                "Cls.engine_type": engine_type,
+                "Rec.engine_type": engine_type,
+            }
             requested_threads = config.num_threads
             effective_threads = max(1, os.cpu_count() or 1) if requested_threads == 0 else requested_threads
             if effective_threads > 0 and runtime == "onnxruntime":

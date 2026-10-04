@@ -301,7 +301,8 @@ def _render_comparison_table(all_data: list[tuple[str, dict]]) -> str:
         bstatus = data.get("benchmark_status", "—")
         stability = data.get("stability_status", "—")
         recoveries = data.get("recovery_count", 0)
-        elapsed = data.get("elapsed_s")
+        run = data.get("run") or {}
+        elapsed = data.get("elapsed_s", run.get("elapsed_s"))
         timings = data.get("timings", {})
         render_s = timings.get("render_s", "—")
         ocr_s = timings.get("ocr_s", "—")

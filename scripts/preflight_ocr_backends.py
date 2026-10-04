@@ -8,6 +8,7 @@ each deployment configuration and OCR a generated pt-BR sample.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,13 +45,53 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--language", default="pt-BR")
     parser.add_argument("--deep-smoke", action="store_true", help="Load each backend and OCR a generated pt-BR sample")
+    parser.add_argument(
+        "--configuration",
+        choices=("paddle", "rapidocr-onnxruntime", "rapidocr-openvino", "easyocr", "tesseract"),
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
 
-    name_width = max(len(label) for label, _, _ in CONFIGURATIONS) + 2
+    if args.deep_smoke and args.configuration is None:
+        # Paddle and EasyOCR load different native runtimes (Paddle and
+        # PyTorch). Keeping every smoke in one Python process can corrupt
+        # runtime state or segfault after a valid Paddle result. Re-exec each
+        # profile so the check matches the benchmark's process isolation.
+        all_ready = True
+        script = str(Path(__file__).resolve())
+        for name, _, _ in CONFIGURATIONS:
+            result = subprocess.run(
+                [sys.executable, script, "--language", args.language,
+                 "--deep-smoke", "--configuration", name],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, file=sys.stderr, end="")
+            if result.returncode:
+                all_ready = False
+        if all_ready:
+            print("\nAll selected OCR configurations: READY")
+            return 0
+        print("\nOne or more OCR configurations are not ready.")
+        return 1
+
+    configurations = CONFIGURATIONS
+    if args.configuration:
+        configurations = tuple(
+            item for item in CONFIGURATIONS
+            if item[0].replace(" [onnxruntime]", "").replace(" [openvino]", "").replace(" ", "-")
+            == args.configuration
+        )
+
+    name_width = max(len(label) for label, _, _ in configurations) + 2
     print(f"\n{'Configuration':<{name_width}}  {'Status':<12}  Reason / details")
     print("-" * 100)
     all_ready = True
-    for label, engine, provider in CONFIGURATIONS:
+    for label, engine, provider in configurations:
         result = _check(engine, provider, args.language, args.deep_smoke)
         if result.status.value != "ready":
             all_ready = False
