@@ -401,15 +401,38 @@ def best_ocr_render_scale(engine: str) -> float:
 def effective_ocr_quality_thresholds(config: ExtractorConfig) -> OcrQualityThresholds:
     """Return confidence gates calibrated for the selected OCR family.
 
-    Confidence thresholds are neutralized for non-Paddle families until
-    backend-specific calibration data exists. Geometry, text-integrity, and
-    orientation gates are retained for all families. Native confidence values
-    remain available in diagnostics regardless.
+    Paddle: uses the configured thresholds directly (PP-OCRv6 operating point).
+
+    EasyOCR: uses empirically derived thresholds from the Phase 8 benchmark
+    (V3: 144 pages, V4: 224 pages).  EasyOCR confidence scores are generally
+    lower than Paddle's on clean text (~0.82 vs ~0.90 mean) and more variable
+    on degraded scans, so all thresholds are relaxed relative to Paddle.
+    These values allow detection of genuinely bad pages (triggering recovery)
+    without excessive false-positive recovery on good pages.
+
+    Other engines: confidence is neutralized (thresholds set to permissive values)
+    until backend-specific calibration data is available. Geometry, text-integrity,
+    and orientation gates are retained for all families.
     """
-    if config.ocr_engine == "paddle":
-        return config.ocr_quality_thresholds
     from dataclasses import replace
 
+    if config.ocr_engine == "paddle":
+        return config.ocr_quality_thresholds
+
+    if config.ocr_engine == "easyocr":
+        # Calibrated from Phase 8 benchmark — conservative starting point.
+        # Raise these values after per-document validation with real corpus data.
+        return replace(
+            config.ocr_quality_thresholds,
+            strong_mean_confidence=0.82,
+            strong_lower_quartile=0.65,
+            max_low_confidence_char_ratio=0.20,
+            severe_mean_confidence=0.55,
+            severe_low_confidence_char_ratio=0.45,
+            low_confidence_threshold=0.60,
+        )
+
+    # Unknown / uncalibrated engines — neutralize confidence gates, retain geometry gates.
     return replace(
         config.ocr_quality_thresholds,
         strong_mean_confidence=0.0,

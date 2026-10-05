@@ -100,3 +100,54 @@ def test_2x_scale_remains_subject_to_the_existing_rgb_budget_gate() -> None:
 
     assert [plan.scale for plan in allowed] == [1.0]
     assert [plan.scale for plan in blocked] == [2.0]
+
+
+# ---------------------------------------------------------------------------
+# §18 — Engine-specific RGB budget
+# ---------------------------------------------------------------------------
+
+from structured_pdf_text.ocr.recovery import _ocr_rgb_budget_for_engine  # noqa: E402
+import math
+
+
+def test_easyocr_has_unlimited_budget_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", raising=False)
+    budget = _ocr_rgb_budget_for_engine("easyocr")
+    assert math.isinf(budget)
+
+
+def test_paddle_budget_uses_shared_default(monkeypatch) -> None:
+    monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", raising=False)
+    budget = _ocr_rgb_budget_for_engine("paddle")
+    assert budget == 8.0
+
+
+def test_easyocr_budget_respects_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "32.0")
+    budget = _ocr_rgb_budget_for_engine("easyocr")
+    assert budget == 32.0
+
+
+def test_easyocr_unlimited_budget_does_not_block_large_scale(monkeypatch) -> None:
+    """With unlimited budget, even a large crop should not be blocked."""
+    monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", raising=False)
+
+    class _FakeIdentity:
+        engine = "easyocr"
+
+    class _FakeEasyOCREngine(_RecordingEngine):
+        identity = _FakeIdentity()
+
+    engine = _FakeEasyOCREngine(calls=[])
+    page_bbox = BBox(0.0, 0.0, 1000.0, 1000.0)
+    result = OcrRegionRefiner(engine).refine(
+        Image.new("RGB", (1000, 1000), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        request=RegionRefinementRequest(
+            bbox=BBox(0.0, 0.0, 1000.0, 1000.0),
+            scale_factors=(4.0,),
+        ),
+    )
+    assert result.status in {"ok", "no_text"}, f"Unexpected status: {result.status}"
+    assert result.selected_scale_factor == 4.0, "Large scale blocked despite unlimited budget"

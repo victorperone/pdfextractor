@@ -120,6 +120,29 @@ def test_confidence_thresholds_are_neutral_for_uncalibrated_families() -> None:
     assert rapid.minimum_printable_ratio == paddle.minimum_printable_ratio
 
 
+def test_easyocr_confidence_thresholds_are_calibrated() -> None:
+    easy = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="easyocr"))
+    paddle = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="paddle"))
+    rapid = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="rapidocr"))
+
+    # EasyOCR must have active (non-zero) confidence gating
+    assert easy.strong_mean_confidence > 0.0, "EasyOCR must have active confidence gating"
+    assert easy.max_low_confidence_char_ratio < 1.0, "EasyOCR must have active low-conf ratio gate"
+    assert easy.low_confidence_threshold > 0.0, "EasyOCR must have active per-token threshold"
+
+    # EasyOCR thresholds must be below Paddle's (EasyOCR confidence is lower on clean text)
+    assert easy.strong_mean_confidence < paddle.strong_mean_confidence
+    assert easy.max_low_confidence_char_ratio > paddle.max_low_confidence_char_ratio
+
+    # EasyOCR must have stronger gates than uncalibrated engines (rapidocr)
+    assert easy.strong_mean_confidence > rapid.strong_mean_confidence
+    assert easy.max_low_confidence_char_ratio < rapid.max_low_confidence_char_ratio
+
+    # Geometry and integrity gates must be preserved (not neutralized)
+    assert easy.minimum_printable_ratio == paddle.minimum_printable_ratio
+    assert easy.minimum_orientation_ratio == paddle.minimum_orientation_ratio
+
+
 def test_extractor_close_is_idempotent_and_prevents_reuse(tmp_path: Path) -> None:
     extractor = PdfTextExtractor(ExtractorConfig(mode="native"))
     extractor.close()

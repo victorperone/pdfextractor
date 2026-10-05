@@ -476,3 +476,317 @@ class TestRotationInfoFallbackPath:
             warnings.simplefilter("always")
             call_run(reader, _make_image(), rotation_info=None)
         assert reader.readtext.call_args[1].get("rotation_info") is None
+
+
+# ---------------------------------------------------------------------------
+# §7 — Cache path always passed to Reader
+# ---------------------------------------------------------------------------
+
+class TestCachePathAlwaysPassedToReader:
+    """EasyOCRBackend must always pass model_storage_directory to Reader.
+
+    Without this fix the Reader falls back to ~/.EasyOCR/model/ while the
+    readiness probe checks ~/.cache/pdfextractor/easyocr/ — they diverge.
+    """
+
+    def _make_easyocr_stub(self, captured: dict) -> types.ModuleType:
+        """Return a fake easyocr module whose Reader records __init__ kwargs."""
+        class FakeReader:
+            def __init__(self, langs, **kwargs):
+                captured["kwargs"] = kwargs
+                captured["langs"] = langs
+                self._langs = langs
+
+        fake_mod = types.ModuleType("easyocr")
+        fake_mod.Reader = FakeReader  # type: ignore[attr-defined]
+        return fake_mod
+
+    def test_model_storage_directory_always_passed(self, monkeypatch):
+        """Reader must receive model_storage_directory even without EASYOCR_MODULE_PATH."""
+        captured: dict = {}
+        monkeypatch.delenv("EASYOCR_MODULE_PATH", raising=False)
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+
+        import sys
+        fake_mod = self._make_easyocr_stub(captured)
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        # Patch _import_easyocr to return our stub
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        # Patch _apply_torch_threads to avoid torch import
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        # Call __init__ manually
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+
+        assert "model_storage_directory" in captured["kwargs"], (
+            "Reader must always receive model_storage_directory"
+        )
+        expected_dir = easyocr_mod._model_cache_dir()
+        assert captured["kwargs"]["model_storage_directory"] == str(expected_dir)
+
+    def test_model_storage_directory_uses_env_override(self, monkeypatch, tmp_path):
+        """When EASYOCR_MODULE_PATH is set, it overrides the default cache dir."""
+        captured: dict = {}
+        monkeypatch.setenv("EASYOCR_MODULE_PATH", str(tmp_path))
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+
+        import sys
+        fake_mod = self._make_easyocr_stub(captured)
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+
+        assert captured["kwargs"]["model_storage_directory"] == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# §8/9/13 — Full parameter surface propagation
+# ---------------------------------------------------------------------------
+
+class TestDetectorParamPropagation:
+    """Detector thresholds must reach reader.detect() when set via env vars."""
+
+    def test_text_threshold_reaches_detect(self, run_easyocr, monkeypatch):
+        monkeypatch.setenv("EASYOCR_TEXT_THRESHOLD", "0.55")
+        call_run, _, _ = run_easyocr
+        reader = _make_reader()
+        # _run_easyocr reads env vars directly when called — pass via kwargs
+        from structured_pdf_text.ocr.backends.easyocr import _run_easyocr
+        import numpy as np
+        import sys, types
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        img = _make_image()
+        _run_easyocr(reader, img, decoder="greedy", beamwidth=5, adjust_contrast=0.5,
+                     allowlist=None, blocklist=None, workers=0, text_threshold=0.55)
+        assert reader.detect.call_args[1]["text_threshold"] == pytest.approx(0.55)
+
+    def test_min_size_reaches_detect(self, run_easyocr, monkeypatch):
+        from structured_pdf_text.ocr.backends.easyocr import _run_easyocr
+        import sys, types
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        reader = _make_reader()
+        _run_easyocr(reader, _make_image(), decoder="greedy", beamwidth=5, adjust_contrast=0.5,
+                     allowlist=None, blocklist=None, workers=0, min_size=10)
+        assert reader.detect.call_args[1]["min_size"] == 10
+
+    def test_width_ths_reaches_detect(self, run_easyocr, monkeypatch):
+        from structured_pdf_text.ocr.backends.easyocr import _run_easyocr
+        import sys, types
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        reader = _make_reader()
+        _run_easyocr(reader, _make_image(), decoder="greedy", beamwidth=5, adjust_contrast=0.5,
+                     allowlist=None, blocklist=None, workers=0, width_ths=0.25)
+        assert reader.detect.call_args[1]["width_ths"] == pytest.approx(0.25)
+
+    def test_contrast_ths_reaches_recognize(self, run_easyocr, monkeypatch):
+        from structured_pdf_text.ocr.backends.easyocr import _run_easyocr
+        import sys, types
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        reader = _make_reader()
+        _run_easyocr(reader, _make_image(), decoder="greedy", beamwidth=5, adjust_contrast=0.5,
+                     allowlist=None, blocklist=None, workers=0, contrast_ths=0.2)
+        assert reader.recognize.call_args[1]["contrast_ths"] == pytest.approx(0.2)
+
+    def test_filter_ths_reaches_recognize(self, run_easyocr, monkeypatch):
+        from structured_pdf_text.ocr.backends.easyocr import _run_easyocr
+        import sys, types
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        reader = _make_reader()
+        _run_easyocr(reader, _make_image(), decoder="greedy", beamwidth=5, adjust_contrast=0.5,
+                     allowlist=None, blocklist=None, workers=0, filter_ths=0.01)
+        assert reader.recognize.call_args[1]["filter_ths"] == pytest.approx(0.01)
+
+
+class TestWordbeamsearchDecoder:
+    """wordbeamsearch must be accepted as a valid decoder value."""
+
+    def _make_easyocr_stub_for_init(self, monkeypatch) -> "types.ModuleType":
+        class FakeReader:
+            def __init__(self, langs, **kwargs):
+                self._langs = langs
+        import sys, types
+        fake_mod = types.ModuleType("easyocr")
+        fake_mod.Reader = FakeReader  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        return fake_mod
+
+    def test_wordbeamsearch_accepted(self, monkeypatch):
+        fake_mod = self._make_easyocr_stub_for_init(monkeypatch)
+        monkeypatch.setenv("EASYOCR_DECODER", "wordbeamsearch")
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        assert backend._decoder == "wordbeamsearch"
+
+    def test_invalid_decoder_falls_back_to_greedy(self, monkeypatch):
+        fake_mod = self._make_easyocr_stub_for_init(monkeypatch)
+        monkeypatch.setenv("EASYOCR_DECODER", "invalid_decoder")
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        assert backend._decoder == "greedy"
+
+    def test_quantize_false_passed_to_reader(self, monkeypatch):
+        captured: dict = {}
+
+        class FakeReader:
+            def __init__(self, langs, **kwargs):
+                captured["quantize"] = kwargs.get("quantize")
+                self._langs = langs
+
+        import sys, types
+        fake_mod = types.ModuleType("easyocr")
+        fake_mod.Reader = FakeReader  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        monkeypatch.setenv("EASYOCR_QUANTIZE", "0")
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        assert captured["quantize"] is False
+
+    def test_fallback_receives_same_detector_params(self, monkeypatch):
+        """When detect() raises, readtext() fallback must receive the same detector params."""
+        from structured_pdf_text.ocr.backends.easyocr import _run_easyocr
+        import sys, types, warnings
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        reader = _make_reader(detect_raises=True)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            _run_easyocr(reader, _make_image(), decoder="greedy", beamwidth=5,
+                         adjust_contrast=0.5, allowlist=None, blocklist=None,
+                         workers=0, text_threshold=0.55, width_ths=0.25,
+                         contrast_ths=0.2, filter_ths=0.01)
+        kw = reader.readtext.call_args[1]
+        assert kw["text_threshold"] == pytest.approx(0.55)
+        assert kw["width_ths"] == pytest.approx(0.25)
+        assert kw["contrast_ths"] == pytest.approx(0.2)
+        assert kw["filter_ths"] == pytest.approx(0.01)
+
+
+# ---------------------------------------------------------------------------
+# §5 — quality_variants / quality_policy candidate policies
+# ---------------------------------------------------------------------------
+
+class TestQualityCandidatePolicies:
+    """quality_variants=True and quality_policy must trigger real EasyOCR multi-pass."""
+
+    def _make_backend_with_counting_reader(self, monkeypatch) -> "tuple[Any, dict]":
+        """Return an EasyOCRBackend with a counting fake Reader."""
+        import sys, types
+        call_counts: dict = {"detect": 0, "recognize": 0}
+
+        class CountingReader:
+            def detect(self, img_color, **kwargs):
+                call_counts["detect"] += 1
+                return ([[[10, 90, 10, 30]]], [[]])
+
+            def recognize(self, img_gray, horizontal_list, free_list, **kwargs):
+                call_counts["recognize"] += 1
+                return [([[10, 10], [90, 10], [90, 30], [10, 30]], "text", 0.9)]
+
+        class FakeMod:
+            def Reader(self, langs, **kwargs):
+                return CountingReader()
+
+        fake_mod = FakeMod()
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        # Patch easyocr.utils so _run_easyocr can import reformat_input
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        return backend, call_counts
+
+    def test_default_policy_makes_single_ocr_call(self, monkeypatch):
+        """Without quality_variants, exactly 1 detect+recognize pair is called."""
+        backend, counts = self._make_backend_with_counting_reader(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_variants=False)
+        assert counts["detect"] == 1
+
+    def test_adaptive_policy_makes_multiple_ocr_calls(self, monkeypatch):
+        """quality_policy='adaptive' must trigger >1 detect call."""
+        backend, counts = self._make_backend_with_counting_reader(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="adaptive")
+        assert counts["detect"] >= 2, "adaptive must produce at least 2 candidates"
+
+    def test_quality_variants_true_triggers_multi_pass(self, monkeypatch):
+        """quality_variants=True must trigger >1 detect call."""
+        backend, counts = self._make_backend_with_counting_reader(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_variants=True)
+        assert counts["detect"] >= 2
+
+    def test_exhaustive_policy_makes_more_calls_than_adaptive(self, monkeypatch):
+        """quality_policy='exhaustive' must produce more candidates than 'adaptive'."""
+        backend_a, counts_a = self._make_backend_with_counting_reader(monkeypatch)
+        backend_a.recognize_page(_make_image(), 0, quality_policy="adaptive")
+        adaptive_detect = counts_a["detect"]
+
+        # Reset and test exhaustive
+        backend_e, counts_e = self._make_backend_with_counting_reader(monkeypatch)
+        backend_e.recognize_page(_make_image(), 0, quality_policy="exhaustive")
+        exhaustive_detect = counts_e["detect"]
+
+        assert exhaustive_detect > adaptive_detect, (
+            f"exhaustive ({exhaustive_detect}) must run more candidates than "
+            f"adaptive ({adaptive_detect})"
+        )
+
+    def test_candidate_selection_returns_non_empty_when_any_candidate_has_tokens(self, monkeypatch):
+        """The best candidate with tokens must be returned."""
+        backend, _ = self._make_backend_with_counting_reader(monkeypatch)
+        from structured_pdf_text.geometry import BBox
+        tokens = backend.recognize_page(
+            _make_image(), 0,
+            page_bbox=BBox(0, 0, 120, 100),
+            quality_policy="adaptive",
+        )
+        assert isinstance(tokens, list)

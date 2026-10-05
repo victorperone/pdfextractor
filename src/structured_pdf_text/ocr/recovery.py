@@ -9,9 +9,18 @@ recognised token back to the original page coordinate system.
 **RGB budget gate** — to prevent ``STATUS_ACCESS_VIOLATION`` in Paddle's C++
 inference runtime when upscaled variants produce very large images,
 :func:`plan_ocr_scales` partitions the requested scale factors into *allowed*
-and *blocked* groups before any image is created.  The limit is controlled by
-the ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB`` environment variable (default 8 MiB).
-See ``docs/ocr-rgb-budget-crash-fix.md`` for the full incident analysis.
+and *blocked* groups before any image is created.
+
+The budget is engine-specific:
+
+- **Paddle**: default 8 MiB, controlled by ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB``.
+  This limit is a hard operational guard against the Paddle runtime crash
+  documented in ``docs/ocr-rgb-budget-crash-fix.md``.
+- **EasyOCR / other engines**: no limit by default (``math.inf``), controlled
+  by ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR``.  EasyOCR does not suffer
+  from the Paddle crash and benefits from processing larger crops without
+  artificial truncation.  Set the env var to a positive number (e.g. ``32``)
+  if you need to constrain memory on low-RAM machines.
 
 **Debug log** — when ``PDFEXTRACTOR_OCR_DEBUG_LOG`` is set to a writable path,
 this module writes ``REGION_SELECTED``, ``OCR_SCALE_PLAN``,
@@ -49,6 +58,30 @@ _MIB = 1024 * 1024
 def _ocr_rgb_budget_mib() -> float:
     from structured_pdf_text.ocr.env import env_float
     return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", 8.0, minimum=0.01)
+
+
+def _ocr_rgb_budget_for_engine(engine_name: str) -> float:
+    """Return the RGB budget (in MiB) appropriate for the given engine.
+
+    Paddle uses a conservative 8 MiB default to prevent STATUS_ACCESS_VIOLATION
+    in its C++ runtime.  EasyOCR and other engines have no such crash risk and
+    default to unlimited (math.inf).
+
+    Override per-engine via environment variables:
+      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB          — Paddle (and legacy default)
+      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR  — EasyOCR (default: unlimited)
+    """
+    if engine_name == "paddle":
+        return _ocr_rgb_budget_mib()
+    if engine_name == "easyocr":
+        raw = os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR")
+        if raw is not None:
+            from structured_pdf_text.ocr.env import env_float
+            return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", math.inf, minimum=0.01)
+        return math.inf
+    # All other engines: use the shared Paddle-era limit as a safe default
+    # until they are individually characterised.
+    return _ocr_rgb_budget_mib()
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,13 +422,24 @@ class OcrRegionRefiner:
             f" quality_reasons=[{reasons_str}]"
         )
 
-        rgb_budget_mib = _ocr_rgb_budget_mib()
+        # Resolve engine-specific budget (EasyOCR: unlimited by default)
+        _engine_name: str = ""
+        try:
+            _engine_name = str(getattr(getattr(self.engine, "identity", None), "engine", ""))
+        except Exception:
+            pass
+        rgb_budget_mib = _ocr_rgb_budget_for_engine(_engine_name)
+        # plan_ocr_scales requires a finite positive limit; translate math.inf
+        # to a very large but finite sentinel so the function's type contract is met.
+        budget_for_plan = 1e12 if not math.isfinite(rgb_budget_mib) else rgb_budget_mib
         allowed_plans, blocked_plans = plan_ocr_scales(
-            crop_w, crop_h, scales_raw, rgb_budget_mib
+            crop_w, crop_h, scales_raw, budget_for_plan
         )
+        _budget_label = "unlimited" if not math.isfinite(rgb_budget_mib) else f"{rgb_budget_mib:.1f}"
         _recovery_debug(
             f"OCR_SCALE_PLAN page={page_index}"
-            f" limit_rgb_mib={rgb_budget_mib:.1f}"
+            f" engine={_engine_name or 'unknown'}"
+            f" limit_rgb_mib={_budget_label}"
             f" allowed_scales={','.join(str(p.scale) for p in allowed_plans) or 'none'}"
             f" blocked_scales={','.join(str(p.scale) for p in blocked_plans) or 'none'}"
         )
