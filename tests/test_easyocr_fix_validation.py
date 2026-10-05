@@ -1414,3 +1414,47 @@ class TestEnvProbeInDiagnostics:
             f"max-quality workers ({diag_max['effective_workers']}) must exceed "
             f"conservative ({diag_cons['effective_workers']})"
         )
+
+
+# ---------------------------------------------------------------------------
+# §15 — _rebuild_reader_no_quantize graceful fallback
+# ---------------------------------------------------------------------------
+
+class TestRebuildReaderNoQuantize:
+    """§10: _rebuild_reader_no_quantize returns None when attributes are missing."""
+
+    def test_returns_none_for_reader_without_lang_list(self):
+        """When reader has no lang_list, return None gracefully."""
+        from structured_pdf_text.ocr.backends.easyocr import _rebuild_reader_no_quantize
+
+        class BadReader:
+            pass
+
+        result = _rebuild_reader_no_quantize(BadReader())
+        assert result is None
+
+    def test_returns_none_for_reader_with_empty_lang_list(self):
+        """Empty lang_list → return None (cannot build Reader without languages)."""
+        from structured_pdf_text.ocr.backends.easyocr import _rebuild_reader_no_quantize
+
+        class EmptyLangReader:
+            lang_list = []
+
+        result = _rebuild_reader_no_quantize(EmptyLangReader())
+        assert result is None
+
+    def test_returns_none_when_easyocr_import_fails(self, monkeypatch):
+        """When easyocr is not importable, function returns None, does not raise."""
+        import sys
+        monkeypatch.setitem(sys.modules, "easyocr", None)
+        from structured_pdf_text.ocr.backends.easyocr import _rebuild_reader_no_quantize
+
+        class FakeReader:
+            lang_list = ["pt"]
+            device = "cpu"
+            model_storage_directory = "/tmp/x"
+            user_network_directory = "/tmp/x"
+            recog_network = "latin_g2"
+
+        result = _rebuild_reader_no_quantize(FakeReader())
+        assert result is None

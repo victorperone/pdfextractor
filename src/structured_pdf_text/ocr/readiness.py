@@ -124,8 +124,60 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
     return ReadinessResult(ReadinessStatus.UNKNOWN, "unsupported_engine", {"engine": engine})
 
 
+_SMOKE_LINES: list[str] = [
+    "ã õ á é í ó ú ç ê ô",
+    "R$ 1.234,56 03/10/2026 12,5%",
+    "CPF 123.456.789-09 CNPJ 12.345.678/0001-90",
+    "palavra com hífen",
+]
+_SMOKE_EXPECTED: str = " ".join(_SMOKE_LINES)
+
+# Maximum CER allowed before probe_deep downgrades to INCOMPLETE.
+# Calibrated conservatively: even a badly-configured model should get well below
+# this on clean rendered text.  A CER above this indicates wrong model, wrong
+# language pack, or a misconfigured recognizer.
+_SMOKE_MAX_CER: float = 0.40
+
+
+def _simple_cer(hypothesis: str, reference: str) -> float:
+    """Character Error Rate via Levenshtein edit distance (character-level).
+
+    Does not require any external library.  Operates on Unicode codepoints.
+    Returns a value in [0, ∞) where 0 = perfect match and 1 = all chars wrong.
+    Values > 1 are possible when the hypothesis is much longer than the reference.
+    """
+    if not reference:
+        return 0.0 if not hypothesis else 1.0
+    h = list(hypothesis)
+    r = list(reference)
+    # Wagner-Fischer DP
+    prev = list(range(len(r) + 1))
+    for ch in h:
+        curr = [prev[0] + 1]
+        for j, cr in enumerate(r):
+            curr.append(min(prev[j] + (0 if ch == cr else 1),
+                            curr[j] + 1,
+                            prev[j + 1] + 1))
+        prev = curr
+    return prev[len(r)] / len(r)
+
+
 def probe_deep(config: ExtractorConfig) -> ReadinessResult:
-    """Load the selected backend and run a tiny generated Portuguese sample."""
+    """Load the selected backend, run a Portuguese smoke image, and validate CER.
+
+    Unlike :func:`probe_static`, this probe instantiates the OCR backend and
+    runs inference on a synthetic image containing:
+      - Accented Portuguese characters (ã, õ, á, é, í, ó, ú, ç, ê, ô)
+      - Currency (R$ 1.234,56), date (03/10/2026), percentage (12,5%)
+      - CPF and CNPJ with their canonical punctuation
+      - A word with a soft hyphen
+
+    The recognised text is compared against the expected ground-truth using
+    character-level CER.  A CER above ``_SMOKE_MAX_CER`` downgrades the result
+    to ``INCOMPLETE / deep_smoke_high_cer`` so that a wrong model or misconfigured
+    recognizer is surfaced before a full benchmark run.  This implements §43 of
+    the EasyOCR quality review.
+    """
     static = probe_static(config)
     if static.status != ReadinessStatus.READY:
         return static
@@ -143,10 +195,8 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
         # this image scale. Use a large built-in font so deep readiness checks
         # exercise the backend instead of reporting a false no-text failure.
         font = ImageFont.load_default(size=42)
-        draw.text((20, 12), "ã õ á é í ó ú ç ê ô", fill="black", font=font)
-        draw.text((20, 78), "R$ 1.234,56 03/10/2026 12,5%", fill="black", font=font)
-        draw.text((20, 144), "CPF 123.456.789-09 CNPJ 12.345.678/0001-90", fill="black", font=font)
-        draw.text((20, 210), "palavra com hífen", fill="black", font=font)
+        for i, line_text in enumerate(_SMOKE_LINES):
+            draw.text((20, 12 + i * 66), line_text, fill="black", font=font)
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         payload = buffer.getvalue()
@@ -160,10 +210,35 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
             language=config.language,
         ))
         if result.status not in {"ok", "recovered"} or not result.tokens:
-            return ReadinessResult(ReadinessStatus.INCOMPLETE, "deep_smoke_no_text", {"status": result.status, "warnings": result.warnings})
-        return ReadinessResult(ReadinessStatus.READY, details={"status": result.status, "token_count": len(result.tokens), "identity": backend.identity.__dict__ if hasattr(backend.identity, "__dict__") else str(backend.identity)})
+            return ReadinessResult(ReadinessStatus.INCOMPLETE, "deep_smoke_no_text",
+                                   {"status": result.status, "warnings": result.warnings})
+
+        # §43: validate recognised text quality, not just token presence.
+        recognised = " ".join(t.text for t in result.tokens)
+        # Normalise whitespace for CER comparison
+        recognised_norm = " ".join(recognised.split())
+        expected_norm = " ".join(_SMOKE_EXPECTED.split())
+        cer = _simple_cer(recognised_norm.lower(), expected_norm.lower())
+
+        identity_repr = (backend.identity.__dict__ if hasattr(backend.identity, "__dict__")
+                         else str(backend.identity))
+        base_details: dict[str, Any] = {
+            "status": result.status,
+            "token_count": len(result.tokens),
+            "smoke_cer": round(cer, 4),
+            "smoke_max_cer": _SMOKE_MAX_CER,
+            "identity": identity_repr,
+        }
+
+        if cer > _SMOKE_MAX_CER:
+            base_details["recognised_text"] = recognised_norm[:200]
+            base_details["expected_text"] = expected_norm[:200]
+            return ReadinessResult(ReadinessStatus.INCOMPLETE, "deep_smoke_high_cer", base_details)
+
+        return ReadinessResult(ReadinessStatus.READY, details=base_details)
     except Exception as exc:
-        return ReadinessResult(ReadinessStatus.UNKNOWN, "deep_smoke_failed", {"type": type(exc).__name__, "message": str(exc)})
+        return ReadinessResult(ReadinessStatus.UNKNOWN, "deep_smoke_failed",
+                               {"type": type(exc).__name__, "message": str(exc)})
     finally:
         if backend is not None:
             try:

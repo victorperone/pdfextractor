@@ -146,25 +146,49 @@ def order_lines_in_region(
     Returns (ordered_lines, column_groups_detected).
     The caller is responsible for handling rotated lines and deduplication
     when combining lines from multiple regions.
+
+    §33: When a prose/list/title region has no native_lines but has ocr_lines
+    (OCR-only page path), the full column-detection algorithm is applied to
+    the OCR lines so multi-column scanned pages are ordered correctly.
     """
-    if not region.native_lines:
-        if region.kind == RegionKind.FIGURE and region.ocr_lines:
-            return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
-        return [], 0
-    if region.kind == RegionKind.TABLE:
-        return _order_table_lines(region.native_lines), 0
-    if region.kind in {
+    # §33: merge native + OCR lines for prose regions so the full multi-column
+    # detection algorithm (gutter + lane scoring) operates on OCR pages.
+    _prose_kinds = {
         RegionKind.TEXT,
         RegionKind.TITLE,
         RegionKind.LIST,
         RegionKind.CAPTION,
         RegionKind.UNKNOWN,
-    } or (
+    }
+    if not region.native_lines:
+        if region.kind == RegionKind.FIGURE and region.ocr_lines:
+            return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
+        if region.kind in _prose_kinds and region.ocr_lines:
+            # Apply the same column-detection path used for native prose lines.
+            lines, groups = _order_prose_lines(
+                region.ocr_lines,
+                region.bbox.width,
+                flow_lines=flow_lines,
+            )
+            return lines, groups
+        return [], 0
+    if region.kind == RegionKind.TABLE:
+        return _order_table_lines(region.native_lines), 0
+    if region.kind in _prose_kinds or (
         region.kind == RegionKind.DECORATIVE
         and not (region.semantic_role or "").startswith("decorative_watermark:")
     ):
+        # When OCR lines supplement native lines in a prose region, merge them
+        # before column detection so gutter evidence from OCR is not lost.
+        candidate_lines = list(region.native_lines)
+        if region.ocr_lines:
+            ocr_added = [
+                line for line in region.ocr_lines
+                if not any(line.bbox.iou(existing.bbox) >= 0.20 for existing in candidate_lines)
+            ]
+            candidate_lines.extend(ocr_added)
         lines, groups = _order_prose_lines(
-            region.native_lines,
+            candidate_lines,
             region.bbox.width,
             flow_lines=flow_lines,
         )
@@ -189,6 +213,13 @@ def order_region_lines(
     Compatibility wrapper around order_regions() + order_lines_in_region().
     Existing callers continue to work unchanged.
     """
+    _prose_kinds_set = {
+        RegionKind.TEXT,
+        RegionKind.TITLE,
+        RegionKind.LIST,
+        RegionKind.CAPTION,
+        RegionKind.UNKNOWN,
+    }
     consistency = _native_order_consistency(regions)
     ordered_regions, region_edges = _order_region_graph(regions, consistency)
     output: list[TextLine] = []
@@ -197,18 +228,21 @@ def order_region_lines(
     table_regions = 0
     prose_decisions: list[ProseFlowDecision] = []
     for region in ordered_regions:
-        if region.kind in {
-            RegionKind.TEXT,
-            RegionKind.TITLE,
-            RegionKind.LIST,
-            RegionKind.CAPTION,
-            RegionKind.UNKNOWN,
-        } or (
+        if region.kind in _prose_kinds_set or (
             region.kind == RegionKind.DECORATIVE
             and not (region.semantic_role or "").startswith("decorative_watermark:")
         ):
+            # §33: merge OCR lines with native lines so column-detection scores
+            # include geometry from scanned/OCR pages (fixes Reading Order on V4).
+            candidate_lines = list(region.native_lines)
+            if region.ocr_lines:
+                ocr_added = [
+                    line for line in region.ocr_lines
+                    if not any(line.bbox.iou(existing.bbox) >= 0.20 for existing in candidate_lines)
+                ]
+                candidate_lines.extend(ocr_added)
             prose_result = _order_prose_lines_with_decision(
-                region.native_lines,
+                candidate_lines,
                 region.bbox.x0,
                 region.bbox.width,
                 region.bbox,
@@ -230,7 +264,8 @@ def order_region_lines(
         rotated_lines += sum(1 for line in lines if line.direction != WritingDirection.LEFT_TO_RIGHT)
         output.extend(lines)
     ordered_line_set_preserved = _preserves_flat_line_set(
-        [line for region in regions for line in region.native_lines], output
+        [line for region in regions
+         for line in (region.native_lines + region.ocr_lines)], output
     )
     output, deduplicated_lines = _deduplicate_adjacent_region_lines(output)
     (

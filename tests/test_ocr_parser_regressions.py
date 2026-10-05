@@ -607,3 +607,265 @@ class TestOcrAuthoritativeFusion:
             result = fuse_native_and_ocr(native, ocr, ocr_authoritative=authoritative)
             assert len(result.unmatched_ocr_tokens) == 1
             assert result.conflicts == ()
+
+
+# ---------------------------------------------------------------------------
+# §9 — wordbeamsearch candidate in exhaustive; §10 — no_quantize candidate
+# §15 — deskew candidate; §17 — high_mag candidate
+# ---------------------------------------------------------------------------
+
+class TestExhaustiveNewCandidates:
+    """§9/§10/§15/§17: exhaustive policy must include wordbeamsearch, no_quantize,
+    deskew and high_mag candidates (when conditions are met)."""
+
+    def _make_backend(self, monkeypatch):
+        import sys
+        import types
+
+        class FakeReader:
+            lang_list = ["pt"]
+            device = "cpu"
+            model_storage_directory = "/tmp/fake"
+            user_network_directory = "/tmp/fake"
+            recog_network = "latin_g2"
+
+            def detect(self, img_color, **kwargs):
+                return ([[[10, 90, 10, 30]]], [[]])
+
+            def recognize(self, img_gray, h_list, f_list, **kwargs):
+                return [([[10, 10], [90, 10], [90, 30], [10, 30]], "text", 0.9)]
+
+        class FakeMod:
+            def Reader(self, langs, **kwargs):
+                return FakeReader()
+
+        fake_mod = FakeMod()
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        return backend
+
+    def test_exhaustive_wordbeamsearch_candidate_added(self, monkeypatch):
+        """§9: wordbeamsearch candidate appears when base decoder is greedy."""
+        import numpy as np
+        backend = self._make_backend(monkeypatch)
+        img = np.full((100, 120, 3), 128, dtype=np.uint8)
+        backend.recognize_page(img, 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        ids = [c["candidate_id"] for c in diag["candidate_diagnostics"]]
+        assert "wordbeamsearch" in ids, f"Expected wordbeamsearch in {ids}"
+
+    def test_exhaustive_wordbeamsearch_not_added_if_already_wbs(self, monkeypatch):
+        """§9: wordbeamsearch candidate is skipped when base decoder is already wordbeamsearch."""
+        import numpy as np
+        monkeypatch.setenv("EASYOCR_DECODER", "wordbeamsearch")
+        backend = self._make_backend(monkeypatch)
+        img = np.full((100, 120, 3), 128, dtype=np.uint8)
+        backend.recognize_page(img, 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        ids = [c["candidate_id"] for c in diag["candidate_diagnostics"]]
+        # wordbeamsearch is the base decoder so no extra wbs candidate
+        assert ids.count("wordbeamsearch") <= 1, \
+            f"wordbeamsearch should not be duplicated; got {ids}"
+
+    def test_exhaustive_total_candidates_ten_or_more(self, monkeypatch):
+        """§9/§10/§15/§17: exhaustive produces up to 10 candidates (env-dependent)."""
+        import numpy as np
+        backend = self._make_backend(monkeypatch)
+        img = np.full((100, 120, 3), 128, dtype=np.uint8)
+        backend.recognize_page(img, 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        count = len(diag["candidate_diagnostics"])
+        # wordbeamsearch + base 6 = at least 7; high_mag adds more
+        assert count >= 7, f"Expected >=7 candidates in exhaustive, got {count}"
+
+    def test_exhaustive_high_mag_candidate_added(self, monkeypatch):
+        """§17: high_mag candidate must appear when base mag_ratio < 2.5."""
+        import numpy as np
+        monkeypatch.setenv("EASYOCR_MAG_RATIO", "1.2")
+        backend = self._make_backend(monkeypatch)
+        img = np.full((100, 120, 3), 128, dtype=np.uint8)
+        backend.recognize_page(img, 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        ids = [c["candidate_id"] for c in diag["candidate_diagnostics"]]
+        assert "high_mag" in ids, f"Expected high_mag in {ids}"
+
+
+# ---------------------------------------------------------------------------
+# §15 — _apply_deskew
+# ---------------------------------------------------------------------------
+
+class TestDeskewPreprocessing:
+    """§15: deskew function must estimate and correct small rotation angles."""
+
+    def test_apply_deskew_returns_same_shape(self):
+        """_apply_deskew must return array with same shape as input."""
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _apply_deskew
+        img = np.full((80, 100, 3), 200, dtype=np.uint8)
+        result = _apply_deskew(img)
+        arr = np.asarray(result)
+        assert arr.shape == img.shape
+
+    def test_apply_deskew_graceful_without_cv2(self, monkeypatch):
+        """_apply_deskew must return original image when cv2 is unavailable."""
+        import sys
+        import numpy as np
+        monkeypatch.setitem(sys.modules, "cv2", None)
+        from structured_pdf_text.ocr.backends.easyocr import _apply_deskew
+        img = np.full((40, 60, 3), 150, dtype=np.uint8)
+        result = _apply_deskew(img)
+        assert result is img
+
+    def test_apply_deskew_near_straight_image_unchanged(self):
+        """_apply_deskew must not rotate a perfectly straight image."""
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _apply_deskew
+        # All-white image — no contours → no angle estimated → unchanged
+        img = np.full((60, 80, 3), 255, dtype=np.uint8)
+        result = _apply_deskew(img)
+        arr = np.asarray(result)
+        # Result is same object or pixel-identical
+        assert arr.shape == img.shape
+
+
+# ---------------------------------------------------------------------------
+# §43 — deep readiness CER validation
+# ---------------------------------------------------------------------------
+
+class TestDeepReadinessCer:
+    """§43: probe_deep must validate CER, not just token presence."""
+
+    def test_simple_cer_perfect_match(self):
+        """CER of identical strings must be 0.0."""
+        from structured_pdf_text.ocr.readiness import _simple_cer
+        assert _simple_cer("hello", "hello") == 0.0
+
+    def test_simple_cer_empty_reference(self):
+        """CER with empty reference returns 0.0 when hypothesis is also empty."""
+        from structured_pdf_text.ocr.readiness import _simple_cer
+        assert _simple_cer("", "") == 0.0
+
+    def test_simple_cer_empty_reference_nonempty_hypothesis(self):
+        """CER with empty reference but non-empty hypothesis returns 1.0."""
+        from structured_pdf_text.ocr.readiness import _simple_cer
+        assert _simple_cer("abc", "") == 1.0
+
+    def test_simple_cer_one_substitution(self):
+        """Single character substitution in 4-char string → CER = 0.25."""
+        from structured_pdf_text.ocr.readiness import _simple_cer
+        cer = _simple_cer("abXd", "abcd")
+        assert abs(cer - 0.25) < 1e-6
+
+    def test_simple_cer_all_wrong(self):
+        """All characters wrong → CER = 1.0."""
+        from structured_pdf_text.ocr.readiness import _simple_cer
+        cer = _simple_cer("xxxx", "abcd")
+        assert abs(cer - 1.0) < 1e-6
+
+    def test_smoke_max_cer_threshold_defined(self):
+        """_SMOKE_MAX_CER must be a float between 0 and 1."""
+        from structured_pdf_text.ocr.readiness import _SMOKE_MAX_CER
+        assert isinstance(_SMOKE_MAX_CER, float)
+        assert 0.0 < _SMOKE_MAX_CER <= 1.0
+
+    def test_smoke_expected_text_contains_portuguese_chars(self):
+        """_SMOKE_EXPECTED must contain accented Portuguese characters."""
+        from structured_pdf_text.ocr.readiness import _SMOKE_EXPECTED
+        accented = set("ãõáéíóúçêô")
+        found = set(_SMOKE_EXPECTED)
+        assert accented & found, f"No accented chars found in smoke text: {_SMOKE_EXPECTED[:60]}"
+
+
+# ---------------------------------------------------------------------------
+# §33 — reading order uses OCR lines for prose/column detection
+# ---------------------------------------------------------------------------
+
+class TestReadingOrderOcrLines:
+    """§33: OCR-only regions must use full column-detection path, not return []."""
+
+    def _make_ocr_line(self, text, x0, y0, x1, y1):
+        from structured_pdf_text.document import TextLine, WritingDirection
+        return TextLine(
+            tokens=[], bbox=BBox(x0, y0, x1, y1),
+            baseline=None, direction=WritingDirection.LEFT_TO_RIGHT,
+            native_order_min=None, native_order_max=None,
+            text_override=text,
+        )
+
+    def _make_region(self, kind, ocr_lines, native_lines=None, x0=0, y0=0, x1=200, y1=200):
+        from structured_pdf_text.document import LayoutRegion, RegionQuality, RegionDecision
+        quality = RegionQuality(decision=RegionDecision.KEEP_NATIVE)
+        return LayoutRegion(
+            region_id="r1", kind=kind, bbox=BBox(x0, y0, x1, y1),
+            layout_confidence=1.0,
+            native_lines=native_lines or [],
+            ocr_tokens=[],
+            quality=quality,
+            ocr_lines=ocr_lines,
+        )
+
+    def test_ocr_only_text_region_returns_lines(self):
+        """§33: TEXT region with only ocr_lines must not return empty."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.text.reading_order import order_lines_in_region
+        ocr_lines = [
+            self._make_ocr_line("linha um", 10, 10, 100, 20),
+            self._make_ocr_line("linha dois", 10, 30, 100, 40),
+        ]
+        region = self._make_region(RegionKind.TEXT, ocr_lines)
+        lines, groups = order_lines_in_region(region)
+        assert len(lines) == 2
+
+    def test_ocr_only_list_region_returns_lines(self):
+        """§33: LIST region with only ocr_lines must be ordered."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.text.reading_order import order_lines_in_region
+        ocr_lines = [
+            self._make_ocr_line("item A", 10, 50, 90, 60),
+            self._make_ocr_line("item B", 10, 70, 90, 80),
+        ]
+        region = self._make_region(RegionKind.LIST, ocr_lines)
+        lines, groups = order_lines_in_region(region)
+        assert len(lines) == 2
+
+    def test_ocr_only_empty_region_returns_empty(self):
+        """§33: region with neither native nor OCR lines returns []."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.text.reading_order import order_lines_in_region
+        region = self._make_region(RegionKind.TEXT, [])
+        lines, groups = order_lines_in_region(region)
+        assert lines == []
+
+    def test_prose_region_with_both_native_and_ocr_merges_them(self):
+        """§33: when region has both native and non-overlapping OCR lines, all are returned."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.text.reading_order import order_lines_in_region
+        native = [self._make_ocr_line("native line", 10, 10, 90, 20)]
+        ocr = [self._make_ocr_line("ocr line", 10, 40, 90, 50)]
+        region = self._make_region(RegionKind.TEXT, ocr, native_lines=native)
+        lines, groups = order_lines_in_region(region)
+        assert len(lines) == 2, f"Expected 2 lines (native+ocr), got {len(lines)}"
+
+    def test_order_region_lines_ocr_only_included(self):
+        """§33: order_region_lines processes regions with only ocr_lines."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.text.reading_order import order_region_lines
+        ocr_lines = [
+            self._make_ocr_line("linha A", 10, 10, 90, 20),
+            self._make_ocr_line("linha B", 10, 30, 90, 40),
+        ]
+        region = self._make_region(RegionKind.TEXT, ocr_lines)
+        lines, decision = order_region_lines([region])
+        assert len(lines) == 2

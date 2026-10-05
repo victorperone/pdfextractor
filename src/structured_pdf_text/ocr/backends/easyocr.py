@@ -95,6 +95,11 @@ EASYOCR_QUANTIZE           Set to '0' to disable PyTorch model quantization.
                            Disabling may improve accuracy on borderline characters
                            at the cost of higher CPU usage.  A/B test before
                            changing in production.
+                           In exhaustive mode a no_quantize candidate is also run
+                           even when this is '1' so the effect can be observed.
+EASYOCR_HIGH_MAG_RATIO     Target magnification for the high_mag exhaustive
+                           candidate (§17).  Default: 1.5× the base mag_ratio,
+                           capped at 2.5.  Only used in exhaustive mode.
 EASYOCR_MAX_QUALITY_THREADS
                            Set to '1' to enable maximum-quality thread allocation.
                            When active, the backend probes available CPUs at
@@ -865,14 +870,79 @@ def _apply_clahe(img: "Any") -> "Any":
         return img
 
 
+def _apply_deskew(img: "Any") -> "Any":
+    """Estimate and correct small rotation angles in a page image.
+
+    Uses a combination of Hough-line angle estimation and the projection-profile
+    method on a binarised copy of the image.  Only corrects angles in the range
+    [-15°, +15°] — larger rotations indicate intentional orientation (portrait/
+    landscape) rather than scan skew and should be handled by an orientation
+    candidate instead.
+
+    Returns the deskewed image (same dtype/shape).  Falls back silently to the
+    original image when cv2 is unavailable or angle estimation fails so the
+    deskew candidate degrades gracefully.
+    """
+    try:
+        import cv2
+        import numpy as np
+        arr = np.asarray(img)
+        if arr.ndim == 3:
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = arr.copy()
+
+        # Binarise for contour / line analysis
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Find connected components and estimate angle via minAreaRect
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        angles: list[float] = []
+        for cnt in contours:
+            if cv2.contourArea(cnt) < 50:
+                continue
+            rect = cv2.minAreaRect(cnt)
+            angle = rect[-1]
+            # minAreaRect returns angles in [-90, 0]; normalise to [-45, 45]
+            if angle < -45:
+                angle += 90
+            if abs(angle) <= 15:
+                angles.append(angle)
+
+        if not angles:
+            return img
+
+        # Use median to be robust against outlier components
+        skew_angle = float(np.median(angles))
+
+        # Only correct meaningful skew (ignore < 0.5° — rounding noise)
+        if abs(skew_angle) < 0.5:
+            return img
+
+        h, w = gray.shape[:2]
+        center = (w / 2.0, h / 2.0)
+        M = cv2.getRotationMatrix2D(center, skew_angle, 1.0)
+        if arr.ndim == 3:
+            rotated = cv2.warpAffine(arr, M, (w, h), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_REPLICATE)
+        else:
+            rotated = cv2.warpAffine(arr, M, (w, h), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_REPLICATE)
+        return rotated
+    except Exception:
+        return img
+
+
 def _exhaustive_candidates(
     reader: "Any",
     img: "Any",
     base_kwargs: "dict[str, Any]",
+    *,
+    quantize: bool = True,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run up to 6 EasyOCR candidates for exhaustive quality policy.
+    """Run up to 10 EasyOCR candidates for exhaustive quality policy.
 
-    Candidates (§13, §12, §14 from review):
+    Candidates (§8, §9, §10, §12, §13, §14, §15, §17 from review):
       A. default          — base parameters as configured
       B. high_recall      — lower CRAFT thresholds for faint/small text
       C. beamsearch       — CTC beam search decoder (if not already default)
@@ -882,10 +952,20 @@ def _exhaustive_candidates(
       F. clahe            — CLAHE-enhanced image for low-contrast scans where
                             internal EasyOCR contrast adjustment is insufficient
                             (§14: real preprocessing variant, not just a param change)
+      G. wordbeamsearch   — CTC wordbeamsearch decoder, best for pt-BR prose where
+                            vocabulary context helps resolve ambiguous characters
+                            (§9). Skipped if already using wordbeamsearch.
+      H. no_quantize      — same as default but quantize=False; avoids rounding
+                            loss in borderline characters (§10). Skipped when
+                            quantize is already False or Reader was built without
+                            quantize support.
+      I. deskew           — corrects small page rotation (skew ≤ 15°) using
+                            minAreaRect + warpAffine before CRAFT detection (§15).
+                            Degrades gracefully if cv2 is unavailable.
+      J. high_mag         — higher mag_ratio (1.8) for pages with small text;
+                            increases effective resolution seen by CRAFT (§17).
 
-    The six families use the same Reader (no second model load) but vary
-    detector thresholds, merging parameters, decoder, contrast handling,
-    and the input image itself.  Used when quality_policy='exhaustive'.
+    All candidates share the same loaded Reader (no second model download).
     """
     results = _adaptive_candidates(reader, img, base_kwargs)
 
@@ -921,7 +1001,116 @@ def _exhaustive_candidates(
     raw_f, _ = _run_easyocr(reader, clahe_img, **base_kwargs)
     results.append(("clahe", raw_f))
 
+    # Candidate G: wordbeamsearch decoder (§9) — CTC with vocabulary-constrained
+    # beam search.  Best for pt-BR prose where word-level context resolves ambiguous
+    # characters (e.g. 'rn' vs 'm').  Skipped when the base decoder is already
+    # wordbeamsearch to avoid running the same candidate twice.
+    if base_kwargs.get("decoder") != "wordbeamsearch":
+        wbs_kwargs = dict(base_kwargs)
+        wbs_kwargs["decoder"] = "wordbeamsearch"
+        try:
+            raw_g, _ = _run_easyocr(reader, img, **wbs_kwargs)
+            results.append(("wordbeamsearch", raw_g))
+        except Exception:
+            pass
+
+    # Candidate H: no_quantize (§10) — run with quantize=False via a separate
+    # Reader instance only when possible.  This avoids the weight-rounding that
+    # quantize=True applies, which can push borderline characters across the wrong
+    # decision boundary.  We attempt to rebuild the Reader without quantize; if
+    # the Reader lacks a quantize attribute or the rebuild fails, the candidate is
+    # silently skipped rather than raising.
+    if quantize:
+        try:
+            nq_reader = _rebuild_reader_no_quantize(reader)
+            if nq_reader is not None:
+                raw_h, _ = _run_easyocr(nq_reader, img, **base_kwargs)
+                results.append(("no_quantize", raw_h))
+        except Exception:
+            pass
+
+    # Candidate I: deskew (§15) — estimate and correct small scan rotation before
+    # CRAFT detection.  Only corrects angles ≤ 15°; larger rotations imply
+    # intentional layout orientation rather than scan skew.
+    deskew_img = _apply_deskew(img)
+    # Only add if deskew actually changed the image (saves time on already-straight pages)
+    try:
+        import numpy as np
+        _arr_orig = np.asarray(img)
+        _arr_deskew = np.asarray(deskew_img)
+        _changed = (_arr_orig.shape == _arr_deskew.shape and
+                    not bool((_arr_orig == _arr_deskew).all()))
+    except Exception:
+        _changed = True
+    if _changed:
+        raw_i, _ = _run_easyocr(reader, deskew_img, **base_kwargs)
+        results.append(("deskew", raw_i))
+
+    # Candidate J: high_mag (§17) — higher magnification ratio so CRAFT sees the
+    # page at a larger effective resolution.  Particularly helps pages with very
+    # small fonts (footnotes, table captions, dense tables).  The base mag_ratio
+    # is typically 1.2; this candidate uses 1.8 (50% more resolution overhead).
+    try:
+        from structured_pdf_text.ocr.env import env_float as _env_float
+        _base_mag = _env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
+        _high_mag = min(_base_mag * 1.5, 2.5)
+    except Exception:
+        _base_mag = 1.2
+        _high_mag = 1.8
+    if _high_mag > _base_mag + 0.1:
+        import os as _os
+        _prev_mag = _os.environ.get("EASYOCR_MAG_RATIO")
+        try:
+            _os.environ["EASYOCR_MAG_RATIO"] = str(_high_mag)
+            raw_j, _ = _run_easyocr(reader, img, **base_kwargs)
+            results.append(("high_mag", raw_j))
+        except Exception:
+            pass
+        finally:
+            if _prev_mag is None:
+                _os.environ.pop("EASYOCR_MAG_RATIO", None)
+            else:
+                _os.environ["EASYOCR_MAG_RATIO"] = _prev_mag
+
     return results
+
+
+def _rebuild_reader_no_quantize(reader: "Any") -> "Any":
+    """Return a new EasyOCR Reader with quantize=False, sharing the same weights.
+
+    EasyOCR's Reader stores its model networks on ``reader.detector`` and
+    ``reader.recognizer``.  We cannot safely share the same model objects because
+    quantize=True and quantize=False use different dtypes on the same weights.
+    Instead, we build a fresh Reader from the same init parameters but with
+    ``quantize=False``.
+
+    Returns None when the reader does not expose the required attributes so the
+    caller can skip the no_quantize candidate gracefully.
+    """
+    try:
+        lang = getattr(reader, "lang_list", None)
+        if not lang:
+            return None
+        gpu = getattr(reader, "device", "cpu") != "cpu"
+        model_dir = getattr(reader, "model_storage_directory", None)
+        user_net_dir = getattr(reader, "user_network_directory", None)
+        recog = getattr(reader, "recog_network", None)
+
+        import easyocr as _easyocr  # type: ignore
+        kwargs: dict[str, object] = {
+            "gpu": gpu,
+            "quantize": False,
+            "download_enabled": False,
+        }
+        if model_dir:
+            kwargs["model_storage_directory"] = model_dir
+        if user_net_dir:
+            kwargs["user_network_directory"] = user_net_dir
+        if recog:
+            kwargs["recog_network"] = recog
+        return _easyocr.Reader(lang, **kwargs)
+    except Exception:
+        return None
 
 
 class EasyOCRBackend:
@@ -1238,7 +1427,8 @@ class EasyOCRBackend:
         if use_variants:
             base_kwargs = self._run_kwargs()
             if policy == "exhaustive":
-                raw_candidates = _exhaustive_candidates(self._reader, img, base_kwargs)
+                raw_candidates = _exhaustive_candidates(self._reader, img, base_kwargs,
+                                                        quantize=self._quantize)
             else:
                 raw_candidates = _adaptive_candidates(self._reader, img, base_kwargs)
             # Convert each candidate's raw result to pipeline tokens, pick best
