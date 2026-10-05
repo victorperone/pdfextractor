@@ -190,13 +190,16 @@ class ExtractorConfig:
     # keeps the normal full-document behavior.
     page_indices: tuple[int, ...] | None = None
     security_limits: SecurityLimits = SecurityLimits()
-    # 0 = auto-detect (os.cpu_count()); -1 = leave Paddle's own default unchanged
+    # 0 = auto-detect (os.cpu_count()); -1 = pass the engine's own thread default unchanged
     num_threads: int = 0
 
     # OCR engine selection — new fields, both with defaults so existing code
     # that constructs ExtractorConfig without these args continues to work.
     # Public engine family. RapidOCR providers remain available as legacy aliases.
-    ocr_engine: str = "paddle"
+    # Default: easyocr — lowest average CER across V3/V4 corpora, zero header leakage,
+    # and lowest duplicate-content rate. Switch to "paddle" for superior critical-data
+    # metrics (Currency F1, Numeric F1) when financial precision is the priority.
+    ocr_engine: str = "easyocr"
     ocr_runtime: str | None = None
     ocr_provider: str | None = None
     paddle_model_profile: str = "pt"
@@ -398,10 +401,10 @@ def best_ocr_render_scale(engine: str) -> float:
 def effective_ocr_quality_thresholds(config: ExtractorConfig) -> OcrQualityThresholds:
     """Return confidence gates calibrated for the selected OCR family.
 
-    The shared defaults are the PP-OCRv6 Paddle operating point. Other families
-    retain geometry, text-integrity, and orientation gates, while confidence
-    thresholds are neutralized until backend-specific calibration data exists.
-    Their native confidence values remain available in diagnostics.
+    Confidence thresholds are neutralized for non-Paddle families until
+    backend-specific calibration data exists. Geometry, text-integrity, and
+    orientation gates are retained for all families. Native confidence values
+    remain available in diagnostics regardless.
     """
     if config.ocr_engine == "paddle":
         return config.ocr_quality_thresholds

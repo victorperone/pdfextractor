@@ -62,9 +62,9 @@ The current code covers:
 - raster grid fallback that recovers cell geometry for embedded-image tables
 - deterministic region-aware reading order, selective prose column splitting,
   table row ordering and rotated text groups
-- OCR engine contract, OCR token-to-line reconstruction and lazy PaddleOCR
-  adapter with explicit missing-runtime diagnostics, CPU/WSL compatibility and
-  rotated-page fallback
+- OCR engine contract, OCR token-to-line reconstruction and pluggable backend
+  adapters (EasyOCR, PaddleOCR, RapidOCR, Tesseract) with explicit
+  missing-runtime diagnostics, CPU/WSL compatibility and rotated-page fallback
 - cross-page table signatures, repeated-header detection, continuation
   evidence and logical table merging with source-page fragments
 - document-level diagnostics, page boundaries and repeated header/footer
@@ -115,8 +115,10 @@ python -m pip install -e .
 
 ## OCR setup (requires internet, run once)
 
-The `balanced` and `ocr` extraction modes use PaddleOCR with locally stored
-model weights. Model downloads happen during setup, not during extraction.
+The `balanced` and `ocr` extraction modes use EasyOCR by default. EasyOCR
+model weights are pre-downloaded once via the benchmark setup script. Other
+engines (PaddleOCR, RapidOCR, Tesseract) require their own setup steps.
+Model downloads happen during setup, not during extraction.
 
 **The runtime never downloads models. If the setup is incomplete, extraction
 fails immediately with a clear error before processing any page.**
@@ -284,20 +286,20 @@ pdftext extract documento.pdf
 pdftext extract documento.pdf --output raw
 pdftext extract documento.pdf --output json
 
-# OCR-assisted extraction with PaddleOCR (default engine, requires Paddle models)
-pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --output markdown
-pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --ocr-quality-policy adaptive
-pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --ocr-quality-policy baseline
-pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --ocr-quality-policy exhaustive
-pdftext extract documento.pdf --mode balanced --paddle-model-profile pt --output json
-pdftext extract documento.pdf --mode ocr --paddle-model-profile pt --output reading
-pdftext extract documento.pdf --best --paddle-model-profile pt --output markdown -o output.md
+# OCR-assisted extraction with EasyOCR (default engine, requires pre-downloaded weights)
+pdftext extract documento.pdf --mode balanced --output markdown
+pdftext extract documento.pdf --mode balanced --ocr-quality-policy adaptive
+pdftext extract documento.pdf --mode balanced --ocr-quality-policy baseline
+pdftext extract documento.pdf --mode balanced --ocr-quality-policy exhaustive
+pdftext extract documento.pdf --mode balanced --output json
+pdftext extract documento.pdf --mode ocr --output reading
+pdftext extract documento.pdf --best --output markdown -o output.md
 
-# Select another OCR family (Paddle profile is not required)
+# Select another OCR engine explicitly
+pdftext extract documento.pdf --mode balanced --ocr-engine paddle --paddle-model-profile pt --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine tesseract --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr --ocr-provider openvino --output markdown
 pdftext extract documento.pdf --mode balanced --ocr-engine rapidocr --ocr-provider onnxruntime --output markdown
-pdftext extract documento.pdf --mode balanced --ocr-engine easyocr --output markdown
 
 # Inspection and diagnostics
 pdftext inspect documento.pdf --page 1
@@ -317,38 +319,44 @@ pdftext paddle-models-status --paddle-model-profile pt
 ```
 
 `--mode` selects the extraction strategy; `--language` identifies recognized
-text and defaults to `pt-BR`; `--paddle-model-profile` selects Paddle weights.
-The Paddle profile defaults to `pt` and selects PP-OCRv6 medium
-(`pt-v6-medium` is a supported alias for backward compatibility). `pt-v5`
-selects PP-OCRv5 only when explicitly requested. `--ocr-quality-policy` is
-independent: it selects the OCR variant strategy. `exhaustive` emits an
-informational resource-use warning and does not automatically reduce OCR
-quality. The `balanced` and `ocr` modes use the optional PaddleOCR adapter by
-default.
+text and defaults to `pt-BR`; `--paddle-model-profile` selects Paddle model
+weights when `--ocr-engine paddle` is used. The Paddle profile defaults to `pt`
+and selects PP-OCRv6 medium (`pt-v6-medium` is a supported alias for backward
+compatibility). `pt-v5` selects PP-OCRv5 only when explicitly requested.
+`--ocr-quality-policy` is independent: it selects the OCR variant strategy.
+`exhaustive` emits an informational resource-use warning and does not
+automatically reduce OCR quality.
 
-`--ocr-engine` selects one of the four OCR families. RapidOCR has separate ONNX Runtime and OpenVINO providers; the old provider-specific names remain as deprecated aliases.
+`--ocr-engine` selects one of the four OCR families. The default is `easyocr`,
+chosen for the lowest average CER across the V3/V4 benchmark corpora and for
+zero header-leakage rate. Use `paddle` when financial-data precision (Currency
+F1, Numeric F1, Identifier Precision) is the priority. RapidOCR has separate
+ONNX Runtime and OpenVINO providers; the old provider-specific names remain as
+deprecated aliases.
 
 | Engine | Flag value | Notes |
 |---|---|---|
-| PaddleOCR PP-OCRv6 | `paddle` (default) | Requires `pdftext setup-paddle-models` |
+| EasyOCR (PyTorch CPU) | `easyocr` **(default)** | Weights pre-downloaded via `setup_ocr_benchmark.sh/.ps1` |
+| PaddleOCR PP-OCRv6 | `paddle` | Requires `pdftext setup-paddle-models`; best critical-data metrics |
 | RapidOCR | `rapidocr` | Choose provider with `--ocr-provider`; Portuguese needs a configured Latin recognizer |
 | RapidOCR ONNX alias (deprecated) | `rapidocr-onnx` | Kept for command compatibility |
 | RapidOCR OpenVINO alias (deprecated) | `rapidocr-openvino` | Kept for command compatibility |
 | Tesseract 5 | `tesseract` | Requires Tesseract binary in PATH |
-| EasyOCR (PyTorch CPU) | `easyocr` | Weights must be pre-downloaded via `setup_ocr_benchmark.sh/.ps1` |
 
 The public language tag `pt-BR` is accepted (with `pt` and `por` aliases).
-Non-Paddle engines do not use `--paddle-model-profile`. The engine is also
-selectable through the Python API via `ExtractorConfig(ocr_engine="rapidocr", ocr_provider="openvino")` or `ExtractorConfig(ocr_engine="tesseract")`
-or `dataclasses.replace(config, ocr_engine="rapidocr", ocr_provider="onnxruntime")`.
-CPU OCR disables MKL-DNN/oneDNN by default because the current Paddle 3.x
-PIR/oneDNN path is known to fail on some Linux/WSL CPU stacks. Set
-`PADDLE_ENABLE_MKLDNN=1` to opt in explicitly; this can re-enable that upstream
-failure on affected versions. Document unwarping (UVDoc) is enabled by default
-and is checked alongside the profile models by `setup-paddle-models`, `paddle-models-status`,
-and the runtime. Models are loaded from explicit local paths; remote
-model-source checks are disabled at runtime. Model paths and behavior can be
-overridden through `PaddleOcrEngine` constructor options.
+Only `--ocr-engine paddle` uses `--paddle-model-profile`. The engine is also
+selectable through the Python API via `ExtractorConfig(ocr_engine="easyocr")`,
+`ExtractorConfig(ocr_engine="rapidocr", ocr_provider="openvino")`,
+`ExtractorConfig(ocr_engine="tesseract")`, or
+`dataclasses.replace(config, ocr_engine="rapidocr", ocr_provider="onnxruntime")`.
+When using PaddleOCR: CPU OCR disables MKL-DNN/oneDNN by default because the
+current Paddle 3.x PIR/oneDNN path is known to fail on some Linux/WSL CPU
+stacks. Set `PADDLE_ENABLE_MKLDNN=1` to opt in explicitly. Document unwarping
+(UVDoc) is enabled by default and is checked alongside the profile models by
+`setup-paddle-models`, `paddle-models-status`, and the runtime. Models are
+loaded from explicit local paths; remote model-source checks are disabled at
+runtime. Model paths and behavior can be overridden through `PaddleOcrEngine`
+constructor options.
 
 OCR quality policies are available through the API and CLI:
 

@@ -22,7 +22,7 @@ class BackendEntry:
     setup_hint: str
 
 
-PUBLIC_ENGINES = ("paddle", "rapidocr", "easyocr", "tesseract")
+PUBLIC_ENGINES = ("easyocr", "paddle", "rapidocr", "tesseract")
 LEGACY_ENGINE_ALIASES = {
     "rapidocr-onnx": ("rapidocr", "onnxruntime"),
     "rapidocr-openvino": ("rapidocr", "openvino"),

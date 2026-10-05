@@ -9,10 +9,10 @@ effective model and OCR parameters.
 
 | Run configuration | OCR family | Provider |
 |---|---|---|
+| `easyocr` | EasyOCR | PyTorch |
 | `paddle` | PaddleOCR | Paddle runtime |
 | `rapidocr-onnxruntime` | RapidOCR | ONNX Runtime |
 | `rapidocr-openvino` | RapidOCR | OpenVINO |
-| `easyocr` | EasyOCR | PyTorch |
 | `tesseract` | Tesseract | Tesseract executable |
 
 The run configuration names identify benchmark rows; the public OCR engine
@@ -20,10 +20,26 @@ family remains `rapidocr` for both RapidOCR providers.
 
 ## Choose a backend
 
+The default engine is **EasyOCR**, which achieved the lowest average CER across
+the V3/V4 benchmark corpora and zero header-leakage rate. Use PaddleOCR when
+financial-data precision (Currency F1, Numeric F1, Identifier Precision) is the
+priority.
+
 ```python
-from dataclasses import replace
 from structured_pdf_text.config import ExtractorConfig
 
+# Default — EasyOCR
+config = ExtractorConfig(mode="balanced", language="pt-BR")
+
+# PaddleOCR — best critical-data metrics
+config = ExtractorConfig(
+    mode="balanced",
+    language="pt-BR",
+    ocr_engine="paddle",
+    paddle_model_profile="pt",
+)
+
+# RapidOCR with an explicit provider
 config = ExtractorConfig(
     mode="balanced",
     language="pt-BR",
@@ -32,26 +48,17 @@ config = ExtractorConfig(
 )
 ```
 
-Paddle model selection is independent of document language:
-
-```python
-config = ExtractorConfig(
-    mode="balanced",
-    language="pt-BR",
-    ocr_engine="paddle",
-    paddle_model_profile="pt-v6-medium",
-)
-```
-
 The CLI exposes four families. RapidOCR takes an explicit provider; Paddle
 profiles apply only to Paddle.
 
 ```bash
+# EasyOCR (default — no flag required)
+pdftext extract documento.pdf --mode balanced --language pt-BR --output markdown
+# Other engines
 pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine tesseract --output markdown
-pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine easyocr --output markdown
 pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine rapidocr --ocr-provider onnxruntime --output markdown
 pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine rapidocr --ocr-provider openvino --output markdown
-pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine paddle --paddle-model-profile pt-v6-medium --output markdown
+pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine paddle --paddle-model-profile pt --output markdown
 ```
 
 ## Install and prepare models

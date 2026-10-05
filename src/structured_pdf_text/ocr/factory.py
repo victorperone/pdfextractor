@@ -26,7 +26,7 @@ def build_ocr_backend(config: "ExtractorConfig") -> OCRBackend:
     Raises:
         UnsupportedOCREngine: when ``config.ocr_engine`` is not registered.
     """
-    engine = getattr(config, "ocr_engine", "paddle")
+    engine = getattr(config, "ocr_engine", "easyocr")
     from structured_pdf_text.ocr.languages import canonical_language
     canonical_language(config.language)
 

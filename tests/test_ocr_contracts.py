@@ -276,10 +276,10 @@ class TestFactory:
 # ---------------------------------------------------------------------------
 
 class TestConfigRetrocompat:
-    def test_default_ocr_engine_is_paddle(self) -> None:
+    def test_default_ocr_engine_is_easyocr(self) -> None:
         from structured_pdf_text.config import ExtractorConfig
         config = ExtractorConfig()
-        assert config.ocr_engine == "paddle"
+        assert config.ocr_engine == "easyocr"
 
     def test_deprecated_ocr_runtime_is_not_a_default_second_source_of_truth(self) -> None:
         from structured_pdf_text.config import ExtractorConfig
@@ -289,4 +289,4 @@ class TestConfigRetrocompat:
     def test_existing_code_still_constructs_config(self) -> None:
         from structured_pdf_text.config import ExtractorConfig, ExtractionMode
         config = ExtractorConfig(mode=ExtractionMode.BALANCED, language="pt")
-        assert config.ocr_engine == "paddle"
+        assert config.ocr_engine == "easyocr"

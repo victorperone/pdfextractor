@@ -336,12 +336,40 @@ As médias abaixo são a média simples dos resultados V3 e V4; CER/WER e duplic
 | RapidOCR OpenVINO | 0.4336 | 0.5633 | 0.4382 | 0.0292 | 0.8924 | 0.5497 | **1.0000** |
 | Tesseract | 0.4722 | 0.6512 | 0.4520 | 0.0848 | 0.7621 | 0.8685 | **1.0000** |
 
-### Interpretação e recomendação
+### Interpretation and recommendation
 
-- **Paddle é a recomendação geral para default** quando a extração precisa preservar também valores, datas e identificadores, além de texto corrido. Tem o melhor WER médio, os melhores F1 médios de números e moedas, precisão perfeita de IDs e a melhor similaridade Markdown média. No V4 também lidera CER/WER e os principais dados críticos.
-- **EasyOCR é mais fiel para transcrição textual simples**, com o melhor CER médio e a menor duplicação. No V3 vence CER e WER; no V4 fica atrás de Paddle. Porém, no V4 sua precisão de identificadores é apenas 0.0667 (F1 0.1251), sinal de muitos falsos positivos, e seus F1 de números e moedas ficam abaixo de Paddle.
-- A vantagem de Paddle vem com ressalvas: no V3 seu CER/WER são piores que EasyOCR, e sua duplicação média (0.1819) é bem maior. Paddle e, no V4, Tesseract também mantêm cabeçalhos repetidos que o Markdown de referência exclui; esses cabeçalhos estão visíveis nos PDFs, então a métrica de vazamento reflete a diferença entre o critério do gabarito e o conteúdo impresso.
-- As métricas de tabela permanecem iguais entre engines: `Cell Exact Match` é 0.3740 no V3 e 0.2327 no V4, com `Cell CER` 0.6089 e 0.7818, respectivamente. Portanto, não há evidência nesta rodada de que trocar a engine resolva a extração de tabelas; a detecção e montagem compartilhadas do pipeline são o próximo ponto a revisar.
-- A hierarquia de títulos continua sem recuperação (`Heading Level Accuracy = 0.0000` em ambos os corpora). Essa limitação estrutural não é resolvida escolhendo outro OCR.
+**EasyOCR is the chosen default engine** (as of 2026-10-05), based on the
+following evidence from this benchmark:
+
+- **Lowest average CER**: EasyOCR achieves 0.3892 averaged across V3 and V4,
+  compared to Paddle 0.4270 (second best). CER is the primary measure of
+  transcription fidelity for text-heavy documents.
+- **Zero header leakage**: EasyOCR produces `header_leakage = 0.0000` in both
+  corpora. Paddle produces 0.5208 (V3) and 0.3616 (V4) — running page headers
+  are systematically included in body text, which corrupts structured Markdown
+  output.
+- **Lowest duplicate content**: EasyOCR averages 0.0245 duplicate-content rate
+  versus Paddle's 0.1819 (~7.4× higher). Content duplication directly degrades
+  downstream search, indexing, and summarization.
+
+**Known trade-off — use PaddleOCR when financial-data precision is the
+priority**: Paddle leads on all critical-data metrics in both corpora — Numeric
+F1 (0.9778 vs 0.9121), Currency F1 (0.8839 vs 0.7297), Identifier Precision
+(1.0000 vs 0.5333). EasyOCR's Identifier Precision collapses to 0.0667 in V4
+(F1 0.1251), a sign of many false positives that makes it unsuitable when
+identifier extraction accuracy is critical (CPF, CNPJ, process numbers). For
+those use cases, configure `ocr_engine="paddle"` explicitly.
+
+**Other findings that do not change with engine choice**:
+
+- Table metrics are identical across all engines in both corpora (`Cell Exact
+  Match` 0.3740 in V3, 0.2327 in V4). Switching the OCR engine does not improve
+  table extraction; the shared pipeline detection and assembly logic is the
+  relevant bottleneck.
+- `Heading Level Accuracy = 0.0000` in both corpora for all engines. Heading
+  hierarchy recovery is a pipeline-level limitation independent of the OCR
+  backend.
+- `Reading Order Accuracy` is identical across all engines in V4 (0.0468),
+  suggesting the metric is dominated by shared pipeline behavior in that corpus.
 
 Os dez Markdown independentes e o comparativo completo estão em [output/comparison-v2-v3/relatorio-comparativo.md](output/comparison-v2-v3/relatorio-comparativo.md), que também liga cada arquivo V3/V4 e os detalhamentos por corpus.

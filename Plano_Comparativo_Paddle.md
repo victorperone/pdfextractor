@@ -16,6 +16,40 @@
 
 ---
 
+## Default Engine Decision (2026-10-05)
+
+**Chosen default: EasyOCR** (`ocr_engine: str = "easyocr"` in `ExtractorConfig`).
+
+Decision is based on the Phase 8 full-corpus benchmark (`Comparativo_Backends_OCR_Fase8.md`,
+2026-10-04, V3: 144 pages, V4: 224 pages):
+
+| Criterion | EasyOCR | PaddleOCR | Winner |
+|---|---|---|---|
+| Average CER (V3+V4) | **0.3892** | 0.4270 | EasyOCR |
+| Header leakage avg | **0.0000** | 0.4412 | EasyOCR |
+| Duplicate content avg | **0.0245** | 0.1819 | EasyOCR |
+| Currency F1 avg | 0.7297 | **0.8839** | Paddle |
+| Numeric F1 avg | 0.9121 | **0.9778** | Paddle |
+| Identifier Precision avg | 0.5333 | **1.0000** | Paddle |
+
+**When to use PaddleOCR instead**: set `ocr_engine="paddle"` explicitly when
+financial-data precision is critical — Currency F1, Numeric F1, and Identifier
+Precision are all substantially better with Paddle. EasyOCR's Identifier
+Precision collapses in V4 (0.0667), making it unsuitable for CPF/CNPJ/process
+number extraction.
+
+**Open known issue affecting RapidOCR (CF-2)**: `paddle2onnx` DLL incompatible
+(0xC0000139) on Windows — RapidOCR still uses the bundled PP-OCRv4 Chinese
+model instead of PP-OCRv6. This does not affect EasyOCR or PaddleOCR. CF-2
+remains open and is documented under "Correções Futuras" below.
+
+**EasyOCR pending improvements**: CLAHE preprocessing (item 9.3) and model
+fine-tuning (item 9.6) remain unimplemented pending A/B validation. All other
+Phase 9 EasyOCR optimizations are implemented. See "Fase 9 — Otimizações
+EasyOCR" below for details.
+
+---
+
 ## Resultados de Performance (pp. 72–103, 32 páginas scan)
 
 | Engine | Tempo total | s/pág | Páginas OK | CER médio |

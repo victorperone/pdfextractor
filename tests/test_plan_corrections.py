@@ -189,9 +189,13 @@ def test_cli_overlay_native_does_not_validate_ocr(monkeypatch, tmp_path: Path) -
     assert code == 0
 
 
-def test_cli_overlay_uses_default_paddle_profile_for_ocr_modes(capsys, tmp_path: Path) -> None:
+def test_cli_overlay_ocr_mode_does_not_require_model_profile(capsys, tmp_path: Path) -> None:
+    # Verify that --ocr-model-profile is never required, even in balanced OCR mode.
+    # Uses paddle explicitly so the test fails on the missing PDF (exit 2) rather
+    # than on EasyOCR package availability in the test environment.
     code = cli_module.main([
-        "overlay", str(tmp_path / "not-opened.pdf"), "--page", "1", "--out", str(tmp_path / "out.png"), "--mode", "balanced",
+        "overlay", str(tmp_path / "not-opened.pdf"), "--page", "1", "--out", str(tmp_path / "out.png"),
+        "--mode", "balanced", "--ocr-engine", "paddle",
     ])
     assert code == 2
     error = capsys.readouterr().err

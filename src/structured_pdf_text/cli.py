@@ -148,7 +148,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         "--threads",
         type=int,
         default=0,
-        help="CPU threads for OCR engine (0 = auto-detect, -1 = PaddlePaddle default)",
+        help="CPU threads for OCR engine (0 = auto-detect, -1 = the engine's own thread default)",
     )
     extract_parser.add_argument(
         "--cache-home",
@@ -162,7 +162,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         metavar="ENGINE",
         choices=PUBLIC_ENGINES,
         help=(
-            "OCR engine family: paddle (default), rapidocr, tesseract, easyocr. "
+            "OCR engine family: easyocr (default), paddle, rapidocr, tesseract. "
             "RapidOCR runtime selection uses --ocr-provider."
         ),
     )
@@ -190,7 +190,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="Override the OCR model cache directory",
     )
-    inspect_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="paddle")
+    inspect_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
     inspect_parser.add_argument("--ocr-provider", choices=("onnxruntime", "openvino"), default=None)
     inspect_parser.add_argument(
         "--ocr-quality-policy",
@@ -217,7 +217,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         help="Paddle model profile (default: pt)",
     )
     overlay_parser.add_argument("--language", default="pt-BR", help="OCR language tag")
-    overlay_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="paddle")
+    overlay_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
     overlay_parser.add_argument("--ocr-provider", choices=("onnxruntime", "openvino"), default=None)
     overlay_parser.add_argument(
         "--cache-home", default=None, metavar="DIR",
@@ -281,9 +281,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         "--threads",
         type=int,
         default=0,
-        help="CPU threads for OCR engine (0 = auto-detect, -1 = PaddlePaddle default)",
+        help="CPU threads for OCR engine (0 = auto-detect, -1 = the engine's own thread default)",
     )
-    report_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="paddle")
+    report_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
     report_parser.add_argument("--ocr-provider", choices=("onnxruntime", "openvino"), default=None)
 
     compare_parser = subparsers.add_parser(
@@ -362,8 +362,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
             return 2
         language = args.language or "pt-BR"
         profile_name = args.paddle_model_profile or "pt"
-        # Resolve effective engine: explicit --ocr-engine wins; default is "paddle".
-        effective_engine: str = args.ocr_engine or "paddle"
+        # Resolve effective engine: explicit --ocr-engine wins; default is "easyocr".
+        effective_engine: str = args.ocr_engine or "easyocr"
         if args.best:
             config = best_extraction_config(language=language)
             # F05: --best must not silently ignore an explicit --ocr-engine.

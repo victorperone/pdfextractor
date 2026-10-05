@@ -209,9 +209,9 @@ def main() -> int:
     ap.add_argument("pdf", type=Path, help="PDF corpus to extract")
     ap.add_argument(
         "--engine",
-        default="paddle",
-        choices=["paddle", "rapidocr", "tesseract", "easyocr"],
-        help="OCR family (default: paddle); choose RapidOCR provider with --provider",
+        default="easyocr",
+        choices=["easyocr", "paddle", "rapidocr", "tesseract"],
+        help="OCR family (default: easyocr); choose RapidOCR provider with --provider",
     )
     ap.add_argument("--provider", choices=["onnxruntime", "openvino"], default=None)
     ap.add_argument(
