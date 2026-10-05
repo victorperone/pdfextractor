@@ -321,3 +321,27 @@ Após cada problema encontrado, corrigi o código/configuração e repeti a etap
 - Métricas de confidence não foram comparadas como probabilidades entre engines. Tabelas, headings e leitura de ordem com valores idênticos entre backends não separam os recognizers nesta execução.
 - O RSS de árvore é amostrado e pode perder picos curtos. O comparador mostra pico da árvore amostrado e pico do processo pai; os JSONs guardam intervalo e contagem de amostras.
 - O manifesto V3 não tem tags de condição; por isso as análises detalhadas por condição só são completas em V4.
+
+## Conclusões complementares — extrações diretas V3/V4
+
+Esta seção incorpora a análise dos Markdown gerados por extrações completas e independentes de cada engine. A grafia correta do diretório é `output/comparison-v2-v3/` (com hífen após `comparison`). Os dez arquivos foram comparados com os artefatos E2E correspondentes: depois de remover apenas os separadores diagnósticos `## Página N`, o texto normalizado de cada par coincidiu integralmente. Assim, as métricas E2E acima descrevem o conteúdo das extrações diretas.
+
+As médias abaixo são a média simples dos resultados V3 e V4; CER/WER e duplicação menores são melhores. A seleção de default considera a fidelidade textual, estrutural e dos dados extraídos, sem usar velocidade ou recursos.
+
+| Engine | CER médio ↓ | WER médio ↓ | AST Markdown médio ↑ | Duplicação média ↓ | F1 numérico médio ↑ | F1 moeda médio ↑ | Precisão de IDs média ↑ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| EasyOCR | **0.3892** | 0.5064 | 0.3953 | **0.0245** | 0.9121 | 0.7297 | 0.5333 |
+| Paddle | 0.4270 | **0.5028** | **0.5265** | 0.1819 | **0.9778** | **0.8839** | **1.0000** |
+| RapidOCR ONNX Runtime | 0.4336 | 0.5633 | 0.4382 | 0.0292 | 0.8924 | 0.5496 | **1.0000** |
+| RapidOCR OpenVINO | 0.4336 | 0.5633 | 0.4382 | 0.0292 | 0.8924 | 0.5497 | **1.0000** |
+| Tesseract | 0.4722 | 0.6512 | 0.4520 | 0.0848 | 0.7621 | 0.8685 | **1.0000** |
+
+### Interpretação e recomendação
+
+- **Paddle é a recomendação geral para default** quando a extração precisa preservar também valores, datas e identificadores, além de texto corrido. Tem o melhor WER médio, os melhores F1 médios de números e moedas, precisão perfeita de IDs e a melhor similaridade Markdown média. No V4 também lidera CER/WER e os principais dados críticos.
+- **EasyOCR é mais fiel para transcrição textual simples**, com o melhor CER médio e a menor duplicação. No V3 vence CER e WER; no V4 fica atrás de Paddle. Porém, no V4 sua precisão de identificadores é apenas 0.0667 (F1 0.1251), sinal de muitos falsos positivos, e seus F1 de números e moedas ficam abaixo de Paddle.
+- A vantagem de Paddle vem com ressalvas: no V3 seu CER/WER são piores que EasyOCR, e sua duplicação média (0.1819) é bem maior. Paddle e, no V4, Tesseract também mantêm cabeçalhos repetidos que o Markdown de referência exclui; esses cabeçalhos estão visíveis nos PDFs, então a métrica de vazamento reflete a diferença entre o critério do gabarito e o conteúdo impresso.
+- As métricas de tabela permanecem iguais entre engines: `Cell Exact Match` é 0.3740 no V3 e 0.2327 no V4, com `Cell CER` 0.6089 e 0.7818, respectivamente. Portanto, não há evidência nesta rodada de que trocar a engine resolva a extração de tabelas; a detecção e montagem compartilhadas do pipeline são o próximo ponto a revisar.
+- A hierarquia de títulos continua sem recuperação (`Heading Level Accuracy = 0.0000` em ambos os corpora). Essa limitação estrutural não é resolvida escolhendo outro OCR.
+
+Os dez Markdown independentes e o comparativo completo estão em [output/comparison-v2-v3/relatorio-comparativo.md](output/comparison-v2-v3/relatorio-comparativo.md), que também liga cada arquivo V3/V4 e os detalhamentos por corpus.
