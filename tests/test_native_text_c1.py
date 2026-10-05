@@ -85,7 +85,7 @@ def test_c1_accepts_renderer_outputs_and_reports_machine_counts():
     summary, findings = audit_rendered_outputs(
         document,
         render_json(document),
-        render_markdown(document),
+        render_markdown(document, diagnostic=True),
     )
     report = render_report(summary, findings)
 

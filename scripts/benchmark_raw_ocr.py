@@ -22,8 +22,12 @@ Usage (Linux / WSL):
 Benchmark rules (Plano_Comparativo_Paddle.md §60):
   - Mesmos pixels para todas as engines (--render-scale fixado por run).
   - Falhas permanecem no denominador.
-  - Sem downloads durante execução.
-  - Versões e hashes registrados no manifesto.
+  - Pré-requisito: todos os pesos devem estar materializados antes da execução.
+    EasyOCR: o backend deve ser instanciado com download_enabled=False para
+    garantir que nenhum download ocorra durante a medição. Rodar
+    setup_ocr_benchmark.sh/.ps1 antes de qualquer run medido.
+  - Versões registradas no manifesto; hashes de modelo são registrados quando
+    o backend os disponibiliza via identity.artifact_hashes.
 """
 from __future__ import annotations
 
@@ -77,13 +81,11 @@ def _git_info() -> dict[str, object]:
 # Page rendering
 # ---------------------------------------------------------------------------
 
-def _render_page(pdf_path: Path, page_index: int, scale: float) -> tuple[object, bytes]:
-    """Render one page and return (PIL.Image, png_bytes)."""
-    import pypdfium2 as pdfium
-    doc = pdfium.PdfDocument(str(pdf_path))
+def _render_page(doc: object, page_index: int, scale: float) -> tuple[object, bytes]:
+    """Render one page from an already-open PdfDocument and return (PIL.Image, png_bytes)."""
+    import io
     page = doc[page_index]
     image = page.render(scale=scale).to_pil().convert("RGB")
-    import io
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return image, buf.getvalue()
@@ -204,9 +206,13 @@ def run_benchmark(
         page_id = meta.get("id", f"P{page_num:03d}")
         expected_control = meta.get("expected_page_control", True)
 
+        render_s: float = 0.0
+        ocr_s: float = 0.0
         t0 = time.perf_counter()
         try:
-            pil_image, png_bytes = _render_page(pdf_path, page_index, render_scale)
+            t_render = time.perf_counter()
+            pil_image, png_bytes = _render_page(doc, page_index, render_scale)
+            render_s = time.perf_counter() - t_render
             image_hash = _sha256_bytes(png_bytes)
 
             request = OCRRequest(
@@ -218,7 +224,9 @@ def run_benchmark(
                 language=language,
                 dpi=int(72 * render_scale),
             )
+            t_ocr = time.perf_counter()
             result = backend.recognize(request)
+            ocr_s = time.perf_counter() - t_ocr
             status = result.status
             hyp_text = _ocr_tokens_to_text(result.tokens)
             token_count = len(result.tokens)
@@ -226,7 +234,6 @@ def run_benchmark(
             if result.status != "ok" and result.status != "no_text":
                 errors += 1
         except Exception as exc:
-            elapsed = time.perf_counter() - t0
             status = "runtime_error"
             hyp_text = ""
             token_count = 0
@@ -234,8 +241,8 @@ def run_benchmark(
             errors += 1
             if verbose:
                 print(f"  [FAIL] page {page_num}: {exc}", file=sys.stderr)
-        else:
-            elapsed = time.perf_counter() - t0
+
+        elapsed = time.perf_counter() - t0
 
         elapsed_total += elapsed
         metrics = _compute_metrics(hyp_text, ref_pages or {}, page_num)
@@ -248,6 +255,8 @@ def run_benchmark(
             "expected_page_control": expected_control,
             "status": status,
             "elapsed_s": round(elapsed, 4),
+            "render_s": round(render_s, 4),
+            "ocr_s": round(ocr_s, 4),
             "token_count": token_count,
         }
         if metrics:

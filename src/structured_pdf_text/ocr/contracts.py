@@ -26,6 +26,8 @@ class OCRBackendIdentity:
     """Fully-qualified identity of one running backend instance.
 
     Every benchmark run must record this; hashes allow reproducibility audits.
+    ``extra`` holds backend-specific runtime parameters (e.g. workers,
+    torch_num_threads, decoder) that do not fit the fixed schema.
     """
 
     engine: str
@@ -35,6 +37,7 @@ class OCRBackendIdentity:
     device: str
     package_versions: dict[str, str] = field(default_factory=dict)
     artifact_hashes: dict[str, str] = field(default_factory=dict)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +74,7 @@ class OCRRequest:
     input_kind: str         # "page" | "region" | "line"
     language: str
     region_id: str | None = None
+    region_bbox: tuple[float, float, float, float] | None = None  # (x0,y0,x1,y1) in page-pixel space
     dpi: int | None = None
     coordinate_system: str = "page"
 
@@ -98,6 +102,7 @@ class OCRToken:
 _VALID_STATUSES = frozenset({
     "ok", "no_text", "partial", "model_missing",
     "timeout", "runtime_error", "budget_blocked", "invalid_input",
+    "recovered",  # nominal path failed; result obtained via fallback (degraded)
 })
 
 
@@ -162,15 +167,18 @@ class OCRBackend(Protocol):
         ...
 
     def recognize_region(
-        self, page_image: object, page_index: int, region_bbox: BBox
+        self, page_image: object, page_index: int, region_bbox: BBox,
+        *, page_bbox: BBox | None = None,
     ) -> list[OcrToken]:
         """Pipeline-layer region OCR — same signature as ``OcrEngine.recognize_region``."""
         ...
 
     def healthcheck(self) -> str:
-        """Check model readiness without loading the runtime.
+        """Run the backend's legacy health probe, which may load its runtime.
 
-        Returns one of: "ready", "missing", "incomplete", "corrupt", "unknown".
+        Use ``ocr.readiness.probe_static`` for checks that must not construct a
+        model, and ``probe_deep`` for an explicit inference smoke test. Returned
+        values follow: ready, missing, incomplete, corrupt, unknown.
         """
         ...
 

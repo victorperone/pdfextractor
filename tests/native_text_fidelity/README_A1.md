@@ -1,21 +1,22 @@
-# A1 — inventário auditável da evidência textual nativa
+# A1 — Auditable Inventory of Native Text Evidence
 
-Esta suíte mede somente a etapa anterior à classificação, montagem, OCR,
-supressão de repetidos, tabelas, ordem de leitura e renderização. Ela mantém
-duas trilhas:
+This suite measures only the step preceding classification, assembly, OCR,
+duplicate suppression, tables, reading order, and rendering. It maintains two
+tracks:
 
-1. `raw_pdfium`: chamadas diretas ao PDFium/pypdfium2, antes do adaptador de
-   produção.
-2. `native_adapter`: objetos reais retornados por
-   `PdfiumNativeEvidenceSource.extract_page(page_index)`, com índice 0-based.
+1. `raw_pdfium`: direct calls to PDFium/pypdfium2, before the production
+   adapter.
+2. `native_adapter`: real objects returned by
+   `PdfiumNativeEvidenceSource.extract_page(page_index)`, with 0-based index.
 
-Assim, `reference -> raw_pdfium` não é atribuído ao adaptador. Uma divergência
-em `raw_pdfium -> native_adapter` é a única que pode ser atribuída à conversão
-do adaptador, e ainda deve ser confirmada pelos campos e flags capturados.
+Therefore, `reference -> raw_pdfium` is not attributed to the adapter. A
+divergence in `raw_pdfium -> native_adapter` is the only one attributable to
+the adapter conversion, and must still be confirmed by the captured fields and
+flags.
 
-## Comandos
+## Commands
 
-Validação inicial do corpus:
+Initial corpus validation:
 
 ```bash
 python tests/corpus/native_text_stress/validate_native_text_stress.py \
@@ -23,97 +24,97 @@ python tests/corpus/native_text_stress/validate_native_text_stress.py \
 pytest -q tests/test_native_text_stress_fixture.py
 ```
 
-Uma página deterministicamente escolhida por família (20 páginas):
+One deterministically chosen page per family (20 pages):
 
 ```bash
 python tests/native_text_fidelity/a1_capture.py --variants-per-family 1
 ```
 
-Três variantes deterministicamente espaçadas por família (60 páginas):
+Three deterministically spaced variants per family (60 pages):
 
 ```bash
 python tests/native_text_fidelity/a1_capture.py --variants-per-family 3
 ```
 
-Corpus completo:
+Full corpus:
 
 ```bash
 python tests/native_text_fidelity/a1_capture.py --all
 ```
 
-Os artefatos ficam em `output/native_text_fidelity/a1/<codigo_sha>/`, que é
-ignorado pelo Git:
+Artifacts are stored in `output/native_text_fidelity/a1/<codigo_sha>/`, which is
+ignored by Git:
 
-- `run_metadata.json`: branch, SHA do código, data efetiva, hashes, versões,
-  páginas selecionadas, opções e política;
-- `raw_pdfium_chars.jsonl`: uma linha por índice de caractere do PDFium, com
-  texto, Unicode, bbox original e bbox convertida, origem, ângulo e erros;
-- `raw_pdfium_pages.jsonl`: geometria, rotação, contagem e `get_text_range()`
-  agregado para inspeção, sem tratá-lo como fonte independente;
-- `native_adapter_chars.jsonl` e `native_adapter_pages.jsonl`: evidência do
-  adaptador sem remover índices, bboxes, IDs ou flags inválidos;
-- `unit_alignment.jsonl`: alinhamento por ocorrência, cardinalidade um-para-um,
-  candidatos, caracteres consumidos, categoria e razões;
-- `page_summary.json`: contagens por página/estágio e numeradores/denominadores
-  estritos e permissivos;
-- `A1_report.md`: exemplos reproduzíveis e limites.
+- `run_metadata.json`: branch, code SHA, actual date, hashes, versions, selected
+  pages, options, and policy;
+- `raw_pdfium_chars.jsonl`: one line per PDFium character index, with text,
+  Unicode, original bbox and converted bbox, origin, angle, and errors;
+- `raw_pdfium_pages.jsonl`: geometry, rotation, count, and aggregated
+  `get_text_range()` for inspection, without treating it as an independent
+  source;
+- `native_adapter_chars.jsonl` and `native_adapter_pages.jsonl`: adapter
+  evidence without removing invalid indices, bboxes, IDs, or flags;
+- `unit_alignment.jsonl`: per-occurrence alignment, one-to-one cardinality,
+  candidates, consumed characters, category, and reasons;
+- `page_summary.json`: per-page/stage counts and strict and permissive
+  numerators/denominators;
+- `A1_report.md`: reproducible examples and limits.
 
-## Decisões de comparação
+## Comparison Decisions
 
-O `exact_text` é comparado literalmente primeiro. Uma segunda visão somente
-diagnóstica converte whitespace Unicode para um espaço ASCII e usa NFKC para
-identificar possíveis ligaturas/substituições; números, IDs e pontuação não
-são normalizados. Duas ocorrências iguais continuam sendo duas ocorrências e
-um caractere consumido não pode ser reutilizado.
+The `exact_text` is compared literally first. A second, diagnostics-only view
+converts Unicode whitespace to an ASCII space and uses NFKC to identify possible
+ligatures/substitutions; numbers, IDs, and punctuation are not normalized. Two
+identical occurrences remain two occurrences and a consumed character cannot be
+reused.
 
-As bboxes da referência são estimativas de métricas da fonte. A associação usa
-proximidade/overlap com tolerância proporcional ao tamanho da fonte, sem exigir
-igualdade da bbox. Texto rotacionado é avaliado no quadro top-origin canônico;
-ordem de desenho e `logical_reading_order` não participam do veredito A1.
+Reference bboxes are font-metric estimates. Association uses proximity/overlap
+with tolerance proportional to font size, without requiring bbox equality.
+Rotated text is evaluated in the canonical top-origin frame; drawing order and
+`logical_reading_order` do not participate in the A1 verdict.
 
-`not_assessable` fica fora do denominador. `unmatched_native` é mantido como
-evidência de caracteres sem unidade correspondente e não conta como sucesso.
-Whitespace alterado é `spacing_changed`, e não perda automática de caractere
-não-espaço. A referência nunca é usada como saída do parser nem como fonte de
-captura.
+`not_assessable` is excluded from the denominator. `unmatched_native` is kept
+as evidence of characters with no matching unit and does not count as a success.
+Changed whitespace is `spacing_changed`, not an automatic non-space character
+loss. The reference is never used as parser output or as a capture source.
 
-## Campos nativos e geometria
+## Native Fields and Geometry
 
-O `NativeCharacter` expõe: `page_index`, `char_index`, `text`,
+The `NativeCharacter` exposes: `page_index`, `char_index`, `text`,
 `unicode_codepoint`, `bbox`, `origin`, `angle`, `font_name`, `font_size`,
 `font_weight`, `fill_color`, `stroke_color`, `text_render_mode`,
-`marked_content_id`, `generated`, `hyphen`, `unicode_mapping_failed` e
-`visible_candidate`. O `NativePageEvidence` expõe `page_index`, `bbox`,
-`characters`, `objects`, `extracted_text` e `capabilities`.
+`marked_content_id`, `generated`, `hyphen`, `unicode_mapping_failed`, and
+`visible_candidate`. `NativePageEvidence` exposes `page_index`, `bbox`,
+`characters`, `objects`, `extracted_text`, and `capabilities`.
 
-O adaptador aplica `BBox.from_pdfium_rect`: subtrai a origem x/y do quadro
-efetivo, inverte y dentro da altura efetiva e retorna a bbox em top-origin.
-A captura bruta repete apenas essa conversão matemática para registrar também
-os valores PDFium originais; ela não chama os helpers privados do adaptador.
+The adapter applies `BBox.from_pdfium_rect`: it subtracts the x/y origin of the
+effective frame, inverts y within the effective height, and returns the bbox in
+top-origin. The raw capture repeats only this mathematical conversion to also
+record the original PDFium values; it does not call the adapter's private
+helpers.
 
-## Limites
+## Limits
 
-O benchmark mede evidência textual nativa, não garante que a intenção do
-gerador represente a tinta real, nem aprova 100% de texto/tabelas. `get_text_range`
-e `get_text_bounded` seriam visões da mesma biblioteca e não são tratados como
-fontes independentes. OCR, rasterização, assembler, conservação, ordem lógica
-e estrutura de tabela ficam para etapas posteriores.
+The benchmark measures native text evidence; it does not guarantee that
+generator intent represents real ink, nor does it approve 100% of text/tables.
+`get_text_range` and `get_text_bounded` are views of the same library and are
+not treated as independent sources. OCR, rasterization, assembler, conservation,
+logical order, and table structure are left for later steps.
 
-## A2 — auditoria de conservação IR
+## A2 — IR Conservation Audit
 
-O primeiro incremento A2 está em `a2_conservation.py`. Ele é um avaliador
-independente e não altera os blocos: confere ownership exatamente uma vez,
-supressões explícitas, fontes transformadas (`DEDUPLICATED`), reivindicações
-órfãs, conteúdo não contabilizado e linhas em branco não avaliáveis. Os testes
-em `test_native_text_a2.py` cobrem esses eventos sem depender do corpus PDF.
-O ledger de produção continua sendo o mecanismo que decide/reconstrói blocos;
-este módulo verifica se sua saída é auditável. `audit_document_conservation`
-agrega páginas já montadas e consome os fatos de fontes transformadas expostos
-em `PageDiagnostics`, permitindo uma verificação documental sem rerodar
-decisões do assembler.
+The first A2 increment is in `a2_conservation.py`. It is an independent
+evaluator and does not alter blocks: it checks ownership exactly once, explicit
+suppressions, transformed sources (`DEDUPLICATED`), orphan claims, unaccounted
+content, and non-assessable blank lines. Tests in `test_native_text_a2.py` cover
+these events without depending on the PDF corpus. The production ledger remains
+the mechanism that decides/reconstructs blocks; this module verifies that its
+output is auditable. `audit_document_conservation` aggregates already-assembled
+pages and consumes transformed-source facts exposed in `PageDiagnostics`,
+enabling a documentary check without re-running assembler decisions.
 
-Para executar a auditoria sobre a saída montada do extrator, sem OCR, layout
-ou tabelas:
+To run the audit on the extractor's assembled output, without OCR, layout, or
+tables:
 
 ```bash
 python tests/native_text_fidelity/a2_evaluate.py \
@@ -121,17 +122,17 @@ python tests/native_text_fidelity/a2_evaluate.py \
   --output /tmp/pdfextractor-a2
 ```
 
-O comando produz `a2_metadata.json`, `a2_summary.json`, `a2_findings.jsonl` e
-`a2_report.md` fora do Git. O JSON é a fonte para automação; o Markdown
-resume o gate e as categorias para revisão humana.
+The command produces `a2_metadata.json`, `a2_summary.json`, `a2_findings.jsonl`,
+and `a2_report.md` outside Git. The JSON is the source for automation; the
+Markdown summarizes the gate and categories for human review.
 
-## B1 — auditoria estrutural
+## B1 — Structural Audit
 
-O auditor B1 compara unidades por ocorrência, verifica se regiões de referência
-foram fragmentadas, avalia a monotonicidade da ordem lógica e confere a forma
-de células (`row`, `col`, `rowspan`, `colspan`) sem confundir `source_draw_order`
-com reading order. Cabeçalhos e rodapés repetidos ficam fora da comparação de
-ordem de conteúdo, pois são furniture explícito da página. Para executar no corpus:
+The B1 auditor compares units per occurrence, checks whether reference regions
+were fragmented, evaluates the monotonicity of logical order, and verifies cell
+shape (`row`, `col`, `rowspan`, `colspan`) without conflating `source_draw_order`
+with reading order. Repeated headers and footers are excluded from the content
+order comparison, as they are explicit page furniture. To run on the corpus:
 
 ```bash
 python tests/native_text_fidelity/b1_evaluate.py \
@@ -140,28 +141,28 @@ python tests/native_text_fidelity/b1_evaluate.py \
   --output /tmp/pdfextractor-b1
 ```
 
-O resultado produz `b1_metadata.json`, `b1_summary.json`, `b1_findings.jsonl`
-e `b1_report.md`. O relatório separa texto presente porém fora da geometria,
-ausência textual ainda não resolvida e partições semânticas não bloqueantes.
-`table_missing` e `table_cell_mismatch` são achados estruturais; não são
-convertidos em perda de texto A1.
+The result produces `b1_metadata.json`, `b1_summary.json`, `b1_findings.jsonl`,
+and `b1_report.md`. The report separates text present but outside the geometry,
+unresolved textual absence, and non-blocking semantic partitions. `table_missing`
+and `table_cell_mismatch` are structural findings; they are not converted into
+A1 text loss.
 
-Quando uma região de referência é coberta por regiões observadas de tipos
-semânticos diferentes (por exemplo, `title` e `text`), o resultado é registrado
-como `region_partitioned`. A partição continua visível na auditoria e preserva
-os IDs e tipos observados, mas não é confundida com um split estrutural de
-regiões do mesmo tipo, que permanece `region_fragmented` e bloqueia o gate B1.
-Na montagem das regiões, caixas fortemente aninhadas do mesmo tipo e com o
-mesmo papel semântico são coalescidas; caixas adjacentes ou com papéis
-semânticos diferentes continuam independentes.
+When a reference region is covered by observed regions of different semantic
+types (for example, `title` and `text`), the result is recorded as
+`region_partitioned`. The partition remains visible in the audit and preserves
+the observed IDs and types, but is not confused with a structural split of
+regions of the same type, which remains `region_fragmented` and blocks the B1
+gate. In region assembly, strongly nested boxes of the same type and semantic
+role are coalesced; adjacent boxes or those with different semantic roles remain
+independent.
 
-## C1 — auditoria das renderizações finais
+## C1 — Final Rendering Audit
 
-`c1_render_audit.py` verifica as duas renderizações sem alterar o pipeline de
-produção. A saída JSON precisa ser estruturalmente igual a
-`StructuredDocument.to_dict()`. A saída Markdown é conferida por seção de
-página e por fragmentos renderizáveis dos blocos não suprimidos; o auditor não
-reimplementa decisões de layout.
+`c1_render_audit.py` verifies both renderings without changing the production
+pipeline. The JSON output must be structurally equal to
+`StructuredDocument.to_dict()`. The Markdown output is checked per page section
+and by renderable fragments of non-suppressed blocks; the auditor does not
+re-implement layout decisions.
 
 ```bash
 python tests/native_text_fidelity/c1_render_audit.py \
@@ -169,51 +170,49 @@ python tests/native_text_fidelity/c1_render_audit.py \
   --output /tmp/pdfextractor-c1
 ```
 
-O comando produz `c1_metadata.json`, `c1_summary.json`, `c1_findings.jsonl`,
-`c1_rendered.json`, `c1_rendered.md` e `c1_report.md` fora do Git.
-Na ordem global, unidades `edge_*`, `rotation_*`, `vertical_*` e unidades de
-célula/cabeçalho de tabela não são comparadas como linhas corridas: bordas e
-rótulos têm fluxo geométrico próprio, enquanto tabelas são avaliadas pela
-forma das células e pela associação de conteúdo.
+The command produces `c1_metadata.json`, `c1_summary.json`, `c1_findings.jsonl`,
+`c1_rendered.json`, `c1_rendered.md`, and `c1_report.md` outside Git. In the
+global order, `edge_*`, `rotation_*`, `vertical_*` units and table cell/header
+units are not compared as running lines: borders and labels have their own
+geometric flow, while tables are evaluated by cell shape and content association.
 
-Quando o texto exato existe, mas a ocorrência escolhida está distante da bbox
-de referência, o auditor registra `unit_geometry_mismatch`; isso não é contado
-como `unit_missing`, mas impede o gate estrutural. A associação continua por
-ocorrência e proximidade, sem aceitar a referência como saída do extrator.
+When the exact text exists but the chosen occurrence is far from the reference
+bbox, the auditor records `unit_geometry_mismatch`; this is not counted as
+`unit_missing`, but blocks the structural gate. Association continues by
+occurrence and proximity, without accepting the reference as extractor output.
 
-Quando uma unidade não existe como linha isolada, o auditor tenta uma
-reconstrução conservadora por tokens nativos dentro da bbox de referência.
-Isso cobre pontuação emitida em linha separada, quebras de linha e células de
-tabela que compartilham uma linha com outro campo. O resultado é registrado
-como `unit_fragmented`, preservando o texto observado e sem relaxar a igualdade
-de conteúdo. Quando dois campos compartilham a mesma linha, o consumo é
-controlado por índice de token; um campo não pode consumir novamente os tokens
-já associados a outro.
+When a unit does not exist as an isolated line, the auditor attempts a
+conservative reconstruction from native tokens within the reference bbox. This
+covers punctuation emitted on a separate line, line breaks, and table cells that
+share a line with another field. The result is recorded as `unit_fragmented`,
+preserving the observed text and without relaxing content equality. When two
+fields share the same line, consumption is controlled by token index; one field
+cannot re-consume tokens already associated with another.
 
-Substituições exclusivamente compatíveis de ligaturas (`ﬁ`, `ﬂ`, `ﬀ`) são
-registradas como `unit_unicode_substitution`. Essa categoria preserva a
-diferença observada e não trata a unidade como texto exato; a normalização não
-é aplicada a identificadores, números ou pontuação.
+Exclusively compatible ligature substitutions (`ﬁ`, `ﬂ`, `ﬀ`) are recorded as
+`unit_unicode_substitution`. This category preserves the observed difference and
+does not treat the unit as exact text; normalization is not applied to
+identifiers, numbers, or punctuation.
 
-O detector de tabelas nativas aceita tanto segmentos finos quanto caminhos
-retangulares repetidos que representam contornos de células. Em tabelas
-borderless, linhas nativas com a mesma linha de base geométrica são agrupadas
-antes da inferência das trilhas. Fragmentos de tabelas continuadas têm seus
-índices de linha normalizados apenas para a forma relativa da página; isso não
-altera a evidência nem a montagem de produção.
+The native table detector accepts both thin segments and repeated rectangular
+paths representing cell outlines. In borderless tables, native rows with the
+same geometric baseline are grouped before track inference. Continued table
+fragments have their row indices normalized only to the relative page shape; this
+does not alter the evidence or production assembly.
 
-Na reconstrução nativa horizontal, a linha é ancorada pela borda inferior das
-caixas dos glifos. Assim, ascendentes, acentos e descendentes permanecem na
-mesma linha visual sem perder a separação geométrica entre colunas.
-Na verificação de ordem, uma unidade reconstruída a partir de uma linha que
-mistura colunas usa as caixas dos tokens consumidos, e não a caixa ampla da
-linha nativa; isso evita atribuir à coluna errada uma ocorrência que foi
-associada corretamente por geometria de tokens.
-Na auditoria B1, quando a linha possui tokens nativos, o texto dos tokens é a
-fonte comparada; `text_override` da linha fica como fallback somente quando não
-há tokens. Isso mantém visível uma divergência entre o agrupamento de linha e
-a evidência textual nativa.
-Quando o agrupamento preserva uma forma compatível de ligatura, mas os tokens
-nativos colapsam glifos sobrepostos, o caso é registrado como
-`unit_tokenization_variant`; ele não é contado como texto exato nem como perda
-do PDFium.
+In horizontal native reconstruction, the line is anchored by the bottom edge of
+the glyph boxes. Thus, ascenders, accents, and descenders remain on the same
+visual line without losing geometric separation between columns. In order
+checking, a unit reconstructed from a line that mixes columns uses the boxes of
+the consumed tokens, not the wide box of the native line; this avoids assigning
+to the wrong column an occurrence that was correctly associated by token
+geometry.
+
+In the B1 audit, when the line has native tokens, the token text is the compared
+source; the line's `text_override` acts as a fallback only when there are no
+tokens. This keeps visible a divergence between line grouping and native text
+evidence.
+
+When grouping preserves a compatible ligature form but native tokens collapse
+overlapping glyphs, the case is recorded as `unit_tokenization_variant`; it is
+not counted as exact text nor as PDFium loss.

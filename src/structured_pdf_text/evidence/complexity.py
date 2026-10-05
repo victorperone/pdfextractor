@@ -440,11 +440,14 @@ def _line_boxes(characters: list[NativeCharacter]) -> list[BBox]:
 
 
 def _ink_ratio(image: Any) -> float:
-    pixels = list(image.convert("RGB").getdata())
-    if not pixels:
+    try:
+        import numpy as np
+        arr = np.asarray(image.convert("RGB"))
+        if arr.size == 0:
+            return 0.0
+        return float(np.mean(arr.min(axis=2) < 245))
+    except Exception:
         return 0.0
-    ink = sum(1 for red, green, blue in pixels if min(red, green, blue) < 245)
-    return ink / len(pixels)
 
 
 def _ink_ratio_in_bbox(image: Any, bbox: BBox, page_bbox: BBox) -> float:

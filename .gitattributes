@@ -1,0 +1,3 @@
+# PowerShell scripts must keep CRLF on all platforms - PS 5.1 on Windows
+# fails to parse LF-only files (missing brace / unterminated string errors).
+*.ps1 text eol=crlf

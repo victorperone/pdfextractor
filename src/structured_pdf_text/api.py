@@ -15,6 +15,7 @@ from .config import (
     ExtractorConfig,
     OcrQualityThresholds,
     effective_ocr_quality_policy,
+    effective_ocr_quality_thresholds,
 )
 from .document import (
     Baseline,
@@ -82,13 +83,33 @@ class PdfTextExtractor:
         self.config = config or ExtractorConfig()
         self.complexity_analyzer = ComplexityAnalyzer()
         self.layout_engine = layout_engine or NativeHeuristicLayoutEngine()
-        if ocr_engine is not None:
-            self.ocr_engine = ocr_engine
-        elif _ocr_enabled(self.config):
+        self.ocr_engine = ocr_engine
+        self._ocr_factory_pending = ocr_engine is None and _ocr_enabled(self.config)
+        self._closed = False
+
+    def _ensure_ocr_engine(self) -> None:
+        if self._closed:
+            raise RuntimeError("PdfTextExtractor is closed")
+        if self.ocr_engine is None and self._ocr_factory_pending:
             from .ocr.factory import build_ocr_backend
             self.ocr_engine = build_ocr_backend(self.config)
-        else:
-            self.ocr_engine = None
+            self._ocr_factory_pending = False
+
+    def close(self) -> None:
+        """Release resources held by the OCR backend (e.g. the Paddle subprocess)."""
+        if self._closed:
+            return
+        if self.ocr_engine is not None and hasattr(self.ocr_engine, "close"):
+            self.ocr_engine.close()
+        self.ocr_engine = None
+        self._ocr_factory_pending = False
+        self._closed = True
+
+    def __enter__(self) -> "PdfTextExtractor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
 
     def extract(
         self,
@@ -121,6 +142,8 @@ class PdfTextExtractor:
         *,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> StructuredDocument:
+        if self._closed:
+            raise RuntimeError("PdfTextExtractor is closed")
         pages = []
         document_start = time.perf_counter()
         memory_start = _process_memory_snapshot()
@@ -138,8 +161,11 @@ class PdfTextExtractor:
                 if progress_callback is not None:
                     progress_callback(len(pages) + 1, len(page_indices))
                 page_memory_start = _process_memory_snapshot()
+                ocr_render_scale = self.config.effective_ocr_render_scale()
                 source_metrics_start = source.metrics_snapshot()
                 timings: dict[str, float] = {}
+                if self.ocr_engine is not None and hasattr(self.ocr_engine, "reset_page_diagnostics"):
+                    self.ocr_engine.reset_page_diagnostics()
                 native_start = time.perf_counter()
                 try:
                     native_page = source.extract_page(page_index)
@@ -166,11 +192,13 @@ class PdfTextExtractor:
                         native_page.bbox.height,
                         self.config.security_limits.max_render_pixels,
                         requested_scale,
+                        self.config.security_limits.max_render_bytes,
                     )
                     if effective < requested_scale:
                         render_limit_diagnostics[stage] = {
                             "reason": "max_render_pixels",
                             "maximum_pixels": self.config.security_limits.max_render_pixels,
+                            "maximum_rgb_bytes": self.config.security_limits.max_render_bytes,
                             "requested_scale": requested_scale,
                             "effective_scale": effective,
                             "resulting_width_pixels": math.ceil(native_page.bbox.width * effective),
@@ -180,7 +208,10 @@ class PdfTextExtractor:
 
                 rendered_page = None
                 render_start = time.perf_counter()
-                if self.config.enable_complexity_render:
+                if (
+                    self.config.normalized_mode() not in (ExtractionMode.NATIVE, ExtractionMode.FAST)
+                    and self.config.enable_complexity_render
+                ):
                     try:
                         rendered_page = source.render_page(
                             page_index,
@@ -287,6 +318,7 @@ class PdfTextExtractor:
 
                 ocr_tokens: list[OcrToken] = []
                 page_ocr_failed = False
+                blank_page_ocr = False
                 ocr_lines: list[TextLine] = []
                 unmatched_ocr_lines: list[TextLine] = []
                 unmatched_ocr_tokens: list[OcrToken] = []
@@ -339,11 +371,18 @@ class PdfTextExtractor:
                 ocr_requested = page_ocr_requested or region_ocr_requested
                 figure_ocr_requested = bool(
                     ocr_available_by_mode
-                    and self.ocr_engine is not None
                     and native_page.objects.images
                     and not page_ocr_requested
                     and _figures_need_ocr(native_page, selected_regions)
                 )
+                if ocr_requested or figure_ocr_requested:
+                    try:
+                        self._ensure_ocr_engine()
+                    except Exception as exc:
+                        warnings.append(f"OCR backend unavailable: {type(exc).__name__}: {exc}")
+                        partial_reasons.append("ocr_backend_unavailable")
+                        page_ocr_requested = region_ocr_requested = figure_ocr_requested = False
+                        ocr_requested = False
                 figure_ocr_bindings: list[tuple[BBox, list[TextLine], list[OcrToken]]] = []
                 if ocr_requested:
                     ocr_image = rendered_page
@@ -351,11 +390,11 @@ class PdfTextExtractor:
                     try:
                         if (
                             ocr_image is None
-                            or self.config.ocr_render_scale > self.config.complexity_render_scale
+                            or ocr_render_scale > self.config.complexity_render_scale
                         ):
                             ocr_image = source.render_page(
                                 page_index,
-                                scale=safe_render_scale("ocr", self.config.ocr_render_scale),
+                                scale=safe_render_scale("ocr", ocr_render_scale),
                             )
                     except FatalExtractionError:
                         raise
@@ -478,12 +517,12 @@ class PdfTextExtractor:
                     ocr_image = rendered_page
                     if (
                         ocr_image is None
-                        or self.config.ocr_render_scale > self.config.complexity_render_scale
+                        or ocr_render_scale > self.config.complexity_render_scale
                     ):
                         try:
                             ocr_image = source.render_page(
                                 page_index,
-                                scale=safe_render_scale("ocr", self.config.ocr_render_scale),
+                            scale=safe_render_scale("ocr", ocr_render_scale),
                             )
                         except FatalExtractionError:
                             raise
@@ -544,9 +583,14 @@ class PdfTextExtractor:
                     and not ocr_tokens
                     and not page_ocr_failed
                 ):
+                    blank_page_ocr = _is_visually_blank(ocr_image)
                     warnings.append(
+                        "OCR produced no tokens for a visually blank page"
+                        if blank_page_ocr else
                         "OCR completed successfully but produced no usable tokens for an OCR-primary page"
                     )
+                    if not blank_page_ocr:
+                        partial_reasons.append("ocr_no_text")
 
                 if region_ocr_requested:
                     for region in selected_regions:
@@ -574,7 +618,7 @@ class PdfTextExtractor:
                                 native_page.bbox,
                             ),
                             quality_policy=effective_ocr_quality_policy(self.config).value,
-                            thresholds=self.config.ocr_quality_thresholds,
+                            thresholds=effective_ocr_quality_thresholds(self.config),
                             page_rotation=native_page.objects.rotation,
                             enforce_policy=True,
                         )
@@ -785,14 +829,39 @@ class PdfTextExtractor:
                 elif (region_ocr_requested or figure_ocr_requested) and ocr_tokens:
                     actual_strategy = PageStrategy.MIXED
                 ocr_any_requested = ocr_requested or figure_ocr_requested
+                easyocr_page_diagnostics = (
+                    self.ocr_engine.consume_page_diagnostics()
+                    if self.ocr_engine is not None
+                    and hasattr(self.ocr_engine, "consume_page_diagnostics")
+                    else {
+                        "easyocr_calls": 0,
+                        "easyocr_fallback_count": 0,
+                        "easyocr_fallback_rate": 0.0,
+                        "easyocr_fallback_reasons": [],
+                    }
+                )
                 if not ocr_any_requested:
                     ocr_outcome = "not_requested"
                     ocr_degraded = False
                     ocr_degraded_reasons: list[str] = []
-                elif ocr_tokens:
-                    ocr_outcome = "success"
+                elif page_ocr_requested and blank_page_ocr:
+                    ocr_outcome = "blank_page"
                     ocr_degraded = False
                     ocr_degraded_reasons = []
+                elif ocr_tokens:
+                    # Check if EasyOCR used its readtext() fallback path.
+                    _easyocr_fallback = easyocr_page_diagnostics["easyocr_fallback_count"] > 0
+                    if _easyocr_fallback:
+                        ocr_outcome = "recovered"
+                        ocr_degraded = True
+                        ocr_degraded_reasons = [
+                            "easyocr_readtext_fallback:"
+                            + "; ".join(easyocr_page_diagnostics["easyocr_fallback_reasons"])
+                        ]
+                    else:
+                        ocr_outcome = "success"
+                        ocr_degraded = False
+                        ocr_degraded_reasons = []
                 else:
                     ocr_outcome = "degraded"
                     ocr_degraded = True
@@ -837,6 +906,9 @@ class PdfTextExtractor:
                         "ocr_quality_policy": effective_ocr_quality_policy(self.config).value,
                         "ocr_baseline_quality": _quality_to_dict(getattr(ocr_diag_engine, "last_baseline_quality", None)),
                         "ocr_image_profile": _image_profile_to_dict(getattr(ocr_diag_engine, "last_image_profile", None)),
+                        "easyocr_fallback_used": easyocr_page_diagnostics["easyocr_fallback_count"] > 0,
+                        "easyocr_fallback_reason": "; ".join(easyocr_page_diagnostics["easyocr_fallback_reasons"]) or None,
+                        **easyocr_page_diagnostics,
                         "ocr_recovery_triggered": bool(getattr(ocr_diag_engine, "last_recovery_triggered", False)),
                         "ocr_recovery_reasons": list(getattr(ocr_diag_engine, "last_recovery_reasons", [])),
                         "ocr_selected_variant": getattr(ocr_diag_engine, "last_selected_variant", None),
@@ -1000,12 +1072,26 @@ class PdfTextExtractor:
         document.diagnostics.facts["native_source_calls"] = source.metrics_snapshot()
         document.diagnostics.facts["num_threads"] = _resolve_num_threads(self.config.num_threads)
         if self.ocr_engine is not None:
-            profile = get_profile(self.config.language)
-            document.diagnostics.facts["ocr_profile"] = self.config.language
-            document.diagnostics.facts["ocr_models"] = {
-                "detection": profile.detection,
-                "recognition": profile.recognition,
-            }
+            if hasattr(self.ocr_engine, "identity"):
+                # OCRBackend protocol: emit engine-agnostic identity diagnostics.
+                ident = self.ocr_engine.identity  # type: ignore[union-attr]
+                document.diagnostics.facts["ocr_profile"] = ident.profile
+                document.diagnostics.facts["ocr_engine_identity"] = {
+                    "engine": ident.engine,
+                    "runtime": ident.runtime,
+                    "language": ident.language,
+                    "device": ident.device,
+                    "package_versions": ident.package_versions,
+                }
+            else:
+                # Legacy OcrEngine (Paddle direct, no OCRBackend wrapper):
+                # fall back to the Paddle-specific model profile.
+                profile = get_profile(self.config.paddle_model_profile)
+                document.diagnostics.facts["ocr_profile"] = self.config.paddle_model_profile
+                document.diagnostics.facts["ocr_models"] = {
+                    "detection": profile.detection,
+                    "recognition": profile.recognition,
+                }
         return document
 
 
@@ -1041,11 +1127,11 @@ def _image_profile_to_dict(value: Any) -> dict[str, Any] | None:
 
 
 def _resolve_num_threads(num_threads: int) -> int:
-    """Resolve o número efetivo de threads para o motor OCR.
+    """Resolve the effective number of threads for the OCR engine.
 
-    0  → auto: usa os.cpu_count() com fallback 2
-    -1 → não configurar (deixar PaddlePaddle decidir)
-    n  → usar exatamente n (mínimo 1)
+    0  → auto: uses os.cpu_count() with fallback 2
+    -1 → do not configure (let PaddlePaddle decide)
+    n  → use exactly n (minimum 1)
     """
     import os
     if num_threads == -1:
@@ -1064,10 +1150,12 @@ def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, i
 
 def _ocr_enabled(config: ExtractorConfig) -> bool:
     """Return whether the selected mode permits OCR work."""
-    return config.enable_ocr or config.normalized_mode() in {
-        ExtractionMode.BALANCED,
-        ExtractionMode.OCR,
-    }
+    mode = config.normalized_mode()
+    if mode in (ExtractionMode.NATIVE, ExtractionMode.FAST):
+        return False
+    if mode == ExtractionMode.OCR:
+        return True
+    return config.enable_ocr is not False
 
 
 def _recover_selected_regions(
@@ -1131,7 +1219,9 @@ def _recover_selected_regions(
         passes += result.ocr_passes
         batches += result.ocr_batches
         all_errors = [a.error for a in result.attempts if a.error is not None]
-        ocr_failed = bool(result.attempts) and not region_tokens
+        ocr_failed = result.status in {"budget_blocked", "invalid_region", "runtime_error", "timeout"} or (
+            result.status == "no_text" and not region_tokens
+        )
         stats[region.region_id] = {
             "kind": region.kind.value,
             "tokens": len(region_tokens),
@@ -1139,6 +1229,8 @@ def _recover_selected_regions(
             "attempt_errors": len(all_errors),
             "ocr_failed": ocr_failed,
             "attempt_error_messages": all_errors if all_errors else None,
+            "status": result.status,
+            "reason_code": result.reason_code,
             "selected_scale_factor": result.selected_scale_factor,
             "selected_rotation": result.selected_rotation,
             "ocr_passes": result.ocr_passes,
@@ -1302,8 +1394,9 @@ def _safe_complexity_scale(
     page_height: float,
     max_pixels: int,
     requested_scale: float,
+    max_bytes: int = 256 * 1024 * 1024,
 ) -> float:
-    """Preserve requested resolution unless PDFium's ceil-rounded raster exceeds its cap."""
+    """Limit raster dimensions by both pixels and estimated RGB allocation."""
     scale = max(0.0, float(requested_scale))
     if page_width <= 0 or page_height <= 0 or max_pixels <= 0 or scale == 0:
         return scale
@@ -1311,6 +1404,8 @@ def _safe_complexity_scale(
     def raster_pixels(candidate: float) -> int:
         return math.ceil(page_width * candidate) * math.ceil(page_height * candidate)
 
+    max_rgb_pixels = max(1, max_bytes // 3)
+    max_pixels = min(max_pixels, max_rgb_pixels)
     if raster_pixels(scale) <= max_pixels:
         return scale
 
@@ -1325,6 +1420,19 @@ def _safe_complexity_scale(
         else:
             high = candidate
     return low
+
+
+def _is_visually_blank(image: Any) -> bool:
+    """Conservatively identify an almost uniform white raster page."""
+    try:
+        from PIL import Image
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+        gray = image.convert("L")
+        low, high = gray.resize((min(64, gray.width), min(64, gray.height))).getextrema()
+        return low >= 250 and high - low <= 3
+    except Exception:
+        return False
 
 
 def _selected_page_indices(page_indices: tuple[int, ...] | None, page_count: int) -> list[int]:

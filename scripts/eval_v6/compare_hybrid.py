@@ -370,7 +370,7 @@ def run_profile(
         for page_num in page_list:
             t_page = time.perf_counter()
 
-            # --- Nível 1: texto nativo ---
+            # --- Level 1: native text ---
             native_text, native_chars = _extract_native_text(pdf, page_num)
             if native_chars >= min_native_chars:
                 elapsed = round((time.perf_counter() - t_page) * 1000, 1)
@@ -388,7 +388,7 @@ def run_profile(
                 print(f"  [{profile}] pág {page_num:3d}: native={native_chars} chars  mode=native")
                 continue
 
-            # --- Nível 2: OCR ---
+            # --- Level 2: OCR ---
             img_path = tmpdir / f"p{page_num:04d}.png"
             _rasterize_page(pdf, page_num, scale).save(img_path)
 
@@ -420,7 +420,7 @@ def run_profile(
                 "total_elapsed_ms": ocr["elapsed_ms"],
             }
 
-            # --- Nível 3: TableMagic ---
+            # --- Level 3: TableMagic ---
             if trigger:
                 tm = _tablemagic_page(img_path, _get_tm())
                 record["tablemagic"] = {

@@ -114,6 +114,7 @@ def detect_visual_table(
         row_count=len(y_edges) - 1,
         confidence=grid.confidence,
         method=TableMethod.VISUAL_MODEL,
+        header_rows=(),
     )
 
 

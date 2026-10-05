@@ -229,6 +229,149 @@ Os valores Heading Text CER são zero porque a implementação não encontrou pa
 
 ---
 
+## Fase 9 — Otimizações EasyOCR (pontos de melhoria identificados)
+
+> Pesquisa realizada em 2026-10-01. **Requisito:** execução 100% offline — apenas download inicial de modelos requer internet.  
+> Base de comparação: Fase 8 v1 (224 págs, `balanced`, `pt`) — CER 0.2860, substitution_rate 0.2834, currency_exact 0.3803, cell_cer 1.1575, 11.83 s/pág.
+
+### 9.1 Parâmetros críticos não configurados
+
+| ID | Parâmetro | Valor atual | Valor proposto | Justificativa | Impacto esperado |
+|---|---|---|---|---|---|
+| E-01 | `canvas_size` | 2560 (padrão) | 3500 | A4@300 DPI = 2480×3508 px — o CRAFT está fazendo downscale da altura das páginas, destruindo texto pequeno | Alto — direto no cell_cer e detecção de rodapés/tabelas |
+| E-02 | `decoder` | `'greedy'` (padrão) | `'beamsearch'` | Mantém N caminhos alternativos no CTC antes de decidir; reduz ambiguidade de caractere | Alto — reduz substitution_rate (28.3% atual) |
+| E-03 | `beamWidth` | 5 (padrão) | 10 | Mais alternativas no beamsearch = mais acurácia em palavras ambíguas | Médio — complementa E-02 |
+| E-04 | `mag_ratio` | 1.0 (padrão) | 1.5 | Magnifica input antes do CRAFT; melhora detecção de texto pequeno em células de tabela | Alto — cell_cer 1.1575 é diretamente impactado |
+| E-05 | `adjust_contrast` | 0.5 (padrão) | 1.0 | Target de contraste para reprocessamento de regiões de baixo contraste; documentos financeiros escaneados têm texto desbotado | Médio — melhora recovery de texto cinza/desbotado |
+| E-06 | `workers` | 0 (padrão) | 4 | Paralelismo no DataLoader para pré-carga de crops; ~30% speedup no CPU sem impacto na qualidade | Médio — 11.83 s/pág → ~8 s/pág estimado |
+| E-07 | `allowlist` | não usado | `'0123456789.,R$%()-/ '` (em regiões financeiras) | Restringe o decodificador ao charset esperado; elimina confusão de caractere em valores monetários | Muito alto — currency_exact_match 38% → estimado 60%+ |
+| E-08 | `blocklist` | não usado | `'OoIlBSZ'` (em regiões numéricas) | O EasyOCR confunde O→0, l→1, B→8, S→5 em PT (issue #1131); blocklist força exclusão desses caracteres | Alto — numeric_exact_match e currency |
+
+### 9.2 Feature não utilizada: pipeline separado detect + recognize
+
+Atualmente usamos `reader.readtext(image)` que executa detecção e reconhecimento em sequência com os mesmos parâmetros. O EasyOCR expõe os dois estágios separadamente:
+
+```python
+# Estágio 1 — Detecção (CRAFT): usar parâmetros de detecção otimizados
+horizontal_list, free_list = reader.detect(
+    image,
+    canvas_size=3500,
+    mag_ratio=1.5,
+    text_threshold=0.7,
+    low_text=0.4,
+    link_threshold=0.4,
+)
+
+# Estágio 2 — Reconhecimento (CRNN): usar parâmetros de reconhecimento otimizados
+result = reader.recognize(
+    image,
+    horizontal_list=horizontal_list,
+    free_list=free_list,
+    decoder='beamsearch',
+    beamWidth=10,
+    batch_size=8,
+    workers=4,
+    adjust_contrast=1.0,
+)
+```
+
+**Por que isso importa:**
+- Permite aplicar preprocessing diferente por tipo de região (tabela vs. texto corrido)
+- Permite experimentar parâmetros de reconhecimento sem reexecutar a detecção cara
+- Permite usar `allowlist`/`blocklist` diferentes por tipo de coluna em tabelas
+
+### 9.3 Preprocessing com CLAHE (antes de passar ao EasyOCR)
+
+Para páginas escaneadas com iluminação irregular (frequente em documentos financeiros em PT):
+
+```python
+import cv2
+
+def preprocess_page_for_easyocr(img_bgr):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)  # EasyOCR espera BGR
+```
+
+- **CLAHE** (equalização local de contraste): preserva bordas, melhora texto em regiões com iluminação desuniforme
+- Ganho documentado: 29.69% → 67.97% de accuracy em um estudo com documentos escaneados
+- **NÃO usar**: binarização global (Otsu/threshold) — destrói strokes finos e confunde o CRAFT
+- **NÃO usar**: sharpening excessivo — cria artefatos que fragmentam detecção de regiões de texto
+- Totalmente offline (OpenCV)
+
+### 9.4 Modelo alternativo `latin_g1`
+
+```python
+reader = easyocr.Reader(['pt'], recog_network='latin_g1')
+```
+
+- Padrão atual: `latin_g2` (menor, mais rápido, lançado em EasyOCR 1.3+)
+- `latin_g1`: modelo mais antigo, maior, mais lento, mas pode ter melhor acurácia em textos financeiros portugueses com fontes específicas
+- Requer benchmark comparativo para confirmar se melhora ou piora no corpus
+- Cacheia localmente após primeiro download; execução offline ✅
+
+### 9.5 O que foi descartado (e por quê)
+
+| Opção | Motivo do descarte |
+|---|---|
+| `detect_network='dbnet18'` | 50× mais lento que CRAFT no CPU (confirmado no issue #855) |
+| `decoder='wordbeamsearch'` | Requer `CTCWordBeamSearch` extra; bug de 10× lentidão por chamada excessiva a `simplify_label` (issue #267); instável em 1.7.x |
+| GPU acceleration | Constraint: execução offline em CPU-only |
+| Binarização Otsu antes do EasyOCR | Destrói strokes finos; EasyOCR faz sua própria binarização interna via `contrast_ths/adjust_contrast` |
+
+### 9.6 Fine-tuning do modelo de reconhecimento (longo prazo)
+
+**Potencial:** Benchmark publicado mostrou 2.35% → 96.03% de accuracy em domínio financeiro numérico após fine-tune.
+
+**Abordagem:**
+1. Gerar dados sintéticos com [TextRecognitionDataGenerator](https://github.com/Belval/TextRecognitionDataGenerator) usando charset financeiro PT (`0-9`, `.,R$%()/-`, `áàãâéêíóõôúç`)
+2. Anotar amostras reais do corpus com EasyOCRLabel
+3. Fine-tune via `/trainer` no repo do EasyOCR com `latin_g2.pth` como ponto de partida
+4. Deploy via `recog_network='pt_financial'` + `user_network_directory`
+
+**Constraint offline:** inference do modelo fine-tunado é 100% offline; só o treinamento requer acesso aos dados.
+
+### 9.7 Resumo — Prioridade de implementação
+
+| Prioridade | ID | Ação | Esforço | Impacto | Status |
+|---|---|---|---|---|---|
+| 🔴 Alta | E-01 | `canvas_size` dinâmico (`max(h,w)`) | Mínimo | Nunca faz downscale da imagem | ✅ Impl. |
+| 🔴 Alta | E-07 | `allowlist` via `EASYOCR_ALLOWLIST` | Baixo | currency_exact_match 38% → >60% | ✅ Impl. |
+| 🔴 Alta | E-02+E-03 | `decoder` via `EASYOCR_DECODER` (padrão `greedy`) | Mínimo | A/B necessário para confirmar ganho de beamsearch | ✅ Impl. |
+| 🟡 Média | E-04 | `mag_ratio=1.2` via `EASYOCR_MAG_RATIO` | Mínimo | Melhora detecção em tabelas | ✅ Impl. |
+| 🟡 Média | E-08 | `blocklist` via `EASYOCR_BLOCKLIST` | Baixo | Configurável por deployment | ✅ Impl. |
+| 🟡 Média | 9.2 | Pipeline detect + recognize separado (contrato upstream) | Médio | Corrige unwrap [0] do detect(); grayscale para recognize() | ✅ Impl. |
+| 🟡 Média | 9.3 | CLAHE preprocessing (grayscale p/ recognize) | Baixo-Médio | Melhora páginas escaneadas | ⬜ Pendente (A/B necessário) |
+| 🟡 Média | E-06 | `workers` via `EASYOCR_WORKERS` (padrão 0) | Mínimo | ~30% speedup em Linux; 0 no Windows | ✅ Impl. |
+| 🟢 Baixa | 9.4 | `latin_g1` via `EASYOCR_RECOG_NETWORK` | Baixo | Benchmark necessário para confirmar ganho | ✅ Impl. |
+| 🟢 Baixa | 9.6 | Fine-tuning do modelo | Alto | Teto máximo de qualidade | ⬜ Pendente |
+
+### Nota de implementação (2026-10-02)
+
+Otimizações implementadas em `src/structured_pdf_text/ocr/backends/easyocr.py`.
+O backend usa o **pipeline detect + recognize separado** espelhando o contrato upstream do EasyOCR:
+`reformat_input()` → `detect(reformat=False)` → `[0]` unwrap → `recognize(img_gray, reformat=False)`.
+Fallback explícito para `readtext()` em caso de falha, com `RuntimeWarning` e `status="recovered"`.
+
+**Parâmetros configuráveis por env var:**
+- `EASYOCR_DECODER` — `greedy` (padrão, upstream default) ou `beamsearch` (A/B ainda não executado)
+- `EASYOCR_BEAMWIDTH` — beam width para beamsearch (padrão `5`, upstream default)
+- `EASYOCR_MAG_RATIO` — magnification do CRAFT (padrão `1.2`)
+- `EASYOCR_ADJUST_CONTRAST` — contraste interno do recognize (padrão `0.5`)
+- `EASYOCR_WORKERS` — paralelismo DataLoader (padrão auto: 0 no Windows, cpu//2 no Linux, máx 4)
+- `EASYOCR_ALLOWLIST` — allowlist global (ex: `'0123456789.,R$%()-/ '`)
+- `EASYOCR_BLOCKLIST` — blocklist global (atenção: não bloquear 'O'/'o' em PT)
+- `EASYOCR_RECOG_NETWORK` — modelo alternativo (ex: `latin_g1`)
+- `EASYOCR_MODULE_PATH` — diretório de cache dos modelos
+
+**Não implementado (requer A/B antes de integrar):**
+- CLAHE preprocessing — `_clahe_grey()` foi removida por ser código morto; reintegrar somente após A/B com ganho mensurável comprovado
+
+**Próximo passo:** Re-executar o benchmark Fase 8 v2 com estas otimizações para medir o delta de melhoria.
+
+---
+
 ## Métricas Futuras (fora do escopo da Fase 8 inicial)
 
 Documentadas em `metricas_avaliacao_parser_ocr_markdown.md` — implementar em fases posteriores conforme necessidade:
@@ -240,3 +383,212 @@ Documentadas em `metricas_avaliacao_parser_ocr_markdown.md` — implementar em f
 - **Recursos:** Peak RAM, VRAM, CPU/GPU Usage
 - **Exatidão total:** Document Exact Match, Page Exact Match, Block Exact Match
 - **Semântica:** Semantic Similarity (baixa prioridade — não substitui métricas textuais)
+
+---
+
+## Fase 9 — Otimizações Tesseract (espelho da Fase 9 EasyOCR)
+
+### Contexto
+
+O benchmark Fase 8 revelou problemas críticos no Tesseract que têm causa-raiz clara e corrigível via configuração de CLI:
+
+| Métrica | Valor Fase 8 | Causa raiz |
+|---|---|---|
+| deletion_rate | 27.4% (pior) | `--dpi` ausente → Tesseract usa 70 DPI internamente |
+| CER | 43.15% | DPI bug + diacríticos PT mal lidos |
+| invalid_markdown_rate | 3.57% | backtick gerado → quebra fences Markdown |
+| cell_cer | 1.14 | espaços entre colunas colapsados |
+
+### Itens implementados
+
+| ID | Ação | Impacto esperado | Status |
+|---|---|---|---|
+| T-01 | `--dpi` calculado automaticamente de `config.ocr_render_scale` (padrão 144 para scale=2.0) | Corrige deletion_rate 27.4% → meta <15% | ✅ Impl. |
+| T-02 | `-c textord_min_linesize=2.5` — corrige bug de diacríticos PT (ã,ç,ê,õ lidos como linha separada) | Reduz CER em documentos PT | ✅ Impl. |
+| T-03 | `-c tessedit_char_blacklist=\`` — elimina backtick do output | Elimina invalid_markdown_rate 3.57% → 0% | ✅ Impl. |
+| T-04 | `-c textord_noise_rejrows=0 -c textord_noise_rejwords=0` — desabilita rejeição agressiva de linhas/palavras | Reduz deleções de texto válido | ✅ Impl. |
+| T-05 | `-c crunch_del_rating=40` (padrão 60) — threshold mais permissivo para deleção de palavras | Preserva mais tokens borderline | ✅ Impl. |
+| T-06 | `-c language_model_penalty_non_dict_word=0.05` (padrão 0.15) — menos penalidade para vocab financeiro | Melhora CNPJ, ATIVO, EBITDA etc. | ✅ Impl. |
+| T-07 | `-c preserve_interword_spaces=1` — preserva espaços entre colunas de tabela | Melhora cell_cer | ✅ Impl. |
+| T-08 | CLAHE preprocessing via `_clahe_preprocess()` — converte para grayscale + aplica CLAHE antes do OCR | Melhora scans com iluminação irregular | ✅ Impl. |
+| T-09 | `TESSERACT_TESSDATA_DIR` env var → `--tessdata-dir` flag — suporte a `tessdata_best` | ~5% CER adicional (download manual necessário) | ✅ Impl. |
+| T-10 | `TESSERACT_DPI` env var — sobrescreve DPI calculado | Override para casos especiais | ✅ Impl. |
+| T-11 | `TESSERACT_CONF_MIN` env var — filtro de confiança mínima (0–100, padrão 0 = sem filtro) | Reduz tokens de baixa qualidade | ✅ Impl. |
+
+### Parâmetros fixos (sempre ativos)
+
+Todos fixos no código — sem configuração necessária:
+
+| Parâmetro | Valor | Motivo |
+|---|---|---|
+| `textord_min_linesize` | `2.5` | Bug diacríticos PT — sempre necessário para `por` |
+| `tessedit_char_blacklist` | `` ` `` | Sempre gera Markdown inválido |
+| `textord_noise_rejrows` | `0` | Deleção falsa de linhas válidas |
+| `textord_noise_rejwords` | `0` | Deleção falsa de palavras válidas |
+| `crunch_del_rating` | `40` | Menos agressivo que padrão 60 |
+| `language_model_penalty_non_dict_word` | `0.05` | Vocab financeiro |
+| `preserve_interword_spaces` | `1` | Separação de colunas em tabelas |
+| CLAHE preprocessing | clipLimit=2.0, tileGridSize=8×8 | Local contrast enhancement |
+
+### Variáveis de ambiente
+
+| Var | Padrão | Efeito |
+|---|---|---|
+| `TESSERACT_LANG` | `por` | Idioma Tesseract |
+| `TESSERACT_PSM` | `3` | Page segmentation mode |
+| `TESSERACT_OEM` | `1` | OCR engine mode (LSTM) |
+| `TESSERACT_DPI` | `72 × ocr_render_scale` | Override DPI calculado |
+| `TESSERACT_TESSDATA_DIR` | não definido | Caminho para tessdata_best |
+| `TESSERACT_CONF_MIN` | `0` | Confiança mínima (0–100) |
+
+### O que NÃO foi implementado
+
+| Item | Motivo |
+|---|---|
+| PSM padrão diferente (4, 11) | Precisa de benchmark para validar — PSM 3 correto para documentos mistos |
+| `user_words` / `user_patterns` | Manutenção custosa; ganho menor que DPI+diacritics fix |
+| Fine-tuning (tesstrain) | Explicitamente excluído |
+| `OMP_THREAD_LIMIT` | Variável de ambiente do SO — documentada na docstring do módulo |
+
+### Benchmark esperado após implementação
+
+```powershell
+.\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix "v2"
+```
+
+Metas:
+- deletion_rate: 27.4% → <15%
+- CER: 43.15% → <30%
+- invalid_markdown_rate: 3.57% → 0%
+
+---
+
+## Fase 9 — RapidOCR ONNX e OpenVINO
+
+### Diagnóstico Fase 8
+
+Ambas as variantes partilham as mesmas fraquezas estruturais (failure_rate ≈ 0.9% — engine estável, mas qualidade baixa):
+
+| Métrica | RapidOCR-ONNX | RapidOCR-OpenVINO | Causa raiz |
+|---|---|---|---|
+| cer_normalized | 0.3596 | 0.3633 | modelo ch + diacríticos perdidos |
+| insertion_rate (omissões) | **0.4968** | **0.4987** | texto não detectado/reconhecido |
+| deletion_rate (extras) | 0.0273 | 0.0278 | baixo — poucas alucinações |
+| substitution_rate | 0.0761 | 0.0754 | diacríticos → caractere errado |
+| cell_cer | 0.6702 | 0.8889 | texto pequeno perdido em células |
+| currency_exact_match | 0.3403 | 0.3361 | R$ perdido por diacríticos adjacentes |
+
+**Nota:** `insertion_rate` nesta codebase representa palavras da referência **ausentes** no output (semântica invertida vs ASR padrão).
+
+**Piores páginas (ambas):** `ocr_table` com degradação (skew, lowdpi, noise, blur, grayscale, jpeg). Páginas 156, 162, 148, 181, 161, 182 — coincidentes em ambas as variantes.
+
+### Causas raiz identificadas
+
+1. **Modelo padrão PP-OCRv4 ch (Chinês):** não contém ã, ç, ê, õ na codificação de saída — modelo bundled em `rapidocr-onnxruntime 1.4.4` é treinado para Chinês simplificado + ASCII básico.
+2. **`unclip_ratio=1.6` clipa diacríticos:** ascendentes de ã, â, ê e descenders de ç estouram caixas de detecção não expandidas o suficiente.
+3. **`box_thresh=0.5` e `det_thresh=0.3` conservadores:** perdem caixas fracas em scans degradados (lowdpi, jpeg, blur).
+4. **CLAHE ausente:** scans chegam ao detector sem enhancement local de contraste.
+
+### Otimizações implementadas (Fase 9)
+
+| ID | Ação | Impacto esperado | Status |
+|---|---|---|---|
+| R-01 | CLAHE via canal L do espaço LAB — `_clahe_preprocess()` retorna BGR 3-channel (preserva cor vs grayscale dos outros backends) | Melhora recall em scans degradados | ✅ Impl. |
+| R-02 | `det_db_unclip_ratio` 1.6 → 1.8 — expande caixas detectadas para incluir diacríticos | Reduz clipagem de ã, ç, ê nas bordas | ✅ Impl. |
+| R-03 | `det_db_box_thresh` 0.5 → 0.45 — recupera caixas fracas em scans de baixo contraste | Melhora recall em tabelas degradadas | ✅ Impl. |
+| R-04 | `det_db_thresh` 0.3 → 0.25 — threshold pixel-level mais permissivo para ink fraco | Recupera texto em fotocópias | ✅ Impl. |
+| R-05 | `text_score` exposto via `RAPIDOCR_TEXT_SCORE` (padrão 0.5 mantido) | Tunável por env var | ✅ Impl. |
+| R-06 | `with_angle_cls=False` por padrão — documentos PT portrait não precisam | Remove latência desnecessária | ✅ Impl. |
+| R-07 | `RAPIDOCR_REC_KEYS` env var para dict de caracteres — necessário ao trocar para modelo Latin | Habilita modelos Latin sem hardcode | ✅ Impl. |
+| R-08 | try/except no construtor — fallback gracioso para versões do pacote que não aceitam os kwargs | Robustez cross-version | ✅ Impl. |
+
+### Parâmetros e seus padrões (Fase 9)
+
+| Parâmetro | Padrão v1 (antes) | Padrão v2 (Fase 9) | Motivo |
+|---|---|---|---|
+| CLAHE preprocessing | ausente | LAB L-channel, clipLimit=2.0, 8×8 | Contrast enhancement preservando cor |
+| `det_db_unclip_ratio` | 1.6 | **1.8** | Diacríticos clipados nas bordas |
+| `det_db_box_thresh` | 0.5 | **0.45** | Caixas fracas em scans degradados |
+| `det_db_thresh` | 0.3 | **0.25** | Ink fraco em fotocópias |
+| `text_score` | 0.5 | 0.5 (exposto) | Tunável, padrão mantido |
+| `with_angle_cls` | True (padrão pacote) | **False** | Documentos portrait não precisam |
+
+### Variáveis de ambiente
+
+| Var | Padrão | Efeito |
+|---|---|---|
+| `RAPIDOCR_DET_MODEL` | não definido | Caminho para modelo de detecção alternativo |
+| `RAPIDOCR_REC_MODEL` | não definido | Caminho para modelo Latin (PP-OCRv4 latin, PP-OCRv6) |
+| `RAPIDOCR_REC_KEYS` | não definido | Dict de caracteres para modelo não-padrão (ex: `en_dict.txt`) |
+| `RAPIDOCR_UNCLIP_RATIO` | `1.8` | Expansão de caixas DB (1.5–2.0) |
+| `RAPIDOCR_BOX_THRESH` | `0.45` | Score mínimo por caixa (0.3–0.6) |
+| `RAPIDOCR_DET_THRESH` | `0.25` | Threshold pixel-level do mapa DB (0.2–0.4) |
+| `RAPIDOCR_TEXT_SCORE` | `0.5` | Confiança mínima por linha |
+| `RAPIDOCR_ANGLE_CLS` | `0` | Ativar classificador de ângulo (`1` = opt-in) |
+
+### O que NÃO foi implementado
+
+| Item | Motivo |
+|---|---|
+| Modelo Latin como padrão | Requer download de model + dict — opt-in via env var existente |
+| Modelo PP-OCRv6 como padrão | CF-2: DLL incompatibility no Windows; opt-in via env var |
+| `score_mode: slow` | Ganho marginal; aumenta latência em todas as páginas |
+| `intra_op_num_threads` / `inference_num_threads` | Padrão automático do ONNX/OpenVINO é suficiente |
+
+### Benchmark esperado após implementação
+
+```powershell
+.\scripts\run_benchmark.ps1 -Engine rapidocr-onnx -AllPages -RunSuffix "v2"
+.\scripts\run_benchmark.ps1 -Engine rapidocr-openvino -AllPages -RunSuffix "v2"
+```
+
+Metas (v1 → v2, sem troca de modelo):
+- insertion_rate: 49.7% → <40%
+- substitution_rate: 7.6% → <5%
+- cer_normalized: 0.360 → <0.30
+- `deletion_rate` não deve piorar (CLAHE não gera falsos positivos)
+
+---
+
+## Melhorias de Infraestrutura de Benchmark (2026-10-01)
+
+### compute_metrics.py — Paralelização com ProcessPoolExecutor
+
+O loop de páginas de `scripts/compute_metrics.py` foi paralelizado usando
+`ProcessPoolExecutor` com um worker por core de CPU.
+
+| Antes | Depois | Hardware |
+|---|---|---|
+| ~60 min (sequencial) | ~10 min | 12 cores, corpus 224 páginas |
+
+**Por que é seguro:**
+- Cada página é processada de forma independente (sem estado compartilhado).
+- A função worker `_process_page` é definida em nível de módulo (picklable), garantindo
+  compatibilidade com o método `spawn` do Windows.
+- Os resultados são ordenados por número de página após a coleta, produzindo
+  output idêntico ao da versão sequencial.
+
+**Guard necessário no Windows:** o bloco `if __name__ == "__main__":` já existia
+no script antes da paralelização (linha 1102+), protegendo contra execução
+recursiva nos workers.
+
+### run_benchmark.ps1 — Correção do splatting @metricsFiles
+
+**Problema:** quando apenas uma engine é executada, `Get-ChildItem | ForEach-Object { $_.FullName }`
+retorna uma string (não array). `@string` em PowerShell itera sobre os caracteres
+individuais, passando `\` e `.` como argumentos ao `compare_engines.py`, que
+os interpretava como caminhos de arquivo válidos e falhava silenciosamente.
+
+**Sintoma observado:**
+```
+WARNING: skipping \: ...
+WARNING: skipping .: ...
+ERROR: no valid metrics files loaded
+```
+
+**Correção:** envolver a atribuição em `@(...)` força o resultado a ser sempre
+um array, independente do número de arquivos retornados:
+```powershell
+$metricsFiles = @(Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" ... |
+    ForEach-Object { $_.FullName })
+```

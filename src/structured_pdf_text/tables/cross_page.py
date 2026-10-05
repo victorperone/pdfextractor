@@ -343,6 +343,7 @@ def _merge(previous: StructuredTable, following: StructuredTable) -> StructuredT
         row_count=previous.row_count + following.row_count + row_shift,
         confidence=min(previous.confidence, following.confidence),
         method=previous.method,
+        header_rows=previous.header_rows,
         continued_from_previous_page=True,
         continues_to_next_page=following.continues_to_next_page,
     )

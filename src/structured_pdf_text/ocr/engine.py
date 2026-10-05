@@ -46,5 +46,12 @@ class OcrEngine(Protocol):
             confidence.
         """
 
-    def recognize_region(self, page_image: object, page_index: int, region_bbox: BBox) -> list[OcrToken]:
-        """Run OCR over a region crop and map tokens back to page coordinates."""
+    def recognize_region(
+        self, page_image: object, page_index: int, region_bbox: BBox,
+        *, page_bbox: BBox | None = None,
+    ) -> list[OcrToken]:
+        """Run OCR over a region and map tokens to page points when supplied.
+
+        ``region_bbox`` is in raster pixels for legacy callers, or in PDF page
+        points when ``page_bbox`` is supplied.
+        """

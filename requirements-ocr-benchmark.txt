@@ -3,9 +3,8 @@
 # Ambiente: Windows Server 2025, Python 3.12.10, AMD64
 # Tesseract: 5.5.3 (executável do sistema, tessdata: por)
 #
-# INSTALAÇÃO (ordem importa para openvino):
-#   pip install -r requirements-ocr-benchmark.txt
-#   pip install rapidocr-openvino==1.4.4 --no-deps
+# Instalação: pip install -r requirements-ocr-benchmark.txt
+# Provider engines are installed declaratively with the unified RapidOCR package.
 #
 # Ou usar o script: scripts/setup_ocr_benchmark.ps1
 
@@ -20,14 +19,15 @@ paddleocr==3.7.0
 paddlex[ocr]==3.7.2
 
 # Fase 4: RapidOCR ONNX Runtime
-rapidocr-onnxruntime==1.4.4
+rapidocr==3.9.2
 onnxruntime==1.30.0
 
-# Fase 5: OpenVINO (instalar antes de rapidocr-openvino)
+# Fase 5: OpenVINO provider for unified RapidOCR
 openvino==2024.4.0
-# rapidocr-openvino==1.4.4  ← instalar separado com --no-deps (ver nota acima)
 
 # Fase 7: EasyOCR (PyTorch CPU)
+# Resolve as wheels CPU publicadas no índice oficial do PyTorch.
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.14.0+cpu   # via: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 torchvision==0.29.0+cpu
 easyocr==1.7.2

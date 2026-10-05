@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 
-def process_memory_snapshot() -> dict[str, Any]:
+def _current_process_memory_snapshot() -> dict[str, Any]:
     """Return current and peak RSS in bytes, or ``None`` when unavailable.
 
     Metrics describe this process only, never its child processes. Linux and
@@ -103,6 +105,100 @@ def process_memory_snapshot() -> dict[str, Any]:
                 f"{type(exc).__name__}: {exc}; "
                 f"fallback {type(fallback_exc).__name__}: {fallback_exc}"
             )
+
+
+def process_memory_snapshot() -> dict[str, Any]:
+    """Return parent and sampled process-tree RSS when psutil is available."""
+    snapshot = _current_process_memory_snapshot()
+    parent_current = snapshot.get("current_rss_bytes")
+    child_current = 0
+    child_peak = 0
+    child_count = 0
+    child_peaks_available = True
+    error = None
+    try:
+        import psutil
+
+        parent = psutil.Process(os.getpid())
+        for child in parent.children(recursive=True):
+            try:
+                info = child.memory_info()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            child_current += int(info.rss)
+            peak = getattr(info, "peak_wset", None)
+            if peak is None:
+                child_peaks_available = False
+            else:
+                child_peak += int(peak)
+            child_count += 1
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+
+    snapshot.update({
+        "parent_current_rss_bytes": parent_current,
+        "children_current_rss_bytes": child_current if child_count or error is None else None,
+        "process_tree_current_rss_bytes": (
+            parent_current + child_current if parent_current is not None and error is None else parent_current
+        ),
+        "process_tree_peak_rss_bytes": (
+            snapshot.get("peak_rss_bytes") + child_peak
+            if snapshot.get("peak_rss_bytes") is not None and error is None and child_peaks_available else None
+        ),
+        "child_process_count": child_count,
+        "process_tree_error": error,
+    })
+    return snapshot
+
+
+class ProcessTreeMemorySampler:
+    """Sample current parent + descendant RSS throughout a measured run."""
+
+    def __init__(self, interval_seconds: float = 0.2) -> None:
+        if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, (int, float)) or interval_seconds <= 0:
+            raise ValueError("interval_seconds must be a positive number")
+        self.interval_seconds = float(interval_seconds)
+        self.sampled_process_tree_peak_rss_bytes: int | None = None
+        self.max_child_process_count = 0
+        self.sample_count = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _sample(self) -> None:
+        while not self._stop.is_set():
+            self._take_sample()
+            self._stop.wait(self.interval_seconds)
+
+    def _take_sample(self) -> None:
+        snapshot = process_memory_snapshot()
+        current = snapshot.get("process_tree_current_rss_bytes")
+        if isinstance(current, int):
+            self.sampled_process_tree_peak_rss_bytes = max(
+                current, self.sampled_process_tree_peak_rss_bytes or 0
+            )
+        self.max_child_process_count = max(
+            self.max_child_process_count, int(snapshot.get("child_process_count") or 0)
+        )
+        self.sample_count += 1
+
+    def __enter__(self) -> "ProcessTreeMemorySampler":
+        self._take_sample()
+        self._thread = threading.Thread(target=self._sample, name="pdfextractor-memory-sampler", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.interval_seconds * 4))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sampled_process_tree_peak_rss_bytes": self.sampled_process_tree_peak_rss_bytes,
+            "sampling_interval_seconds": self.interval_seconds,
+            "sample_count": self.sample_count,
+            "max_child_process_count": self.max_child_process_count,
+        }
 
 
 def _unavailable(reason: str) -> dict[str, Any]:

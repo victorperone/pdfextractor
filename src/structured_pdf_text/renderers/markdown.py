@@ -6,6 +6,8 @@ blocks — this module only formats text and tables (INV-06).
 """
 from __future__ import annotations
 
+import string
+
 from structured_pdf_text.document import (
     ContentKind,
     PageContentBlock,
@@ -14,7 +16,7 @@ from structured_pdf_text.document import (
 )
 
 
-def render_markdown(document: StructuredDocument) -> str:
+def render_markdown(document: StructuredDocument, *, diagnostic: bool = False) -> str:
     """Render a ``StructuredDocument`` to a Markdown string.
 
     Iterates each page's ``content_blocks`` in ``order_index`` order. Tables
@@ -46,7 +48,10 @@ def render_markdown(document: StructuredDocument) -> str:
             # (e.g. pages produced by older code paths in tests).
             page_parts = _render_page_legacy(page, table_map, preserve_hf)
 
-        sections.append(_render_page_section(page.page_index, page_parts))
+        sections.append(
+            _render_page_section(page.page_index, page_parts)
+            if diagnostic else "\n\n".join(page_parts)
+        )
 
     return "\n\n".join(sections).strip()
 
@@ -72,16 +77,16 @@ def _render_content_block(
         # canonical blocks rely exclusively on ``suppressed``.
         if not preserve_hf and not block.line_ids:
             return ""
-        return block.text
+        return _escape_inline_text(block.text, context="paragraph")
 
     if block.kind == ContentKind.TITLE:
         level = block.heading_level or 1
         prefix = "#" * max(1, min(level, 6))
-        return f"{prefix} {block.text}" if block.text else ""
+        return f"{prefix} {_escape_inline_text(block.text, context='heading')}" if block.text else ""
 
     if block.kind == ContentKind.LIST and block.list_items:
         return "\n".join(
-            f"{'  ' * max(0, item.level)}{item.marker} {item.text}"
+            f"{'  ' * max(0, item.level)}{item.marker} {_escape_inline_text(item.text, context='list')}"
             for item in block.list_items
         )
 
@@ -92,18 +97,14 @@ def _render_content_block(
         rendered = _render_table(table)
         if not rendered:
             return ""
-        return (
-            f"#### Tabela {table.table_id} "
-            f"(página: {block.page_index + 1})\n\n"
-            f"{rendered}"
-        )
+        return rendered
 
     if block.kind == ContentKind.FIGURE:
         # No semantic representation yet. Preserve OCR text when present so it
         # is not silently lost. Empty figures produce no Markdown output.
-        return block.text or ""
+        return _escape_inline_text(block.text, context="paragraph") if block.text else ""
 
-    return block.text
+    return _escape_inline_text(block.text, context="paragraph")
 
 
 # ---------------------------------------------------------------------------
@@ -128,13 +129,9 @@ def _render_page_legacy(
         page_parts: list[str] = []
         body = page.reading_text.strip()
         if body:
-            page_parts.append(body)
+            page_parts.append(_escape_inline_text(body, context="paragraph"))
         for table, rendered in rendered_tables:
-            page_parts.append(
-                f"#### Tabela {table.table_id} "
-                f"(página: {page.page_index + 1})\n\n"
-                f"{rendered}"
-            )
+            page_parts.append(rendered)
         return page_parts
 
     page_parts: list[str] = []
@@ -159,7 +156,7 @@ def _render_page_legacy(
                 if line.text.strip()
             )
             if title_text:
-                page_parts.append(f"{prefix} {title_text}")
+                page_parts.append(f"{prefix} {_escape_inline_text(title_text, context='heading')}")
             continue
 
         body = "\n".join(
@@ -168,14 +165,10 @@ def _render_page_legacy(
             if line.text.strip()
         ).strip()
         if body:
-            page_parts.append(body)
+            page_parts.append(_escape_inline_text(body, context="paragraph"))
 
     for table, rendered in rendered_tables:
-        page_parts.append(
-            f"#### Tabela {table.table_id} "
-            f"(página: {page.page_index + 1})\n\n"
-            f"{rendered}"
-        )
+        page_parts.append(rendered)
     return page_parts
 
 
@@ -246,14 +239,14 @@ def _render_table(table: StructuredTable) -> str:
     """Render a ``StructuredTable`` as a GFM pipe table or, for merged cells, as HTML.
 
     Returns an empty string when the table has no cells or no columns. The
-    first row is always treated as the header row. Tables with any rowspan > 1
+    only rows listed in ``table.header_rows`` are treated as headers. Tables with any rowspan > 1
     or colspan > 1 are rendered as an HTML ``<table>`` block so that span
     semantics are not silently lost.
     """
     if not table.cells or table.column_count <= 0:
         return ""
 
-    if any(cell.rowspan > 1 or cell.colspan > 1 for cell in table.cells):
+    if any(cell.rowspan > 1 or cell.colspan > 1 for cell in table.cells) or table.header_rows != (0,):
         return _render_spanned_table_html(table)
 
     row_count = max(
@@ -290,7 +283,7 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
     for cell in sorted(table.cells, key=lambda item: (item.row, item.col)):
         if cell.row < 0 or cell.row >= row_count:
             continue
-        tag = "th" if cell.row == 0 else "td"
+        tag = "th" if cell.row in table.header_rows else "td"
         attrs: list[str] = []
         if cell.rowspan > 1:
             attrs.append(f'rowspan="{cell.rowspan}"')
@@ -308,11 +301,41 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
 
 def _escape_cell(value: str) -> str:
     return (
-        value
-        .replace("|", "\\|")
+        _escape_inline_text(value, context="table")
         .replace("\r\n", "<br>")
         .replace("\n", "<br>")
     )
+
+
+def _escape_inline_text(value: str, *, context: str = "paragraph") -> str:
+    """Escape Markdown syntax only where literal text could change structure."""
+    if context not in {"paragraph", "heading", "list", "table"}:
+        raise ValueError(f"Unknown Markdown text context: {context!r}")
+    escaped = set("\\`*_[]<>!")
+    if context == "table":
+        escaped.add("|")
+    lines = value.splitlines(keepends=True)
+    if not lines:
+        lines = [value]
+    output: list[str] = []
+    for line in lines:
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        stripped = content.lstrip()
+        leading = content[: len(content) - len(stripped)]
+        if context == "heading" and stripped.startswith("#"):
+            escaped.add("#")
+        if context in {"paragraph", "list"}:
+            if stripped.startswith((">", "#")):
+                escaped.add(stripped[0])
+            if stripped.startswith(("- ", "+ ", "* ")):
+                escaped.add(stripped[0])
+            if len(stripped) > 1 and stripped[0].isdigit():
+                marker = stripped.split(maxsplit=1)[0]
+                if marker.endswith((".", ")")):
+                    escaped.add(marker[-1])
+        output.append(leading + "".join(("\\" + char) if char in escaped else char for char in stripped) + ending)
+    return "".join(output)
 
 
 def _escape_html(value: str) -> str:

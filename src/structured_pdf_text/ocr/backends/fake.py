@@ -105,7 +105,8 @@ class FakeOCRBackend:
         return list(self.tokens)
 
     def recognize_region(
-        self, page_image: object, page_index: int, region_bbox: BBox
+        self, page_image: object, page_index: int, region_bbox: BBox,
+        *, page_bbox: BBox | None = None,
     ) -> list[OcrToken]:
         return list(self.tokens)
 

@@ -192,7 +192,8 @@ def _log_ocr_versions() -> None:
         except ImportError:
             versions[pkg] = "not_installed"
     import math as _math
-    budget_mib = float(os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "8.0"))
+    from structured_pdf_text.ocr.env import env_float
+    budget_mib = env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", 8.0, minimum=0.01)
     det_limit = max(960, round(_math.sqrt(int(budget_mib * 1024 * 1024) / 3) * 1.2 / 32) * 32)
     _ocr_debug(
         "VERSIONS " + " ".join(f"{k}={v}" for k, v in versions.items())
@@ -310,6 +311,7 @@ class PaddleOcrEngine:
 
     def __init__(self, language: str = "pt", num_threads: int = 0, **options: Any) -> None:
         self.language = language
+        self.model_profile = options.pop("model_profile", language)
         self.num_threads = num_threads
         self.cache_home = options.pop("cache_home", None) or os.environ.get(
             "PADDLE_PDX_CACHE_HOME",
@@ -781,9 +783,25 @@ class PaddleOcrEngine:
         page_image: object,
         page_index: int,
         region_bbox: BBox,
+        *,
+        page_bbox: BBox | None = None,
     ) -> list[OcrToken]:
-        image = _crop_image(page_image, region_bbox)
-        return self.recognize_page(image, page_index, region_bbox)
+        if page_bbox is None:
+            image = _crop_image(page_image, region_bbox)
+            return self.recognize_page(image, page_index, region_bbox)
+        import numpy as np
+        from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page, offset_tokens
+
+        image, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(
+            np.asarray(page_image), region_bbox, page_bbox
+        )
+        if image.size == 0:
+            return []
+        local = self.recognize_page(image, page_index)
+        return map_tokens_to_page(
+            offset_tokens(local, float(cx0), float(cy0)), page_bbox, width, height
+        )
 
     def _get_ocr(self) -> Any:
         # Fast path: no lock needed once initialised.
@@ -830,9 +848,8 @@ class PaddleOcrEngine:
         # tensor, making upscaling pointless for detection.  We use √2 * base
         # (A4 aspect ratio) to accommodate the long side of portrait documents.
         import math as _math
-        _budget_mib = float(
-            os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "8.0")
-        )
+        from structured_pdf_text.ocr.env import env_float
+        _budget_mib = env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", 8.0, minimum=0.01)
         _budget_bytes = int(_budget_mib * 1024 * 1024)
         # Long side of an A4-portrait image that fills the budget: √(B/3 · √2)
         # rounded to the nearest multiple of 32 (detection-model requirement).
@@ -854,7 +871,7 @@ class PaddleOcrEngine:
             local_models = (
                 _resolve_required_local_models(
                     cache_home,
-                    language=self.language,
+                    language=self.model_profile,
                     options=options,
                 )
             )
@@ -882,7 +899,7 @@ class PaddleOcrEngine:
 
         # Model names are sourced from the centralised profile so they stay in
         # sync with the directories resolved above.
-        profile = get_profile(self.language)
+        profile = get_profile(self.model_profile)
         options.update(profile.name_kwargs)
 
         effective_threads = self.num_threads
@@ -1791,6 +1808,11 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
                             box,
                             _as_rotation(payload[2]) if len(payload) > 2 else 0,
                         ))
+                else:
+                    # PaddleOCR 3.x predict() yields PipelineResult objects inside a
+                    # list; they are not dicts or list/tuples, so the branches above
+                    # silently drop them. Recurse to hit the hasattr(raw, "json") path.
+                    records.extend(_records(item))
             except (TypeError, ValueError, IndexError, OverflowError):
                 # Ignore a malformed record while retaining usable siblings.
                 continue
@@ -1908,13 +1930,13 @@ def _deskew_image(
     *,
     page_index: int | None = None,
 ) -> tuple[object, float]:
-    """Detecta e corrige inclinação pequena em imagens de página (scan ou foto).
+    """Detect and correct small skew in page images (scan or photo).
 
-    Cobre todas as 4 orientações base (0/90/180/270°) porque cv2.minAreaRect
-    detecta o desvio em relação ao eixo mais próximo, não só ao horizontal.
+    Covers all 4 base orientations (0/90/180/270°) because cv2.minAreaRect
+    detects deviation relative to the nearest axis, not only to horizontal.
 
-    Retorna (imagem_corrigida, angulo_aplicado).
-    angulo_aplicado == 0.0 significa que nenhuma correção foi aplicada.
+    Returns (corrected_image, applied_angle).
+    applied_angle == 0.0 means no correction was applied.
     """
     try:
         import cv2

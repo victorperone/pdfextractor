@@ -7,6 +7,7 @@ actual backend classes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 
 
 @dataclass(frozen=True)
@@ -21,30 +22,28 @@ class BackendEntry:
     setup_hint: str
 
 
+PUBLIC_ENGINES = ("paddle", "rapidocr", "easyocr", "tesseract")
+LEGACY_ENGINE_ALIASES = {
+    "rapidocr-onnx": ("rapidocr", "onnxruntime"),
+    "rapidocr-openvino": ("rapidocr", "openvino"),
+}
+
 REGISTRY: dict[str, BackendEntry] = {
     "paddle": BackendEntry(
         name="paddle",
         display_name="PaddleOCR PP-OCRv6 medium",
         default_runtime="paddle_static",
-        default_profile="ppocrv6-medium",
+        default_profile="pt",
         extras="ocr",
-        setup_hint="pdftext setup-models --language pt",
+        setup_hint="pdftext setup-paddle-models --paddle-model-profile pt",
     ),
-    "rapidocr-onnx": BackendEntry(
-        name="rapidocr-onnx",
-        display_name="RapidOCR PP-OCRv6 medium + ONNX Runtime",
+    "rapidocr": BackendEntry(
+        name="rapidocr",
+        display_name="RapidOCR",
         default_runtime="onnxruntime",
-        default_profile="ppocrv6-medium",
-        extras="ocr-rapid-onnx",
-        setup_hint="pdftext setup-models --ocr-engine rapidocr-onnx",
-    ),
-    "rapidocr-openvino": BackendEntry(
-        name="rapidocr-openvino",
-        display_name="RapidOCR PP-OCRv6 medium + OpenVINO",
-        default_runtime="openvino",
-        default_profile="ppocrv6-medium",
-        extras="ocr-rapid-openvino",
-        setup_hint="pdftext setup-models --ocr-engine rapidocr-openvino",
+        default_profile="latin/pt-compatible",
+        extras="ocr-rapidocr-onnx",
+        setup_hint='pip install "structured-pdf-text[ocr-rapidocr-onnx]"',
     ),
     "tesseract": BackendEntry(
         name="tesseract",
@@ -60,7 +59,7 @@ REGISTRY: dict[str, BackendEntry] = {
         default_runtime="torch-cpu",
         default_profile="latin-g2-pt",
         extras="ocr-easyocr",
-        setup_hint="pdftext setup-models --ocr-engine easyocr",
+        setup_hint='pip install "structured-pdf-text[ocr-easyocr]"',
     ),
 }
 
@@ -71,6 +70,13 @@ def get_entry(engine: str) -> BackendEntry:
     Raises ``KeyError`` for unknown names.  Callers that want a softer error
     should check ``engine in REGISTRY`` first.
     """
+    if engine in LEGACY_ENGINE_ALIASES:
+        warnings.warn(
+            f"{engine!r} is deprecated; use ocr_engine='rapidocr' and set ocr_provider explicitly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        engine = LEGACY_ENGINE_ALIASES[engine][0]
     if engine not in REGISTRY:
         raise KeyError(
             f"Unknown OCR engine: {engine!r}. "

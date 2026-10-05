@@ -15,6 +15,8 @@ Key responsibilities:
 from __future__ import annotations
 
 import ctypes
+import functools
+import threading
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,18 @@ except Exception:  # pragma: no cover - exercised only when dependency is missin
 
 class PdfiumUnavailableError(RuntimeError):
     pass
+
+
+_PDFIUM_LOCK = threading.RLock()
+
+
+def _pdfium_serialized(method):
+    """Serialize every source operation that may enter PDFium's native code."""
+    @functools.wraps(method)
+    def wrapped(*args, **kwargs):
+        with _PDFIUM_LOCK:
+            return method(*args, **kwargs)
+    return wrapped
 
 
 class PdfiumNativeEvidenceSource:
@@ -81,6 +95,7 @@ class PdfiumNativeEvidenceSource:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
+    @_pdfium_serialized
     def open(self) -> DocumentContext:
         """Open and validate the PDF, returning a ``DocumentContext``.
 
@@ -123,6 +138,7 @@ class PdfiumNativeEvidenceSource:
         )
         return self._context
 
+    @_pdfium_serialized
     def extract_page(self, page_index: int) -> NativePageEvidence:
         """Extract immutable native evidence for a single page.
 
@@ -227,6 +243,7 @@ class PdfiumNativeEvidenceSource:
         finally:
             page.close()
 
+    @_pdfium_serialized
     def render_page(self, page_index: int, scale: float = 0.5) -> Any:
         """Render a low-resolution diagnostic image while the document is open."""
         if self._doc is None:
@@ -250,6 +267,7 @@ class PdfiumNativeEvidenceSource:
         finally:
             page.close()
 
+    @_pdfium_serialized
     def close(self) -> None:
         if self._doc is not None:
             self._doc.close()

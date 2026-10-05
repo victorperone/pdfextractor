@@ -1,9 +1,21 @@
-# Corpus local
+# Local corpus
 
-Coloque aqui PDFs reais usados para validação manual do extrator. Os arquivos
-PDF são ignorados pelo Git por padrão.
+Place real PDFs here for manual validation of the extractor. PDF files
+are ignored by Git by default.
 
-Sugestão de organização:
+The local Stress V4 acceptance set is verified against
+[`acceptance-corpus.lock.json`](acceptance-corpus.lock.json). After placing the
+PDF, reference, manifest, and validation report alongside the lock, run:
+
+```bash
+python scripts/provision_acceptance_corpus.py
+```
+
+The lock records sizes, page count, and SHA-256 values but does not redistribute
+the corpus or assert its license. Operators remain responsible for the source
+corpus terms.
+
+Suggested organization:
 
 ```text
 corpus/
@@ -21,7 +33,7 @@ corpus/
 └── legacy-system/
 ```
 
-Para a entrega atual, o foco é observar a evidência nativa:
+For the current deliverable, the focus is on observing native evidence:
 
 ```bash
 PYTHONPATH=src python3 -m structured_pdf_text.cli inspect \
@@ -31,6 +43,6 @@ PYTHONPATH=src python3 -m structured_pdf_text.cli extract \
   corpus/digital-simple/exemplo.pdf --output reading
 ```
 
-O dump bruto mostra os caracteres na sequência exposta pelo PDFium, Unicode,
-coordenadas, origem, fonte, tamanho, ângulo, flags, imagens, paths,
-anotações, caixas da página e capacidades disponíveis.
+The raw dump shows the characters in the sequence exposed by PDFium, Unicode,
+coordinates, origin, font, size, angle, flags, images, paths,
+annotations, page boxes, and available capabilities.

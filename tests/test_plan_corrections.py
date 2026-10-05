@@ -12,7 +12,7 @@ import structured_pdf_text.diagnostics.compare as compare_module
 import structured_pdf_text.memory as memory_module
 from structured_pdf_text.api import PdfTextExtractor, _safe_complexity_scale
 from structured_pdf_text.assemble.document import assemble_document
-from structured_pdf_text.config import ExtractorConfig, SecurityLimits
+from structured_pdf_text.config import ExtractorConfig, SecurityLimits, effective_ocr_quality_thresholds
 from structured_pdf_text.diagnostics.compare import ComparisonExtraction, compare_extractors
 from structured_pdf_text.ocr.models import PROFILES, get_profile
 
@@ -41,6 +41,11 @@ def test_render_scale_reduces_only_above_pixel_limit() -> None:
     scale = _safe_complexity_scale(10, 10, 99, 1.0)
     assert scale < 1.0
     assert (10 * scale).__ceil__() * (10 * scale).__ceil__() <= 99
+
+
+def test_render_scale_respects_rgb_byte_limit() -> None:
+    scale = _safe_complexity_scale(100, 100, 1_000_000, 2.0, max_bytes=30_000)
+    assert scale <= 1.0
 
 
 def test_security_limits_no_longer_expose_project_timeout() -> None:
@@ -106,6 +111,27 @@ def test_memory_failure_is_unavailable_not_zero(monkeypatch) -> None:
     assert snapshot["peak_rss_bytes"] is None
 
 
+def test_confidence_thresholds_are_neutral_for_uncalibrated_families() -> None:
+    paddle = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="paddle"))
+    rapid = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="rapidocr"))
+    assert paddle.strong_mean_confidence == 0.90
+    assert rapid.strong_mean_confidence == 0.0
+    assert rapid.max_low_confidence_char_ratio == 1.0
+    assert rapid.minimum_printable_ratio == paddle.minimum_printable_ratio
+
+
+def test_extractor_close_is_idempotent_and_prevents_reuse(tmp_path: Path) -> None:
+    extractor = PdfTextExtractor(ExtractorConfig(mode="native"))
+    extractor.close()
+    extractor.close()
+    try:
+        extractor.extract(tmp_path / "does-not-exist.pdf")
+    except RuntimeError as exc:
+        assert "closed" in str(exc)
+    else:
+        raise AssertionError("closed extractor accepted a new document")
+
+
 def test_compare_never_substitutes_a_failed_requested_reference(monkeypatch, tmp_path: Path) -> None:
     class Adapter:
         def __init__(self, name: str, result: ComparisonExtraction):
@@ -163,12 +189,14 @@ def test_cli_overlay_native_does_not_validate_ocr(monkeypatch, tmp_path: Path) -
     assert code == 0
 
 
-def test_cli_overlay_requires_profile_for_modes_that_can_use_ocr(capsys, tmp_path: Path) -> None:
+def test_cli_overlay_uses_default_paddle_profile_for_ocr_modes(capsys, tmp_path: Path) -> None:
     code = cli_module.main([
         "overlay", str(tmp_path / "not-opened.pdf"), "--page", "1", "--out", str(tmp_path / "out.png"), "--mode", "balanced",
     ])
     assert code == 2
-    assert "--ocr-model-profile is required" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "--ocr-model-profile is required" not in error
+    assert "not-opened.pdf" in error
 
 
 def test_cli_all_failed_comparison_saves_diagnostic_and_returns_nonzero(monkeypatch, capsys, tmp_path: Path) -> None:

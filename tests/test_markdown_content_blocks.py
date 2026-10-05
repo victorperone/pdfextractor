@@ -79,6 +79,7 @@ def _table(
         row_count=row_count,
         confidence=0.9,
         method=TableMethod.STRICT_GRID,
+        header_rows=(0,),
     )
 
 

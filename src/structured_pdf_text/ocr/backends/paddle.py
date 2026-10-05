@@ -20,17 +20,37 @@ CF-4 (Windows DLL isolation):
 """
 from __future__ import annotations
 
-import base64
+import dataclasses
 import importlib.util
-import io
 import json
-import os
 import logging
+import os
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
+
+# Inference timeout: per-request deadline (one page of OCR).
+# Default 2400 s = ~25× the observed ~94 s/page average — exists only to kill
+# a truly frozen process, not to race against normal inference.
+# Override with PADDLE_WORKER_REQUEST_TIMEOUT (or legacy PADDLE_WORKER_TIMEOUT).
+def _worker_request_timeout() -> float:
+    from structured_pdf_text.ocr.env import env_float
+    if "PADDLE_WORKER_REQUEST_TIMEOUT" in os.environ:
+        return env_float("PADDLE_WORKER_REQUEST_TIMEOUT", 2400.0, minimum=0.01)
+    if "PADDLE_WORKER_TIMEOUT" in os.environ:
+        return env_float("PADDLE_WORKER_TIMEOUT", 2400.0, minimum=0.01)
+    return 2400.0
+
+# Init timeout: model loading can be slower than inference on a cold cache.
+# Default 2400 s (same as request) — override with PADDLE_WORKER_INIT_TIMEOUT.
+def _worker_init_timeout() -> float:
+    from structured_pdf_text.ocr.env import env_float
+    return env_float("PADDLE_WORKER_INIT_TIMEOUT", 2400.0, minimum=0.01)
 
 from structured_pdf_text.config import ExtractorConfig, effective_ocr_quality_policy
 from structured_pdf_text.document import OcrToken, SourceKind
@@ -52,6 +72,12 @@ _WORKER_SCRIPT = Path(__file__).parent.parent / "_paddle_subprocess_worker.py"
 
 
 def _resolve_num_threads(num_threads: int) -> int:
+    """Translate ExtractorConfig.num_threads to a concrete value for PaddleOcrEngine.
+
+    -1 means "leave Paddle's own default unchanged" (not passed to the engine).
+     0 means "auto-detect" → max(2, cpu_count).
+    Any positive value is clamped to at least 1.
+    """
     if num_threads == -1:
         return -1
     if num_threads == 0:
@@ -88,7 +114,8 @@ class PaddleOCRBackend:
         from structured_pdf_text.ocr.models import get_profile
 
         self._config = config
-        get_profile(config.language)
+        self._closed = False
+        get_profile(config.paddle_model_profile)
         self._runtime_policy = resolve_paddle_runtime_policy()
         apply_paddle_runtime_policy(self._runtime_policy)
         logging.getLogger(__name__).info(
@@ -102,17 +129,31 @@ class PaddleOCRBackend:
 
         self._subprocess_config: dict | None = None
         self._worker_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        # Serialise all subprocess request/response cycles so two callers
+        # on different threads can never interleave their writes and reads.
+        self._worker_lock: threading.Lock = threading.Lock()
+        # Monotonic counter used as request_id for response matching.
+        self._worker_req_seq: int = 0
+
+        # Resolve cache_home once at construction time, mirroring PaddleOcrEngine's
+        # own resolution, so healthcheck() checks the same directory the engine uses.
+        self._cache_home: str = os.environ.get(
+            "PADDLE_PDX_CACHE_HOME",
+            str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
+        )
+        self._artifact_hashes = self._resolve_artifact_hashes()
 
         if _has_torch_conflict():
             # Subprocess mode (CF-4): torch DLLs would crash paddle at import time.
             # Store config and defer all OCR work to a clean subprocess.
             self._subprocess_config = {
                 "language": config.language,
+                "model_profile": config.paddle_model_profile,
                 "num_threads": _resolve_num_threads(config.num_threads),
                 "ocr_batch_size": config.ocr_batch_size,
                 "quality_variants": config.ocr_quality_variants,
                 "quality_policy": effective_ocr_quality_policy(config).value,
-                "quality_thresholds": config.ocr_quality_thresholds,
+                "quality_thresholds": dataclasses.asdict(config.ocr_quality_thresholds),
                 "mkldnn": _enable_mkldnn,
                 "disable_pir_api": self._runtime_policy.disable_pir_api,
             }
@@ -124,6 +165,7 @@ class PaddleOCRBackend:
             self._engine = PaddleOcrEngine(
                 language=config.language,
                 num_threads=_resolve_num_threads(config.num_threads),
+                model_profile=config.paddle_model_profile,
                 ocr_batch_size=config.ocr_batch_size,
                 quality_variants=config.ocr_quality_variants,
                 quality_policy=effective_ocr_quality_policy(config).value,
@@ -135,8 +177,32 @@ class PaddleOCRBackend:
     # Subprocess worker management (CF-4)
     # ------------------------------------------------------------------
 
+    def _discard_worker(self) -> None:
+        """Stop and forget a worker after any protocol framing failure."""
+        proc = self._worker_proc
+        self._worker_proc = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
     def _ensure_worker(self) -> None:
-        """Start the subprocess worker if not already running."""
+        """Start the subprocess worker if not already running.
+
+        Must be called while ``_worker_lock`` is held (done by ``_worker_send``).
+        Uses ``_raw_send`` directly to avoid re-acquiring the lock for the
+        init handshake.
+        """
         if self._worker_proc is not None and self._worker_proc.poll() is None:
             return  # still alive
 
@@ -144,30 +210,101 @@ class PaddleOCRBackend:
             [sys.executable, str(_WORKER_SCRIPT)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            bufsize=1,  # line-buffered
+            bufsize=0,  # unbuffered binary I/O — flush() is explicit in _raw_send
         )
-        # Send init request
-        init_req = {"method": "init", **self._subprocess_config}  # type: ignore[arg-type]
-        response = self._worker_send(init_req)
+        # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
+        init_req = {"protocol_version": 3, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
+        try:
+            response = self._raw_send(init_req, timeout=_worker_init_timeout())
+        except Exception:
+            self._discard_worker()
+            raise
         if response.get("status") != "ok":
+            self._discard_worker()
             raise RuntimeError(
                 f"Paddle worker init failed: {response.get('error')}"
             )
 
-    def _worker_send(self, request: dict) -> dict:
-        """Send one JSONL request to the worker and return the parsed response."""
+    def _raw_send(self, request: dict, timeout: float | None = None) -> dict:
+        """Write one request and read one response on the raw pipe.
+
+        No lock, no request_id injection — callers must hold ``_worker_lock``
+        before calling this. Init and request deadlines are resolved at call time.
+        """
         assert self._worker_proc is not None
         assert self._worker_proc.stdin is not None
         assert self._worker_proc.stdout is not None
+        if timeout is None:
+            timeout = _worker_request_timeout()
 
         line = json.dumps(request, ensure_ascii=False) + "\n"
         self._worker_proc.stdin.write(line.encode())
         self._worker_proc.stdin.flush()
 
-        response_line = self._worker_proc.stdout.readline()
+        stdout = self._worker_proc.stdout
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut: Future[bytes] = pool.submit(stdout.readline)
+        try:
+            response_line = fut.result(timeout=timeout)
+        except FuturesTimeoutError:
+            self._discard_worker()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise RuntimeError(f"Paddle worker timed out after {timeout}s")
+        else:
+            pool.shutdown(wait=True)
+
         if not response_line:
             raise RuntimeError("Paddle worker closed unexpectedly")
-        return json.loads(response_line)
+
+        try:
+            response = json.loads(response_line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Paddle worker sent malformed JSON: {response_line[:200]!r}"
+            ) from exc
+        if not isinstance(response, dict) or response.get("status") not in ("ok", "error"):
+            raise RuntimeError("Paddle worker sent an invalid response object")
+        return response
+
+    def _worker_send(self, request: dict) -> dict:
+        """Send one JSONL request to the worker and return the parsed response.
+
+        The full write → read cycle is serialised by ``_worker_lock`` so that
+        concurrent callers on different threads cannot interleave their writes
+        and reads and receive mismatched responses.
+
+        A monotonic ``request_id`` is injected into every request and verified
+        against the response, making protocol violations immediately visible
+        rather than silently returning a stale or misrouted result.
+
+        Enforces a per-request read timeout (PADDLE_WORKER_REQUEST_TIMEOUT env
+        var, or legacy PADDLE_WORKER_TIMEOUT; default 2400 s) so that a truly
+        frozen worker never blocks the
+        parent process indefinitely. readline() runs in a background thread;
+        TimeoutError kills the worker and raises RuntimeError.
+        """
+        with self._worker_lock:
+            # Ensure the worker is alive inside the lock so concurrent callers
+            # cannot race to start two workers simultaneously.
+            self._ensure_worker()
+
+            self._worker_req_seq += 1
+            req_id = self._worker_req_seq
+            request = {**request, "protocol_version": 3, "request_id": req_id}
+            try:
+                response = self._raw_send(request)
+            except Exception:
+                self._discard_worker()
+                raise
+
+            resp_id = response.get("request_id")
+            if resp_id != req_id:
+                self._discard_worker()
+                raise RuntimeError(
+                    f"Paddle worker request_id mismatch: sent {req_id}, got {resp_id}"
+                )
+
+            return response
 
     def _call_subprocess(
         self,
@@ -175,29 +312,41 @@ class PaddleOCRBackend:
         image: Any,
         page_index: int,
         region_bbox: BBox | None = None,
+        *,
+        quality_policy: str | None = None,
+        page_bbox: BBox | None = None,
+        quality_variants: bool | None = None,
     ) -> list[OcrToken]:
-        """Serialize image, send to worker, deserialize OcrToken list."""
+        """Write a temporary PNG path, send it to the worker, and decode tokens."""
         from PIL import Image
 
         if not isinstance(image, Image.Image):
             image = Image.fromarray(image)
 
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        image_b64 = base64.b64encode(buf.getvalue()).decode()
+        fd, image_path = tempfile.mkstemp(prefix="pdfextractor-paddle-", suffix=".png")
+        os.close(fd)
+        try:
+            image.save(image_path, format="PNG")
+            req: dict[str, Any] = {
+                "method": method,
+                "image_path": image_path,
+                "page_index": page_index,
+            }
+            if quality_policy is not None:
+                req["quality_policy"] = quality_policy
+            if page_bbox is not None:
+                req["page_bbox"] = [page_bbox.x0, page_bbox.y0, page_bbox.x1, page_bbox.y1]
+            if quality_variants is not None:
+                req["quality_variants"] = quality_variants
+            if region_bbox is not None:
+                req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
 
-        req: dict[str, Any] = {
-            "method": method,
-            "image_b64": image_b64,
-            "page_index": page_index,
-        }
-        if quality_policy is not None:
-            req["quality_policy"] = quality_policy
-        if region_bbox is not None:
-            req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
-
-        self._ensure_worker()
-        response = self._worker_send(req)
+            response = self._worker_send(req)
+        finally:
+            try:
+                os.unlink(image_path)
+            except FileNotFoundError:
+                pass
 
         if response.get("status") != "ok":
             raise RuntimeError(response.get("error", "unknown subprocess error"))
@@ -205,12 +354,23 @@ class PaddleOCRBackend:
         tokens: list[OcrToken] = []
         for item in response.get("tokens", []):
             x0, y0, x1, y1 = item["bbox"]
+            conf = item.get("confidence")
+            # Reconstruct source from the serialized string value; fall back to
+            # OCR_PAGE for responses from older workers that omit the field.
+            raw_source = item.get("source", "ocr_page")
+            try:
+                source = SourceKind(raw_source)
+            except ValueError:
+                source = SourceKind.OCR_PAGE
             tokens.append(
                 OcrToken(
                     text=item["text"],
-                    confidence=float(item["confidence"]),
+                    confidence=float(conf) if conf is not None else None,
                     bbox=BBox(x0, y0, x1, y1),
-                    source_kind=SourceKind.OCR,
+                    source=source,
+                    language=item.get("language") or self._config.language,
+                    rotation=int(item.get("rotation", 0)),
+                    provenance=item.get("provenance"),
                 )
             )
         return tokens
@@ -224,7 +384,7 @@ class PaddleOCRBackend:
         return OCRBackendIdentity(
             engine="paddle",
             runtime="paddle_subprocess" if self._subprocess_config else "paddle_static",
-            profile=self._config.language,
+            profile=self._config.paddle_model_profile,
             language=self._config.language,
             device="cpu",
             package_versions={
@@ -232,8 +392,44 @@ class PaddleOCRBackend:
                 "paddleocr": _package_version("paddleocr"),
                 "paddlex": _package_version("paddlex"),
             },
-            artifact_hashes={},
+            artifact_hashes=dict(self._artifact_hashes),
+            extra={
+                "render_scale": self._config.effective_ocr_render_scale(),
+                "quality_policy": effective_ocr_quality_policy(self._config).value,
+                "quality_variants": self._config.ocr_quality_variants,
+                "ocr_batch_size": self._config.ocr_batch_size,
+                "num_threads": _resolve_num_threads(self._config.num_threads),
+                "one_dnn": self._runtime_policy.enable_mkldnn,
+                "orientation_classifier": True,
+                "unwarping": True,
+            },
         )
+
+    def _resolve_artifact_hashes(self) -> dict[str, str]:
+        from structured_pdf_text.ocr.models import UV_DOC_MODEL, get_profile
+        from structured_pdf_text.ocr.paddle import _local_model_root
+        from structured_pdf_text.ocr.backends._parser_utils import sha256_file
+
+        root = _local_model_root(self._cache_home)
+        profile = get_profile(self._config.paddle_model_profile)
+        names = set(profile.model_names.values()) | {UV_DOC_MODEL}
+        hashes: dict[str, str] = {}
+        for name in sorted(names):
+            directory = root / name
+            if not directory.is_dir():
+                continue
+            for path in sorted(directory.rglob("*")):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(directory)
+                if any(part.startswith(".") for part in relative.parts):
+                    continue
+                if path.suffix in {".lock", ".metadata"}:
+                    continue
+                digest = sha256_file(path)
+                if digest is not None:
+                    hashes[path.relative_to(root).as_posix()] = digest
+        return hashes
 
     @property
     def capabilities(self) -> OCRCapabilities:
@@ -253,18 +449,34 @@ class PaddleOCRBackend:
     def recognize(self, request: OCRRequest) -> OCRResult:
         t0 = time.perf_counter()
 
+        if self._closed:
+            return OCRResult(
+                status="runtime_error", tokens=(), text="", engine_identity=self.identity,
+                elapsed_total_s=0.0, warnings=("PaddleOCR backend is closed",),
+            )
+
+        if request.input_kind == "region" and request.region_bbox is None:
+            return OCRResult(
+                status="invalid_input",
+                tokens=(),
+                text="",
+                engine_identity=self.identity,
+                elapsed_total_s=time.perf_counter() - t0,
+                warnings=("region input requires region_bbox",),
+            )
+
         try:
+            is_region = request.input_kind == "region"
+            region_box: BBox | None = None
+            if is_region:
+                region_box = BBox(*request.region_bbox)
+
             if self._subprocess_config is not None:
-                method = (
-                    "recognize_region"
-                    if request.input_kind == "region" and request.region_id is not None
-                    else "recognize_page"
-                )
-                region = BBox(0.0, 0.0, 1.0, 1.0) if method == "recognize_region" else None
-                tokens = self._call_subprocess(method, request.image, request.page_index, region)
-            elif request.input_kind == "region" and request.region_id is not None:
+                method = "recognize_region" if is_region else "recognize_page"
+                tokens = self._call_subprocess(method, request.image, request.page_index, region_box)
+            elif is_region:
                 tokens = self._engine.recognize_region(  # type: ignore[union-attr]
-                    request.image, request.page_index, BBox(0.0, 0.0, 1.0, 1.0)
+                    request.image, request.page_index, region_box  # type: ignore[arg-type]
                 )
             else:
                 tokens = self._engine.recognize_page(  # type: ignore[union-attr]
@@ -305,9 +517,12 @@ class PaddleOCRBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        if self._closed:
+            raise RuntimeError("PaddleOCR backend is closed")
         if self._subprocess_config is not None:
             return self._call_subprocess(
-                "recognize_page", page_image, page_index, quality_policy=quality_policy
+                "recognize_page", page_image, page_index, page_bbox=page_bbox,
+                quality_variants=quality_variants, quality_policy=quality_policy
             )
         return self._engine.recognize_page(  # type: ignore[union-attr]
             page_image,
@@ -318,8 +533,25 @@ class PaddleOCRBackend:
         )
 
     def recognize_region(
-        self, page_image: object, page_index: int, region_bbox: BBox
+        self, page_image: object, page_index: int, region_bbox: BBox,
+        *, page_bbox: BBox | None = None,
     ) -> list[OcrToken]:
+        if self._closed:
+            raise RuntimeError("PaddleOCR backend is closed")
+        if page_bbox is not None:
+            import numpy as np
+            from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
+            from structured_pdf_text.ocr.coordinates import map_tokens_to_page, offset_tokens
+
+            crop, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(
+                np.asarray(page_image), region_bbox, page_bbox
+            )
+            if crop.size == 0:
+                return []
+            local = self.recognize_page(crop, page_index)
+            return map_tokens_to_page(
+                offset_tokens(local, float(cx0), float(cy0)), page_bbox, width, height
+            )
         if self._subprocess_config is not None:
             return self._call_subprocess("recognize_region", page_image, page_index, region_bbox)
         return self._engine.recognize_region(page_image, page_index, region_bbox)  # type: ignore[union-attr]
@@ -329,20 +561,10 @@ class PaddleOCRBackend:
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
-        if self._subprocess_config is not None:
-            # In subprocess mode: send a lightweight ping to the worker
-            try:
-                self._ensure_worker()
-                resp = self._worker_send({"method": "healthcheck"})
-                return "ready" if resp.get("status") == "ok" else "unknown"
-            except Exception:
-                return "unknown"
-
         from structured_pdf_text.ocr.paddle import validate_local_ocr_models
 
         try:
-            validate_local_ocr_models(language=self._config.language)
-            return "ready"
+            validate_local_ocr_models(language=self._config.paddle_model_profile, cache_home=self._cache_home)
         except PaddleOcrUnavailable:
             return "missing"
         except ValueError:
@@ -350,16 +572,36 @@ class PaddleOCRBackend:
         except Exception:
             return "unknown"
 
-    def close(self) -> None:
-        if self._worker_proc is not None:
+        if self._subprocess_config is not None:
+            # In subprocess mode: also ping the worker to verify the subprocess runs.
+            # _worker_send handles _ensure_worker internally under the lock.
             try:
-                self._worker_proc.stdin.write(b"QUIT\n")  # type: ignore[union-attr]
-                self._worker_proc.stdin.flush()  # type: ignore[union-attr]
-                self._worker_proc.wait(timeout=10)
+                resp = self._worker_send({"method": "healthcheck"})
+                return "ready" if resp.get("status") == "ok" else "unknown"
             except Exception:
-                self._worker_proc.kill()
-            finally:
-                self._worker_proc = None
+                return "unknown"
+
+        return "ready"
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        with self._worker_lock:
+            if self._worker_proc is not None:
+                try:
+                    self._worker_proc.stdin.write(b"QUIT\n")  # type: ignore[union-attr]
+                    self._worker_proc.stdin.flush()  # type: ignore[union-attr]
+                    self._worker_proc.wait(timeout=10)
+                except Exception:
+                    self._worker_proc.kill()
+                finally:
+                    self._worker_proc = None
+        engine = self._engine
+        close = getattr(engine, "close", None)
+        if callable(close):
+            close()
+        self._engine = None
+        self._closed = True
 
     # ------------------------------------------------------------------
     # Forward diagnostic attributes accessed by api.py

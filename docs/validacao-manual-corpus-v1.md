@@ -1,100 +1,100 @@
-# Validação manual do corpus — M4/M5/M7/M8/M9 e OCR
+# Manual corpus validation — M4/M5/M7/M8/M9 and OCR
 
-Data da execução: 2026-09-13  
-Modos: `balanced` para OCR e `native` para a varredura integral; modelos
-PaddleOCR em cache local.
+Run date: 2026-09-13  
+Modes: `balanced` for OCR and `native` for the full scan; PaddleOCR models in
+local cache.
 
-Esta validação é uma inspeção de execução real, não uma métrica de acurácia.
-Os marcadores abaixo foram conferidos contra o conteúdo esperado indicado no
-próprio corpus.
+This validation is an inspection of a real run, not an accuracy metric.
+The markers below were checked against the expected content indicated in the
+corpus itself.
 
-## Resumo da execução
+## Run summary
 
-| Documento | Páginas | Tabelas | Warnings | Tempo |
+| Document | Pages | Tables | Warnings | Time |
 |---|---:|---:|---:|---:|
-| `benchmark_controlado_v1.pdf` | 12 | 7 | 0 | 262,5 s |
-| `Document_AI_V2.pdf` | 42 | 7 | 0 | 410,9 s |
+| `benchmark_controlado_v1.pdf` | 12 | 7 | 0 | 262.5 s |
+| `Document_AI_V2.pdf` | 42 | 7 | 0 | 410.9 s |
 
-O arquivo `benchmark_03_medium_268.pdf` também foi processado integralmente em
-modo nativo após as correções: 268 páginas, 444.648 caracteres brutos, zero
-warnings, pico RSS de aproximadamente 444 MB e 14 tabelas por trilhas de texto.
-Em validações `balanced` direcionadas, uma matriz visual 14×8 foi preservada e
-gráficos/diagramas sem células textuais foram rejeitados como tabelas.
+The file `benchmark_03_medium_268.pdf` was also fully processed in native mode
+after the fixes: 268 pages, 444,648 raw characters, zero warnings, peak RSS of
+approximately 444 MB, and 14 tables via text tracks. In targeted `balanced`
+validations, a 14×8 visual matrix was preserved and charts/diagrams without
+text cells were rejected as tables.
 
-## Pontos verificados
+## Verified points
 
-| Páginas | Cobertura | Resultado observado |
+| Pages | Coverage | Observed result |
 |---|---|---|
-| Benchmark 1–2 | cabeçalho, título, acentos e tabela nativa | recuperados; tabela e caracteres especiais preservados |
-| Benchmark 8 | fórmulas e tabela | fórmulas nativas preservadas; tabela recuperada |
-| Benchmark 9–11 | tabelas raster | OCR recuperou células; página 10 usou rotação 270° e página 11 rotação 0° |
-| DocumentAI 15–16 | tabelas largas/estreitas | texto e linhas recuperados; células estreitas mantidas como linhas de tabela |
-| DocumentAI 19–20 | tabela multipágina | fragmentos unidos; sequência PED-2026001 a PED-2026030 presente |
-| DocumentAI 22 | gráficos e eixos | títulos, `R$ mil`, `Quantidade`, meses `Jan`–`Jun`, percentuais e valores `170`–`120` recuperados por OCR ampliado |
-| DocumentAI 26–30 | OCR limpo, contraste, ruído, inclinação e fonte pequena | páginas 28–30 validadas em execuções direcionadas; códigos e valores principais presentes, com ruído residual apenas em caracteres difíceis |
-| DocumentAI 31–33 | rotação física | rotações 90°, 180° e 270° corrigidas, com códigos `GS2-ROT-*` presentes |
-| DocumentAI 34 | rotação por metadado/camada nativa | o sinal visual permanece diagnóstico, o texto nativo é preservado e OCR desnecessário foi suprimido; texto não duplica |
-| DocumentAI 35 | camada oculta incorreta | OCR foi promovido a fonte principal; `GS2-VISIBLE-035`, `R$ 3.535,35` e `APROVADO` prevalecem |
-| DocumentAI 36 | marca d’água e carimbo | corpo principal recuperado; marca d’água aparece fragmentada, mas não substitui o corpo |
-| DocumentAI 39–42 | redação visual, contrato e marcador final | conteúdo nativo e `GS2-END-OF-CORPUS-42` recuperados |
+| Benchmark 1–2 | header, title, accents, and native table | recovered; table and special characters preserved |
+| Benchmark 8 | formulas and table | native formulas preserved; table recovered |
+| Benchmark 9–11 | raster tables | OCR recovered cells; page 10 used 270° rotation and page 11 0° rotation |
+| DocumentAI 15–16 | wide/narrow tables | text and lines recovered; narrow cells maintained as table rows |
+| DocumentAI 19–20 | multi-page table | fragments joined; sequence PED-2026001 to PED-2026030 present |
+| DocumentAI 22 | charts and axes | titles, `R$ mil`, `Quantidade`, months `Jan`–`Jun`, percentages, and values `170`–`120` recovered by enlarged OCR |
+| DocumentAI 26–30 | clean OCR, contrast, noise, skew, and small font | pages 28–30 validated in targeted runs; main codes and values present, with residual noise only in difficult characters |
+| DocumentAI 31–33 | physical rotation | 90°, 180°, and 270° rotations corrected, with `GS2-ROT-*` codes present |
+| DocumentAI 34 | metadata rotation / native layer | the visual signal remains diagnostic, native text is preserved, and unnecessary OCR was suppressed; text does not duplicate |
+| DocumentAI 35 | incorrect hidden layer | OCR was promoted to main source; `GS2-VISIBLE-035`, `R$ 3.535,35`, and `APROVADO` prevail |
+| DocumentAI 36 | watermark and stamp | main body recovered; watermark appears fragmented but does not replace the body |
+| DocumentAI 39–42 | visual redaction, contract, and final marker | native content and `GS2-END-OF-CORPUS-42` recovered |
 
-## Correções aplicadas após a inspeção
+## Corrections applied after inspection
 
-1. OCR tornou-se fonte principal em páginas predominantemente rasterizadas,
-   evitando que uma camada textual oculta incorreta seja mantida.
-2. `invisible_text` é tratado apenas como evidência de complexidade; linhas
-   nativas não são apagadas antes da decisão regional/OCR.
-3. Foram adicionadas variantes de pré-processamento para ruído, baixo contraste e
-   fonte pequena.
-4. Eixos, meses, legendas e rótulos pequenos dos gráficos recebem OCR ampliado.
-5. A seleção de variantes funde tokens compactos de alta confiança quando o
-   ruído fragmenta um valor ou código em vários pedaços.
-6. Variantes OCR são agrupadas em lotes limitados; relatórios podem usar
-   multiprocessing opt-in por documento.
-7. O tamanho do batch e o uso de variantes de qualidade agora são configuráveis
-   pela API e pela CLI, mantendo por padrão a configuração de maior recall.
-8. Um refinador genérico por região centraliza crop, ampliação, rotação,
-   remapeamento de coordenadas e seleção/fusão de hipóteses textuais ou
-   numéricas; tabelas e figuras usam o mesmo componente.
-9. A leitura da página 22 recuperou em uma execução final os três títulos dos
-   gráficos, `R$ mil`, `Quantidade`, `Jan`–`Jun`, `170`–`120`, `8`–`0` e os
-   quatro percentuais esperados, sem warnings.
-10. O pipeline passou a executar layout e quality gate antes do OCR. Em
-    execução real, a página 22 acionou somente a região da figura (`mixed`), a
-    página 30 promoveu OCR integral, a página 34 ficou exclusivamente nativa e
-    a página 35 priorizou o raster visível sobre a camada oculta incorreta.
-11. Text tracks recuperaram a tabela sem bordas da página 17 como 5×5 e as
-    tabelas digitais das páginas 13, 14 e 18; o classificador de prosa rejeitou
-    corretamente os layouts em colunas das páginas 8 e 9.
-12. A resolução multipágina uniu apenas as tabelas 19–20 no documento maior e
-    10–11 no benchmark. Pares adjacentes independentes foram preservados e
-    cada aceitação/rejeição passou a expor score, razões e fatos geométricos.
-13. Uma execução nativa integral do benchmark registrou p50/p95/p99 por
-    estratégia, aquisições/estimativa FFI e pico RSS de aproximadamente 108 MB,
-    processando as 12 páginas sem warnings.
-14. O dump nativo preservou RGBA, render mode e matriz em caracteres/objetos;
-    na página 7 do benchmark, objetos tagged também expuseram MCID e a anotação
-    `link` informou bbox e contagem de objetos sem falhar por appearance ausente.
-15. A caixa efetiva do PDFium passou a definir o sistema de coordenadas quando
-    MediaBox/CropBox herdados divergem do render; isso eliminou deslocamentos de
-    aproximadamente 50 pontos no documento de 268 páginas.
-16. Evidência PDFium detalhada tornou-se opt-in no resultado estruturado e é
-    ativada automaticamente por `inspect --raw-page-json`; o pico RSS no arquivo
-    de 268 páginas caiu de aproximadamente 965 MB para 444 MB.
-17. A reconstrução nativa passou a preservar espaços em fontes itálicas e
-    glifos de linha de base (`_`, vírgula e ponto), recuperando identificadores
-    como `render_cppn` e expressões como `norm_x`.
-18. Os classificadores de tabela agora rejeitam prosa com regras decorativas,
-    blocos de código, gráficos sem células e diagramas de baixa confiança; as
-    tabelas raster de controle mantiveram 35/35 células nas três orientações.
-19. OCR de figura suprime grupos de pictogramas grandes e repetidos confundidos
-    com caracteres, mantendo pequenos rótulos e números de eixos.
+1. OCR became the main source on predominantly rasterized pages, preventing an
+   incorrect hidden text layer from being retained.
+2. `invisible_text` is treated only as evidence of complexity; native lines are
+   not erased before the regional/OCR decision.
+3. Pre-processing variants were added for noise, low contrast, and small font.
+4. Axes, months, legends, and small chart labels receive enlarged OCR.
+5. Variant selection merges compact high-confidence tokens when noise fragments
+   a value or code into multiple pieces.
+6. OCR variants are grouped into limited batches; reports can use opt-in
+   multiprocessing per document.
+7. Batch size and the use of quality variants are now configurable via the API
+   and CLI, defaulting to the highest-recall configuration.
+8. A generic per-region refiner centralizes crop, enlargement, rotation,
+   coordinate remapping, and selection/fusion of text or numeric hypotheses;
+   tables and figures use the same component.
+9. The reading of page 22 recovered in a final run the three chart titles,
+   `R$ mil`, `Quantidade`, `Jan`–`Jun`, `170`–`120`, `8`–`0`, and the four
+   expected percentages, without warnings.
+10. The pipeline now runs layout and quality gate before OCR. In a real run,
+    page 22 triggered only the figure region (`mixed`), page 30 promoted full
+    OCR, page 34 remained exclusively native, and page 35 prioritized the
+    visible raster over the incorrect hidden layer.
+11. Text tracks recovered the borderless table on page 17 as 5×5 and the
+    digital tables on pages 13, 14, and 18; the prose classifier correctly
+    rejected the column layouts on pages 8 and 9.
+12. The multi-page resolution joined only tables 19–20 in the larger document
+    and 10–11 in the benchmark. Independent adjacent pairs were preserved and
+    each acceptance/rejection now exposes score, reasons, and geometric facts.
+13. A full native benchmark run recorded p50/p95/p99 per strategy, FFI
+    acquisitions/estimate, and peak RSS of approximately 108 MB, processing
+    all 12 pages without warnings.
+14. The native dump preserved RGBA, render mode, and matrix in
+    characters/objects; on page 7 of the benchmark, tagged objects also exposed
+    MCID and the `link` annotation reported bbox and object count without
+    failing due to missing appearance.
+15. The PDFium effective box now defines the coordinate system when inherited
+    MediaBox/CropBox diverge from the render; this eliminated offsets of
+    approximately 50 points in the 268-page document.
+16. Detailed PDFium evidence became opt-in in the structured result and is
+    automatically enabled by `inspect --raw-page-json`; the peak RSS in the
+    268-page file dropped from approximately 965 MB to 444 MB.
+17. The native reconstruction now preserves spaces in italic fonts and baseline
+    glyphs (`_`, comma, and period), recovering identifiers such as
+    `render_cppn` and expressions such as `norm_x`.
+18. Table classifiers now reject prose with decorative rules, code blocks,
+    charts without cells, and low-confidence diagrams; the control raster tables
+    maintained 35/35 cells in all three orientations.
+19. Figure OCR suppresses groups of large, repeated pictograms confused with
+    characters, while keeping small labels and axis numbers.
 
-## Pendências de qualidade
+## Quality backlogs
 
-- a página 29 ainda pode melhorar a acentuação de textos inclinados (`OCR` e
-  caracteres de `SKEW`); a variante de deskew foi avaliada, mas não ficou
-  ativada automaticamente porque piorou a ordem espacial em uma execução;
-- gráficos ainda não são convertidos em dados semânticos, apenas em texto;
-- a validação continua sendo manual contra a imagem original, pois o corpus não
-  fornece ground truth textual completo para cada caractere.
+- page 29 can still improve accentuation of skewed text (`OCR` and `SKEW`
+  characters); the deskew variant was evaluated but was not automatically
+  enabled because it worsened spatial order in one run;
+- charts are still not converted into semantic data, only into text;
+- validation remains manual against the original image, as the corpus does not
+  provide complete textual ground truth for each character.
