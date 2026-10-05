@@ -95,6 +95,15 @@ EASYOCR_QUANTIZE           Set to '0' to disable PyTorch model quantization.
                            Disabling may improve accuracy on borderline characters
                            at the cost of higher CPU usage.  A/B test before
                            changing in production.
+EASYOCR_MAX_QUALITY_THREADS
+                           Set to '1' to enable maximum-quality thread allocation.
+                           When active, the backend probes available CPUs at
+                           startup and allocates all logical cores to PyTorch
+                           inference (intra-op threads) and up to 16 DataLoader
+                           workers for recognition.  Intended for dedicated
+                           benchmark machines where the process has exclusive
+                           access to the CPU.  Default: '0' (conservative — half
+                           of cpu_count, capped at 4 workers).
 
 Optimization notes
 ------------------
@@ -132,38 +141,88 @@ if TYPE_CHECKING:
     from structured_pdf_text.config import ExtractorConfig
 
 
-def _default_workers() -> int:
+def _probe_environment() -> "dict[str, Any]":
+    """Detect available CPU resources at runtime for adaptive thread allocation.
+
+    Collects:
+      cpu_count_logical  — total logical CPUs (os.cpu_count())
+      cpu_count_physical — physical cores when psutil is available; else None
+      cpu_load_1m        — 1-minute load average (Linux/macOS); else None
+      platform           — 'linux', 'darwin', or 'windows'
+      is_windows         — True on Windows (affects multiprocessing safety)
+      max_quality_env    — True when EASYOCR_MAX_QUALITY_THREADS=1
+
+    Used by _resolve_workers() and _apply_torch_threads() to decide whether
+    to use all available cores or keep conservative defaults.
+    """
+    import platform as _platform
+    system = _platform.system().lower()
+    is_win = system == "windows"
+
+    logical = os.cpu_count() or 1
+    physical: "int | None" = None
+    try:
+        import psutil  # type: ignore
+        physical = psutil.cpu_count(logical=False) or logical
+    except Exception:
+        physical = None
+
+    load_1m: "float | None" = None
+    if not is_win:
+        try:
+            load_1m = os.getloadavg()[0]
+        except (AttributeError, OSError):
+            pass
+
+    max_quality_env = os.environ.get("EASYOCR_MAX_QUALITY_THREADS", "0").strip() == "1"
+
+    return {
+        "cpu_count_logical": logical,
+        "cpu_count_physical": physical,
+        "cpu_load_1m": load_1m,
+        "platform": system,
+        "is_windows": is_win,
+        "max_quality_env": max_quality_env,
+    }
+
+
+def _default_workers(env_probe: "dict[str, Any] | None" = None) -> int:
     """Return a safe default for EasyOCR DataLoader worker count.
 
     On Windows, PyTorch uses 'spawn' for multiprocessing, which requires
     the __main__ guard and causes deadlocks in subprocess contexts like
     our paddle_subprocess worker.  Zero is the only safe default there.
-    On Linux/macOS, 'fork' is used and workers parallelize data loading
-    for a ~30% throughput gain.  We use half of the available cores,
-    capped at 4, to avoid starving other pipeline stages.
+    On Linux/macOS, 'fork' is used and workers parallelize data loading.
+    Default behaviour (conservative): half of cpu_count, capped at 4.
+    Max-quality mode: up to cpu_count (no artificial cap).
     """
-    import platform
-    if platform.system() == "Windows":
+    probe = env_probe or _probe_environment()
+    if probe["is_windows"]:
         return 0
-    cpu = os.cpu_count() or 1
-    return min(4, max(1, cpu // 2))
+    logical = probe["cpu_count_logical"]
+    if probe["max_quality_env"]:
+        # All logical CPUs available, capped only by a generous safety ceiling
+        # so a 128-core server does not spawn 128 DataLoader processes.
+        return min(logical, 16)
+    return min(4, max(1, logical // 2))
 
 
-def _resolve_workers(config_num_threads: int) -> int:
+def _resolve_workers(config_num_threads: int, env_probe: "dict[str, Any] | None" = None) -> int:
     """Resolve effective DataLoader worker count.
 
     Priority (highest to lowest):
       1. EASYOCR_WORKERS env var — explicit override, any value.
-      2. config.num_threads > 0 — derive workers proportionally
-         (half of threads, capped at 4; 0 on Windows always).
+      2. config.num_threads > 0 — derive workers proportionally.
+         Conservative mode: half of threads, capped at 4.
+         Max-quality mode (EASYOCR_MAX_QUALITY_THREADS=1): uses full count.
       3. Platform auto-detect via _default_workers().
 
     Windows always returns 0 regardless of config or env var, because
     PyTorch 'spawn' requires the __main__ guard which is absent in
     subprocess / library contexts.
     """
-    import platform
-    is_windows = platform.system() == "Windows"
+    probe = env_probe or _probe_environment()
+    is_windows = probe["is_windows"]
 
     env_val = os.environ.get("EASYOCR_WORKERS")
     if env_val is not None:
@@ -174,28 +233,50 @@ def _resolve_workers(config_num_threads: int) -> int:
         return 0
 
     if config_num_threads > 0:
+        if probe["max_quality_env"]:
+            return min(config_num_threads, 16)
         return min(4, max(0, config_num_threads // 2))
 
-    return _default_workers()
+    return _default_workers(probe)
 
 
-def _apply_torch_threads(num_threads: int) -> tuple[int | None, int | None]:
-    """Apply global PyTorch thread limits and return both effective values."""
+def _apply_torch_threads(
+    num_threads: int,
+    env_probe: "dict[str, Any] | None" = None,
+) -> tuple[int | None, int | None]:
+    """Apply PyTorch thread limits and return both effective values.
+
+    When num_threads == 0 and EASYOCR_MAX_QUALITY_THREADS=1, all logical
+    CPUs are handed to PyTorch so inference uses the full machine.
+    When num_threads > 0, that value is applied directly (no change).
+    When num_threads == 0 without max-quality mode, PyTorch keeps its own
+    default (unchanged, as before).
+    """
     try:
         import torch
     except Exception:
         return None, None
+
+    probe = env_probe or _probe_environment()
+
     if num_threads > 0:
+        target_intra = num_threads
+    elif probe["max_quality_env"]:
+        # Use all logical CPUs for intra-op parallelism (inference threads).
+        target_intra = probe["cpu_count_logical"]
+    else:
+        target_intra = 0  # leave PyTorch default unchanged
+
+    if target_intra > 0:
         try:
-            torch.set_num_threads(num_threads)
+            torch.set_num_threads(target_intra)
         except Exception:
             pass
         try:
-            torch.set_num_interop_threads(max(1, num_threads // 2))
+            torch.set_num_interop_threads(max(1, target_intra // 2))
         except Exception:
-            # Torch can reject inter-op changes after work starts. Report its
-            # actual value and the separately effective intra-op value.
             pass
+
     try:
         intra = int(torch.get_num_threads())
     except Exception:
@@ -877,7 +958,9 @@ class EasyOCRBackend:
             raw_decoder if raw_decoder in ("greedy", "beamsearch", "wordbeamsearch") else "greedy"
         )
         self._beamwidth = env_int("EASYOCR_BEAMWIDTH", 5, minimum=1)
-        self._workers = _resolve_workers(config.num_threads)
+        # _workers is set later, after _env_probe is built, so the probe-aware
+        # _resolve_workers() can use all available cores in max-quality mode.
+        self._workers: int = 0
         self._adjust_contrast = env_float("EASYOCR_ADJUST_CONTRAST", 0.5, minimum=0.0, maximum=1.0)
         allowlist_env = os.environ.get("EASYOCR_ALLOWLIST", "")
         self._allowlist: str | None = allowlist_env if allowlist_env else None
@@ -905,9 +988,18 @@ class EasyOCRBackend:
         self._filter_ths = env_float("EASYOCR_FILTER_THS", 0.003, minimum=0.0)
         self._quantize = env_bool("EASYOCR_QUANTIZE", default=True)
 
+        # Probe the execution environment once at init time so all resource
+        # decisions (workers, torch threads) use a consistent snapshot.
+        self._env_probe = _probe_environment()
+
+        # Re-resolve workers now that the probe is available.
+        self._workers = _resolve_workers(config.num_threads, self._env_probe)
+
         # Apply PyTorch thread limits before the Reader (and its model loading)
         # initialises, so all inference calls inherit the constrained thread pool.
-        self._torch_num_threads, self._torch_num_interop_threads = _apply_torch_threads(config.num_threads)
+        self._torch_num_threads, self._torch_num_interop_threads = _apply_torch_threads(
+            config.num_threads, self._env_probe
+        )
 
         # --- reader init ---
         easyocr_mod = _import_easyocr()
@@ -952,6 +1044,10 @@ class EasyOCRBackend:
         policies were used, a ``candidate_diagnostics`` list with one entry per
         candidate carrying token_count, char_count, mean_confidence, score and
         a ``selected`` flag indicating which candidate was chosen.
+
+        ``env_probe`` is included once per backend lifetime (not reset each page)
+        and contains the runtime environment snapshot used for thread allocation:
+        cpu_count_logical, cpu_count_physical, cpu_load_1m, max_quality_env.
         """
         result = {
             "easyocr_calls": self._easyocr_calls,
@@ -962,6 +1058,9 @@ class EasyOCRBackend:
             ),
             "easyocr_fallback_reasons": list(self._easyocr_fallback_reasons),
             "candidate_diagnostics": list(self._last_candidate_diagnostics),
+            "env_probe": dict(getattr(self, "_env_probe", {})),
+            "effective_workers": getattr(self, "_workers", None),
+            "effective_torch_intra_threads": getattr(self, "_torch_num_threads", None),
         }
         self.reset_page_diagnostics()
         return result
@@ -1029,6 +1128,11 @@ class EasyOCRBackend:
                 "height_ths": self._height_ths,
                 "width_ths": self._width_ths,
                 "add_margin": self._add_margin,
+                # Environment probe — recorded at init time
+                "env_cpu_logical": self._env_probe.get("cpu_count_logical"),
+                "env_cpu_physical": self._env_probe.get("cpu_count_physical"),
+                "env_cpu_load_1m": self._env_probe.get("cpu_load_1m"),
+                "env_max_quality_threads": self._env_probe.get("max_quality_env"),
             },
         )
 

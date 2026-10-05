@@ -517,7 +517,7 @@ class TestCachePathAlwaysPassedToReader:
         # Patch _import_easyocr to return our stub
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
         # Patch _apply_torch_threads to avoid torch import
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
 
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
@@ -545,7 +545,7 @@ class TestCachePathAlwaysPassedToReader:
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
 
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
 
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
@@ -638,7 +638,7 @@ class TestWordbeamsearchDecoder:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
         easyocr_mod.EasyOCRBackend.__init__(backend, config)
@@ -652,7 +652,7 @@ class TestWordbeamsearchDecoder:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
         easyocr_mod.EasyOCRBackend.__init__(backend, config)
@@ -676,7 +676,7 @@ class TestWordbeamsearchDecoder:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
         easyocr_mod.EasyOCRBackend.__init__(backend, config)
@@ -738,7 +738,7 @@ class TestQualityCandidatePolicies:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
 
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
@@ -902,7 +902,7 @@ class TestCandidateDiagnostics:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
 
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
@@ -1090,7 +1090,7 @@ class TestExhaustiveLowContrastCandidate:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
 
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
@@ -1137,3 +1137,280 @@ class TestExhaustiveLowContrastCandidate:
         # The low_contrast call must have contrast_ths >= 0.20 (higher than base 0.1)
         contrast_values = [c.get("contrast_ths", 0.1) for c in calls]
         assert any(v >= 0.20 for v in contrast_values), f"No high contrast_ths call found: {contrast_values}"
+
+
+# ---------------------------------------------------------------------------
+# Adaptive resource allocation — _probe_environment, _resolve_workers,
+# _apply_torch_threads, EASYOCR_MAX_QUALITY_THREADS (env var)
+# ---------------------------------------------------------------------------
+
+class TestEnvironmentProbe:
+    """_probe_environment() must detect CPU count and honour the env var."""
+
+    def test_probe_returns_required_keys(self, monkeypatch):
+        monkeypatch.delenv("EASYOCR_MAX_QUALITY_THREADS", raising=False)
+        from structured_pdf_text.ocr.backends.easyocr import _probe_environment
+        probe = _probe_environment()
+        required = {"cpu_count_logical", "cpu_count_physical", "cpu_load_1m",
+                    "platform", "is_windows", "max_quality_env"}
+        assert required <= probe.keys()
+
+    def test_probe_logical_cpu_is_positive(self, monkeypatch):
+        monkeypatch.delenv("EASYOCR_MAX_QUALITY_THREADS", raising=False)
+        from structured_pdf_text.ocr.backends.easyocr import _probe_environment
+        probe = _probe_environment()
+        assert probe["cpu_count_logical"] >= 1
+
+    def test_probe_max_quality_env_false_by_default(self, monkeypatch):
+        monkeypatch.delenv("EASYOCR_MAX_QUALITY_THREADS", raising=False)
+        from structured_pdf_text.ocr.backends.easyocr import _probe_environment
+        probe = _probe_environment()
+        assert probe["max_quality_env"] is False
+
+    def test_probe_max_quality_env_true_when_set(self, monkeypatch):
+        monkeypatch.setenv("EASYOCR_MAX_QUALITY_THREADS", "1")
+        from structured_pdf_text.ocr.backends.easyocr import _probe_environment
+        probe = _probe_environment()
+        assert probe["max_quality_env"] is True
+
+    def test_probe_max_quality_env_false_for_other_values(self, monkeypatch):
+        for val in ("0", "yes", "true", "2"):
+            monkeypatch.setenv("EASYOCR_MAX_QUALITY_THREADS", val)
+            from structured_pdf_text.ocr.backends.easyocr import _probe_environment
+            probe = _probe_environment()
+            assert probe["max_quality_env"] is False, f"Should be False for EASYOCR_MAX_QUALITY_THREADS={val!r}"
+
+
+class TestAdaptiveWorkerResolution:
+    """_resolve_workers() must use all cores in max-quality mode."""
+
+    def _probe(self, logical: int = 8, max_quality: bool = False, is_windows: bool = False):
+        return {
+            "cpu_count_logical": logical,
+            "cpu_count_physical": logical // 2,
+            "cpu_load_1m": None,
+            "platform": "windows" if is_windows else "linux",
+            "is_windows": is_windows,
+            "max_quality_env": max_quality,
+        }
+
+    def test_conservative_mode_caps_at_4(self):
+        from structured_pdf_text.ocr.backends.easyocr import _resolve_workers
+        probe = self._probe(logical=16, max_quality=False)
+        workers = _resolve_workers(0, probe)
+        assert workers <= 4, f"Conservative mode must cap at 4, got {workers}"
+
+    def test_max_quality_mode_uses_more_workers(self):
+        from structured_pdf_text.ocr.backends.easyocr import _resolve_workers
+        probe_cons = self._probe(logical=16, max_quality=False)
+        probe_max = self._probe(logical=16, max_quality=True)
+        cons = _resolve_workers(0, probe_cons)
+        maxq = _resolve_workers(0, probe_max)
+        assert maxq > cons, f"Max-quality ({maxq}) must exceed conservative ({cons})"
+
+    def test_max_quality_mode_caps_at_16(self):
+        from structured_pdf_text.ocr.backends.easyocr import _resolve_workers
+        probe = self._probe(logical=128, max_quality=True)
+        workers = _resolve_workers(0, probe)
+        assert workers <= 16, f"Max-quality must cap at 16 workers, got {workers}"
+
+    def test_windows_always_zero(self):
+        from structured_pdf_text.ocr.backends.easyocr import _resolve_workers
+        probe = self._probe(logical=16, max_quality=True, is_windows=True)
+        assert _resolve_workers(0, probe) == 0
+
+    def test_env_override_takes_priority(self, monkeypatch):
+        monkeypatch.setenv("EASYOCR_WORKERS", "7")
+        from structured_pdf_text.ocr.backends.easyocr import _resolve_workers
+        probe = self._probe(logical=16, max_quality=False)
+        assert _resolve_workers(0, probe) == 7
+
+    def test_config_num_threads_conservative_caps_at_4(self):
+        from structured_pdf_text.ocr.backends.easyocr import _resolve_workers
+        probe = self._probe(logical=16, max_quality=False)
+        assert _resolve_workers(16, probe) <= 4
+
+    def test_config_num_threads_max_quality_no_conservative_cap(self):
+        from structured_pdf_text.ocr.backends.easyocr import _resolve_workers
+        probe = self._probe(logical=16, max_quality=True)
+        # num_threads=16 in max-quality: must allow more than 4
+        workers = _resolve_workers(16, probe)
+        assert workers > 4, f"Max-quality with num_threads=16 should exceed 4, got {workers}"
+
+
+class TestAdaptiveTorchThreads:
+    """_apply_torch_threads() must set all cores in max-quality mode."""
+
+    def _probe(self, logical: int = 8, max_quality: bool = False):
+        return {
+            "cpu_count_logical": logical,
+            "cpu_count_physical": logical // 2,
+            "cpu_load_1m": None,
+            "platform": "linux",
+            "is_windows": False,
+            "max_quality_env": max_quality,
+        }
+
+    def test_zero_threads_conservative_does_not_set_torch_threads(self, monkeypatch):
+        """num_threads=0, no max-quality: torch threads must not be touched."""
+        calls: list = []
+
+        class FakeTorch:
+            def set_num_threads(self, n): calls.append(("intra", n))
+            def set_num_interop_threads(self, n): calls.append(("inter", n))
+            def get_num_threads(self): return 4
+            def get_num_interop_threads(self): return 2
+
+        import sys
+        monkeypatch.setitem(sys.modules, "torch", FakeTorch())
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads",
+                            easyocr_mod._apply_torch_threads.__wrapped__
+                            if hasattr(easyocr_mod._apply_torch_threads, "__wrapped__")
+                            else easyocr_mod._apply_torch_threads)
+        probe = self._probe(logical=8, max_quality=False)
+        from structured_pdf_text.ocr.backends.easyocr import _apply_torch_threads
+        _apply_torch_threads(0, probe)
+        # No set_num_threads should have been called in conservative mode with 0
+        assert not any(c[0] == "intra" for c in calls), (
+            "Conservative mode with num_threads=0 must not set torch threads"
+        )
+
+    def test_max_quality_sets_all_logical_cores(self, monkeypatch):
+        """num_threads=0, max_quality=True: torch must receive all logical CPUs."""
+        set_calls: list[int] = []
+
+        class FakeTorch:
+            def set_num_threads(self, n): set_calls.append(n)
+            def set_num_interop_threads(self, n): pass
+            def get_num_threads(self): return set_calls[-1] if set_calls else 8
+            def get_num_interop_threads(self): return 4
+
+        import sys
+        monkeypatch.setitem(sys.modules, "torch", FakeTorch())
+        probe = self._probe(logical=8, max_quality=True)
+        from structured_pdf_text.ocr.backends.easyocr import _apply_torch_threads
+        _apply_torch_threads(0, probe)
+        assert set_calls, "max_quality=True must call set_num_threads"
+        assert set_calls[0] == 8, f"Expected 8 (all logical CPUs), got {set_calls[0]}"
+
+    def test_explicit_num_threads_takes_priority_over_probe(self, monkeypatch):
+        """Explicit num_threads > 0 must be used regardless of probe."""
+        set_calls: list[int] = []
+
+        class FakeTorch:
+            def set_num_threads(self, n): set_calls.append(n)
+            def set_num_interop_threads(self, n): pass
+            def get_num_threads(self): return set_calls[-1] if set_calls else 4
+            def get_num_interop_threads(self): return 2
+
+        import sys
+        monkeypatch.setitem(sys.modules, "torch", FakeTorch())
+        probe = self._probe(logical=8, max_quality=True)
+        from structured_pdf_text.ocr.backends.easyocr import _apply_torch_threads
+        _apply_torch_threads(3, probe)
+        assert set_calls and set_calls[0] == 3, (
+            f"Explicit num_threads=3 must override probe, got {set_calls}"
+        )
+
+
+class TestEnvProbeInDiagnostics:
+    """consume_page_diagnostics must include env_probe and effective_workers."""
+
+    def _make_backend(self, monkeypatch) -> "Any":
+        import sys, types
+
+        class FakeReader:
+            def detect(self, img_color, **kwargs):
+                return ([[[10, 90, 10, 30]]], [[]])
+            def recognize(self, img_gray, h_list, f_list, **kwargs):
+                return [([[10, 10], [90, 10], [90, 30], [10, 30]], "word", 0.85)]
+
+        class FakeMod:
+            def Reader(self, langs, **kwargs):
+                return FakeReader()
+
+        fake_mod = FakeMod()
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+        monkeypatch.delenv("EASYOCR_MAX_QUALITY_THREADS", raising=False)
+
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
+
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        return backend
+
+    def test_diagnostics_include_env_probe(self, monkeypatch):
+        backend = self._make_backend(monkeypatch)
+        diag = backend.consume_page_diagnostics()
+        assert "env_probe" in diag
+        assert "cpu_count_logical" in diag["env_probe"]
+
+    def test_diagnostics_include_effective_workers(self, monkeypatch):
+        backend = self._make_backend(monkeypatch)
+        diag = backend.consume_page_diagnostics()
+        assert "effective_workers" in diag
+        assert isinstance(diag["effective_workers"], int)
+
+    def test_diagnostics_include_effective_torch_threads(self, monkeypatch):
+        backend = self._make_backend(monkeypatch)
+        diag = backend.consume_page_diagnostics()
+        assert "effective_torch_intra_threads" in diag
+
+    def test_max_quality_workers_higher_than_conservative(self, monkeypatch):
+        """With EASYOCR_MAX_QUALITY_THREADS=1, effective_workers must exceed conservative."""
+        import sys, types
+
+        class FakeReader:
+            def detect(self, img_color, **kwargs): return ([[[10, 90, 10, 30]]], [[]])
+            def recognize(self, img_gray, h, f, **kwargs): return []
+
+        class FakeMod:
+            def Reader(self, langs, **kwargs): return FakeReader()
+
+        fake_mod = FakeMod()
+
+        def _make(monkeypatch_inner, max_quality: bool):
+            monkeypatch_inner.setitem(sys.modules, "easyocr", fake_mod)
+            fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+            monkeypatch_inner.setitem(sys.modules, "easyocr.utils", fake_utils)
+            monkeypatch_inner.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+            monkeypatch_inner.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+            monkeypatch_inner.delenv("EASYOCR_WORKERS", raising=False)
+            if max_quality:
+                monkeypatch_inner.setenv("EASYOCR_MAX_QUALITY_THREADS", "1")
+            else:
+                monkeypatch_inner.delenv("EASYOCR_MAX_QUALITY_THREADS", raising=False)
+
+            from structured_pdf_text.config import ExtractorConfig
+            from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+            monkeypatch_inner.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+            monkeypatch_inner.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
+            config = ExtractorConfig(language="pt")
+            backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+            easyocr_mod.EasyOCRBackend.__init__(backend, config)
+            return backend
+
+        import os
+        # Only meaningful on machines with > 8 logical CPUs; skip gracefully otherwise
+        if (os.cpu_count() or 1) <= 8:
+            pytest.skip("Machine has ≤ 8 logical CPUs; conservative cap may equal max-quality cap")
+
+        backend_cons = _make(monkeypatch, max_quality=False)
+        diag_cons = backend_cons.consume_page_diagnostics()
+
+        backend_max = _make(monkeypatch, max_quality=True)
+        diag_max = backend_max.consume_page_diagnostics()
+
+        assert diag_max["effective_workers"] > diag_cons["effective_workers"], (
+            f"max-quality workers ({diag_max['effective_workers']}) must exceed "
+            f"conservative ({diag_cons['effective_workers']})"
+        )

@@ -415,7 +415,7 @@ class TestClahePreprocessing:
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
 
         monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
-        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n, p=None: (None, None))
         config = ExtractorConfig(language="pt")
         backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
         easyocr_mod.EasyOCRBackend.__init__(backend, config)
