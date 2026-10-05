@@ -747,6 +747,55 @@ def _candidate_metrics(tokens: "list[OcrToken]") -> "dict[str, float]":
     }
 
 
+def _lexical_plausibility(tokens: "list[OcrToken]") -> float:
+    """Return a [0, 1] plausibility score for the token list as pt-BR prose (§38).
+
+    A token is considered lexically plausible when it:
+      - contains at least 2 characters of predominantly alphabetic content
+      - contains at least one alphabetic Unicode character (i.e. is not
+        purely numeric, symbolic or punctuation-only)
+      - has no more than one consecutive unrecognised glyph (U+FFFD)
+
+    The score is the fraction of tokens that pass this test.  It is deliberately
+    weak — it only distinguishes coherent alphabetic text from garbled output;
+    it is NOT a spell-checker.  Numeric-only tokens (R$, dates, CPF) score
+    neutrally (0.5) so they do not degrade the score of an otherwise good
+    candidate.
+
+    Used as a small tiebreaker bonus in _score_candidate.  Maximum contribution
+    is 0.03 so it cannot reverse a clear quality difference.
+    """
+    if not tokens:
+        return 0.0
+    import unicodedata as _ud
+
+    plausible = 0
+    neutral = 0
+    for tok in tokens:
+        text = tok.text.strip()
+        if not text:
+            neutral += 1
+            continue
+        alpha_count = sum(1 for ch in text if _ud.category(ch).startswith("L"))
+        digit_count = sum(1 for ch in text if ch.isdigit())
+        total = len(text)
+        # Purely numeric or currency — neutral
+        if digit_count > 0 and alpha_count == 0:
+            neutral += 1
+            continue
+        # Contains more than one replacement character U+FFFD (garbled glyph)
+        if text.count("�") > 1:
+            continue
+        # Plausible: majority alphabetic, at least 2 chars
+        if alpha_count >= 2 and alpha_count / total >= 0.5:
+            plausible += 1
+
+    denominator = len(tokens) - neutral
+    if denominator <= 0:
+        return 0.5  # all tokens are numeric/neutral → no information
+    return plausible / denominator
+
+
 def _score_candidate(tokens: "list[OcrToken]") -> float:
     """Score a candidate token list for selection. Higher is better.
 
@@ -755,6 +804,8 @@ def _score_candidate(tokens: "list[OcrToken]") -> float:
       + char_count bonus             — logarithmic, capped at 0.08, so content
                                        coverage matters but never overrides confidence
       + horizontal_ratio * 0.02      — small bonus for coherent horizontal text
+      + lexical_plausibility * 0.03  — small bonus for pt-BR alphabetic plausibility
+                                       (§38); max 0.03 — only acts as tiebreaker
       - low_conf_ratio * 0.15        — penalise high fraction of uncertain tokens
       - replacement_char_ratio * 0.30 — penalise garbled / control characters
       - duplicate_ratio * 0.10       — penalise repeated token texts (hallucination)
@@ -766,10 +817,12 @@ def _score_candidate(tokens: "list[OcrToken]") -> float:
     if not tokens:
         return -_math.inf
     m = _candidate_metrics(tokens)
+    lex = _lexical_plausibility(tokens)
     score = (
         m["mean_confidence"]
         + min(0.08, _math.log1p(m["char_count"]) * 0.012)
         + m["horizontal_ratio"] * 0.02
+        + lex * 0.03
         - m["low_conf_ratio"] * 0.15
         - m["replacement_char_ratio"] * 0.30
         - m["duplicate_ratio"] * 0.10
@@ -933,6 +986,73 @@ def _apply_deskew(img: "Any") -> "Any":
         return img
 
 
+def _rotate_image(img: "Any", angle: int) -> "Any":
+    """Rotate an image by 90, 180, or 270 degrees clockwise.
+
+    Uses numpy array operations (no cv2 dependency).  Returns the rotated array.
+    Only handles multiples of 90°; other angles are returned as-is.
+    """
+    import numpy as np
+    arr = np.asarray(img)
+    if angle == 90:
+        return np.rot90(arr, k=3)   # 90° clockwise = 3 CCW
+    if angle == 180:
+        return np.rot90(arr, k=2)
+    if angle == 270:
+        return np.rot90(arr, k=1)   # 270° clockwise = 1 CCW
+    return arr
+
+
+def _remap_raw_for_rotation(
+    raw: "list[Any]",
+    angle: int,
+    rotated_h: int,
+    rotated_w: int,
+) -> "list[Any]":
+    """Map OCR bbox points from rotated-image coordinates back to original-image space.
+
+    EasyOCR returns bbox_points as [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] in the
+    coordinate system of the image it was given.  When we rotated the image by
+    ``angle`` degrees clockwise before passing it to OCR, we need to apply the
+    inverse rotation to map detected polygons back to the original image space.
+
+    Args:
+        raw:        EasyOCR raw result list — each item is (bbox_pts, text, conf).
+        angle:      The clockwise rotation that was applied to the image (90/180/270).
+        rotated_h:  Height of the rotated image (= width of original for 90°/270°).
+        rotated_w:  Width  of the rotated image (= height of original for 90°/270°).
+
+    Returns the same list structure with bbox_points remapped.
+    """
+    if not raw or angle not in (90, 180, 270):
+        return raw
+
+    remapped = []
+    for item in raw:
+        try:
+            bbox_pts, text, conf = item[0], item[1], item[2] if len(item) > 2 else None
+            new_pts = []
+            for pt in bbox_pts:
+                x, y = float(pt[0]), float(pt[1])
+                if angle == 90:
+                    # Clockwise 90°: (x, y) in rotated → (y, W_rot - 1 - x) in original
+                    nx, ny = y, rotated_w - 1 - x
+                elif angle == 180:
+                    # 180°: (x, y) → (W_rot-1-x, H_rot-1-y)
+                    nx, ny = rotated_w - 1 - x, rotated_h - 1 - y
+                else:  # 270
+                    # Clockwise 270° = CCW 90°: (x, y) → (H_rot-1-y, x)
+                    nx, ny = rotated_h - 1 - y, x
+                new_pts.append([nx, ny])
+            if conf is not None:
+                remapped.append((new_pts, text, conf))
+            else:
+                remapped.append((new_pts, text))
+        except (IndexError, TypeError, ValueError):
+            remapped.append(item)
+    return remapped
+
+
 def _exhaustive_candidates(
     reader: "Any",
     img: "Any",
@@ -940,9 +1060,9 @@ def _exhaustive_candidates(
     *,
     quantize: bool = True,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run up to 10 EasyOCR candidates for exhaustive quality policy.
+    """Run up to 13 EasyOCR candidates for exhaustive quality policy.
 
-    Candidates (§8, §9, §10, §12, §13, §14, §15, §17 from review):
+    Candidates (§8, §9, §10, §12, §13, §14, §15, §16, §17 from review):
       A. default          — base parameters as configured
       B. high_recall      — lower CRAFT thresholds for faint/small text
       C. beamsearch       — CTC beam search decoder (if not already default)
@@ -964,6 +1084,15 @@ def _exhaustive_candidates(
                             Degrades gracefully if cv2 is unavailable.
       J. high_mag         — higher mag_ratio (1.8) for pages with small text;
                             increases effective resolution seen by CRAFT (§17).
+      K. rot90            — page rotated 90° clockwise before OCR; polygons
+      L. rot180             remapped back to original coordinates (§16).
+      M. rot270           — Only added when they produce more tokens than the
+                            default, so landscape/upside-down pages are recovered
+                            without degrading already-correct pages.
+      N. dbnet18          — runs DBNet18 detector on the same image; provides
+                            independent detection complementary to CRAFT (§11).
+                            Only added when the reader exposes enough attributes
+                            to build a DBNet18 Reader; graceful fallback otherwise.
 
     All candidates share the same loaded Reader (no second model download).
     """
@@ -1072,7 +1201,98 @@ def _exhaustive_candidates(
             else:
                 _os.environ["EASYOCR_MAG_RATIO"] = _prev_mag
 
+    # Candidate N: DBNet18 detector ensemble (§11) — runs the second EasyOCR detector
+    # on the same image.  DBNet18 uses differentiable binarisation (DB) and can detect
+    # text boxes that CRAFT misses in dense or irregular layouts.  Both detector outputs
+    # enter the candidate set independently; the scorer picks the better result or a
+    # later merge pass can combine non-overlapping boxes from both.
+    # Only attempt when the Reader exposes enough attributes to build a DBNet18 reader;
+    # graceful fallback if model files are absent or reader attributes missing.
+    try:
+        _dbnet_reader = _build_dbnet18_reader(reader)
+        if _dbnet_reader is not None:
+            raw_n, _ = _run_easyocr(_dbnet_reader, img, **base_kwargs)
+            results.append(("dbnet18", raw_n))
+    except Exception:
+        pass
+
+    # Candidates K/L/M: page orientation variants (§16) — 90°/180°/270° clockwise.
+    # For fully rotated pages (landscape PDFs, upside-down scans) EasyOCR cannot
+    # recognise text in the wrong orientation.  We try all three non-trivial
+    # rotations and remap detected polygon coordinates back to the original image
+    # space so downstream reading-order and coordinate mapping remain correct.
+    # Only append a rotation candidate when it yields *more* tokens than the
+    # default result (already in results[0]) to avoid polluting the candidate set
+    # with worse-or-equal outputs when the page is already upright.
+    try:
+        import numpy as _np
+        _default_token_count = len(results[0][1]) if results else 0
+        _arr_base = _np.asarray(img)
+        _rh, _rw = _arr_base.shape[:2]
+
+        for _angle, _label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
+            try:
+                _rot_img = _rotate_image(_arr_base, _angle)
+                _rot_h, _rot_w = _rot_img.shape[:2]
+                _raw_rot, _ = _run_easyocr(reader, _rot_img, **base_kwargs)
+                if len(_raw_rot) > _default_token_count:
+                    _raw_remapped = _remap_raw_for_rotation(
+                        _raw_rot, _angle, _rot_h, _rot_w
+                    )
+                    results.append((_label, _raw_remapped))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return results
+
+
+def _build_dbnet18_reader(reader: "Any") -> "Any":
+    """Build a new EasyOCR Reader using DBNet18 detector instead of CRAFT (§11).
+
+    CRAFT and DBNet18 use fundamentally different text region proposal strategies:
+      - CRAFT: character-region affinity map, excellent for curved/complex layouts
+      - DBNet18: differentiable binarisation, faster and better for straight text
+
+    Running both provides an ensemble of independent detections.  The two readers
+    produce different box sets; boxes present in only one are retained as candidates
+    and evaluated by the candidate scoring system, so a genuine detection is not
+    discarded even if the other detector misses it.
+
+    Returns None when:
+      - ``reader`` does not expose ``lang_list`` (missing attribute)
+      - easyocr is not importable
+      - Any other instantiation error (model file missing, etc.)
+
+    The caller must always check for None before using the result.
+    """
+    try:
+        lang = getattr(reader, "lang_list", None)
+        if not lang:
+            return None
+        gpu = getattr(reader, "device", "cpu") != "cpu"
+        model_dir = getattr(reader, "model_storage_directory", None)
+        user_net_dir = getattr(reader, "user_network_directory", None)
+        recog = getattr(reader, "recog_network", None)
+        quantize = getattr(reader, "quantize", True)
+
+        import easyocr as _easyocr  # type: ignore
+        kwargs: dict[str, object] = {
+            "gpu": gpu,
+            "detect_network": "dbnet18",
+            "quantize": quantize,
+            "download_enabled": False,
+        }
+        if model_dir:
+            kwargs["model_storage_directory"] = model_dir
+        if user_net_dir:
+            kwargs["user_network_directory"] = user_net_dir
+        if recog:
+            kwargs["recog_network"] = recog
+        return _easyocr.Reader(lang, **kwargs)
+    except Exception:
+        return None
 
 
 def _rebuild_reader_no_quantize(reader: "Any") -> "Any":

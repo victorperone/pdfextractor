@@ -869,3 +869,331 @@ class TestReadingOrderOcrLines:
         region = self._make_region(RegionKind.TEXT, ocr_lines)
         lines, decision = order_region_lines([region])
         assert len(lines) == 2
+
+
+# ---------------------------------------------------------------------------
+# §16 — Page orientation candidates (_rotate_image + _remap_raw_for_rotation)
+# ---------------------------------------------------------------------------
+
+class TestPageOrientationCandidates:
+    """§16: orientation rotation helpers produce correct remapped coordinates."""
+
+    def test_rotate_image_90_swaps_hw(self):
+        """Rotating 90° clockwise swaps height and width."""
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _rotate_image
+
+        arr = np.zeros((100, 200, 3), dtype=np.uint8)
+        rotated = _rotate_image(arr, 90)
+        assert rotated.shape == (200, 100, 3)
+
+    def test_rotate_image_180_preserves_hw(self):
+        """Rotating 180° preserves height and width."""
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _rotate_image
+
+        arr = np.zeros((100, 200, 3), dtype=np.uint8)
+        rotated = _rotate_image(arr, 180)
+        assert rotated.shape == (100, 200, 3)
+
+    def test_rotate_image_270_swaps_hw(self):
+        """Rotating 270° clockwise swaps height and width."""
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _rotate_image
+
+        arr = np.zeros((100, 200, 3), dtype=np.uint8)
+        rotated = _rotate_image(arr, 270)
+        assert rotated.shape == (200, 100, 3)
+
+    def test_remap_180_inverts_coordinates(self):
+        """180° remap: point (x, y) maps to (W-1-x, H-1-y)."""
+        from structured_pdf_text.ocr.backends.easyocr import _remap_raw_for_rotation
+
+        raw = [([[10, 20], [30, 20], [30, 40], [10, 40]], "text", 0.9)]
+        # rotated image is 100×200 (H×W same as original for 180°)
+        remapped = _remap_raw_for_rotation(raw, 180, rotated_h=100, rotated_w=200)
+        pts = remapped[0][0]
+        # (10,20) → (200-1-10, 100-1-20) = (189, 79)
+        assert pts[0] == [189.0, 79.0]
+
+    def test_remap_empty_raw_unchanged(self):
+        """Empty raw list → empty result."""
+        from structured_pdf_text.ocr.backends.easyocr import _remap_raw_for_rotation
+
+        assert _remap_raw_for_rotation([], 90, 100, 200) == []
+
+    def test_remap_non_rotation_angle_unchanged(self):
+        """Unknown angle (not 90/180/270) → raw returned unchanged."""
+        from structured_pdf_text.ocr.backends.easyocr import _remap_raw_for_rotation
+
+        raw = [([[0, 0], [10, 0], [10, 10], [0, 10]], "x", 0.8)]
+        result = _remap_raw_for_rotation(raw, 0, 100, 200)
+        assert result is raw  # same object, unchanged
+
+    def test_exhaustive_candidates_has_rotate_helpers(self):
+        """_rotate_image and _remap_raw_for_rotation are importable."""
+        from structured_pdf_text.ocr.backends.easyocr import (
+            _rotate_image,
+            _remap_raw_for_rotation,
+        )
+        assert callable(_rotate_image)
+        assert callable(_remap_raw_for_rotation)
+
+
+# ---------------------------------------------------------------------------
+# §36 — CriticalDataRefiner
+# ---------------------------------------------------------------------------
+
+class TestCriticalDataRefiner:
+    """§36: CriticalDataRefiner scores and identifies structured data types."""
+
+    def test_cpf_format_scores_high(self):
+        """CPF with correct format and checksum → score 1.0."""
+        from structured_pdf_text.ocr.critical_data import _score_as_cpf
+
+        assert _score_as_cpf("123.456.789-09") == 1.0
+
+    def test_cpf_digits_only_scores_nonzero(self):
+        """CPF with only digits (no punctuation) scores > 0 (may reach 1.0 if checksum valid)."""
+        from structured_pdf_text.ocr.critical_data import _score_as_cpf
+
+        score = _score_as_cpf("12345678909")
+        assert score > 0.0
+
+    def test_cpf_wrong_length_scores_zero(self):
+        """Text that is not 11 digits → 0.0."""
+        from structured_pdf_text.ocr.critical_data import _score_as_cpf
+
+        assert _score_as_cpf("1234") == 0.0
+
+    def test_cnpj_format_scores_nonzero(self):
+        """14-digit string with CNPJ punctuation → score > 0."""
+        from structured_pdf_text.ocr.critical_data import _score_as_cnpj
+
+        score = _score_as_cnpj("12.345.678/0001-90")
+        assert score > 0.0
+
+    def test_cnpj_wrong_length_scores_zero(self):
+        """Not 14 digits → score 0.0."""
+        from structured_pdf_text.ocr.critical_data import _score_as_cnpj
+
+        assert _score_as_cnpj("123") == 0.0
+
+    def test_currency_pattern_scores_one(self):
+        """R$ 1.234,56 → score 1.0."""
+        from structured_pdf_text.ocr.critical_data import _score_as_currency
+
+        assert _score_as_currency("R$ 1.234,56") == 1.0
+
+    def test_currency_prefix_only_partial(self):
+        """R$ with no amount → partial score 0.5."""
+        from structured_pdf_text.ocr.critical_data import _score_as_currency
+
+        assert _score_as_currency("R$") == 0.5
+
+    def test_date_format_scores_one(self):
+        """dd/mm/yyyy date → score 1.0."""
+        from structured_pdf_text.ocr.critical_data import _score_as_date
+
+        assert _score_as_date("03/10/2026") == 1.0
+
+    def test_date_non_date_scores_zero(self):
+        """Random text → score 0.0."""
+        from structured_pdf_text.ocr.critical_data import _score_as_date
+
+        assert _score_as_date("hello world") == 0.0
+
+    def test_detect_context_cpf_label(self):
+        """Context label 'CPF:' → detected type is CPF."""
+        from structured_pdf_text.ocr.critical_data import CriticalDataRefiner, DataType
+
+        refiner = CriticalDataRefiner()
+        result = refiner.detect_type_from_context(["CPF:"])
+        assert result == DataType.CPF
+
+    def test_detect_context_cnpj_label(self):
+        """Context label 'CNPJ:' → detected type is CNPJ."""
+        from structured_pdf_text.ocr.critical_data import CriticalDataRefiner, DataType
+
+        refiner = CriticalDataRefiner()
+        result = refiner.detect_type_from_context(["CNPJ:"])
+        assert result == DataType.CNPJ
+
+    def test_detect_context_currency_label(self):
+        """Context label 'valor' → detected type is CURRENCY."""
+        from structured_pdf_text.ocr.critical_data import CriticalDataRefiner, DataType
+
+        refiner = CriticalDataRefiner()
+        result = refiner.detect_type_from_context(["Valor"])
+        assert result == DataType.CURRENCY
+
+    def test_detect_context_no_label(self):
+        """Empty labels → None (no context detected)."""
+        from structured_pdf_text.ocr.critical_data import CriticalDataRefiner
+
+        refiner = CriticalDataRefiner()
+        assert refiner.detect_type_from_context([]) is None
+
+    def test_get_allowlist_cpf(self):
+        """CPF allowlist contains digits, dot, dash."""
+        from structured_pdf_text.ocr.critical_data import get_allowlist, DataType
+
+        al = get_allowlist(DataType.CPF)
+        assert al is not None
+        assert "0" in al and "." in al and "-" in al
+
+    def test_get_allowlist_unknown_returns_none(self):
+        """Unknown type → None."""
+        from structured_pdf_text.ocr.critical_data import get_allowlist
+
+        assert get_allowlist("nonexistent_type") is None
+
+    def test_cpf_checksum_valid(self):
+        """_validate_cpf_checksum accepts 123.456.789-09 (first CPF in RECEITA database)."""
+        from structured_pdf_text.ocr.critical_data import _validate_cpf_checksum
+
+        assert _validate_cpf_checksum("12345678909")
+
+    def test_cpf_checksum_all_same_digit_invalid(self):
+        """All-same-digit CPFs fail checksum (known invalid)."""
+        from structured_pdf_text.ocr.critical_data import _validate_cpf_checksum
+
+        assert not _validate_cpf_checksum("11111111111")
+
+    def test_refiner_score_token(self):
+        """score_token returns float for a currency token."""
+        from structured_pdf_text.ocr.critical_data import CriticalDataRefiner, DataType
+        from structured_pdf_text.geometry import BBox
+        from structured_pdf_text.document import OcrToken, SourceKind
+
+        token = OcrToken(
+            text="R$ 1.234,56", bbox=BBox(0, 0, 100, 20),
+            confidence=0.9, language="pt", source=SourceKind.OCR_PAGE,
+        )
+        refiner = CriticalDataRefiner()
+        score = refiner.score_token(token, DataType.CURRENCY)
+        assert score == 1.0
+
+    def test_refiner_returns_tokens_unchanged_when_no_labels(self):
+        """refine_tokens with no context_labels returns original list."""
+        from structured_pdf_text.ocr.critical_data import CriticalDataRefiner
+        from structured_pdf_text.geometry import BBox
+        from structured_pdf_text.document import OcrToken, SourceKind
+
+        tokens = [OcrToken(
+            text="hello", bbox=BBox(0, 0, 50, 20),
+            confidence=0.8, language="pt", source=SourceKind.OCR_PAGE,
+        )]
+        refiner = CriticalDataRefiner()
+        result = refiner.refine_tokens(tokens)
+        assert result is tokens
+
+
+# ---------------------------------------------------------------------------
+# §27 — OcrAwareLayoutEngine (reclassify_ocr_regions)
+# ---------------------------------------------------------------------------
+
+class TestOcrAwareLayoutReclassification:
+    """§27: reclassify_ocr_regions() promotes/reclassifies regions using OCR evidence."""
+
+    def _make_line(self, text, x0, y0, x1, y1):
+        from structured_pdf_text.document import TextLine, WritingDirection
+        return TextLine(
+            tokens=[], bbox=BBox(x0, y0, x1, y1),
+            baseline=None, direction=WritingDirection.LEFT_TO_RIGHT,
+            native_order_min=None, native_order_max=None,
+            text_override=text,
+        )
+
+    def _make_region(self, kind, ocr_lines=None, x0=0, y0=0, x1=400, y1=50):
+        from structured_pdf_text.document import LayoutRegion, RegionQuality, RegionDecision
+        quality = RegionQuality(decision=RegionDecision.KEEP_NATIVE)
+        return LayoutRegion(
+            region_id="r1", kind=kind, bbox=BBox(x0, y0, x1, y1),
+            layout_confidence=1.0,
+            native_lines=[],
+            ocr_tokens=[],
+            quality=quality,
+            ocr_lines=ocr_lines or [],
+        )
+
+    def test_unknown_with_ocr_lines_becomes_text(self):
+        """§27: UNKNOWN region with OCR lines is promoted to TEXT."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        lines = [self._make_line("some text", 10, 5, 300, 20)]
+        region = self._make_region(RegionKind.UNKNOWN, lines)
+        result = reclassify_ocr_regions([region])
+        assert result[0].kind == RegionKind.TEXT
+
+    def test_unknown_without_ocr_lines_unchanged(self):
+        """§27: UNKNOWN region with no OCR lines stays UNKNOWN."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        region = self._make_region(RegionKind.UNKNOWN, [])
+        result = reclassify_ocr_regions([region])
+        assert result[0].kind == RegionKind.UNKNOWN
+
+    def test_table_region_never_reclassified(self):
+        """§27: TABLE regions are protected from reclassification."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        lines = [self._make_line("1 2 3 4 5", 10, 5, 300, 20)]
+        region = self._make_region(RegionKind.TABLE, lines)
+        result = reclassify_ocr_regions([region])
+        assert result[0].kind == RegionKind.TABLE
+
+    def test_figure_region_never_reclassified(self):
+        """§27: FIGURE regions are protected from reclassification."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        lines = [self._make_line("Figure 1", 10, 5, 200, 20)]
+        region = self._make_region(RegionKind.FIGURE, lines)
+        result = reclassify_ocr_regions([region])
+        assert result[0].kind == RegionKind.FIGURE
+
+    def test_text_region_with_bullets_becomes_list(self):
+        """§27: TEXT region where most lines start with bullets → LIST."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        lines = [
+            self._make_line("• primeiro item", 10, 10, 300, 20),
+            self._make_line("• segundo item", 10, 25, 300, 35),
+            self._make_line("• terceiro item", 10, 40, 300, 50),
+        ]
+        region = self._make_region(RegionKind.TEXT, lines)
+        result = reclassify_ocr_regions([region])
+        assert result[0].kind == RegionKind.LIST
+
+    def test_text_region_with_caption_prefix_becomes_caption(self):
+        """§27: TEXT region starting with 'Figura' becomes CAPTION."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        lines = [self._make_line("Figura 1: exemplo de gráfico.", 10, 5, 300, 20)]
+        region = self._make_region(RegionKind.TEXT, lines)
+        result = reclassify_ocr_regions([region])
+        assert result[0].kind == RegionKind.CAPTION
+
+    def test_empty_regions_list(self):
+        """§27: empty input → empty output."""
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        assert reclassify_ocr_regions([]) == []
+
+    def test_returns_new_list_not_mutated(self):
+        """§27: input list is not mutated — returns new list."""
+        from structured_pdf_text.document import RegionKind
+        from structured_pdf_text.layout.ocr_aware import reclassify_ocr_regions
+
+        lines = [self._make_line("texto", 10, 5, 300, 20)]
+        region = self._make_region(RegionKind.UNKNOWN, lines)
+        original = [region]
+        result = reclassify_ocr_regions(original)
+        assert result is not original
+        assert original[0].kind == RegionKind.UNKNOWN  # original unchanged

@@ -29,6 +29,7 @@ from .validation import (
     build_table_construction_diagnostics,
     validate_table_geometry,
 )
+from .cell_ocr import crop_cell_image, ocr_table_cells, simple_crop_ocr
 
 __all__ = [
     "RowSignature",
@@ -55,4 +56,7 @@ __all__ = [
     "TableGeometryValidation",
     "build_table_construction_diagnostics",
     "validate_table_geometry",
+    "crop_cell_image",
+    "ocr_table_cells",
+    "simple_crop_ocr",
 ]

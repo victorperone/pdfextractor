@@ -1012,6 +1012,46 @@ class TestCandidateScoring:
         assert m["token_count"] == 0
         assert m["char_count"] == 0
 
+    def test_lexical_plausibility_prose_scores_high(self):
+        """§38: alphabetic pt-BR tokens score high plausibility."""
+        from structured_pdf_text.ocr.backends.easyocr import _lexical_plausibility
+        tokens = [
+            self._make_token("palavra", 0.9),
+            self._make_token("texto", 0.9),
+            self._make_token("documento", 0.9),
+        ]
+        score = _lexical_plausibility(tokens)
+        assert score > 0.7
+
+    def test_lexical_plausibility_garbled_scores_low(self):
+        """§38: garbled tokens with mostly non-alpha chars score low."""
+        from structured_pdf_text.ocr.backends.easyocr import _lexical_plausibility
+        tokens = [
+            self._make_token("x", 0.9),  # 1 char — not plausible
+            self._make_token(".", 0.9),   # punctuation — not plausible
+        ]
+        score = _lexical_plausibility(tokens)
+        assert score < 0.5
+
+    def test_lexical_plausibility_numeric_is_neutral(self):
+        """§38: purely numeric tokens don't degrade plausibility (they're neutral)."""
+        from structured_pdf_text.ocr.backends.easyocr import _lexical_plausibility
+        tokens = [self._make_token("1234567890", 0.9)]
+        score = _lexical_plausibility(tokens)
+        assert 0.4 <= score <= 0.6  # neutral range
+
+    def test_lexical_plausibility_empty_is_zero(self):
+        """§38: empty token list → 0.0."""
+        from structured_pdf_text.ocr.backends.easyocr import _lexical_plausibility
+        assert _lexical_plausibility([]) == 0.0
+
+    def test_prose_candidate_beats_garbled_with_same_confidence(self):
+        """§38: prose tokens should score higher than garbled at same confidence."""
+        from structured_pdf_text.ocr.backends.easyocr import _score_candidate
+        prose = [self._make_token("documento", 0.85), self._make_token("fiscal", 0.85)]
+        garbled = [self._make_token("x.", 0.85), self._make_token("0|", 0.85)]
+        assert _score_candidate(prose) > _score_candidate(garbled)
+
 
 # ---------------------------------------------------------------------------
 # §25 — OcrToken.level field
@@ -1458,3 +1498,77 @@ class TestRebuildReaderNoQuantize:
 
         result = _rebuild_reader_no_quantize(FakeReader())
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# §11 — _build_dbnet18_reader graceful fallback
+# ---------------------------------------------------------------------------
+
+class TestBuildDbnet18Reader:
+    """§11: _build_dbnet18_reader returns None when attributes are missing or import fails."""
+
+    def test_returns_none_for_reader_without_lang_list(self):
+        """When reader has no lang_list, return None gracefully."""
+        from structured_pdf_text.ocr.backends.easyocr import _build_dbnet18_reader
+
+        class BadReader:
+            pass
+
+        result = _build_dbnet18_reader(BadReader())
+        assert result is None
+
+    def test_returns_none_for_reader_with_empty_lang_list(self):
+        """Empty lang_list → return None."""
+        from structured_pdf_text.ocr.backends.easyocr import _build_dbnet18_reader
+
+        class EmptyLangReader:
+            lang_list = []
+
+        result = _build_dbnet18_reader(EmptyLangReader())
+        assert result is None
+
+    def test_returns_none_when_easyocr_import_fails(self, monkeypatch):
+        """When easyocr is not importable, return None, do not raise."""
+        import sys
+        monkeypatch.setitem(sys.modules, "easyocr", None)
+        from structured_pdf_text.ocr.backends.easyocr import _build_dbnet18_reader
+
+        class FakeReader:
+            lang_list = ["pt"]
+            device = "cpu"
+            model_storage_directory = "/tmp/x"
+            user_network_directory = "/tmp/x"
+            recog_network = "latin_g2"
+            quantize = True
+
+        result = _build_dbnet18_reader(FakeReader())
+        assert result is None
+
+    def test_builds_reader_with_dbnet18_detect_network(self, monkeypatch):
+        """When easyocr is available, Reader is called with detect_network='dbnet18'."""
+        import sys
+        import types
+
+        captured: dict = {}
+
+        class FakeReader:
+            lang_list = ["pt"]
+            device = "cpu"
+            model_storage_directory = "/tmp/m"
+            user_network_directory = None
+            recog_network = "latin_g2"
+            quantize = True
+
+        def fake_Reader(langs, **kwargs):
+            captured["langs"] = langs
+            captured["kwargs"] = kwargs
+            return object()
+
+        fake_easyocr = types.ModuleType("easyocr")
+        fake_easyocr.Reader = fake_Reader  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "easyocr", fake_easyocr)
+
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        result = easyocr_mod._build_dbnet18_reader(FakeReader())
+        assert result is not None
+        assert captured["kwargs"].get("detect_network") == "dbnet18"

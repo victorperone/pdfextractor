@@ -16,6 +16,7 @@ from .recovery import (
     RegionRefinementResult,
     recover_ocr_tokens,
 )
+from .critical_data import CriticalDataRefiner, DataType, get_allowlist
 
 __all__ = [
     "OcrEngine",
@@ -26,7 +27,10 @@ __all__ = [
     "RegionRefinementGoal",
     "RegionRefinementRequest",
     "RegionRefinementResult",
+    "CriticalDataRefiner",
+    "DataType",
     "dehyphenate_ocr_lines",
+    "get_allowlist",
     "merge_ocr_bullet_markers",
     "reconstruct_ocr_lines",
     "segment_ocr_paragraphs",
