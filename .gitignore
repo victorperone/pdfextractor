@@ -245,3 +245,4 @@ notebooks/.ipynb_checkpoints/
 notebooks/output/
 notebooks/tmp/
 *.zip
+:memory:.ses
