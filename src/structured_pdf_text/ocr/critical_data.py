@@ -22,6 +22,7 @@ Usage::
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ _CPF_PATTERN = re.compile(r"\d{3}\.?\d{3}\.?\d{3}-?\d{2}")
 _CNPJ_PATTERN = re.compile(r"\d{2}\.?\d{3}\.?\d{3}/?\.?\d{4}-?\d{2}")
 
 # Currency: R$ 1.234,56 or R$1234,56 or R$ 1.234.567,89
-_CURRENCY_PATTERN = re.compile(r"R\$\s*[\d.]+,\d{2}")
+_CURRENCY_PATTERN = re.compile(r"R\$\s*(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?!\d)")
 
 # Date: dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy
 _DATE_PATTERN = re.compile(r"\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4}")
@@ -49,6 +50,9 @@ _PERCENTAGE_PATTERN = re.compile(r"\d+[,.]?\d*\s*%")
 
 # Generic numeric with Brazilian decimal separator: 1.234,56 or 1234,56
 _NUMERIC_PATTERN = re.compile(r"\d[\d.]*,\d+|\d{4,}")
+_TIME_PATTERN = re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?")
+_CEP_PATTERN = re.compile(r"\d{5}-?\d{3}")
+_PROCESS_NUMBER_PATTERN = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
 
 
 # Labels that indicate the following token is a structured data type.
@@ -59,16 +63,22 @@ _CPF_LABELS: frozenset[str] = frozenset({
 })
 _CNPJ_LABELS: frozenset[str] = frozenset({
     "cnpj", "cnpj:", "cnpj do cliente", "cpf/cnpj", "cpf/cnpj:",
-    "inscrição", "ie",
+    "inscricao", "ie",
 })
 _CURRENCY_LABELS: frozenset[str] = frozenset({
-    "valor", "total", "subtotal", "desconto", "acréscimo",
-    "r$", "preço", "price", "amount", "vl", "vl.", "vlr",
+    "valor", "total", "subtotal", "desconto", "acrescimo",
+    "r$", "preco", "price", "amount", "vl", "vl.", "vlr",
 })
 _DATE_LABELS: frozenset[str] = frozenset({
-    "data", "date", "emissão", "emissao", "vencimento", "vcto", "dtv",
-    "data de emissão", "data de vencimento", "data emissão",
+    "data", "date", "emissao", "vencimento", "vcto", "dtv",
+    "data de emissao", "data de vencimento", "data emissao",
 })
+_PERCENT_LABELS: frozenset[str] = frozenset({"percentual", "percent", "aliquota", "%"})
+_TIME_LABELS: frozenset[str] = frozenset({"hora", "horario", "time"})
+_CEP_LABELS: frozenset[str] = frozenset({"cep", "codigo postal", "cod postal"})
+_PROCESS_LABELS: frozenset[str] = frozenset({"processo", "processo no", "numero do processo", "n processo"})
+_INVOICE_LABELS: frozenset[str] = frozenset({"nf", "nfe", "nota fiscal", "numero da nota", "invoice", "pedido"})
+_NUMERIC_LABELS: frozenset[str] = frozenset({"quantidade", "numero", "qtd", "item", "lote"})
 
 
 def _normalize_label(text: str) -> str:
@@ -125,6 +135,10 @@ class DataType:
     DATE = "date"
     PERCENTAGE = "percentage"
     NUMERIC = "numeric"
+    TIME = "time"
+    CEP = "cep"
+    PROCESS_NUMBER = "process_number"
+    INVOICE_NUMBER = "invoice_number"
 
 
 def _score_as_cpf(text: str) -> float:
@@ -155,6 +169,8 @@ def _score_as_currency(text: str) -> float:
     """Score currency format match."""
     if _CURRENCY_PATTERN.search(text):
         return 1.0
+    if re.fullmatch(r"(?:R\$\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}", text.strip()):
+        return 0.85
     if re.search(r"R\$", text):
         return 0.5
     return 0.0
@@ -162,8 +178,59 @@ def _score_as_currency(text: str) -> float:
 
 def _score_as_date(text: str) -> float:
     """Score date format match."""
-    if _DATE_PATTERN.search(text):
+    match = _DATE_PATTERN.search(text)
+    if match:
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
+            try:
+                datetime.strptime(match.group(0), fmt)
+                return 1.0
+            except ValueError:
+                continue
+        return 0.4
+    return 0.0
+
+
+def _score_as_percentage(text: str) -> float:
+    match = _PERCENTAGE_PATTERN.search(text)
+    if not match:
+        return 0.0
+    try:
+        value = float(match.group(0).replace("%", "").replace(" ", "").replace(",", "."))
+        return 1.0 if 0 <= value <= 100 else 0.4
+    except ValueError:
+        return 0.4
+
+
+def _score_as_numeric(text: str) -> float:
+    if not _NUMERIC_PATTERN.search(text):
+        return 0.0
+    return 1.0 if all(character.isdigit() or character in ".,/-% " for character in text) else 0.4
+
+
+def _score_as_time(text: str) -> float:
+    return 1.0 if _TIME_PATTERN.fullmatch(text.strip()) else 0.0
+
+
+def _score_as_cep(text: str) -> float:
+    digits = re.sub(r"\D", "", text)
+    return 1.0 if len(digits) == 8 and _CEP_PATTERN.fullmatch(text.strip()) else 0.0
+
+
+def _score_as_process_number(text: str) -> float:
+    value = text.strip()
+    if _PROCESS_NUMBER_PATTERN.fullmatch(value):
         return 1.0
+    # Some OCR engines return the same CNJ structure without punctuation.
+    digits = re.sub(r"\D", "", value)
+    return 0.35 if len(digits) == 20 else 0.0
+
+
+def _score_as_invoice_number(text: str) -> float:
+    value = text.strip()
+    if re.fullmatch(r"\d{1,15}", value):
+        return 1.0
+    if re.fullmatch(r"[A-Z0-9][A-Z0-9./-]{1,19}", value, re.IGNORECASE):
+        return 0.65
     return 0.0
 
 
@@ -176,6 +243,18 @@ def _data_type_score(text: str, data_type: str) -> float:
         return _score_as_currency(text)
     if data_type == DataType.DATE:
         return _score_as_date(text)
+    if data_type == DataType.PERCENTAGE:
+        return _score_as_percentage(text)
+    if data_type == DataType.NUMERIC:
+        return _score_as_numeric(text)
+    if data_type == DataType.TIME:
+        return _score_as_time(text)
+    if data_type == DataType.CEP:
+        return _score_as_cep(text)
+    if data_type == DataType.PROCESS_NUMBER:
+        return _score_as_process_number(text)
+    if data_type == DataType.INVOICE_NUMBER:
+        return _score_as_invoice_number(text)
     return 0.0
 
 
@@ -195,6 +274,18 @@ def _detect_context_type(context_labels: "list[str]") -> "str | None":
             return DataType.CURRENCY
         if norm in _DATE_LABELS:
             return DataType.DATE
+        if norm in _TIME_LABELS:
+            return DataType.TIME
+        if norm in _CEP_LABELS:
+            return DataType.CEP
+        if norm in _PROCESS_LABELS:
+            return DataType.PROCESS_NUMBER
+        if norm in _INVOICE_LABELS:
+            return DataType.INVOICE_NUMBER
+        if norm in _PERCENT_LABELS:
+            return DataType.PERCENTAGE
+        if norm in _NUMERIC_LABELS:
+            return DataType.NUMERIC
     return None
 
 
@@ -209,6 +300,10 @@ _ALLOWLISTS: dict[str, str] = {
     DataType.DATE:       "0123456789/-.",
     DataType.PERCENTAGE: "0123456789,. %",
     DataType.NUMERIC:    "0123456789,.",
+    DataType.TIME:       "0123456789:",
+    DataType.CEP:        "0123456789-",
+    DataType.PROCESS_NUMBER: "0123456789-.",
+    DataType.INVOICE_NUMBER: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz./-",
 }
 
 

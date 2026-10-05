@@ -278,6 +278,21 @@ Scripts involved:
 | `scripts/setup_ocr_benchmark.sh` | Installs the required runtimes and models on WSL |
 | `scripts/run_benchmark.sh` | Orchestrates the three steps sequentially on Linux/WSL |
 
+## Maximum quality OCR
+
+Accuracy-first extraction keeps native text selection and enables exhaustive
+OCR candidates, overlapping page tiles, regional refinement, table-cell OCR,
+and contextual critical-data refinement.
+
+```bash
+pdftext extract arquivo.pdf --max-quality --ocr-engine easyocr -o saida.md
+pdftext setup-easyocr-models --language pt-BR --include-dbnet
+```
+
+DBNet18 is used when its local weights are provisioned. Readiness reports a
+degraded status when those weights are missing, and extraction continues with
+the remaining supported EasyOCR capabilities.
+
 ## CLI examples
 
 ```bash

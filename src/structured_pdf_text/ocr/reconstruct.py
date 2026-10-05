@@ -117,6 +117,7 @@ def reconstruct_ocr_lines(
                     normalized_text=normalize_text(token.text),
                     provenance=token.provenance or _default_ocr_provenance(token),
                     rotation=token.rotation,
+                    ocr_provenance=token.ocr_provenance,
                 )
             )
             previous = token
@@ -138,6 +139,7 @@ def reconstruct_ocr_lines(
         result = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
     if dehyphenate:
         result = dehyphenate_ocr_lines(result)
+    result = merge_ocr_bullet_markers(result, page_index=page_index)
     return result
 
 
@@ -608,7 +610,9 @@ def _is_ocr_bullet_marker(text: str) -> bool:
     return bool(_ORDERED_MARKER_RE.match(stripped))
 
 
-def merge_ocr_bullet_markers(lines: list[TextLine]) -> list[TextLine]:
+def merge_ocr_bullet_markers(
+    lines: list[TextLine], *, page_index: int = 0
+) -> list[TextLine]:
     """Join isolated OCR bullet-marker boxes with the text line to their right.
 
     EasyOCR sometimes returns a list marker (``•``, ``-``, ``1.``, …) as a tiny
@@ -673,7 +677,7 @@ def merge_ocr_bullet_markers(lines: list[TextLine]) -> list[TextLine]:
                     space_token = TextToken(
                         text=" ",
                         bbox=space_bbox,
-                        sources=[EvidenceRef(SourceKind.OCR_PAGE, 0, f"bullet-gap:{i}")],
+                        sources=[EvidenceRef(SourceKind.OCR_PAGE, page_index, f"bullet-gap:{i}")],
                         confidence=0.60,
                         normalized_text=" ",
                         flags={TokenFlag.WHITESPACE_INFERRED},

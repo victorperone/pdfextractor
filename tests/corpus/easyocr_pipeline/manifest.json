@@ -1,0 +1,257 @@
+{
+  "schema": "structured-pdf-text.easyocr-pipeline.v2",
+  "generator": "tests/corpus/easyocr_pipeline/generate.py",
+  "pdf": "outputs/EasyOCR_Pipeline_Corpus_V1.pdf",
+  "documents": [
+    {
+      "id": "clean_scan",
+      "page": 1,
+      "ground_truth": "ground_truth/clean_scan.md",
+      "features": [
+        "clean_scan",
+        "paragraph"
+      ]
+    },
+    {
+      "id": "low_dpi",
+      "page": 2,
+      "ground_truth": "ground_truth/low_dpi.md",
+      "features": [
+        "low_dpi"
+      ]
+    },
+    {
+      "id": "tiny_text",
+      "page": 3,
+      "ground_truth": "ground_truth/tiny_text.md",
+      "features": [
+        "tiny_text"
+      ]
+    },
+    {
+      "id": "low_contrast",
+      "page": 4,
+      "ground_truth": "ground_truth/low_contrast.md",
+      "features": [
+        "low_contrast"
+      ]
+    },
+    {
+      "id": "blur",
+      "page": 5,
+      "ground_truth": "ground_truth/blur.md",
+      "features": [
+        "blur"
+      ]
+    },
+    {
+      "id": "noise",
+      "page": 6,
+      "ground_truth": "ground_truth/noise.md",
+      "features": [
+        "noise"
+      ]
+    },
+    {
+      "id": "skew",
+      "page": 7,
+      "ground_truth": "ground_truth/skew.md",
+      "features": [
+        "skew"
+      ]
+    },
+    {
+      "id": "rotated_90",
+      "page": 8,
+      "ground_truth": "ground_truth/rotated_90.md",
+      "features": [
+        "rotated_90"
+      ]
+    },
+    {
+      "id": "rotated_180",
+      "page": 9,
+      "ground_truth": "ground_truth/rotated_180.md",
+      "features": [
+        "rotated_180"
+      ]
+    },
+    {
+      "id": "rotated_270",
+      "page": 10,
+      "ground_truth": "ground_truth/rotated_270.md",
+      "features": [
+        "rotated_270"
+      ]
+    },
+    {
+      "id": "two_columns",
+      "page": 11,
+      "ground_truth": "ground_truth/two_columns.md",
+      "features": [
+        "two_columns",
+        "reading_order"
+      ]
+    },
+    {
+      "id": "three_columns",
+      "page": 12,
+      "ground_truth": "ground_truth/three_columns.md",
+      "features": [
+        "three_columns",
+        "reading_order"
+      ]
+    },
+    {
+      "id": "headings",
+      "page": 13,
+      "ground_truth": "ground_truth/headings.md",
+      "features": [
+        "headings",
+        "hierarchy"
+      ]
+    },
+    {
+      "id": "lists",
+      "page": 14,
+      "ground_truth": "ground_truth/lists.md",
+      "features": [
+        "lists",
+        "bullets"
+      ]
+    },
+    {
+      "id": "footnotes",
+      "page": 15,
+      "ground_truth": "ground_truth/footnotes.md",
+      "features": [
+        "footnotes",
+        "tiny_text"
+      ]
+    },
+    {
+      "id": "forms",
+      "page": 16,
+      "ground_truth": "ground_truth/forms.md",
+      "features": [
+        "forms",
+        "critical_data"
+      ]
+    },
+    {
+      "id": "bordered_table",
+      "page": 17,
+      "ground_truth": "ground_truth/bordered_table.md",
+      "features": [
+        "bordered_table"
+      ]
+    },
+    {
+      "id": "borderless_table",
+      "page": 18,
+      "ground_truth": "ground_truth/borderless_table.md",
+      "features": [
+        "borderless_table"
+      ]
+    },
+    {
+      "id": "financial_table",
+      "page": 19,
+      "ground_truth": "ground_truth/financial_table.md",
+      "features": [
+        "financial_table",
+        "currency"
+      ]
+    },
+    {
+      "id": "cpf_cnpj_cep",
+      "page": 20,
+      "ground_truth": "ground_truth/cpf_cnpj_cep.md",
+      "features": [
+        "cpf_cnpj",
+        "cep",
+        "identifiers"
+      ]
+    },
+    {
+      "id": "process_numbers",
+      "page": 21,
+      "ground_truth": "ground_truth/process_numbers.md",
+      "features": [
+        "process_numbers",
+        "invoice_number"
+      ]
+    },
+    {
+      "id": "hybrid_native_scan",
+      "page": 22,
+      "ground_truth": "ground_truth/hybrid_native_scan.md",
+      "features": [
+        "hybrid_native_scan",
+        "hybrid"
+      ]
+    },
+    {
+      "id": "bad_hidden_ocr",
+      "page": 23,
+      "ground_truth": "ground_truth/bad_hidden_ocr.md",
+      "features": [
+        "bad_hidden_ocr",
+        "hybrid"
+      ]
+    },
+    {
+      "id": "screenshot",
+      "page": 24,
+      "ground_truth": "ground_truth/screenshot.md",
+      "features": [
+        "screenshots"
+      ]
+    },
+    {
+      "id": "accented_portuguese",
+      "page": 25,
+      "ground_truth": "ground_truth/accented_portuguese.md",
+      "features": [
+        "accented_portuguese",
+        "unicode"
+      ]
+    },
+    {
+      "id": "hyphenation",
+      "page": 26,
+      "ground_truth": "ground_truth/hyphenation.md",
+      "features": [
+        "hyphenation",
+        "paragraph"
+      ]
+    },
+    {
+      "id": "dark_background",
+      "page": 27,
+      "ground_truth": "ground_truth/dark_background.md",
+      "features": [
+        "dark_background",
+        "inverted_text"
+      ]
+    },
+    {
+      "id": "jpeg_artifacts",
+      "page": 28,
+      "ground_truth": "ground_truth/jpeg_artifacts.md",
+      "features": [
+        "jpeg_artifacts",
+        "compression"
+      ]
+    },
+    {
+      "id": "stamps",
+      "page": 29,
+      "ground_truth": "ground_truth/stamps.md",
+      "features": [
+        "stamps",
+        "figure_text"
+      ]
+    }
+  ]
+}

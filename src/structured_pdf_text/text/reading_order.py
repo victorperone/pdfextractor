@@ -160,6 +160,17 @@ def order_lines_in_region(
         RegionKind.CAPTION,
         RegionKind.UNKNOWN,
     }
+    if (
+        region.quality.decision.value == "ocr_region"
+        and region.ocr_lines
+        and region.kind in _prose_kinds
+    ):
+        lines, groups = _order_prose_lines(
+            region.ocr_lines,
+            region.bbox.width,
+            flow_lines=flow_lines,
+        )
+        return lines, groups
     if not region.native_lines:
         if region.kind == RegionKind.FIGURE and region.ocr_lines:
             return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0

@@ -74,7 +74,9 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
     explicit_ids: set[int] = set()
 
     for region in page.regions:
-        lines = region.native_lines
+        # Scanned pages have no native line stream.  Their OCR line evidence
+        # must participate in the same cross-page furniture check.
+        lines = region.native_lines or region.ocr_lines
         all_lines.extend(lines)
         if region.kind == RegionKind.HEADER or region.edge_role == "top_candidate":
             for line in lines:

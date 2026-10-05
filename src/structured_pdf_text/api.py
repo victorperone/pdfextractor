@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, replace
@@ -24,6 +25,7 @@ from .document import (
     EvidenceRef,
     LayoutRegion,
     OcrToken,
+    OcrProvenance,
     PageDiagnostics,
     PageStrategy,
     RegionDecision,
@@ -47,9 +49,13 @@ from .evidence.decision import assess_region_recovery
 from .fusion.token_fusion import fuse_native_and_ocr
 from .layout.engine import NativeHeuristicLayoutEngine
 from .layout.regions import full_page_text_region, regions_from_predictions
+from .layout.ocr_aware import reconstruct_ocr_layout
 from .native.pdfium_source import PdfiumNativeEvidenceSource
 from .ocr.engine import OcrEngine
+from .ocr.candidate_fusion import recognize_page_with_tiles
+from .ocr.candidate_fusion import OcrCandidateFusionEngine, OcrCandidateResult
 from .ocr.reconstruct import reconstruct_ocr_lines
+from .ocr.critical_data import CriticalDataRefiner
 from .ocr.recovery import (
     OcrRegionRefiner,
     RegionRefinementGoal,
@@ -323,6 +329,7 @@ class PdfTextExtractor:
                 unmatched_ocr_lines: list[TextLine] = []
                 unmatched_ocr_tokens: list[OcrToken] = []
                 fusion = None
+                local_fusion_decisions: list[dict[str, Any]] = []
                 ocr_image = None
                 ocr_passes_total = None
                 ocr_batches_total = None
@@ -337,6 +344,8 @@ class PdfTextExtractor:
                 ocr_targeted_passes = 0
                 ocr_targeted_batches = 0
                 ocr_attempt_errors: list[str] = []
+                ocr_tile_stats: dict[str, int] = {"tiles": 0, "tile_tokens": 0, "fusion_conflicts": 0}
+                embedded_image_tokens = 0
                 mode = self.config.normalized_mode()
                 ocr_available_by_mode = _ocr_enabled(self.config)
                 promotion_reasons = list(recovery_plan.reasons)
@@ -451,6 +460,18 @@ class PdfTextExtractor:
                                         native_page.bbox,
                                         **page_kwargs,
                                     )
+                                    if self.config.ocr_tiling and _backend_supports(self.ocr_engine, "recognition"):
+                                        ocr_tokens, ocr_tile_stats = recognize_page_with_tiles(
+                                            self.ocr_engine,
+                                            ocr_image,
+                                            page_index,
+                                            native_page.bbox,
+                                            ocr_tokens,
+                                            quality_policy=quality_policy,
+                                            rows=self.config.ocr_tile_rows,
+                                            columns=self.config.ocr_tile_columns,
+                                            overlap=self.config.ocr_tile_overlap,
+                                        )
                                     ocr_passes_total = getattr(
                                         self.ocr_engine, "last_pass_count", None
                                     )
@@ -599,6 +620,24 @@ class PdfTextExtractor:
                         ]
 
                 if page_ocr_requested and ocr_tokens and ocr_image is not None:
+                    if self.config.max_quality:
+                        try:
+                            original_candidate = _recognize_dominant_embedded_image(
+                                source=source,
+                                engine=self.ocr_engine,
+                                page=native_page,
+                                page_image=ocr_image,
+                                page_index=page_index,
+                                quality_policy=effective_ocr_quality_policy(self.config).value,
+                            )
+                            if original_candidate:
+                                embedded_image_tokens = len(original_candidate)
+                                ocr_tokens = list(OcrCandidateFusionEngine().fuse([
+                                    OcrCandidateResult("full-page", "full-page", tuple(ocr_tokens), _ocr_token_score(ocr_tokens), type(self.ocr_engine).__name__),
+                                    OcrCandidateResult("embedded-image", "embedded-image", tuple(original_candidate), _ocr_token_score(original_candidate), type(self.ocr_engine).__name__),
+                                ]).tokens)
+                        except Exception as exc:
+                            warnings.append(f"Embedded image OCR candidate unavailable: {type(exc).__name__}: {exc}")
                     weak_start = time.perf_counter()
                     try:
                         (
@@ -638,9 +677,60 @@ class PdfTextExtractor:
                         time.perf_counter() - weak_start
                     ) * 1000
 
+                critical_data_refinements = 0
+                footnote_refinements = 0
+                if (
+                    self.config.enable_critical_data_refinement
+                    and page_ocr_requested
+                    and ocr_tokens
+                    and ocr_image is not None
+                    and self.ocr_engine is not None
+                ):
+                    critical_start = time.perf_counter()
+                    ocr_tokens, critical_data_refinements = _refine_critical_data_tokens(
+                        engine=self.ocr_engine,
+                        page_image=ocr_image,
+                        page_index=page_index,
+                        page_bbox=native_page.bbox,
+                        tokens=ocr_tokens,
+                        lines=[
+                            *native_lines,
+                            *reconstruct_ocr_lines(ocr_tokens, page_index, native_page.bbox),
+                        ],
+                        quality_policy=effective_ocr_quality_policy(self.config).value,
+                        page_rotation=native_page.objects.rotation,
+                        region_renderer=lambda bbox, scale: source.render_region(
+                            page_index, bbox, scale, native_page.bbox
+                        ),
+                        base_scale=ocr_render_scale,
+                    )
+                    timings["critical_data_refinement_ms"] = (
+                        time.perf_counter() - critical_start
+                    ) * 1000
+
+                if (
+                    (self.config.max_quality or effective_ocr_quality_policy(self.config).value == "exhaustive")
+                    and page_ocr_requested
+                    and ocr_tokens
+                    and ocr_image is not None
+                    and self.ocr_engine is not None
+                ):
+                    ocr_tokens, footnote_refinements = _refine_small_footnote_tokens(
+                        engine=self.ocr_engine,
+                        page_index=page_index,
+                        page_bbox=native_page.bbox,
+                        tokens=ocr_tokens,
+                        quality_policy=effective_ocr_quality_policy(self.config).value,
+                        region_renderer=lambda bbox, scale: source.render_region(
+                            page_index, bbox, scale, native_page.bbox
+                        ),
+                        base_scale=ocr_render_scale,
+                    )
+
                 # Recompute alignment after refinements so diagnostics and
                 # supplemental text describe the final OCR evidence.
                 if ocr_tokens:
+                    ocr_tokens = _attach_ocr_provenance(ocr_tokens, self.ocr_engine)
                     ocr_lines = reconstruct_ocr_lines(
                         ocr_tokens,
                         page_index,
@@ -648,6 +738,9 @@ class PdfTextExtractor:
                     )
                     fusion_start = time.perf_counter()
                     fusion = fuse_native_and_ocr(native_lines, ocr_tokens)
+                    local_fusion_decisions = _local_fusion_decisions(
+                        regions, ocr_tokens
+                    )
                     unmatched_ocr_tokens = list(fusion.unmatched_ocr_tokens)
                     unmatched_ocr_lines = reconstruct_ocr_lines(
                         unmatched_ocr_tokens,
@@ -663,10 +756,11 @@ class PdfTextExtractor:
                     ocr_region = full_page_text_region(
                         page_index,
                         native_page.bbox,
-                        ocr_lines,
+                        [],
                         complexity,
                     )
                     ocr_region.region_id = f"page-{page_index + 1}:ocr-primary"
+                    ocr_region.ocr_lines = list(ocr_lines)
                     ocr_region.ocr_tokens = ocr_tokens
                     regions = [ocr_region]
                 table_start = time.perf_counter()
@@ -780,6 +874,32 @@ class PdfTextExtractor:
                         native_page.bbox,
                     )
                     ocr_table_tokens += len(consumed_table_ocr)
+                table_cell_refinements = 0
+                if self.config.enable_table_cell_ocr and tables:
+                    try:
+                        self._ensure_ocr_engine()
+                        cell_image = ocr_image if ocr_image is not None else rendered_page
+                        if cell_image is None:
+                            cell_image = source.render_page(
+                                page_index,
+                                scale=safe_render_scale("table_cell_ocr", ocr_render_scale),
+                            )
+                        if self.ocr_engine is not None and cell_image is not None:
+                            table_cell_refinements = _refine_table_cells_ocr(
+                                engine=self.ocr_engine,
+                                page_image=cell_image,
+                                page_index=page_index,
+                                page_bbox=native_page.bbox,
+                                tables=tables,
+                                quality_policy=effective_ocr_quality_policy(self.config).value,
+                                region_renderer=lambda bbox, scale: source.render_region(
+                                    page_index, bbox, scale, native_page.bbox
+                                ),
+                                base_scale=ocr_render_scale,
+                            )
+                    except Exception as exc:
+                        warnings.append(f"Table cell OCR refinement unavailable: {type(exc).__name__}: {exc}")
+                        partial_reasons.append("table_cell_ocr_unavailable")
                 (
                     tables,
                     table_validation_facts,
@@ -819,6 +939,8 @@ class PdfTextExtractor:
                         table_ocr_overrides=table_ocr_overrides,
                         figure_ocr_bindings=figure_ocr_bindings,
                     )
+                if ocr_tokens:
+                    regions = reconstruct_ocr_layout(regions, native_page.bbox)
                 timings["table_ms"] = (time.perf_counter() - table_start) * 1000
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 page_memory_end = _process_memory_snapshot()
@@ -982,6 +1104,12 @@ class PdfTextExtractor:
                             source_metrics_end,
                         ),
                         "ocr_engine": type(self.ocr_engine).__name__ if self.ocr_engine is not None else None,
+                        "ocr_tile_stats": ocr_tile_stats,
+                        "critical_data_refinements": critical_data_refinements,
+                        "footnote_refinements": footnote_refinements,
+                        "embedded_image_candidate_tokens": embedded_image_tokens,
+                        "table_cell_refinements": table_cell_refinements,
+                        "ocr_capabilities": _backend_capability_facts(self.ocr_engine),
                         "ocr_passes": ocr_passes_total,
                         "ocr_batches": ocr_batches_total,
                         "deskew_angle_deg": (
@@ -994,6 +1122,7 @@ class PdfTextExtractor:
                         "ocr_matched_tokens": fusion.matched_ocr_tokens if fusion else 0,
                         "ocr_unmatched_tokens": len(fusion.unmatched_ocr_tokens) if fusion else 0,
                         "ocr_conflicts": len(fusion.conflicts) if fusion else 0,
+                        "native_ocr_local_decisions": local_fusion_decisions,
                         "ocr_supplemental_lines": len(unmatched_ocr_lines),
                         "ocr_rotations": sorted({token.rotation for token in ocr_tokens}),
                         "table_count": len(tables),
@@ -1158,6 +1287,143 @@ def _ocr_enabled(config: ExtractorConfig) -> bool:
     return config.enable_ocr is not False
 
 
+def _backend_supports(engine: Any, capability: str) -> bool:
+    """Read declared OCR capabilities while keeping legacy engines usable."""
+    if engine is None:
+        return False
+    capabilities = getattr(engine, "capabilities", None)
+    if capabilities is None:
+        return True
+    if isinstance(capabilities, dict):
+        return bool(capabilities.get(capability, False))
+    return bool(getattr(capabilities, capability, False))
+
+
+def _backend_capability_facts(engine: Any) -> dict[str, bool]:
+    names = (
+        "polygons", "direct_recognition", "detector_profiles", "decoder_profiles",
+        "orientation_search", "multiple_detectors", "word_beam_search", "native_confidence",
+    )
+    return {name: _backend_supports(engine, name) for name in names}
+
+
+def _attach_ocr_provenance(tokens: list[OcrToken], engine: Any) -> list[OcrToken]:
+    identity = getattr(engine, "identity", None)
+    engine_name = getattr(identity, "engine", type(engine).__name__ if engine is not None else "unknown")
+    extra = getattr(identity, "extra", {}) or {}
+    result: list[OcrToken] = []
+    for token in tokens:
+        if token.ocr_provenance is not None:
+            result.append(token)
+            continue
+        candidate_id = None
+        if token.provenance and token.provenance.startswith("candidate:"):
+            candidate_id = token.provenance.split(":", 1)[1]
+        result.append(replace(
+            token,
+            ocr_provenance=OcrProvenance(
+                engine=engine_name,
+                candidate_id=candidate_id or "baseline",
+                detector=("dbnet18" if candidate_id and "dbnet" in candidate_id else "craft" if engine_name == "easyocr" else None),
+                recognizer=str(extra.get("recognition_network")) if extra.get("recognition_network") else None,
+                decoder=str(extra.get("decoder")) if extra.get("decoder") else None,
+                preprocessing=(candidate_id,) if candidate_id and candidate_id not in {"default", "full-page"} else (),
+                rotation=float(token.rotation),
+                tile_id=candidate_id.removeprefix("tile:") if candidate_id and candidate_id.startswith("tile:") else None,
+                refinement_kind=(token.provenance if token.provenance and token.provenance not in {"baseline", f"candidate:{candidate_id}"} else None),
+            ),
+        ))
+    return result
+
+
+def _local_fusion_decisions(
+    regions: list[LayoutRegion], ocr_tokens: list[OcrToken]
+) -> list[dict[str, Any]]:
+    """Record region-local source authority and conflict scores."""
+    decisions: list[dict[str, Any]] = []
+    for region in regions:
+        if region.quality.decision not in {RegionDecision.MERGE_OCR, RegionDecision.OCR_REGION}:
+            continue
+        local_tokens = [token for token in ocr_tokens if _line_in_box(token, region.bbox)]
+        if not local_tokens:
+            continue
+        result = fuse_native_and_ocr(
+            region.native_lines,
+            local_tokens,
+            ocr_authoritative=region.quality.decision == RegionDecision.OCR_REGION,
+        )
+        decisions.append({
+            "region_id": region.region_id,
+            "decision": region.quality.decision.value,
+            "chosen_source": "ocr" if region.quality.decision == RegionDecision.OCR_REGION else "native_preferred",
+            "matched": result.matched_ocr_tokens,
+            "conflicts": [
+                {
+                    "chosen": item.chosen,
+                    "alternatives": item.alternatives,
+                    "reason": item.reason,
+                    "chosen_source": item.chosen_source,
+                    "alternative_sources": item.alternative_sources,
+                    "chosen_score": item.chosen_score,
+                    "alternative_scores": item.alternative_scores,
+                }
+                for item in result.conflicts
+            ],
+        })
+    return decisions
+
+
+def _ocr_token_score(tokens: list[OcrToken]) -> float:
+    if not tokens:
+        return -math.inf
+    confidences = [token.confidence for token in tokens if token.confidence is not None]
+    mean_confidence = sum(confidences) / len(confidences) if confidences else 0.5
+    character_count = sum(len(token.text.strip()) for token in tokens)
+    return mean_confidence + min(character_count, 400) / 4000
+
+
+def _recognize_dominant_embedded_image(
+    *, source: Any, engine: Any, page: Any, page_image: Any,
+    page_index: int, quality_policy: str,
+) -> list[OcrToken]:
+    """Use an original embedded bitmap when it materially exceeds raster detail."""
+    if engine is None or not page.objects.images or page.bbox.area <= 0:
+        return []
+    candidates = [
+        image for image in page.objects.images
+        if image.bbox is not None and image.bbox.area / page.bbox.area >= 0.55
+        and image.pixel_width and image.pixel_height
+    ]
+    if not candidates:
+        return []
+    image = max(candidates, key=lambda item: item.bbox.area)
+    scale = 3.0
+    try:
+        scale = float(engine.identity.extra.get("render_scale", scale))
+    except Exception:
+        pass
+    if image.pixel_width < image.bbox.width * scale * 1.15 or image.pixel_height < image.bbox.height * scale * 1.15:
+        return []
+    extracted = source.extract_embedded_image(page.page_index, image.object_index)
+    if not extracted:
+        return []
+    bitmap, image_bbox = extracted
+    tokens = _call_page_recognition(engine.recognize_page, bitmap, page_index, image_bbox, quality_policy)
+    return [replace(token, provenance="embedded_image_original") for token in tokens]
+
+
+def _call_page_recognition(method: Any, image: Any, page_index: int, bbox: BBox, quality_policy: str) -> list[OcrToken]:
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_policy = "quality_policy" in parameters or any(
+        item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+    )
+    kwargs = {"quality_policy": quality_policy} if accepts_policy else {}
+    return method(image, page_index, bbox, **kwargs)
+
+
 def _recover_selected_regions(
     engine: Any,
     page_image: Any,
@@ -1215,6 +1481,9 @@ def _recover_selected_regions(
     for region, result in zip(regions, results):
         region_tokens = list(result.tokens)
         region.ocr_tokens = region_tokens
+        region.ocr_lines = reconstruct_ocr_lines(
+            region_tokens, page_index, page_bbox
+        )
         tokens.extend(region_tokens)
         passes += result.ocr_passes
         batches += result.ocr_batches
@@ -1237,6 +1506,260 @@ def _recover_selected_regions(
             "ocr_batches": result.ocr_batches,
         }
     return _deduplicate_region_ocr_tokens(tokens), passes, batches, stats
+
+
+def _refine_small_footnote_tokens(
+    *, engine: Any, page_index: int, page_bbox: BBox, tokens: list[OcrToken],
+    quality_policy: str, region_renderer: Any, base_scale: float,
+) -> tuple[list[OcrToken], int]:
+    """Rerender tiny bottom-page OCR lines directly from PDFium in max quality."""
+    if not tokens or page_bbox.height <= 0 or not callable(region_renderer):
+        return tokens, 0
+    lines = reconstruct_ocr_lines(tokens, page_index, page_bbox)
+    heights = sorted(line.bbox.height for line in lines if line.bbox.height > 0)
+    if len(heights) < 3:
+        return tokens, 0
+    median_height = heights[len(heights) // 2]
+    candidates = [
+        line for line in lines
+        if line.bbox.y1 >= page_bbox.y0 + page_bbox.height * 0.72
+        and (
+            line.bbox.height <= median_height * 0.88
+            or bool(re.match(r"^(?:\d+|[*†‡])\s*", line.text.strip()))
+        )
+    ]
+    refined_count = 0
+    output = list(tokens)
+    for line in candidates:
+        box = line.bbox.expand(max(3.0, line.bbox.height * 0.5)).intersection(page_bbox)
+        if box is None or box.area <= 0:
+            continue
+        try:
+            image = region_renderer(box, base_scale * 2.0)
+            reread = _call_page_recognition(
+                engine.recognize_page, image, page_index, box, quality_policy
+            )
+        except Exception:
+            continue
+        reread = [token for token in reread if token.text.strip()]
+        if not reread:
+            continue
+        old_indices = [
+            index for index, token in enumerate(output)
+            if box.x0 <= token.bbox.cx <= box.x1 and box.y0 <= token.bbox.cy <= box.y1
+        ]
+        old_tokens = [output[index] for index in old_indices]
+        old_text = " ".join(token.text.strip() for token in old_tokens)
+        new_text = " ".join(token.text.strip() for token in reread)
+        old_score = _ocr_token_score(old_tokens)
+        new_score = _ocr_token_score(reread)
+        # A rerender can win on better confidence or recover at least 20% more
+        # non-whitespace characters without a confidence drop over 0.10.
+        old_chars = len(re.sub(r"\s+", "", old_text))
+        new_chars = len(re.sub(r"\s+", "", new_text))
+        if not (
+            new_score > old_score + 0.05
+            or (new_chars >= old_chars * 1.2 and new_score >= old_score - 0.10)
+        ):
+            continue
+        for index in reversed(old_indices):
+            output.pop(index)
+        output.extend(replace(token, provenance="footnote_high_scale") for token in reread)
+        refined_count += 1
+    return output, refined_count
+
+
+_CRITICAL_LABEL_RE = re.compile(
+    r"\b(CPF(?:/CNPJ)?|CNPJ|VALOR|TOTAL|SUBTOTAL|DESCONTO|PRE[CÇ]O|DATA|EMISS[AÃ]O|VENCIMENTO|AL[IÍ]QUOTA|PERCENTUAL|QUANTIDADE|PROCESSO|N[ÚU]MERO DO PROCESSO|CEP|C[ÓO]DIGO POSTAL|HORA|HOR[AÁ]RIO|TIME|NF|NFE|NOTA FISCAL|N[ÚU]MERO DA NOTA|INVOICE|PEDIDO)\b\s*:?[ ]*",
+    re.IGNORECASE,
+)
+
+
+def _refine_critical_data_tokens(
+    *, engine: Any, page_image: Any, page_index: int, page_bbox: BBox,
+    tokens: list[OcrToken], lines: list[TextLine], quality_policy: str,
+    page_rotation: int = 0, region_renderer: Any = None, base_scale: float = 3.0,
+) -> tuple[list[OcrToken], int]:
+    """Rerun contextual critical fields and select only OCR-produced text."""
+    refiner = CriticalDataRefiner()
+    contexts: list[tuple[TextLine, list[str]]] = []
+    for line in lines:
+        labels = [match.group(1) for match in _CRITICAL_LABEL_RE.finditer(line.text)]
+        if labels:
+            contexts.append((line, labels))
+    if not contexts:
+        return tokens, 0
+
+    output = list(tokens)
+    refinements = 0
+    for index, token in enumerate(tokens):
+        if not any(character.isdigit() for character in token.text):
+            continue
+        nearby_labels: list[str] = []
+        for label_line, labels in contexts:
+            vertical_distance = max(
+                0.0, label_line.bbox.y0 - token.bbox.y1,
+                token.bbox.y0 - label_line.bbox.y1,
+            )
+            horizontal_distance = max(
+                0.0, label_line.bbox.x0 - token.bbox.x1,
+                token.bbox.x0 - label_line.bbox.x1,
+            )
+            tolerance = max(36.0, token.bbox.height * 3.0)
+            if vertical_distance <= tolerance and horizontal_distance <= max(160.0, tolerance * 3):
+                nearby_labels.extend(labels)
+        data_type = refiner.detect_type_from_context(nearby_labels)
+        if data_type is None or refiner.score_token(token, data_type) >= 0.98:
+            continue
+        box = token.bbox.expand(max(2.0, token.bbox.height * 0.35)).intersection(page_bbox)
+        if box is None or box.area <= 0:
+            continue
+        refined_tokens: list[OcrToken] = []
+        if callable(region_renderer):
+            try:
+                region_image = region_renderer(box, base_scale * 1.75)
+                refined_tokens = _call_page_recognition(
+                    engine.recognize_page, region_image, page_index, box, quality_policy
+                )
+                if _backend_supports(engine, "direct_recognition") and callable(getattr(engine, "recognize_direct", None)):
+                    refined_tokens.extend(engine.recognize_direct(
+                        region_image, page_index, box, quality_policy=quality_policy
+                    ))
+            except Exception:
+                refined_tokens = []
+        if not refined_tokens:
+            result = OcrRegionRefiner(engine).refine(
+                page_image, page_index, page_bbox,
+                RegionRefinementRequest(
+                    bbox=box,
+                    scale_factors=(1.5, 2.0, 3.0),
+                    rotations=(0.0,),
+                    quality_variants=quality_policy != "baseline",
+                    quality_policy=quality_policy,
+                    goal=RegionRefinementGoal.NUMERIC,
+                    page_rotation=page_rotation,
+                    quality_reasons=(f"critical_data:{data_type}",),
+                ),
+            )
+            refined_tokens = list(result.tokens)
+        if not refined_tokens:
+            continue
+        observed_text = " ".join(item.text.strip() for item in refined_tokens if item.text.strip())
+        if not observed_text:
+            continue
+        candidate = replace(
+            token,
+            text=observed_text,
+            bbox=BBox.union_all([item.bbox for item in refined_tokens]),
+            confidence=max((item.confidence or 0.0) for item in refined_tokens),
+            provenance="critical_data_refinement",
+            polygon=None,
+        )
+        if refiner.score_token(candidate, data_type) > refiner.score_token(token, data_type):
+            output[index] = candidate
+            refinements += 1
+    return output, refinements
+
+
+def _refine_table_cells_ocr(
+    *, engine: Any, page_image: Any, page_index: int, page_bbox: BBox,
+    tables: list[Any], quality_policy: str, region_renderer: Any = None,
+    base_scale: float = 3.0,
+) -> int:
+    """Target weak cells using both detector and direct-recognition paths."""
+    import numpy as np
+    from PIL import Image
+    from .tables.cell_ocr import crop_cell_image
+    from .tables.text_join import join_table_tokens
+
+    refiner = CriticalDataRefiner()
+    page_array = np.asarray(page_image)
+    capabilities = getattr(engine, "capabilities", None)
+    direct_supported = bool(getattr(capabilities, "direct_recognition", False))
+    direct = getattr(engine, "recognize_direct", None)
+    refinements = 0
+    for table in tables:
+        header_rows = table.header_rows or ((min((cell.row for cell in table.cells), default=0),) if table.cells else ())
+        for cell in table.cells:
+            if cell.bbox is None or (cell.text.strip() and cell.confidence >= 0.70):
+                continue
+            crop = crop_cell_image(page_array, cell.bbox, page_bbox, pad_px=3)
+            if crop is None or not crop.size:
+                continue
+            if callable(region_renderer):
+                try:
+                    crop = np.asarray(region_renderer(cell.bbox, base_scale * 1.75))
+                except Exception:
+                    pass
+            cell_header = next((
+                item.text for item in table.cells
+                if item.col == cell.col and item.row in header_rows and item.text.strip()
+            ), "")
+            data_type = refiner.detect_type_from_context([cell_header]) if cell_header else None
+            candidates: list[list[OcrToken]] = []
+            try:
+                candidates.append(_call_page_recognition(
+                    engine.recognize_page, crop, page_index, cell.bbox, quality_policy
+                ))
+            except Exception:
+                pass
+            if direct_supported and callable(direct):
+                try:
+                    candidates.append(direct(crop, page_index, cell.bbox, quality_policy=quality_policy))
+                except Exception:
+                    pass
+            # A direct render from the existing crop still provides a useful
+            # recognizer hypothesis when the detector misses very small text.
+            try:
+                enlarged = Image.fromarray(crop).resize((crop.shape[1] * 2, crop.shape[0] * 2), Image.Resampling.LANCZOS)
+                candidates.append(_call_page_recognition(
+                    engine.recognize_page, enlarged, page_index, cell.bbox, quality_policy
+                ))
+            except Exception:
+                pass
+            candidates = [candidate for candidate in candidates if candidate]
+            if not candidates:
+                continue
+            candidate_texts = [" ".join(token.text.strip() for token in group if token.text.strip()) for group in candidates]
+            if data_type:
+                best_index = max(
+                    range(len(candidates)),
+                    key=lambda idx: (
+                        refiner.score_token(replace(candidates[idx][0], text=candidate_texts[idx]), data_type),
+                        sum(token.confidence or 0.0 for token in candidates[idx]) / len(candidates[idx]),
+                    ),
+                )
+            else:
+                best_index = max(
+                    range(len(candidates)),
+                    key=lambda idx: sum(token.confidence or 0.0 for token in candidates[idx]) / len(candidates[idx]),
+                )
+            chosen = candidates[best_index]
+            text = candidate_texts[best_index]
+            if not text:
+                continue
+            old_score = refiner.score_token(
+                replace(chosen[0], text=cell.text), data_type
+            ) if data_type and cell.text.strip() else 0.0
+            new_score = refiner.score_token(replace(chosen[0], text=text), data_type) if data_type else 1.0
+            if cell.text.strip() and new_score < old_score:
+                continue
+            cell.tokens = [
+                TextToken(
+                    text=token.text,
+                    bbox=token.bbox,
+                    sources=[EvidenceRef(SourceKind.OCR_REGION, page_index, f"table-cell:{table.table_id}:{cell.row}:{cell.col}")],
+                    confidence=max(0.0, min(1.0, token.confidence or 0.0)),
+                    normalized_text=token.text,
+                    provenance="table_cell_ocr",
+                    rotation=token.rotation,
+                )
+                for token in chosen
+            ]
+            cell.text = join_table_tokens(cell.tokens)
+            cell.confidence = max((token.confidence for token in chosen if token.confidence is not None), default=cell.confidence)
+            refinements += 1
+    return refinements
 
 
 def _recover_weak_ocr_regions(
@@ -1550,8 +2073,9 @@ def _append_hybrid_ocr_regions(
         if not any(_line_in_box(line, box) for box in table_boxes + figure_boxes)
     ]
     if remaining:
-        supplemental = full_page_text_region(page_index, page_bbox, remaining, complexity)
+        supplemental = full_page_text_region(page_index, page_bbox, [], complexity)
         supplemental.region_id = f"page-{page_index + 1}:ocr-supplement"
+        supplemental.ocr_lines = list(remaining)
         supplemental.ocr_tokens = [
             token
             for token in unmatched_tokens
@@ -1763,6 +2287,7 @@ def _source_lines_for_table(
     for region in regions:
         if any(_line_in_box(region, box) for box in boxes):
             candidates.extend(region.native_lines)
+            candidates.extend(region.ocr_lines)
     candidates.extend(extra_lines)
     output: list[TextLine] = []
     seen: set[int] = set()

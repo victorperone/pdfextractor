@@ -15,11 +15,12 @@ import shutil
 import subprocess
 from typing import Any
 
-from structured_pdf_text.config import ExtractorConfig
+from structured_pdf_text.config import ExtractorConfig, OcrQualityPolicy, effective_ocr_quality_policy
 
 
 class ReadinessStatus(str, Enum):
     READY = "ready"
+    DEGRADED = "degraded"
     MISSING = "missing"
     INCOMPLETE = "incomplete"
     CORRUPT = "corrupt"
@@ -114,12 +115,45 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
     if engine == "easyocr":
         if importlib.util.find_spec("easyocr") is None:
             return ReadinessResult(ReadinessStatus.MISSING, "package_missing", {"package": "easyocr"})
-        cache = Path(os.environ.get("EASYOCR_MODULE_PATH") or Path.home() / ".cache" / "pdfextractor" / "easyocr").expanduser()
-        expected = ("craft_mlt_25k.pth", "latin_g2.pth")
-        missing = [name for name in expected if not (cache / name).is_file()]
-        if missing:
-            return ReadinessResult(ReadinessStatus.INCOMPLETE, "model_missing", {"cache": str(cache), "missing": missing})
-        return ReadinessResult(ReadinessStatus.READY, details={"cache": str(cache), "language": config.language})
+        configured_cache = (
+            os.environ.get("EASYOCR_MODULE_PATH")
+            or (
+                str(Path(cache_home or config.ocr_cache_home).expanduser() / "easyocr")
+                if cache_home or config.ocr_cache_home else None
+            )
+        )
+        cache = Path(configured_cache or Path.home() / ".cache" / "pdfextractor" / "easyocr").expanduser()
+        craft_ok = (cache / "craft_mlt_25k.pth").is_file()
+        recog_name = os.environ.get("EASYOCR_RECOG_NETWORK", "latin_g2")
+        recog_ok = (cache / f"{recog_name}.pth").is_file()
+        dbnet_name: str | None = None
+        dbnet_ok = False
+        try:
+            import easyocr.config as easy_config  # type: ignore
+            model = easy_config.detection_models.get("dbnet18", {})
+            dbnet_name = model.get("filename")
+            dbnet_ok = bool(dbnet_name and (cache / dbnet_name).is_file())
+        except Exception:
+            pass
+        details = {
+            "cache": str(cache), "language": config.language,
+            "models": {
+                "craft": "available" if craft_ok else "missing",
+                "dbnet18": "available" if dbnet_ok else "missing",
+                "recognizer": "available" if recog_ok else "missing",
+            },
+        }
+        if not craft_ok or not recog_ok:
+            details["missing"] = [
+                name for name, available in (("craft_mlt_25k.pth", craft_ok), (f"{recog_name}.pth", recog_ok))
+                if not available
+            ]
+            return ReadinessResult(ReadinessStatus.INCOMPLETE, "model_missing", details)
+        requires_dbnet = config.max_quality or effective_ocr_quality_policy(config) == OcrQualityPolicy.EXHAUSTIVE
+        if requires_dbnet and not dbnet_ok:
+            details["dbnet_model"] = dbnet_name
+            return ReadinessResult(ReadinessStatus.DEGRADED, "dbnet18_missing", details)
+        return ReadinessResult(ReadinessStatus.READY, details=details)
 
     return ReadinessResult(ReadinessStatus.UNKNOWN, "unsupported_engine", {"engine": engine})
 
@@ -219,6 +253,13 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
         recognised_norm = " ".join(recognised.split())
         expected_norm = " ".join(_SMOKE_EXPECTED.split())
         cer = _simple_cer(recognised_norm.lower(), expected_norm.lower())
+        precision_checks = {
+            "currency_exact": "r$ 1.234,56" in recognised_norm.lower(),
+            "date_exact": "03/10/2026" in recognised_norm,
+            "percentage_exact": "12,5%" in recognised_norm,
+            "accented_portuguese": all(ch in recognised_norm.lower() for ch in "ãõçêô"),
+            "hyphen_preserved": "hífen" in recognised_norm.lower(),
+        }
 
         identity_repr = (backend.identity.__dict__ if hasattr(backend.identity, "__dict__")
                          else str(backend.identity))
@@ -227,6 +268,7 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
             "token_count": len(result.tokens),
             "smoke_cer": round(cer, 4),
             "smoke_max_cer": _SMOKE_MAX_CER,
+            "precision_checks": precision_checks,
             "identity": identity_repr,
         }
 
@@ -234,6 +276,12 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
             base_details["recognised_text"] = recognised_norm[:200]
             base_details["expected_text"] = expected_norm[:200]
             return ReadinessResult(ReadinessStatus.INCOMPLETE, "deep_smoke_high_cer", base_details)
+
+        failed_checks = [name for name, passed in precision_checks.items() if not passed]
+        if failed_checks:
+            base_details["failed_precision_checks"] = failed_checks
+            base_details["recognised_text"] = recognised_norm[:200]
+            return ReadinessResult(ReadinessStatus.INCOMPLETE, "deep_smoke_precision_failed", base_details)
 
         return ReadinessResult(ReadinessStatus.READY, details=base_details)
     except Exception as exc:

@@ -1,0 +1,1 @@
+Contraste reduzido — informação preservada.

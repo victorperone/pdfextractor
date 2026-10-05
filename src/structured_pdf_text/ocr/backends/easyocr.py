@@ -711,11 +711,21 @@ def _candidate_metrics(tokens: "list[OcrToken]") -> "dict[str, float]":
             "mean_confidence": 0.0, "low_conf_ratio": 1.0,
             "replacement_char_ratio": 1.0, "duplicate_ratio": 1.0,
             "horizontal_ratio": 0.0, "char_count": 0, "token_count": 0,
+            "lower_quartile_confidence": 0.0, "invalid_geometry_ratio": 1.0,
+            "suspicious_insertion_ratio": 1.0,
         }
 
     confidences = [t.confidence for t in tokens if t.confidence is not None]
     mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
     low_conf = sum(1 for c in confidences if c < 0.60) / max(len(confidences), 1)
+    sorted_confidences = sorted(confidences)
+    lower_quartile = sorted_confidences[max(0, (len(sorted_confidences) - 1) // 4)] if sorted_confidences else 0.0
+    invalid_geometry = sum(
+        1 for token in tokens
+        if token.bbox.area <= 0 or any(not _math.isfinite(value) for value in (
+            token.bbox.x0, token.bbox.y0, token.bbox.x1, token.bbox.y1
+        ))
+    ) / n
 
     all_chars = "".join(t.text for t in tokens)
     bad_chars = sum(
@@ -723,6 +733,10 @@ def _candidate_metrics(tokens: "list[OcrToken]") -> "dict[str, float]":
         if ch == "�" or (_ud.category(ch).startswith("C") and ch not in " \t\n")
     )
     repl_ratio = bad_chars / max(len(all_chars), 1)
+    suspicious_ratio = sum(
+        1 for token in tokens
+        if not token.text.strip() or "�" in token.text or len(token.text.strip()) <= 1
+    ) / n
 
     texts = [t.text.strip() for t in tokens if t.text.strip()]
     seen: set[str] = set()
@@ -744,6 +758,9 @@ def _candidate_metrics(tokens: "list[OcrToken]") -> "dict[str, float]":
         "horizontal_ratio": horiz,
         "char_count": chars,
         "token_count": n,
+        "lower_quartile_confidence": lower_quartile,
+        "invalid_geometry_ratio": invalid_geometry,
+        "suspicious_insertion_ratio": suspicious_ratio,
     }
 
 
@@ -822,10 +839,13 @@ def _score_candidate(tokens: "list[OcrToken]") -> float:
         m["mean_confidence"]
         + min(0.08, _math.log1p(m["char_count"]) * 0.012)
         + m["horizontal_ratio"] * 0.02
+        + m["lower_quartile_confidence"] * 0.05
         + lex * 0.03
         - m["low_conf_ratio"] * 0.15
         - m["replacement_char_ratio"] * 0.30
         - m["duplicate_ratio"] * 0.10
+        - m["invalid_geometry_ratio"] * 0.40
+        - m["suspicious_insertion_ratio"] * 0.08
     )
     return score
 
@@ -833,7 +853,7 @@ def _score_candidate(tokens: "list[OcrToken]") -> float:
 def _best_candidate(
     candidates: "list[tuple[str, list[OcrToken]]]",
 ) -> "tuple[list[OcrToken], list[dict[str, Any]]]":
-    """Return (best tokens, per-candidate diagnostics) sorted highest-score first.
+    """Fuse spatially distinct candidate evidence and report candidate scores.
 
     Each diagnostics entry contains the candidate_id, all quality metrics from
     _candidate_metrics, the composite score, and a ``selected`` flag.
@@ -847,9 +867,29 @@ def _best_candidate(
         metrics = _candidate_metrics(tokens)
         score = _score_candidate(tokens)
         scored.append((score, label, tokens, metrics))
+    baseline = next((tokens for label, tokens in candidates if label == "default"), candidates[0][1])
+    baseline_trusted = [token for token in baseline if (token.confidence or 0.0) >= 0.70]
+    adjusted = []
+    for score, label, tokens, metrics in scored:
+        preserved = _baseline_preservation_ratio(baseline_trusted, tokens)
+        metrics["baseline_preservation_ratio"] = preserved
+        # A hypothesis that drops reliable baseline spans receives a material
+        # penalty even when its average confidence is higher.
+        score -= max(0.0, 0.80 - preserved) * 0.45
+        adjusted.append((score, label, tokens, metrics))
+    scored = adjusted
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    _best_score, best_label, best_tokens, _best_metrics = scored[0]
+    _best_score, best_label, _best_tokens, _best_metrics = scored[0]
+    from structured_pdf_text.ocr.candidate_fusion import (
+        OcrCandidateFusionEngine,
+        OcrCandidateResult,
+    )
+    candidate_results = [
+        OcrCandidateResult(label, _candidate_family(label), tuple(tokens), score, "easyocr")
+        for score, label, tokens, _ in scored
+    ]
+    fused = OcrCandidateFusionEngine().fuse(candidate_results)
     diagnostics = [
         {
             "candidate_id": label,
@@ -860,12 +900,46 @@ def _best_candidate(
             "replacement_char_ratio": round(metrics["replacement_char_ratio"], 4),
             "duplicate_ratio": round(metrics["duplicate_ratio"], 4),
             "horizontal_ratio": round(metrics["horizontal_ratio"], 4),
+            "lower_quartile_confidence": round(metrics["lower_quartile_confidence"], 4),
+            "invalid_geometry_ratio": round(metrics["invalid_geometry_ratio"], 4),
+            "suspicious_insertion_ratio": round(metrics["suspicious_insertion_ratio"], 4),
+            "baseline_preservation_ratio": round(metrics["baseline_preservation_ratio"], 4),
             "score": round(score, 4) if _math.isfinite(score) else None,
             "selected": label == best_label,
+            "fused_evidence_count": len(fused.tokens),
+            "fusion_consensus_count": fused.consensus_count,
+            "fusion_conflict_count": fused.conflict_count,
         }
         for score, label, tokens, metrics in scored
     ]
-    return best_tokens, diagnostics
+    return list(fused.tokens), diagnostics
+
+
+def _baseline_preservation_ratio(baseline: list[OcrToken], candidate: list[OcrToken]) -> float:
+    if not baseline:
+        return 1.0
+    preserved = 0
+    for token in baseline:
+        key = " ".join(token.text.casefold().split())
+        if any(
+            other.bbox.iou(token.bbox) >= 0.25
+            and " ".join(other.text.casefold().split()) == key
+            for other in candidate
+        ):
+            preserved += 1
+    return preserved / len(baseline)
+
+
+def _candidate_family(label: str) -> str:
+    """Map correlated variants to a shared independent-evidence family."""
+    value = label.lower()
+    if "dbnet" in value:
+        return "dbnet"
+    if "direct" in value:
+        return "direct_recognition"
+    if "wordbeam" in value or "beamsearch" in value:
+        return "craft_beam"
+    return "craft_greedy"
 
 
 def _adaptive_candidates(
@@ -889,8 +963,53 @@ def _adaptive_candidates(
     hr_kwargs["link_threshold"] = min(base_kwargs["link_threshold"], 0.35)
     hr_kwargs["min_size"] = max(1, base_kwargs["min_size"] // 2)
     raw_b, _ = _run_easyocr(reader, img, **hr_kwargs)
+    results = [("default", raw_a), ("high_recall", raw_b)]
+    # Adaptive mode activates image transforms only when the raster signals
+    # low contrast or a dark background. The original remains the baseline.
+    for label, variant in _image_preprocessing_candidates(img, adaptive=True):
+        raw, _ = _run_easyocr(reader, variant, **base_kwargs)
+        results.append((label, raw))
+    return results
 
-    return [("default", raw_a), ("high_recall", raw_b)]
+
+def _image_preprocessing_candidates(img: "Any", *, adaptive: bool) -> list[tuple[str, Any]]:
+    """Build optional grayscale/contrast/denoise/threshold image hypotheses."""
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageOps
+        arr = np.asarray(img)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY) if arr.ndim == 3 else arr.copy()
+        if not gray.size:
+            return []
+        mean, std = float(gray.mean()), float(gray.std())
+        dark_background = mean < 112 and float((gray < 96).mean()) > 0.55
+        low_contrast = std < 58
+        if adaptive and not dark_background and not low_contrast:
+            return []
+        candidates: list[tuple[str, Any]] = [("grayscale", gray)]
+        pil = Image.fromarray(gray)
+        candidates.append(("autocontrast", np.asarray(ImageOps.autocontrast(pil))))
+        if dark_background:
+            candidates.append(("inverted_grayscale", cv2.bitwise_not(gray)))
+        sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        candidates.append(("sharpen", cv2.filter2D(gray, -1, sharpen_kernel)))
+        candidates.append(("median_denoise", cv2.medianBlur(gray, 3)))
+        candidates.append(("bilateral_denoise", cv2.bilateralFilter(gray, 5, 45, 45)))
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        candidates.append(("otsu", otsu))
+        adaptive_threshold = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11
+        )
+        candidates.append(("adaptive_threshold", adaptive_threshold))
+        if arr.ndim == 3:
+            candidates = [
+                (label, cv2.cvtColor(variant, cv2.COLOR_GRAY2RGB) if variant.ndim == 2 else variant)
+                for label, variant in candidates
+            ]
+        return candidates
+    except Exception:
+        return []
 
 
 def _apply_clahe(img: "Any") -> "Any":
@@ -936,6 +1055,13 @@ def _apply_deskew(img: "Any") -> "Any":
     original image when cv2 is unavailable or angle estimation fails so the
     deskew candidate degrades gracefully.
     """
+    return _apply_deskew_with_inverse(img)[0]
+
+
+def _apply_deskew_with_inverse(img: "Any") -> tuple["Any", "Any"]:
+    """Deskew an image and return the affine inverse for OCR polygons."""
+    import numpy as np
+    identity = np.eye(3, dtype=float)
     try:
         import cv2
         import numpy as np
@@ -963,14 +1089,14 @@ def _apply_deskew(img: "Any") -> "Any":
                 angles.append(angle)
 
         if not angles:
-            return img
+            return img, identity
 
         # Use median to be robust against outlier components
         skew_angle = float(np.median(angles))
 
         # Only correct meaningful skew (ignore < 0.5° — rounding noise)
         if abs(skew_angle) < 0.5:
-            return img
+            return img, identity
 
         h, w = gray.shape[:2]
         center = (w / 2.0, h / 2.0)
@@ -981,9 +1107,29 @@ def _apply_deskew(img: "Any") -> "Any":
         else:
             rotated = cv2.warpAffine(arr, M, (w, h), flags=cv2.INTER_LINEAR,
                                      borderMode=cv2.BORDER_REPLICATE)
-        return rotated
+        affine = np.vstack((M, [0.0, 0.0, 1.0]))
+        return rotated, np.linalg.inv(affine)
     except Exception:
-        return img
+        return img, identity
+
+
+def _remap_raw_affine(raw: "list[Any]", inverse: "Any") -> "list[Any]":
+    """Map polygon coordinates from a transformed OCR image to its source."""
+    import numpy as np
+    if not raw:
+        return raw
+    remapped = []
+    for item in raw:
+        try:
+            points, text, confidence = item[0], item[1], item[2] if len(item) > 2 else None
+            mapped = []
+            for point in points:
+                value = inverse @ np.array([float(point[0]), float(point[1]), 1.0])
+                mapped.append([float(value[0]), float(value[1])])
+            remapped.append((mapped, text, confidence))
+        except Exception:
+            remapped.append(item)
+    return remapped
 
 
 def _rotate_image(img: "Any", angle: int) -> "Any":
@@ -1130,6 +1276,12 @@ def _exhaustive_candidates(
     raw_f, _ = _run_easyocr(reader, clahe_img, **base_kwargs)
     results.append(("clahe", raw_f))
 
+    for label, variant in _image_preprocessing_candidates(img, adaptive=False):
+        if label == "grayscale":
+            continue
+        raw, _ = _run_easyocr(reader, variant, **base_kwargs)
+        results.append((label, raw))
+
     # Candidate G: wordbeamsearch decoder (§9) — CTC with vocabulary-constrained
     # beam search.  Best for pt-BR prose where word-level context resolves ambiguous
     # characters (e.g. 'rn' vs 'm').  Skipped when the base decoder is already
@@ -1161,7 +1313,7 @@ def _exhaustive_candidates(
     # Candidate I: deskew (§15) — estimate and correct small scan rotation before
     # CRAFT detection.  Only corrects angles ≤ 15°; larger rotations imply
     # intentional layout orientation rather than scan skew.
-    deskew_img = _apply_deskew(img)
+    deskew_img, deskew_inverse = _apply_deskew_with_inverse(img)
     # Only add if deskew actually changed the image (saves time on already-straight pages)
     try:
         import numpy as np
@@ -1173,6 +1325,7 @@ def _exhaustive_candidates(
         _changed = True
     if _changed:
         raw_i, _ = _run_easyocr(reader, deskew_img, **base_kwargs)
+        raw_i = _remap_raw_affine(raw_i, deskew_inverse)
         results.append(("deskew", raw_i))
 
     # Candidate J: high_mag (§17) — higher magnification ratio so CRAFT sees the
@@ -1416,7 +1569,11 @@ class EasyOCRBackend:
         self._recog_network = recog_network or "latin_g2"
         # Always resolve from _model_cache_dir() so the Reader and the readiness
         # probe check the same directory regardless of EASYOCR_MODULE_PATH being set.
-        self._model_cache_dir = _model_cache_dir()
+        configured_cache = getattr(config, "ocr_cache_home", None)
+        if configured_cache and not os.environ.get("EASYOCR_MODULE_PATH"):
+            self._model_cache_dir = Path(configured_cache).expanduser() / "easyocr"
+        else:
+            self._model_cache_dir = _model_cache_dir()
 
         # Download is disabled by default so a benchmark run never touches the
         # network. Set EASYOCR_ALLOW_DOWNLOAD=1 only during the setup phase.
@@ -1554,7 +1711,27 @@ class EasyOCRBackend:
             page_orientation=False,
             quadrilateral_boxes=True,
             per_token_confidence=True,
+            polygons=True,
+            direct_recognition=True,
+            detector_profiles=True,
+            decoder_profiles=True,
+            orientation_search=True,
+            multiple_detectors=self._dbnet18_available(),
+            word_beam_search=True,
+            native_confidence=True,
         )
+
+    def _dbnet18_available(self) -> bool:
+        """Report whether the local EasyOCR package and DBNet weights exist."""
+        try:
+            import easyocr.config as easy_config  # type: ignore
+            model = easy_config.detection_models.get("dbnet18", {})
+            filename = model.get("filename")
+            if not filename:
+                return False
+            return (self._model_cache_dir / filename).is_file()
+        except Exception:
+            return False
 
     def _run_kwargs(self) -> "dict[str, Any]":
         """Return the full set of keyword arguments for _run_easyocr calls."""
@@ -1689,6 +1866,34 @@ class EasyOCRBackend:
             offset_x=float(cx0), offset_y=float(cy0),
             source=SourceKind.OCR_REGION,
         )
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        return map_tokens_to_page(tokens, page_bbox, width, height)
+
+    def recognize_direct(
+        self, image: object, page_index: int, page_bbox: "BBox | None" = None,
+        *, quality_policy: str | None = None,
+    ) -> list[OcrToken]:
+        """Recognize a known crop without running EasyOCR's text detector."""
+        if self._closed:
+            return []
+        import numpy as np
+        import cv2  # type: ignore
+        image_array = _to_numpy(image)
+        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY) if image_array.ndim == 3 else image_array
+        height, width = gray.shape[:2]
+        if not width or not height:
+            return []
+        result = self._reader.recognize(
+            gray,
+            [[0, width, 0, height]],
+            [],
+            decoder=self._decoder,
+            beamWidth=self._beamwidth,
+            allowlist=self._allowlist,
+            blocklist=self._blocklist,
+            workers=self._workers,
+        )
+        tokens = _result_to_pipeline_tokens(result or [], page_index, self._language)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)
 

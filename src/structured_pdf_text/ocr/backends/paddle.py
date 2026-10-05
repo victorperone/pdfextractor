@@ -440,6 +440,8 @@ class PaddleOCRBackend:
             page_orientation=True,
             quadrilateral_boxes=True,
             per_token_confidence=True,
+            polygons=True,
+            native_confidence=True,
         )
 
     # ------------------------------------------------------------------

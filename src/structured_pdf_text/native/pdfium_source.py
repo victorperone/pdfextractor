@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import math
 import threading
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -264,6 +265,93 @@ class PdfiumNativeEvidenceSource:
                 return bitmap.to_pil().convert("RGB")
             finally:
                 bitmap.close()
+        finally:
+            page.close()
+
+    @_pdfium_serialized
+    def render_region(
+        self,
+        page_index: int,
+        bbox: BBox,
+        scale: float,
+        page_bbox: BBox | None = None,
+    ) -> Any:
+        """Rasterize a PDF-coordinate region at the requested source scale."""
+        if self._doc is None:
+            self.open()
+        if self._doc is None:
+            raise RuntimeError("Document failed to open")
+        if page_index < 0 or page_index >= len(self._doc):
+            raise IndexError(f"page_index out of range: {page_index}")
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError(f"scale must be finite and positive, got {scale!r}")
+        page = self._doc[page_index]
+        self._record_metric("page_acquisitions")
+        self._record_metric("render_calls")
+        self._record_metric("region_render_calls")
+        self._record_metric("ffi_calls_estimated", 5)
+        try:
+            bitmap = page.render(scale=float(scale), rev_byteorder=True)
+            try:
+                rendered = bitmap.to_pil().convert("RGB")
+                if page_bbox is None:
+                    width, height = (float(value) for value in page.get_size())
+                    page_bbox = BBox(0.0, 0.0, width, height)
+                from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
+                crop, _, _ = crop_region_in_raster(rendered, bbox, page_bbox)
+                if crop.size == 0:
+                    raise ValueError("Requested PDF region does not intersect the page raster")
+                from PIL import Image
+                return Image.fromarray(crop)
+            finally:
+                bitmap.close()
+        finally:
+            page.close()
+
+    @_pdfium_serialized
+    def extract_embedded_image(self, page_index: int, object_index: int) -> tuple[Any, BBox] | None:
+        """Extract a dominant image's source-resolution bitmap when its placement is affine and axis aligned."""
+        if self._doc is None:
+            self.open()
+        if self._doc is None or page_index < 0 or page_index >= len(self._doc):
+            return None
+        page = self._doc[page_index]
+        self._record_metric("page_acquisitions")
+        self._record_metric("embedded_image_extract_calls")
+        self._record_metric("ffi_calls_estimated", 4)
+        try:
+            objects = _get_page_objects(page, None)
+            if object_index < 0 or object_index >= len(objects):
+                return None
+            image_obj = objects[object_index]
+            if getattr(image_obj, "type", None) != _constant("FPDF_PAGEOBJ_IMAGE", 3):
+                return None
+            matrix = _get_object_matrix(getattr(image_obj, "raw", image_obj))
+            if matrix is None or len(matrix) != 6:
+                return None
+            # A simple positive scale/translation gives an unambiguous mapping
+            # from original bitmap axes to page axes. Reject rotations, shears,
+            # and mirrors until their quadrilateral transform can be verified.
+            a, b, c, d, _, _ = matrix
+            if abs(b) > 1e-5 or abs(c) > 1e-5 or a <= 0 or d <= 0:
+                return None
+            bounds = _get_object_bbox(image_obj, float(page.get_size()[1]), 0.0, 0.0)
+            if bounds is None or bounds.area <= 0:
+                return None
+            bitmap = image_obj.get_bitmap(render=False, scale_to_original=True)
+            try:
+                pil = bitmap.to_pil().convert("RGB")
+            finally:
+                bitmap.close()
+            if pil.width <= 0 or pil.height <= 0:
+                return None
+            source_ratio = pil.width / pil.height
+            page_ratio = bounds.width / bounds.height
+            if abs(source_ratio / page_ratio - 1.0) > 0.15:
+                return None
+            return pil, bounds
+        except Exception:
+            return None
         finally:
             page.close()
 

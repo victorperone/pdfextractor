@@ -53,6 +53,14 @@ class OCRCapabilities:
     page_orientation: bool
     quadrilateral_boxes: bool
     per_token_confidence: bool
+    polygons: bool = False
+    direct_recognition: bool = False
+    detector_profiles: bool = False
+    decoder_profiles: bool = False
+    orientation_search: bool = False
+    multiple_detectors: bool = False
+    word_beam_search: bool = False
+    native_confidence: bool = True
 
 
 # ---------------------------------------------------------------------------

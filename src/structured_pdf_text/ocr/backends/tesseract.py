@@ -507,6 +507,9 @@ class TesseractBackend:
             page_orientation=self._osd_enabled,  # True only when TESSERACT_OSD=1
             quadrilateral_boxes=False,  # axis-aligned only
             per_token_confidence=True,
+            direct_recognition=True,
+            orientation_search=self._osd_enabled,
+            native_confidence=True,
         )
 
     # ------------------------------------------------------------------
@@ -615,6 +618,30 @@ class TesseractBackend:
             offset_x=float(cx0), offset_y=float(cy0),
             conf_min=self._conf_min,
             source=SourceKind.OCR_REGION,
+        )
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        return map_tokens_to_page(tokens, page_bbox, width, height)
+
+    def recognize_direct(
+        self, image: object, page_index: int, page_bbox: "BBox | None" = None,
+        *, quality_policy: str | None = None,
+    ) -> list[OcrToken]:
+        """Recognize a known crop as one text line (Tesseract PSM 7)."""
+        import numpy as np
+        from PIL import Image
+        pil = _to_pil(image)
+        width, height = pil.size
+        if width <= 0 or height <= 0:
+            return []
+        tsv = _run_tesseract_tsv(
+            pil, self._tess_lang, 7, self._oem,
+            dpi=self._dpi, extra_flags=self._extra_flags,
+            executable=self._tesseract_cmd, profile=self._profile,
+            num_threads=self._config.num_threads,
+        )
+        tokens = _tsv_to_pipeline_tokens(
+            _parse_tsv(tsv), page_index, self._language,
+            conf_min=self._conf_min, source=SourceKind.OCR_REGION,
         )
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)

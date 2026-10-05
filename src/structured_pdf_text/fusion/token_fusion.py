@@ -101,6 +101,10 @@ def fuse_native_and_ocr(
                         chosen=ocr_token.text,
                         alternatives=[native_text],
                         reason="ocr_authoritative_override",
+                        chosen_source=ocr_token.source.value,
+                        alternative_sources=["native_pdf"],
+                        chosen_score=ocr_token.confidence,
+                        alternative_scores=[sum(token.confidence for token in candidates) / len(candidates)],
                     )
                 )
             else:
@@ -109,6 +113,10 @@ def fuse_native_and_ocr(
                         chosen=native_text,
                         alternatives=[ocr_token.text],
                         reason="native_ocr_text_mismatch",
+                        chosen_source="native_pdf",
+                        alternative_sources=[ocr_token.source.value],
+                        chosen_score=sum(token.confidence for token in candidates) / len(candidates),
+                        alternative_scores=[ocr_token.confidence],
                     )
                 )
     return FusionResult(tuple(unmatched), matched, tuple(conflicts))

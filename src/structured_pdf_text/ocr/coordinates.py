@@ -67,6 +67,7 @@ def map_tokens_to_page(tokens: list[OcrToken], page_bbox: BBox | None, width_px:
             provenance=t.provenance,
             polygon=transform.raster_polygon_to_page(t.polygon) if t.polygon else None,
             level=t.level,
+            ocr_provenance=t.ocr_provenance,
         )
         for t in tokens
     ]
@@ -87,6 +88,7 @@ def offset_tokens(tokens: list[OcrToken], x: float, y: float) -> list[OcrToken]:
             provenance=t.provenance,
             polygon=tuple(Point(p.x + x, p.y + y) for p in t.polygon) if t.polygon else None,
             level=t.level,
+            ocr_provenance=t.ocr_provenance,
         )
         for t in tokens
     ]

@@ -323,6 +323,20 @@ def _normalized_lines_text(lines: list[TextLine]) -> str:
     return normalize_reading_text(lines_to_text(lines)).strip()
 
 
+def _normalized_ocr_paragraph_text(lines: list[TextLine]) -> str:
+    """Join OCR physical lines into one logical paragraph string."""
+    parts: list[str] = []
+    for index, line in enumerate(lines):
+        value = line.text.strip()
+        if not value:
+            continue
+        if parts and lines[index - 1].join_next_without_space:
+            parts[-1] += value
+        else:
+            parts.append(value)
+    return normalize_reading_text(" ".join(parts)).strip()
+
+
 def _build_region_blocks(
     region: LayoutRegion,
     page_index: int,
@@ -507,38 +521,51 @@ def _emit_prose_blocks(
         source_segments = (ListSegment(tuple(lines), (), False),)
     blocks: list[PageContentBlock] = []
     for segment in source_segments:
-        segment_lines = list(segment.lines)
-        text = _normalized_lines_text(segment_lines)
-        if not text:
-            continue
-        decorative_suppressed = _decorative_suppression_confirmed(region)
-        bbox = BBox(
-            x0=min(l.bbox.x0 for l in segment_lines),
-            y0=min(l.bbox.y0 for l in segment_lines),
-            x1=max(l.bbox.x1 for l in segment_lines),
-            y1=max(l.bbox.y1 for l in segment_lines),
-        )
-        block_kind = ContentKind.LIST if segment.is_list else kind
-        blocks.append(
-            PageContentBlock(
-                block_id=f"page-{page_index + 1}:region-{region.region_id}",
-                page_index=page_index,
-                kind=block_kind,
-                bbox=bbox,
-                order_index=0,  # reindexed by _reindex_blocks
-                text=text,
-                heading_level=region.heading_level if block_kind == ContentKind.TITLE else None,
-                source_region_ids=[region.region_id],
-                fallback_from_table=fallback_from_table,
-                list_items=list(segment.items),
-                decorative=region.kind == RegionKind.DECORATIVE,
-                line_ids=[line_identity(line) for line in segment_lines],
-                suppressed=decorative_suppressed,
-                suppression_reason=(
-                    "decorative" if decorative_suppressed else None
-                ),
+        from structured_pdf_text.text.lists import ListSegment
+        if segment.is_list or region.native_lines or not region.ocr_lines:
+            paragraph_segments = [segment]
+        else:
+            from structured_pdf_text.ocr.reconstruct import segment_ocr_paragraphs
+            paragraph_segments = [
+                ListSegment(tuple(paragraph), (), False)
+                for paragraph in segment_ocr_paragraphs(list(segment.lines))
+            ]
+        for paragraph_index, paragraph_segment in enumerate(paragraph_segments, start=1):
+            segment_lines = list(paragraph_segment.lines)
+            if paragraph_segment.is_list:
+                text = _normalized_lines_text(segment_lines)
+            elif region.ocr_lines and not region.native_lines:
+                text = _normalized_ocr_paragraph_text(segment_lines)
+            else:
+                text = _normalized_lines_text(segment_lines)
+            if not text:
+                continue
+            decorative_suppressed = _decorative_suppression_confirmed(region)
+            bbox = BBox(
+                x0=min(l.bbox.x0 for l in segment_lines),
+                y0=min(l.bbox.y0 for l in segment_lines),
+                x1=max(l.bbox.x1 for l in segment_lines),
+                y1=max(l.bbox.y1 for l in segment_lines),
             )
-        )
+            block_kind = ContentKind.LIST if paragraph_segment.is_list else kind
+            blocks.append(
+                PageContentBlock(
+                    block_id=f"page-{page_index + 1}:region-{region.region_id}:{paragraph_index}",
+                    page_index=page_index,
+                    kind=block_kind,
+                    bbox=bbox,
+                    order_index=0,
+                    text=text,
+                    heading_level=region.heading_level if block_kind == ContentKind.TITLE else None,
+                    source_region_ids=[region.region_id],
+                    fallback_from_table=fallback_from_table,
+                    list_items=list(paragraph_segment.items),
+                    decorative=region.kind == RegionKind.DECORATIVE,
+                    line_ids=[line_identity(line) for line in segment_lines],
+                    suppressed=decorative_suppressed,
+                    suppression_reason="decorative" if decorative_suppressed else None,
+                )
+            )
     return blocks
 
 

@@ -215,7 +215,7 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
 def _region_has_alphanumeric_text(region: LayoutRegion) -> bool:
     return any(
         character.isalnum()
-        for line in region.native_lines
+        for line in [*region.native_lines, *region.ocr_lines]
         for character in line.text
     )
 

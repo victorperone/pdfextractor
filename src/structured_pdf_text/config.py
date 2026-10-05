@@ -180,6 +180,14 @@ class ExtractorConfig:
     ocr_quality_variants: bool = True
     ocr_quality_policy: OcrQualityPolicy | str = OcrQualityPolicy.ADAPTIVE
     ocr_quality_thresholds: OcrQualityThresholds = OcrQualityThresholds()
+    max_quality: bool = False
+    ocr_tiling: bool = False
+    ocr_tile_rows: int = 2
+    ocr_tile_columns: int = 2
+    ocr_tile_overlap: float = 0.15
+    enable_critical_data_refinement: bool = False
+    enable_table_cell_ocr: bool = False
+    ocr_cache_home: str | None = None
     ocr_batch_size: int = 3
     preserve_headers_footers: bool = True
     # Low-level PDFium characters and object summaries are useful for a raw
@@ -263,6 +271,8 @@ class ExtractorConfig:
                     "ocr_provider must be 'onnxruntime' or 'openvino', "
                     f"got {self.ocr_provider!r}"
                 )
+        if self.ocr_cache_home is not None and not isinstance(self.ocr_cache_home, (str, Path)):
+            raise ConfigurationError("ocr_cache_home must be a path string or None")
         if self.ocr_runtime not in {None, "paddle_static", "onnxruntime", "openvino"}:
             raise ConfigurationError(f"Unsupported deprecated ocr_runtime value: {self.ocr_runtime!r}")
         if self.ocr_runtime in {"onnxruntime", "openvino"}:
@@ -293,6 +303,15 @@ class ExtractorConfig:
             raise ConfigurationError("RapidOCR ocr_runtime cannot be used with Paddle")
         if isinstance(self.ocr_batch_size, bool) or not isinstance(self.ocr_batch_size, int) or self.ocr_batch_size < 1:
             raise ConfigurationError(f"ocr_batch_size must be >= 1, got {self.ocr_batch_size!r}")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in (self.ocr_tile_rows, self.ocr_tile_columns)):
+            raise ConfigurationError("ocr_tile_rows and ocr_tile_columns must be positive integers")
+        if (
+            isinstance(self.ocr_tile_overlap, bool)
+            or not isinstance(self.ocr_tile_overlap, (int, float))
+            or not math.isfinite(self.ocr_tile_overlap)
+            or not 0.10 <= self.ocr_tile_overlap <= 0.20
+        ):
+            raise ConfigurationError("ocr_tile_overlap must be in [0.10, 0.20]")
         if isinstance(self.num_threads, bool) or not isinstance(self.num_threads, int) or self.num_threads < -1:
             raise ConfigurationError(f"num_threads must be -1, 0, or positive, got {self.num_threads!r}")
         if self.page_indices is not None:
@@ -389,6 +408,10 @@ def max_quality_extraction_config(
         preserve_headers_footers=preserve_headers,
         ocr_quality_variants=True,
         ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE,
+        max_quality=True,
+        ocr_tiling=True,
+        enable_critical_data_refinement=True,
+        enable_table_cell_ocr=True,
         enable_experimental_occlusion_redaction=True,
     )
 

@@ -250,6 +250,21 @@ class OcrToken:
     provenance: str | None = None
     polygon: "tuple[Point, ...] | None" = None
     level: str = "line"
+    ocr_provenance: "OcrProvenance | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class OcrProvenance:
+    engine: str
+    candidate_id: str | None = None
+    detector: str | None = None
+    recognizer: str | None = None
+    decoder: str | None = None
+    preprocessing: tuple[str, ...] = ()
+    scale: float | None = None
+    rotation: float | None = None
+    tile_id: str | None = None
+    refinement_kind: str | None = None
 
 
 @dataclass(slots=True)
@@ -275,6 +290,7 @@ class TextToken:
     text_render_mode: int | str | None = None
     provenance: str | None = None
     rotation: int = 0
+    ocr_provenance: "OcrProvenance | None" = None
 
 
 @dataclass(frozen=True, slots=True)
