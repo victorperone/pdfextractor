@@ -7,7 +7,7 @@ access every major OCR component from a single import path.
 from .engine import OcrEngine
 from .paddle import PaddleOcrEngine, PaddleOcrUnavailable
 from .render import render_page
-from .reconstruct import dehyphenate_ocr_lines, reconstruct_ocr_lines, segment_ocr_paragraphs
+from .reconstruct import dehyphenate_ocr_lines, merge_ocr_bullet_markers, reconstruct_ocr_lines, segment_ocr_paragraphs
 from .recovery import (
     OcrRegionRefiner,
     RegionRefinementAttempt,
@@ -27,6 +27,7 @@ __all__ = [
     "RegionRefinementRequest",
     "RegionRefinementResult",
     "dehyphenate_ocr_lines",
+    "merge_ocr_bullet_markers",
     "reconstruct_ocr_lines",
     "segment_ocr_paragraphs",
     "recover_ocr_tokens",

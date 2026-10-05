@@ -754,24 +754,57 @@ def _adaptive_candidates(
     return [("default", raw_a), ("high_recall", raw_b)]
 
 
+def _apply_clahe(img: "Any") -> "Any":
+    """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to an image.
+
+    Operates on the luminance channel of the image to enhance local contrast
+    without destroying colour information.  Returns the enhanced image as a
+    numpy array in the same shape/dtype as the input (RGB or grayscale).
+
+    Requires OpenCV (cv2).  If unavailable, returns the original image unchanged
+    so the CLAHE candidate degrades gracefully to the same result as the default.
+    """
+    try:
+        import cv2
+        import numpy as np
+        arr = np.asarray(img)
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            # Convert to LAB, apply CLAHE to L channel, convert back to RGB
+            lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
+            l_channel, a_channel, b_channel = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l_enhanced = clahe.apply(l_channel)
+            lab_enhanced = cv2.merge([l_enhanced, a_channel, b_channel])
+            return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB)
+        elif arr.ndim == 2:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            return clahe.apply(arr)
+        return arr
+    except Exception:
+        return img
+
+
 def _exhaustive_candidates(
     reader: "Any",
     img: "Any",
     base_kwargs: "dict[str, Any]",
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run up to 5 EasyOCR candidates for exhaustive quality policy.
+    """Run up to 6 EasyOCR candidates for exhaustive quality policy.
 
-    Candidates (§13, §12 from review):
+    Candidates (§13, §12, §14 from review):
       A. default          — base parameters as configured
       B. high_recall      — lower CRAFT thresholds for faint/small text
       C. beamsearch       — CTC beam search decoder (if not already default)
       D. layout_sensitive — conservative merging to avoid cross-gutter joins
       E. low_contrast     — relaxed contrast_ths + boosted adjust_contrast for
                             scans with low-contrast text (grey on white, etc.)
+      F. clahe            — CLAHE-enhanced image for low-contrast scans where
+                            internal EasyOCR contrast adjustment is insufficient
+                            (§14: real preprocessing variant, not just a param change)
 
-    The five families use the same Reader (no second model load) but vary
-    detector thresholds, merging parameters, decoder, and contrast handling.
-    Used when quality_policy='exhaustive'.
+    The six families use the same Reader (no second model load) but vary
+    detector thresholds, merging parameters, decoder, contrast handling,
+    and the input image itself.  Used when quality_policy='exhaustive'.
     """
     results = _adaptive_candidates(reader, img, base_kwargs)
 
@@ -797,6 +830,15 @@ def _exhaustive_candidates(
     lc_kwargs["adjust_contrast"] = min(base_kwargs.get("adjust_contrast", 0.5) + 0.15, 0.70)
     raw_e, _ = _run_easyocr(reader, img, **lc_kwargs)
     results.append(("low_contrast", raw_e))
+
+    # Candidate F: CLAHE preprocessing (§14) — apply adaptive histogram equalization
+    # to the full page image before detection.  This is a true image-level preprocess
+    # rather than a parameter change, so it can recover text that EasyOCR's internal
+    # contrast adjustment misses (grey-on-white, fax degraded, uneven illumination).
+    # Degrades gracefully if cv2 is unavailable (returns same result as default).
+    clahe_img = _apply_clahe(img)
+    raw_f, _ = _run_easyocr(reader, clahe_img, **base_kwargs)
+    results.append(("clahe", raw_f))
 
     return results
 

@@ -380,3 +380,230 @@ class TestOcrHeadingDetection:
             quality=RegionQuality(decision=RegionDecision.KEEP_NATIVE),
         )
         assert _ocr_region_height(region) is None
+
+
+# ---------------------------------------------------------------------------
+# §14 — CLAHE preprocessing candidate in exhaustive policy
+# ---------------------------------------------------------------------------
+
+class TestClahePreprocessing:
+    """§14: exhaustive policy must include a CLAHE-preprocessed image candidate."""
+
+    def _make_exhaustive_counting_backend(self, monkeypatch):
+        import sys
+        import types
+
+        class FakeReader:
+            def detect(self, img_color, **kwargs):
+                return ([[[10, 90, 10, 30]]], [[]])
+
+            def recognize(self, img_gray, h_list, f_list, **kwargs):
+                return [([[10, 10], [90, 10], [90, 30], [10, 30]], "text", 0.9)]
+
+        class FakeMod:
+            def Reader(self, langs, **kwargs):
+                return FakeReader()
+
+        fake_mod = FakeMod()
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        return backend
+
+    def test_exhaustive_includes_clahe_candidate(self, monkeypatch):
+        """§14: exhaustive candidate list must include the 'clahe' entry."""
+        import numpy as np
+        backend = self._make_exhaustive_counting_backend(monkeypatch)
+        img = np.full((100, 120, 3), 128, dtype=np.uint8)
+        backend.recognize_page(img, 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        ids = [c["candidate_id"] for c in diag["candidate_diagnostics"]]
+        assert "clahe" in ids, f"'clahe' not found in candidates: {ids}"
+
+    def test_exhaustive_has_six_or_more_candidates(self, monkeypatch):
+        """§14: exhaustive adds clahe as 6th candidate, total >= 6."""
+        import numpy as np
+        backend = self._make_exhaustive_counting_backend(monkeypatch)
+        img = np.full((100, 120, 3), 128, dtype=np.uint8)
+        backend.recognize_page(img, 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        assert len(diag["candidate_diagnostics"]) >= 6, (
+            f"Expected >=6 candidates, got {len(diag['candidate_diagnostics'])}"
+        )
+
+    def test_apply_clahe_returns_array_with_same_shape(self):
+        """_apply_clahe must return an array of the same shape as the input."""
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _apply_clahe
+        img = np.full((80, 100, 3), 100, dtype=np.uint8)
+        result = _apply_clahe(img)
+        import numpy as np2
+        arr = np2.asarray(result)
+        assert arr.shape == img.shape, f"Shape changed: {img.shape} → {arr.shape}"
+
+    def test_apply_clahe_graceful_without_cv2(self, monkeypatch):
+        """_apply_clahe must return original image unchanged when cv2 is unavailable."""
+        import sys
+        import numpy as np
+        monkeypatch.setitem(sys.modules, "cv2", None)  # make cv2 unimportable
+        from structured_pdf_text.ocr.backends.easyocr import _apply_clahe
+        img = np.full((40, 60, 3), 200, dtype=np.uint8)
+        result = _apply_clahe(img)
+        assert result is img, "Without cv2, original image must be returned unchanged"
+
+
+# ---------------------------------------------------------------------------
+# §32 — OCR-aware list detection: isolated bullet marker merging
+# ---------------------------------------------------------------------------
+
+class TestOcrBulletMarkerMerge:
+    """§32: merge_ocr_bullet_markers must join tiny marker boxes with item text."""
+
+    def _make_lines(self, specs):
+        """Build TextLine list from (text, x0, y0, x1, y1) tuples."""
+        return [_make_text_line(t, x0, y0, x1, y1) for (t, x0, y0, x1, y1) in specs]
+
+    def test_bullet_glyph_merged_with_next_line(self):
+        """A bullet • on the same row as text must be merged into one line."""
+        from structured_pdf_text.ocr.reconstruct import merge_ocr_bullet_markers
+        lines = self._make_lines([
+            ("•", 10, 5, 18, 15),          # marker: 8×10 box
+            ("item de lista", 22, 5, 200, 15),  # text: same vertical band
+        ])
+        result = merge_ocr_bullet_markers(lines)
+        assert len(result) == 1, f"Expected 1 merged line, got {len(result)}"
+        assert result[0].text.strip().startswith("•")
+        assert "item de lista" in result[0].text
+
+    def test_dash_marker_merged(self):
+        """A dash - on the same row as text must be merged."""
+        from structured_pdf_text.ocr.reconstruct import merge_ocr_bullet_markers
+        lines = self._make_lines([
+            ("-", 10, 5, 16, 15),
+            ("outro item", 20, 5, 180, 15),
+        ])
+        result = merge_ocr_bullet_markers(lines)
+        assert len(result) == 1
+        assert result[0].text.strip().startswith("-")
+
+    def test_ordered_marker_merged(self):
+        """An ordered marker like '1.' on the same row must be merged."""
+        from structured_pdf_text.ocr.reconstruct import merge_ocr_bullet_markers
+        lines = self._make_lines([
+            ("1.", 10, 5, 22, 15),
+            ("primeiro item da lista", 26, 5, 200, 15),
+        ])
+        result = merge_ocr_bullet_markers(lines)
+        assert len(result) == 1
+        assert "1." in result[0].text
+        assert "primeiro item" in result[0].text
+
+    def test_non_marker_short_line_not_merged(self):
+        """A short word that is not a marker must not be merged with the next line."""
+        from structured_pdf_text.ocr.reconstruct import merge_ocr_bullet_markers
+        lines = self._make_lines([
+            ("ou", 10, 5, 30, 15),          # common word, not a marker
+            ("próxima linha", 10, 17, 200, 27),
+        ])
+        result = merge_ocr_bullet_markers(lines)
+        assert len(result) == 2, "Non-marker short word must remain separate"
+
+    def test_marker_on_different_row_not_merged(self):
+        """Bullet and text on very different rows (different paragraphs) must stay separate."""
+        from structured_pdf_text.ocr.reconstruct import merge_ocr_bullet_markers
+        lines = self._make_lines([
+            ("•", 10, 5, 18, 15),
+            ("texto em outra região", 22, 100, 200, 110),  # far below
+        ])
+        result = merge_ocr_bullet_markers(lines)
+        assert len(result) == 2, "Marker and text in different rows must not merge"
+
+    def test_empty_input(self):
+        from structured_pdf_text.ocr.reconstruct import merge_ocr_bullet_markers
+        assert merge_ocr_bullet_markers([]) == []
+
+    def test_single_line_unchanged(self):
+        from structured_pdf_text.ocr.reconstruct import merge_ocr_bullet_markers
+        line = _make_text_line("only line", 0, 0, 100, 10)
+        result = merge_ocr_bullet_markers([line])
+        assert len(result) == 1
+        assert result[0] is line
+
+
+# ---------------------------------------------------------------------------
+# §40 — OCR-authoritative fusion (OCR_REGION local conflict resolution)
+# ---------------------------------------------------------------------------
+
+class TestOcrAuthoritativeFusion:
+    """§40: fuse_native_and_ocr with ocr_authoritative=True must let OCR win."""
+
+    def _make_native_line(self, text, x0=0, y0=0, x1=100, y1=10):
+        from structured_pdf_text.document import TextLine, TextToken, EvidenceRef, SourceKind, WritingDirection
+        tok = TextToken(
+            text=text, bbox=BBox(x0, y0, x1, y1),
+            sources=[EvidenceRef(SourceKind.NATIVE_PDF, 0, "native")],
+            confidence=1.0, normalized_text=text,
+        )
+        return TextLine(
+            tokens=[tok], bbox=BBox(x0, y0, x1, y1),
+            baseline=None, direction=WritingDirection.LEFT_TO_RIGHT,
+            native_order_min=0, native_order_max=0,
+        )
+
+    def _make_ocr_token(self, text, x0=5, y0=1, x1=95, y1=9):
+        from structured_pdf_text.document import OcrToken, SourceKind
+        return OcrToken(text=text, bbox=BBox(x0, y0, x1, y1),
+                        confidence=0.9, language="pt", source=SourceKind.OCR_REGION)
+
+    def test_native_wins_by_default(self):
+        """Default (ocr_authoritative=False): native text is chosen in conflicts."""
+        from structured_pdf_text.fusion.token_fusion import fuse_native_and_ocr
+        native = [self._make_native_line("nativo")]
+        ocr = [self._make_ocr_token("ocr_diferente")]
+        result = fuse_native_and_ocr(native, ocr)
+        conflicts = result.conflicts
+        assert len(conflicts) == 1
+        assert conflicts[0].chosen == "nativo"
+        assert conflicts[0].reason == "native_ocr_text_mismatch"
+
+    def test_ocr_wins_when_authoritative(self):
+        """ocr_authoritative=True: OCR text is chosen over native in conflicts."""
+        from structured_pdf_text.fusion.token_fusion import fuse_native_and_ocr
+        native = [self._make_native_line("nativo_ruim")]
+        ocr = [self._make_ocr_token("ocr_correto")]
+        result = fuse_native_and_ocr(native, ocr, ocr_authoritative=True)
+        conflicts = result.conflicts
+        assert len(conflicts) == 1
+        assert conflicts[0].chosen == "ocr_correto"
+        assert conflicts[0].reason == "ocr_authoritative_override"
+
+    def test_matching_tokens_always_counted(self):
+        """When texts match, both modes count them as matched (no conflict)."""
+        from structured_pdf_text.fusion.token_fusion import fuse_native_and_ocr
+        native = [self._make_native_line("igual")]
+        ocr = [self._make_ocr_token("igual")]
+        for authoritative in (False, True):
+            result = fuse_native_and_ocr(native, ocr, ocr_authoritative=authoritative)
+            assert result.matched_ocr_tokens == 1
+            assert result.conflicts == ()
+
+    def test_unmatched_ocr_tokens_always_unmatched(self):
+        """OCR tokens with no native overlap are always unmatched (both modes)."""
+        from structured_pdf_text.fusion.token_fusion import fuse_native_and_ocr
+        native = [self._make_native_line("longe", x0=500, y0=500, x1=600, y1=510)]
+        ocr = [self._make_ocr_token("aqui", x0=5, y0=1, x1=95, y1=9)]
+        for authoritative in (False, True):
+            result = fuse_native_and_ocr(native, ocr, ocr_authoritative=authoritative)
+            assert len(result.unmatched_ocr_tokens) == 1
+            assert result.conflicts == ()

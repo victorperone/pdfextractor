@@ -26,8 +26,10 @@ class FusionResult:
             (e.g., text recovered from a scanned region).
         matched_ocr_tokens: Count of OCR words that matched a native token
             with identical normalised text.
-        conflicts: OCR words that overlapped a native token but whose text
-            differed after normalisation; the native text is always ``chosen``.
+        conflicts: Token-level conflicts where native and OCR text differed.
+            When ``ocr_authoritative=False`` (default), ``chosen`` is the
+            native text.  When ``ocr_authoritative=True`` (§40 OCR_REGION
+            path), ``chosen`` is the OCR text.
     """
 
     unmatched_ocr_tokens: tuple[OcrToken, ...]
@@ -62,8 +64,20 @@ def fuse_native_tokens(native_tokens: list[TextToken]) -> list[TextToken]:
 def fuse_native_and_ocr(
     native_lines: list[TextLine],
     ocr_tokens: list[OcrToken],
+    *,
+    ocr_authoritative: bool = False,
 ) -> FusionResult:
-    """Compare OCR words with native evidence without silently replacing it."""
+    """Compare OCR words with native evidence without silently replacing it.
+
+    Args:
+        native_lines: Native PDF text lines for this region.
+        ocr_tokens: OCR tokens to fuse with the native layer.
+        ocr_authoritative: When ``True``, OCR text wins in conflicts instead
+            of the native layer.  Use this for ``OCR_REGION`` decisions where
+            the region was explicitly marked for OCR replacement because the
+            native text is unreliable (hidden OCR layer, broken CMap, etc.).
+            Defaults to ``False`` (native-first, existing behaviour).
+    """
     raw_native = [token for line in native_lines for token in line.tokens if not token.text.isspace()]
     native_tokens = fuse_native_tokens(raw_native)
     unmatched: list[OcrToken] = []
@@ -80,11 +94,21 @@ def fuse_native_and_ocr(
         if native_key == ocr_key:
             matched += 1
         else:
-            conflicts.append(
-                TokenConflict(
-                    chosen=native_text,
-                    alternatives=[ocr_token.text],
-                    reason="native_ocr_text_mismatch",
+            if ocr_authoritative:
+                # §40: OCR_REGION — OCR is authoritative, keep OCR text.
+                conflicts.append(
+                    TokenConflict(
+                        chosen=ocr_token.text,
+                        alternatives=[native_text],
+                        reason="ocr_authoritative_override",
+                    )
                 )
-            )
+            else:
+                conflicts.append(
+                    TokenConflict(
+                        chosen=native_text,
+                        alternatives=[ocr_token.text],
+                        reason="native_ocr_text_mismatch",
+                    )
+                )
     return FusionResult(tuple(unmatched), matched, tuple(conflicts))

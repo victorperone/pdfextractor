@@ -580,4 +580,123 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
         paragraphs.append(current_group)
     return paragraphs
 
+
+# ---------------------------------------------------------------------------
+# §32 — OCR-aware list detection: merge isolated bullet marker boxes
+# ---------------------------------------------------------------------------
+
+# Bullet glyphs that EasyOCR may return as a tiny separate box.
+_BULLET_GLYPHS: frozenset[str] = frozenset(
+    "•◦▪‣·●○■–—-*"
+)
+
+# Ordered list markers: single digit/letter followed by . or )
+_ORDERED_MARKER_RE = re.compile(r"^(?:\d+|[A-Za-z])[.)]$")
+
+
+def _is_ocr_bullet_marker(text: str) -> bool:
+    """Return True if ``text`` looks like a standalone list marker from OCR.
+
+    Detects single bullet glyphs AND ordered-list labels (``1.``, ``a)``, etc.)
+    that EasyOCR returned as a box separate from the item text.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if len(stripped) == 1 and stripped in _BULLET_GLYPHS:
+        return True
+    return bool(_ORDERED_MARKER_RE.match(stripped))
+
+
+def merge_ocr_bullet_markers(lines: list[TextLine]) -> list[TextLine]:
+    """Join isolated OCR bullet-marker boxes with the text line to their right.
+
+    EasyOCR sometimes returns a list marker (``•``, ``-``, ``1.``, …) as a tiny
+    separate detection box on the same baseline as the item text.  When the
+    marker line and the text line share the same vertical band (similar y-centre)
+    and the text starts to the right of the marker, they are merged into a single
+    ``TextLine`` whose text begins with the marker and a space (§32).
+
+    Merge conditions (all must hold):
+    - The candidate marker line has only 1–3 characters after stripping.
+    - The text is recognised as a bullet/ordered-list marker.
+    - The next line's y-centre is within ½ the median line height of the
+      marker's y-centre (same row).
+    - The next line starts to the right of the marker's right edge.
+    - The gap between marker right edge and text left edge is ≤ 2× the
+      median line height (not a cross-column join).
+
+    The function is conservative: it only merges when ALL conditions hold so
+    that legitimate single-character words are never accidentally consumed.
+
+    Args:
+        lines: OCR ``TextLine`` list, typically from :func:`reconstruct_ocr_lines`.
+
+    Returns:
+        A new list with merged lines where bullet markers were detected.
+        Lines not involved in a merge are returned unchanged.
+    """
+    if len(lines) < 2:
+        return list(lines)
+
+    heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    median_height = median(heights) if heights else 10.0
+    row_tolerance = median_height * 0.5
+    max_gap = median_height * 2.0
+
+    result: list[TextLine] = []
+    consumed: set[int] = set()
+
+    for i, line in enumerate(lines):
+        if i in consumed:
+            continue
+        stripped = line.text.strip()
+        if len(stripped) <= 3 and _is_ocr_bullet_marker(stripped) and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            # Check same-row condition
+            marker_cy = line.bbox.cy
+            text_cy = next_line.bbox.cy
+            if abs(marker_cy - text_cy) <= row_tolerance:
+                # Check spatial ordering: text to the right
+                gap = next_line.bbox.x0 - line.bbox.x1
+                if 0 <= gap <= max_gap:
+                    # Merge: build a new token list = marker tokens + space + text tokens
+                    merged_tokens = list(line.tokens)
+                    # Insert a space token between marker and text
+                    space_bbox = BBox(
+                        line.bbox.x1,
+                        min(line.bbox.y0, next_line.bbox.y0),
+                        next_line.bbox.x0,
+                        max(line.bbox.y1, next_line.bbox.y1),
+                    )
+                    from structured_pdf_text.document import EvidenceRef, TokenFlag
+                    space_token = TextToken(
+                        text=" ",
+                        bbox=space_bbox,
+                        sources=[EvidenceRef(SourceKind.OCR_PAGE, 0, f"bullet-gap:{i}")],
+                        confidence=0.60,
+                        normalized_text=" ",
+                        flags={TokenFlag.WHITESPACE_INFERRED},
+                    )
+                    merged_tokens.append(space_token)
+                    merged_tokens.extend(next_line.tokens)
+                    merged_bbox = BBox.union_all([line.bbox, next_line.bbox])
+                    merged_line = TextLine(
+                        tokens=merged_tokens,
+                        bbox=merged_bbox,
+                        baseline=line.baseline if line.baseline is not None else next_line.baseline,
+                        direction=next_line.direction,
+                        native_order_min=line.native_order_min,
+                        native_order_max=next_line.native_order_max,
+                        gap_mode=line.gap_mode,
+                        order_mode=line.order_mode,
+                        line_id=line.line_id,
+                    )
+                    result.append(merged_line)
+                    consumed.add(i + 1)
+                    continue
+        result.append(line)
+
+    return result
+
     return output
