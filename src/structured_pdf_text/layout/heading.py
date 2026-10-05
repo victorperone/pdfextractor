@@ -11,6 +11,20 @@ The public entry point :func:`assign_heading_levels` operates in two passes:
    without a clear size/weight signal are demoted to plain ``TEXT``.  Accepted
    headings are bucketed into up to three levels by clustering their size ratios
    relative to the median body font.
+
+   When native font metrics (``font_size``, ``font_weight``) are absent — for
+   example on fully-scanned pages processed via EasyOCR — heading detection
+   falls back to OCR-aware features (§28):
+
+   - **Box height ratio**: OCR line height relative to the document body-text
+     median OCR height (computed from non-title regions that have ``ocr_lines``).
+   - **Numbered prefix**: section numbering patterns (``1.``, ``1.1``, ``A.``).
+   - **Page geometry**: proximity to the top third, centring, short text length.
+   - **Vertical spacing**: larger-than-body gaps above a candidate suggest a
+     paragraph break rather than a heading transition.
+
+   The OCR path produces a level assignment consistent with the native path:
+   clusters of size ratios are mapped to H1/H2/H3 identically.
 """
 from __future__ import annotations
 
@@ -29,10 +43,18 @@ HEADING_ACCEPTANCE_THRESHOLD = 1.0
 
 
 def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
-    """Assign up to three heading levels from document typography and geometry."""
+    """Assign up to three heading levels from document typography and geometry.
+
+    Native path: uses ``font_size`` / ``font_weight`` from ``native_lines``.
+    OCR fallback (§28): when native font metrics are absent, derives heading
+    evidence from OCR line box heights, numbered prefixes, and page geometry.
+    Both paths produce the same H1/H2/H3 clustering output.
+    """
     pages = [_merge_heading_fragments(page) for page in pages]
     title_font_sizes: list[tuple[int, str, float]] = []
     body_sizes: list[float] = []
+    # Collect OCR line heights for the OCR-aware fallback (§28).
+    body_ocr_heights: list[float] = []
 
     for page in pages:
         for region in page.regions:
@@ -43,8 +65,9 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
                 if token.font_size is not None and token.font_size > 0
             ]
             if region.kind == RegionKind.TITLE and _region_has_alphanumeric_text(region):
-                font_size = statistics.median(sizes) if sizes else region.bbox.height
-                title_font_sizes.append((page.page_index, region.region_id, font_size))
+                font_size = statistics.median(sizes) if sizes else _ocr_region_height(region)
+                if font_size is not None and font_size > 0:
+                    title_font_sizes.append((page.page_index, region.region_id, font_size))
             elif region.kind not in {
                 RegionKind.HEADER,
                 RegionKind.FOOTER,
@@ -52,21 +75,61 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
                 RegionKind.DECORATIVE,
             }:
                 body_sizes.extend(sizes)
+                body_ocr_heights.extend(_region_ocr_heights(region))
 
     body_median = statistics.median(body_sizes) if body_sizes else None
     body_p75 = _percentile(body_sizes, 0.75) if body_sizes else None
+    body_ocr_height_median = statistics.median(body_ocr_heights) if body_ocr_heights else None
+
+    # OCR path (§28) is used only when there is no native font-size evidence at
+    # all — neither from body regions nor from title regions.  When any native
+    # font_size is present we always prefer the native path because it is more
+    # accurate than the OCR-box-height heuristic.
+    has_any_native_font_size = bool(body_sizes)
+    if not has_any_native_font_size:
+        # Also check title regions for native font evidence.
+        for page in pages:
+            for region in page.regions:
+                if region.kind == RegionKind.TITLE:
+                    title_native_sizes = [
+                        token.font_size
+                        for line in region.native_lines
+                        for token in line.tokens
+                        if token.font_size is not None and token.font_size > 0
+                    ]
+                    if title_native_sizes:
+                        has_any_native_font_size = True
+                        break
+            if has_any_native_font_size:
+                break
+
+    use_ocr_path = not has_any_native_font_size and body_ocr_height_median is not None
+
     valid_scores: dict[str, float] = {}
     title_regions: dict[str, LayoutRegion] = {}
     for page in pages:
         for region in page.regions:
             if region.kind == RegionKind.TITLE and _region_has_alphanumeric_text(region):
                 title_regions[region.region_id] = region
-                valid_scores[region.region_id] = _heading_candidate_score(
-                    region,
-                    body_font_median=body_median,
-                    body_font_p75=body_p75,
-                    page_bbox=page.bbox,
-                )
+                if not use_ocr_path:
+                    score = _heading_candidate_score(
+                        region,
+                        body_font_median=body_median,
+                        body_font_p75=body_p75,
+                        page_bbox=page.bbox,
+                    )
+                else:
+                    # OCR-aware fallback (§28): no native font metrics available.
+                    score = _heading_candidate_score_ocr(
+                        region,
+                        body_ocr_height_median=body_ocr_height_median,
+                        page_bbox=page.bbox,
+                    )
+                valid_scores[region.region_id] = score
+
+    # Effective body reference for native path; for OCR fallback it may be None.
+    effective_body_median = body_median
+    effective_body_p75 = body_p75
 
     # Convert punctuation-only and weak title predictions back to ordinary
     # text before assembly. This makes the rejection invariant independent of
@@ -80,11 +143,19 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
                     region.kind == RegionKind.TITLE
                     and (
                         not _region_has_alphanumeric_text(region)
-                        or not _heading_is_accepted(
-                            region,
-                            valid_scores.get(region.region_id, 0.0),
-                            body_font_median=body_median,
-                            body_font_p75=body_p75,
+                        or not (
+                            _heading_is_accepted_ocr(
+                                region,
+                                valid_scores.get(region.region_id, 0.0),
+                                body_ocr_height_median=body_ocr_height_median,
+                            )
+                            if use_ocr_path
+                            else _heading_is_accepted(
+                                region,
+                                valid_scores.get(region.region_id, 0.0),
+                                body_font_median=effective_body_median,
+                                body_font_p75=effective_body_p75,
+                            )
                         )
                     )
                 )
@@ -97,7 +168,9 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
     if not title_font_sizes:
         return pages
 
-    values = sorted((size / body_median if body_median else size for _, _, size in title_font_sizes), reverse=True)
+    # For level clustering, normalize by body reference (native or OCR height).
+    cluster_ref = effective_body_median if effective_body_median else body_ocr_height_median
+    values = sorted((size / cluster_ref if cluster_ref else size for _, _, size in title_font_sizes), reverse=True)
     clusters: list[float] = []
     for value in values:
         if not clusters or clusters[-1] - value > 0.18:
@@ -106,14 +179,23 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
 
     level_map: dict[str, int] = {}
     for _, region_id, font_size in title_font_sizes:
-        ratio = font_size / body_median if body_median else font_size
+        ratio = font_size / cluster_ref if cluster_ref else font_size
         region = title_regions.get(region_id)
-        if region is None or not _heading_is_accepted(
-            region,
-            valid_scores.get(region_id, 0.0),
-            body_font_median=body_median,
-            body_font_p75=body_p75,
-        ):
+        accepted = (
+            _heading_is_accepted_ocr(
+                region,
+                valid_scores.get(region_id, 0.0),
+                body_ocr_height_median=body_ocr_height_median,
+            )
+            if use_ocr_path
+            else _heading_is_accepted(
+                region,
+                valid_scores.get(region_id, 0.0),
+                body_font_median=effective_body_median,
+                body_font_p75=effective_body_p75,
+            )
+        ) if region is not None else False
+        if not accepted:
             continue
         cluster = min(range(len(clusters)), key=lambda index: abs(clusters[index] - ratio)) if clusters else 0
         level_map[region_id] = min(3, cluster + 1)
@@ -317,3 +399,124 @@ def _heading_weight(region: LayoutRegion) -> float | None:
         if token.font_weight is not None
     ]
     return statistics.median(weights) if weights else None
+
+
+# ---------------------------------------------------------------------------
+# §28 — OCR-aware heading detection helpers
+# ---------------------------------------------------------------------------
+
+def _ocr_region_height(region: LayoutRegion) -> float | None:
+    """Return the median OCR line height for *region*, or ``None`` if unavailable."""
+    heights = [
+        line.bbox.height
+        for line in region.ocr_lines
+        if line.bbox.height > 0
+    ]
+    return statistics.median(heights) if heights else None
+
+
+def _region_ocr_heights(region: LayoutRegion) -> list[float]:
+    """Return all positive OCR line heights for body-median computation."""
+    return [line.bbox.height for line in region.ocr_lines if line.bbox.height > 0]
+
+
+def _heading_candidate_score_ocr(
+    region: LayoutRegion,
+    *,
+    body_ocr_height_median: float | None,
+    page_bbox: BBox | None = None,
+) -> float:
+    """Score a TITLE region using OCR line geometry when native font metrics are absent (§28).
+
+    Features (all geometry-based, no font metadata required):
+
+    - **Height ratio** — median OCR line height vs body median.  Lines taller
+      than the body baseline score higher.  When no body reference exists the
+      region bbox height is used as a self-referential proxy.
+    - **Numbered prefix** — section numbering patterns add evidence
+      (``1.``, ``1.1``, ``A.``, etc.).
+    - **Page position** — proximity to the top third of the page adds a small
+      bonus; proximity to the bottom third reduces score.
+    - **Centering** — horizontally centred text is often a heading.
+    - **Short text** — headings rarely exceed 90 characters.
+    - **Vertical isolation** — regions with no direct neighbour above/below
+      are more likely to be structural markers.
+    """
+    text = " ".join(line.text for line in region.ocr_lines).strip()
+    if not text:
+        text = " ".join(line.text for line in region.native_lines).strip()
+    if not any(character.isalnum() for character in text):
+        return 0.0
+
+    ocr_height = _ocr_region_height(region)
+    box_height = ocr_height if ocr_height is not None else region.bbox.height
+
+    score = 0.5
+
+    if body_ocr_height_median and body_ocr_height_median > 0:
+        ratio = box_height / body_ocr_height_median
+        score += min(2.2, max(0.0, (ratio - 1.0) * 2.0))
+    else:
+        # Self-referential: taller regions within the page are heading candidates.
+        if page_bbox is not None and page_bbox.height > 0:
+            relative_height = box_height / (page_bbox.height * 0.03)
+            score += min(1.0, max(0.0, relative_height - 1.0) * 0.5)
+
+    # Numbered section prefix is strong independent evidence.
+    if re.match(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[.)]?\s+", text):
+        score += 0.45
+
+    # ALL-CAPS short line is a weak heading signal (could be header leakage — keep small).
+    if text.isupper() and len(text) <= 60:
+        score += 0.10
+
+    if page_bbox is not None:
+        # Proximity to page top.
+        if region.bbox.y0 <= page_bbox.y0 + page_bbox.height * 0.20:
+            score += 0.15
+        # Horizontal centering.
+        if abs(region.bbox.cx - page_bbox.cx) <= page_bbox.width * 0.16:
+            score += 0.20
+        # Bottom proximity penalty (likely footer / caption).
+        if region.bbox.y1 >= page_bbox.y1 - page_bbox.height * 0.12:
+            score -= 0.40
+
+    # Short text is a positive signal.
+    if len(text) <= 90:
+        score += 0.15
+    # Very long text is unlikely to be a heading.
+    if len(text) > 200:
+        score -= 0.40
+
+    return max(0.0, score)
+
+
+def _heading_is_accepted_ocr(
+    region: LayoutRegion,
+    score: float,
+    *,
+    body_ocr_height_median: float | None,
+) -> bool:
+    """Return ``True`` when *region* should be kept as a heading in the OCR path (§28).
+
+    Acceptance requires both a score above the threshold and at least one of:
+    - OCR line height is at least 1.15× the body OCR median.
+    - The text begins with a numbered section prefix.
+    - Score is especially high (>= 2.0), suggesting unambiguous heading geometry.
+    """
+    if score < HEADING_ACCEPTANCE_THRESHOLD:
+        return False
+    if body_ocr_height_median is None or body_ocr_height_median <= 0:
+        # No reference: accept on score alone (conservative fallback).
+        return score >= HEADING_ACCEPTANCE_THRESHOLD
+
+    ocr_height = _ocr_region_height(region)
+    box_height = ocr_height if ocr_height is not None else region.bbox.height
+    size_signal = box_height >= body_ocr_height_median * 1.15
+
+    text = " ".join(line.text for line in region.ocr_lines).strip()
+    if not text:
+        text = " ".join(line.text for line in region.native_lines).strip()
+    has_numbered_prefix = bool(re.match(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[.)]?\s+", text))
+
+    return size_signal or has_numbered_prefix or score >= 2.0

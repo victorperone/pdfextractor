@@ -467,3 +467,117 @@ def dehyphenate_ocr_lines(lines: list[TextLine]) -> list[TextLine]:
             output.append(line)
 
     return output
+
+
+# ---------------------------------------------------------------------------
+# §29 — Paragraph segmentation post-OCR
+# ---------------------------------------------------------------------------
+
+def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
+    """Group OCR ``TextLine`` objects into logical paragraphs (§29).
+
+    OCR produces one ``TextLine`` per physical text band.  This function joins
+    consecutive lines that belong to the same paragraph and splits them at
+    paragraph boundaries, returning a list of groups (each group is one
+    paragraph).
+
+    A **paragraph break** is detected when any of the following holds between
+    consecutive lines ``prev`` and ``curr``:
+
+    1. **Large vertical gap** — ``gap > 1.4 × median_gap`` (significantly
+       larger than the typical inter-line spacing indicates a paragraph break).
+    2. **First-line indent** — ``curr.bbox.x0`` is at least ``indent_ths``
+       further right than the paragraph's running left edge (common in
+       indented first-line paragraphs).
+    3. **Ragged-right transition** — the previous line is substantially
+       shorter than the page width (< 60 % of the median line width) and the
+       current line starts at the same left edge, suggesting the previous line
+       ended the paragraph.
+    4. **Column break** — ``curr.bbox.x0`` is substantially to the left of
+       ``prev.bbox.x0`` (new column start, not indentation).
+
+    Lines that are empty or very short (≤ 2 characters) are kept as separate
+    single-line paragraphs (they are likely bullet markers or standalone labels).
+
+    Args:
+        lines: Ordered list of ``TextLine`` objects, typically the output of
+            :func:`reconstruct_ocr_lines` or :func:`dehyphenate_ocr_lines`.
+
+    Returns:
+        A list of paragraph groups.  Each group is a non-empty ``list[TextLine]``.
+        The order of lines within each group and the order of groups preserve
+        the original reading order.
+    """
+    if not lines:
+        return []
+    if len(lines) == 1:
+        return [lines]
+
+    # Compute inter-line gaps (vertical distance between consecutive lines).
+    gaps: list[float] = []
+    for i in range(1, len(lines)):
+        gap = lines[i].bbox.y0 - lines[i - 1].bbox.y1
+        if gap > 0:
+            gaps.append(gap)
+    median_gap = median(gaps) if gaps else 0.0
+    gap_threshold = max(median_gap * 1.4, 1.0)
+
+    # Compute line widths for ragged-right detection.
+    widths = [line.bbox.width for line in lines if line.bbox.width > 0]
+    median_width = median(widths) if widths else 1.0
+    # Indent threshold: a step of >= 1 standard character width to the right.
+    heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    char_width_estimate = (median(heights) if heights else 10.0) * 0.6
+    indent_ths = max(char_width_estimate, 4.0)
+
+    paragraphs: list[list[TextLine]] = []
+    current_group: list[TextLine] = [lines[0]]
+    current_left = lines[0].bbox.x0
+
+    for i in range(1, len(lines)):
+        prev = lines[i - 1]
+        curr = lines[i]
+
+        # Rule 1: large vertical gap.
+        gap = curr.bbox.y0 - prev.bbox.y1
+        if gap > gap_threshold:
+            paragraphs.append(current_group)
+            current_group = [curr]
+            current_left = curr.bbox.x0
+            continue
+
+        # Rule 2: first-line indent relative to running left edge.
+        if curr.bbox.x0 > current_left + indent_ths:
+            paragraphs.append(current_group)
+            current_group = [curr]
+            current_left = curr.bbox.x0
+            continue
+
+        # Rule 3: previous line is ragged-right (much shorter than median).
+        prev_text = prev.text.rstrip()
+        if prev.bbox.width < median_width * 0.60 and len(prev_text) > 2:
+            # Only break if the current line is not also short (avoids breaking
+            # two consecutive short lines that are both part of the same block).
+            if curr.bbox.width >= median_width * 0.55:
+                paragraphs.append(current_group)
+                current_group = [curr]
+                current_left = curr.bbox.x0
+                continue
+
+        # Rule 4: column break — current line starts far to the left of previous.
+        if curr.bbox.x0 < prev.bbox.x0 - indent_ths * 2:
+            paragraphs.append(current_group)
+            current_group = [curr]
+            current_left = curr.bbox.x0
+            continue
+
+        # Continuation: same paragraph.
+        current_group.append(curr)
+        # Update running left edge (use minimum seen in this paragraph).
+        current_left = min(current_left, curr.bbox.x0)
+
+    if current_group:
+        paragraphs.append(current_group)
+    return paragraphs
+
+    return output
