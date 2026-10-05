@@ -57,9 +57,16 @@ def map_tokens_to_page(tokens: list[OcrToken], page_bbox: BBox | None, width_px:
         return tokens
     transform = PageTransform(page_bbox, RasterGeometry(width_px, height_px))
     return [
-        OcrToken(text=t.text, bbox=transform.raster_bbox_to_page(t.bbox),
-                 confidence=t.confidence, language=t.language, source=t.source,
-                 rotation=t.rotation, provenance=t.provenance)
+        OcrToken(
+            text=t.text,
+            bbox=transform.raster_bbox_to_page(t.bbox),
+            confidence=t.confidence,
+            language=t.language,
+            source=t.source,
+            rotation=t.rotation,
+            provenance=t.provenance,
+            polygon=transform.raster_polygon_to_page(t.polygon) if t.polygon else None,
+        )
         for t in tokens
     ]
 
@@ -69,9 +76,15 @@ def offset_tokens(tokens: list[OcrToken], x: float, y: float) -> list[OcrToken]:
     if not x and not y:
         return tokens
     return [
-        OcrToken(text=t.text, bbox=BBox(t.bbox.x0 + x, t.bbox.y0 + y,
-                                      t.bbox.x1 + x, t.bbox.y1 + y),
-                 confidence=t.confidence, language=t.language, source=t.source,
-                 rotation=t.rotation, provenance=t.provenance)
+        OcrToken(
+            text=t.text,
+            bbox=BBox(t.bbox.x0 + x, t.bbox.y0 + y, t.bbox.x1 + x, t.bbox.y1 + y),
+            confidence=t.confidence,
+            language=t.language,
+            source=t.source,
+            rotation=t.rotation,
+            provenance=t.provenance,
+            polygon=tuple(Point(p.x + x, p.y + y) for p in t.polygon) if t.polygon else None,
+        )
         for t in tokens
     ]

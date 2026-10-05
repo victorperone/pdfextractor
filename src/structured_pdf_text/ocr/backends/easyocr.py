@@ -566,6 +566,7 @@ def _result_to_pipeline_tokens(
 ) -> list[OcrToken]:
     if not raw:
         return []
+    from structured_pdf_text.geometry import Point
     tokens = []
     for item in raw:
         try:
@@ -580,15 +581,25 @@ def _result_to_pipeline_tokens(
             continue
         if geometry is None:
             continue
-        _, (x0, y0, x1, y1) = geometry
+        polygon_raw, (x0, y0, x1, y1) = geometry
         try:
             bbox = BBox(x0, y0, x1, y1)
         except (TypeError, ValueError):
             continue
+        # Preserve the quadrilateral from the detector so downstream passes
+        # (table cell assignment, reading order, native/OCR fusion) have the
+        # exact box shape rather than the axis-aligned envelope.
+        pipeline_polygon: "tuple[Point, ...] | None" = None
+        if polygon_raw and len(polygon_raw) >= 3:
+            try:
+                pipeline_polygon = tuple(Point(p[0], p[1]) for p in polygon_raw)
+            except (TypeError, ValueError, IndexError):
+                pipeline_polygon = None
         tokens.append(OcrToken(
             text=str(text), bbox=bbox,
             confidence=max(0.0, min(1.0, confidence if confidence is not None else 0.0)),
             language=language, source=source,
+            polygon=pipeline_polygon,
         ))
     return tokens
 
@@ -611,14 +622,38 @@ def _score_candidate(tokens: "list[OcrToken]") -> float:
 
 def _best_candidate(
     candidates: "list[tuple[str, list[OcrToken]]]",
-) -> "list[OcrToken]":
-    """Return the highest-scoring non-empty candidate list, or the first fallback."""
+) -> "tuple[list[OcrToken], list[dict[str, Any]]]":
+    """Return (best tokens, per-candidate diagnostics) sorted highest-score first.
+
+    The diagnostics list contains one dict per candidate with keys:
+      candidate_id, token_count, char_count, mean_confidence, score, selected.
+    """
+    import math as _math
     if not candidates:
-        return []
-    scored = [(_score_candidate(tokens), label, tokens) for label, tokens in candidates]
+        return [], []
+
+    scored = []
+    for label, tokens in candidates:
+        score = _score_candidate(tokens)
+        confidences = [t.confidence for t in tokens if t.confidence is not None]
+        mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        char_count = sum(len(t.text.strip()) for t in tokens)
+        scored.append((score, label, tokens, mean_conf, char_count))
     scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, _label, best_tokens = scored[0]
-    return best_tokens
+
+    best_score, best_label, best_tokens, _, _ = scored[0]
+    diagnostics = [
+        {
+            "candidate_id": label,
+            "token_count": len(tokens),
+            "char_count": char_count,
+            "mean_confidence": round(mean_conf, 4),
+            "score": round(score, 4) if _math.isfinite(score) else None,
+            "selected": label == best_label,
+        }
+        for score, label, tokens, mean_conf, char_count in scored
+    ]
+    return best_tokens, diagnostics
 
 
 def _adaptive_candidates(
@@ -769,15 +804,22 @@ class EasyOCRBackend:
         self.reset_page_diagnostics()
 
     def reset_page_diagnostics(self) -> None:
-        """Start a fresh per-page fallback counter for the extraction pipeline."""
+        """Start a fresh per-page diagnostic accumulator for the extraction pipeline."""
         self._easyocr_calls = 0
         self._easyocr_fallback_count = 0
         self._easyocr_fallback_reasons: list[str] = []
         self.last_easyocr_fallback_used = False
         self.last_easyocr_fallback_reason: str | None = None
+        self._last_candidate_diagnostics: list[dict[str, Any]] = []
 
     def consume_page_diagnostics(self) -> dict[str, Any]:
-        """Return and reset accumulated fallback diagnostics for one page."""
+        """Return and reset accumulated diagnostics for one page.
+
+        Keys include per-call fallback counters and, when multi-candidate
+        policies were used, a ``candidate_diagnostics`` list with one entry per
+        candidate carrying token_count, char_count, mean_confidence, score and
+        a ``selected`` flag indicating which candidate was chosen.
+        """
         result = {
             "easyocr_calls": self._easyocr_calls,
             "easyocr_fallback_count": self._easyocr_fallback_count,
@@ -786,6 +828,7 @@ class EasyOCRBackend:
                 if self._easyocr_calls else 0.0
             ),
             "easyocr_fallback_reasons": list(self._easyocr_fallback_reasons),
+            "candidate_diagnostics": list(self._last_candidate_diagnostics),
         }
         self.reset_page_diagnostics()
         return result
@@ -966,12 +1009,14 @@ class EasyOCRBackend:
             for label, raw in raw_candidates:
                 pl_tokens = _result_to_pipeline_tokens(raw, page_index, self._language)
                 pipeline_candidates.append((label, pl_tokens))
-            tokens = _best_candidate(pipeline_candidates)
+            tokens, cand_diag = _best_candidate(pipeline_candidates)
+            self._last_candidate_diagnostics = cand_diag
             self._easyocr_calls += len(raw_candidates)
         else:
             raw, fallback = _run_easyocr(self._reader, img, **self._run_kwargs())
             self._record_call(fallback)
             tokens = _result_to_pipeline_tokens(raw, page_index, self._language)
+            self._last_candidate_diagnostics = []
 
         return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0])
 

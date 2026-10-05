@@ -227,8 +227,12 @@ class NativePageEvidence:
 class OcrToken:
     """One OCR recognition result in canonical PDF page coordinates.
 
-    Immutable; produced by PaddleOcrEngine and region refinement and consumed
-    by the fusion layer.
+    Immutable; produced by OCR backends and consumed by the fusion layer.
+
+    ``polygon`` carries the raw quadrilateral from the detector (e.g. EasyOCR
+    CRAFT four-corner box) after coordinate transform.  It is ``None`` for
+    backends that only return axis-aligned boxes.  Downstream code must always
+    fall back to ``bbox`` when ``polygon`` is absent.
     """
 
     text: str
@@ -238,6 +242,7 @@ class OcrToken:
     source: SourceKind
     rotation: int = 0
     provenance: str | None = None
+    polygon: "tuple[Point, ...] | None" = None
 
 
 @dataclass(slots=True)

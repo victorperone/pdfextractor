@@ -299,12 +299,11 @@ def test_easyocr_fallback_diagnostics_accumulate_until_consumed():
     backend._record_call({"primary_error": "third region failed"})
 
     diagnostics = backend.consume_page_diagnostics()
-    assert diagnostics == {
-        "easyocr_calls": 3,
-        "easyocr_fallback_count": 2,
-        "easyocr_fallback_rate": pytest.approx(2 / 3),
-        "easyocr_fallback_reasons": ["first region failed", "third region failed"],
-    }
+    assert diagnostics["easyocr_calls"] == 3
+    assert diagnostics["easyocr_fallback_count"] == 2
+    assert diagnostics["easyocr_fallback_rate"] == pytest.approx(2 / 3)
+    assert diagnostics["easyocr_fallback_reasons"] == ["first region failed", "third region failed"]
+    assert diagnostics["candidate_diagnostics"] == []  # no multi-candidate pass
     assert backend.consume_page_diagnostics()["easyocr_fallback_count"] == 0
 
 
@@ -790,3 +789,165 @@ class TestQualityCandidatePolicies:
             quality_policy="adaptive",
         )
         assert isinstance(tokens, list)
+
+
+# ---------------------------------------------------------------------------
+# §24 — Polygon retention in pipeline tokens
+# ---------------------------------------------------------------------------
+
+class TestPolygonRetention:
+    """EasyOCR quadrilateral boxes must survive into OcrToken.polygon."""
+
+    def test_result_to_pipeline_tokens_populates_polygon(self):
+        """_result_to_pipeline_tokens must populate OcrToken.polygon from bbox_pts."""
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        from structured_pdf_text.document import SourceKind
+        bbox_pts = [[10, 10], [90, 10], [90, 30], [10, 30]]
+        raw = [(bbox_pts, "hello", 0.95)]
+        tokens = _result_to_pipeline_tokens(raw, 0, "pt")
+        assert len(tokens) == 1
+        t = tokens[0]
+        assert t.polygon is not None, "polygon must be populated from CRAFT quadrilateral"
+        assert len(t.polygon) == 4
+        # Verify polygon coordinates match the input with applied offset (0,0 default)
+        xs = [p.x for p in t.polygon]
+        ys = [p.y for p in t.polygon]
+        assert min(xs) == pytest.approx(10.0)
+        assert max(xs) == pytest.approx(90.0)
+        assert min(ys) == pytest.approx(10.0)
+        assert max(ys) == pytest.approx(30.0)
+
+    def test_polygon_propagates_with_offset(self):
+        """Offsets applied to bbox must also shift polygon coordinates."""
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        bbox_pts = [[0, 0], [10, 0], [10, 5], [0, 5]]
+        raw = [(bbox_pts, "x", 0.9)]
+        tokens = _result_to_pipeline_tokens(raw, 0, "pt", offset_x=50.0, offset_y=20.0)
+        assert tokens[0].polygon is not None
+        xs = [p.x for p in tokens[0].polygon]
+        ys = [p.y for p in tokens[0].polygon]
+        assert min(xs) == pytest.approx(50.0)
+        assert max(xs) == pytest.approx(60.0)
+        assert min(ys) == pytest.approx(20.0)
+        assert max(ys) == pytest.approx(25.0)
+
+    def test_polygon_transforms_through_map_tokens_to_page(self):
+        """map_tokens_to_page must apply raster-to-page transform to polygon."""
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        from structured_pdf_text.geometry import BBox
+        # Page: 100x50 pt; raster: 200x100 px — each pixel = 0.5 pt
+        page_bbox = BBox(0, 0, 100, 50)
+        bbox_pts = [[0, 0], [200, 0], [200, 100], [0, 100]]
+        raw = [(bbox_pts, "page", 0.9)]
+        raster_tokens = _result_to_pipeline_tokens(raw, 0, "pt")
+        page_tokens = map_tokens_to_page(raster_tokens, page_bbox, 200, 100)
+        assert page_tokens[0].polygon is not None
+        for p in page_tokens[0].polygon:
+            assert 0.0 <= p.x <= 100.0
+            assert 0.0 <= p.y <= 50.0
+
+    def test_polygon_shifts_through_offset_tokens(self):
+        """offset_tokens must translate polygon points by the same (x, y) delta."""
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        from structured_pdf_text.ocr.coordinates import offset_tokens
+        bbox_pts = [[0, 0], [10, 0], [10, 5], [0, 5]]
+        raw = [(bbox_pts, "y", 0.9)]
+        tokens = _result_to_pipeline_tokens(raw, 0, "pt")
+        shifted = offset_tokens(tokens, 30.0, 15.0)
+        assert shifted[0].polygon is not None
+        xs = [p.x for p in shifted[0].polygon]
+        ys = [p.y for p in shifted[0].polygon]
+        assert min(xs) == pytest.approx(30.0)
+        assert min(ys) == pytest.approx(15.0)
+
+    def test_degenerate_polygon_skipped_gracefully(self):
+        """A bbox_pts with < 3 valid points must still produce an OcrToken with polygon=None."""
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        # Fewer than 3 points — geometry will fail or polygon will be None
+        bbox_pts = [[0, 0], [10, 10]]  # only 2 points
+        raw = [(bbox_pts, "z", 0.9)]
+        # quadrilateral_geometry requires >= 4 points — result is None → token skipped
+        tokens = _result_to_pipeline_tokens(raw, 0, "pt")
+        assert tokens == []
+
+
+# ---------------------------------------------------------------------------
+# §46 — Candidate diagnostics in consume_page_diagnostics
+# ---------------------------------------------------------------------------
+
+class TestCandidateDiagnostics:
+    """consume_page_diagnostics must include candidate_diagnostics for multi-pass."""
+
+    def _make_counting_backend(self, monkeypatch) -> "Any":
+        import sys, types
+
+        class FakeReader:
+            def detect(self, img_color, **kwargs):
+                return ([[[10, 90, 10, 30]]], [[]])
+            def recognize(self, img_gray, h_list, f_list, **kwargs):
+                return [([[10, 10], [90, 10], [90, 30], [10, 30]], "word", 0.85)]
+
+        class FakeMod:
+            def Reader(self, langs, **kwargs):
+                return FakeReader()
+
+        fake_mod = FakeMod()
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        return backend
+
+    def test_single_pass_produces_empty_candidate_diagnostics(self, monkeypatch):
+        """Default single-pass must leave candidate_diagnostics as empty list."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_variants=False)
+        diag = backend.consume_page_diagnostics()
+        assert diag["candidate_diagnostics"] == []
+
+    def test_adaptive_pass_produces_candidate_diagnostics(self, monkeypatch):
+        """adaptive policy must populate candidate_diagnostics with >=2 entries."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="adaptive")
+        diag = backend.consume_page_diagnostics()
+        cand = diag["candidate_diagnostics"]
+        assert len(cand) >= 2
+        selected = [c for c in cand if c["selected"]]
+        assert len(selected) == 1, "Exactly one candidate must be marked selected"
+
+    def test_exhaustive_pass_produces_candidate_diagnostics(self, monkeypatch):
+        """exhaustive policy must produce >=4 candidate entries."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        cand = diag["candidate_diagnostics"]
+        assert len(cand) >= 4
+
+    def test_candidate_diagnostics_contain_required_keys(self, monkeypatch):
+        """Each candidate_diagnostics entry must have the documented keys."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="adaptive")
+        diag = backend.consume_page_diagnostics()
+        required = {"candidate_id", "token_count", "char_count", "mean_confidence", "score", "selected"}
+        for entry in diag["candidate_diagnostics"]:
+            assert required <= entry.keys(), f"Missing keys in {entry}"
+
+    def test_candidate_diagnostics_reset_on_next_consume(self, monkeypatch):
+        """After consume, candidate_diagnostics must reset to empty."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="adaptive")
+        backend.consume_page_diagnostics()
+        # Second consume (no new recognize_page) must have empty list
+        diag2 = backend.consume_page_diagnostics()
+        assert diag2["candidate_diagnostics"] == []
