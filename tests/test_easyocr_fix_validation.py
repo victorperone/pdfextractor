@@ -1057,3 +1057,83 @@ class TestOcrTokenLevel:
         token = OcrToken("word", BBox(0, 0, 10, 5), 0.9, "pt", SourceKind.OCR_PAGE, level="word")
         shifted = offset_tokens([token], 5.0, 5.0)[0]
         assert shifted.level == "word"
+
+
+# ---------------------------------------------------------------------------
+# §13 — exhaustive candidate pool includes low_contrast variant
+# ---------------------------------------------------------------------------
+
+class TestExhaustiveLowContrastCandidate:
+    """§13: exhaustive policy must include a low-contrast candidate."""
+
+    def _make_counting_backend(self, monkeypatch) -> "Any":
+        """Reuse the same monkeypatching pattern as TestCandidateDiagnostics."""
+        import sys, types
+
+        class FakeReader:
+            def detect(self, img_color, **kwargs):
+                return ([[[10, 90, 10, 30]]], [[]])
+            def recognize(self, img_gray, h_list, f_list, **kwargs):
+                return [([[10, 10], [90, 10], [90, 30], [10, 30]], "word", 0.85)]
+
+        class FakeMod:
+            def Reader(self, langs, **kwargs):
+                return FakeReader()
+
+        fake_mod = FakeMod()
+        monkeypatch.setitem(sys.modules, "easyocr", fake_mod)
+        fake_utils = types.SimpleNamespace(reformat_input=lambda a: (a, a[:, :, 0]))
+        monkeypatch.setitem(sys.modules, "easyocr.utils", fake_utils)
+        monkeypatch.delenv("EASYOCR_RECOG_NETWORK", raising=False)
+        monkeypatch.delenv("EASYOCR_ALLOW_DOWNLOAD", raising=False)
+
+        from structured_pdf_text.config import ExtractorConfig
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_import_easyocr", lambda: fake_mod)
+        monkeypatch.setattr(easyocr_mod, "_apply_torch_threads", lambda n: (None, None))
+
+        config = ExtractorConfig(language="pt")
+        backend = easyocr_mod.EasyOCRBackend.__new__(easyocr_mod.EasyOCRBackend)
+        easyocr_mod.EasyOCRBackend.__init__(backend, config)
+        return backend
+
+    def test_exhaustive_produces_five_or_more_candidates(self, monkeypatch):
+        """§13: exhaustive policy adds low_contrast as 5th candidate family."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        cand = diag["candidate_diagnostics"]
+        assert len(cand) >= 5, f"Expected >=5 candidates, got {len(cand)}: {[c['candidate_id'] for c in cand]}"
+
+    def test_exhaustive_includes_low_contrast_candidate_id(self, monkeypatch):
+        """§13: exhaustive candidate list must include 'low_contrast' entry."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="exhaustive")
+        diag = backend.consume_page_diagnostics()
+        ids = [c["candidate_id"] for c in diag["candidate_diagnostics"]]
+        assert "low_contrast" in ids, f"'low_contrast' not found in candidates: {ids}"
+
+    def test_exhaustive_low_contrast_uses_higher_contrast_ths(self, monkeypatch):
+        """§13: low_contrast candidate must pass contrast_ths > base value."""
+        calls: list[dict] = []
+
+        def capture_run(reader, img, **kw):
+            calls.append(dict(kw))
+            return [], None
+
+        from structured_pdf_text.ocr.backends import easyocr as _mod
+        monkeypatch.setattr(_mod, "_run_easyocr", capture_run)
+
+        from structured_pdf_text.ocr.backends.easyocr import _exhaustive_candidates
+        base_kwargs = {
+            "decoder": "greedy", "beamwidth": 5, "adjust_contrast": 0.5,
+            "allowlist": None, "blocklist": None, "workers": 0,
+            "rotation_info": None, "text_threshold": 0.7, "low_text": 0.4,
+            "link_threshold": 0.4, "min_size": 20, "slope_ths": 0.1,
+            "ycenter_ths": 0.5, "height_ths": 0.5, "width_ths": 0.5,
+            "add_margin": 0.1, "contrast_ths": 0.1, "filter_ths": 0.003,
+        }
+        _exhaustive_candidates(None, _make_image(), base_kwargs)
+        # The low_contrast call must have contrast_ths >= 0.20 (higher than base 0.1)
+        contrast_values = [c.get("contrast_ths", 0.1) for c in calls]
+        assert any(v >= 0.20 for v in contrast_values), f"No high contrast_ths call found: {contrast_values}"

@@ -359,9 +359,9 @@ def max_quality_extraction_config(
     Activates every quality improvement currently implemented for EasyOCR:
 
     - ``ocr_quality_variants=True`` — enables multi-candidate OCR passes.
-    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — runs all four
-      candidate families (default, high-recall, beamsearch, layout-sensitive)
-      on every page, selecting the best by the rich scoring model
+    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — runs all five
+      candidate families (default, high-recall, beamsearch, layout-sensitive,
+      low-contrast) on every page, selecting the best by the rich scoring model
       (confidence, low-confidence ratio, duplicate ratio, replacement
       character ratio).
     - Table detection and cross-page merging enabled.

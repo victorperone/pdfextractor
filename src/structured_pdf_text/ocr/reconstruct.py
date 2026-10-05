@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from statistics import median
 
 from structured_pdf_text.document import (
@@ -32,12 +33,25 @@ def reconstruct_ocr_lines(
     tokens: list[OcrToken],
     page_index: int,
     page_bbox: BBox | None = None,
+    *,
+    dehyphenate: bool = True,
 ) -> list[TextLine]:
     """Convert OCR tokens into lines using the OCR reading coordinate system.
 
     Rotated-page OCR tokens remain in page coordinates for evidence and table
     assignment, but are grouped and ordered in the temporary upright system
     used by the OCR pass.
+
+    Args:
+        tokens: Flat list of OCR tokens from the backend.
+        page_index: Zero-based page number used for evidence references.
+        page_bbox: Page bounding box in document coordinates; when ``None``
+            the bounding box is inferred from the token extents.
+        dehyphenate: When ``True`` (default), apply §30 conservative
+            dehyphenation after line grouping.  OCR often splits hyphenated
+            words across lines (e.g. ``docu-`` / ``mento``); this step
+            joins them back.  Pass ``False`` to skip (e.g. in quality
+            scoring where raw line count matters).
     """
     visible = [token for token in tokens if token.text and token.bbox.width >= 0 and token.bbox.height >= 0]
     if not visible:
@@ -119,8 +133,12 @@ def reconstruct_ocr_lines(
             )
         )
     if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
-        return lines
-    return sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+        result = lines
+    else:
+        result = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    if dehyphenate:
+        result = dehyphenate_ocr_lines(result)
+    return result
 
 
 def _default_ocr_provenance(token: OcrToken) -> str:
@@ -310,3 +328,142 @@ def _line_angle(tokens: list[OcrToken]) -> float:
         return 0.0
     rotation = tokens[0].rotation % 360
     return {90: 1.5707963267948966, 180: 3.141592653589793, 270: 4.71238898038469}.get(rotation, 0.0)
+
+
+# Regex: a hyphen at the very end of a line of OCR text.
+# Only plain ASCII hyphen-minus; en-dash/em-dash are not OCR line-break markers.
+_TRAILING_HYPHEN_RE = re.compile(r"-$")
+
+# Identifiers, URLs, codes: if the word ending in hyphen has digits or is ALL-CAPS,
+# the join is likely wrong (chemical formula, code, compound noun).  Conservative
+# heuristic to avoid silently destroying structured data.
+_ID_LIKE_RE = re.compile(r"[0-9A-Z]{2,}")
+
+
+def _is_hyphen_break(prev_text: str, next_text: str) -> bool:
+    """Return True when the previous line ends with a line-break hyphen.
+
+    Conservative rules (§30):
+      1. Previous line must end with ASCII hyphen-minus (-).
+      2. Next line must start with a Unicode letter (catches accented pt-BR).
+      3. The character before the hyphen must be a letter (not digit/code).
+      4. The token before the hyphen must not look like an identifier/code.
+      5. The continuation word must start with a lowercase letter (compound
+         nouns like segunda-feira are already on one OCR line; hyphens at
+         line-end before an uppercase word are likely proper nouns or headings
+         where joining is risky).
+    """
+    prev = prev_text.rstrip()
+    nxt = next_text.lstrip()
+    if not _TRAILING_HYPHEN_RE.search(prev):
+        return False
+    if not nxt or not unicodedata.category(nxt[0]).startswith("L"):
+        return False
+    # Character before the hyphen must be a letter
+    stem = prev[:-1]
+    if not stem or not unicodedata.category(stem[-1]).startswith("L"):
+        return False
+    # If the stem has a capital run or digits, it is likely a code/ID
+    if _ID_LIKE_RE.search(stem):
+        return False
+    # Only join when next word starts lowercase — uppercase may be a proper noun
+    if nxt[0] != nxt[0].lower():
+        return False
+    return True
+
+
+def dehyphenate_ocr_lines(lines: list[TextLine]) -> list[TextLine]:
+    """Join OCR lines where the previous line ends with a line-break hyphen.
+
+    This is a post-processing step that runs after ``reconstruct_ocr_lines``
+    and operates only on the OCR path (§30).  The native text path is
+    unaffected.
+
+    The algorithm is deliberately conservative:
+    - Only ASCII hyphen-minus triggers a join (not en-dash or em-dash).
+    - The continuation must start with a lowercase Unicode letter.
+    - Identifiers and codes (digits, all-caps) are never joined.
+    - The gap between the two lines must be ≤ 2× the median line height
+      (avoids joining across paragraphs or columns).
+
+    When a join occurs:
+    - The hyphen-ending token is stripped of its trailing hyphen.
+    - The first token of the next line is appended directly (no space).
+    - Remaining tokens of the next line follow with their usual spacing.
+    - The merged line's bbox is the union of both original bboxes.
+    - The consumed ``next`` line is removed from the output.
+
+    Empty lines or lines with no tokens are passed through unchanged.
+    """
+    if len(lines) < 2:
+        return lines
+
+    # Median line height used for gap threshold
+    heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    median_height = median(heights) if heights else 10.0
+    max_gap = 2.0 * median_height
+
+    output: list[TextLine] = []
+    skip_next = False
+    for i, line in enumerate(lines):
+        if skip_next:
+            skip_next = False
+            continue
+        if i + 1 >= len(lines):
+            output.append(line)
+            continue
+
+        next_line = lines[i + 1]
+        prev_text = line.text
+        next_text = next_line.text
+
+        # Check vertical gap between lines
+        vertical_gap = next_line.bbox.y0 - line.bbox.y1
+        gap_ok = vertical_gap <= max_gap
+
+        if gap_ok and _is_hyphen_break(prev_text, next_text):
+            # Build merged token list: strip trailing hyphen from last token of
+            # current line, then append all tokens from next line (no extra space).
+            merged_tokens = list(line.tokens)
+
+            # Strip the trailing hyphen from the last non-space token
+            for rev_idx in range(len(merged_tokens) - 1, -1, -1):
+                tok = merged_tokens[rev_idx]
+                if tok.text.rstrip():
+                    stripped = tok.text.rstrip("-")
+                    if stripped != tok.text:
+                        tok.text = stripped
+                        tok.normalized_text = normalize_text(stripped)
+                        tok.flags.add(TokenFlag.WHITESPACE_INFERRED)
+                    break
+
+            # Append next line tokens directly (no leading space — the join
+            # is exactly where the hyphen was)
+            merged_tokens.extend(next_line.tokens)
+
+            merged_bbox = BBox.union_all([line.bbox, next_line.bbox])
+            merged_line = TextLine(
+                tokens=merged_tokens,
+                bbox=merged_bbox,
+                baseline=line.baseline,
+                direction=line.direction,
+                native_order_min=line.native_order_min,
+                native_order_max=next_line.native_order_max,
+                gap_mode=line.gap_mode,
+                order_mode=line.order_mode,
+                line_id=line.line_id,
+                text_override=None,
+                join_next_without_space=line.join_next_without_space,
+                ghost_punctuation_candidate=line.ghost_punctuation_candidate,
+                merged_source_line_ids=(
+                    line.merged_source_line_ids
+                    + next_line.merged_source_line_ids
+                    + (next_line.line_id,)
+                ) if next_line.line_id else line.merged_source_line_ids,
+            )
+            output.append(merged_line)
+            skip_next = True
+        else:
+            output.append(line)
+
+    return output

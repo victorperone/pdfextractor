@@ -759,10 +759,19 @@ def _exhaustive_candidates(
     img: "Any",
     base_kwargs: "dict[str, Any]",
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run 4 EasyOCR candidates (default, high-recall, beamsearch, layout-sensitive).
+    """Run up to 5 EasyOCR candidates for exhaustive quality policy.
 
-    Used when quality_policy='exhaustive'.  More expensive but maximises coverage
-    and confidence for demanding extractions.
+    Candidates (§13, §12 from review):
+      A. default          — base parameters as configured
+      B. high_recall      — lower CRAFT thresholds for faint/small text
+      C. beamsearch       — CTC beam search decoder (if not already default)
+      D. layout_sensitive — conservative merging to avoid cross-gutter joins
+      E. low_contrast     — relaxed contrast_ths + boosted adjust_contrast for
+                            scans with low-contrast text (grey on white, etc.)
+
+    The five families use the same Reader (no second model load) but vary
+    detector thresholds, merging parameters, decoder, and contrast handling.
+    Used when quality_policy='exhaustive'.
     """
     results = _adaptive_candidates(reader, img, base_kwargs)
 
@@ -779,6 +788,15 @@ def _exhaustive_candidates(
     ls_kwargs["add_margin"] = min(base_kwargs["add_margin"], 0.05)
     raw_d, _ = _run_easyocr(reader, img, **ls_kwargs)
     results.append(("layout_sensitive", raw_d))
+
+    # Candidate E: low-contrast recovery — lower contrast_ths so more crops
+    # receive the second-pass contrast adjustment, and boost adjust_contrast
+    # to recover faint text missed by the default recognizer parameters (§13).
+    lc_kwargs = dict(base_kwargs)
+    lc_kwargs["contrast_ths"] = max(base_kwargs.get("contrast_ths", 0.1), 0.20)
+    lc_kwargs["adjust_contrast"] = min(base_kwargs.get("adjust_contrast", 0.5) + 0.15, 0.70)
+    raw_e, _ = _run_easyocr(reader, img, **lc_kwargs)
+    results.append(("low_contrast", raw_e))
 
     return results
 
@@ -797,8 +815,8 @@ class EasyOCRBackend:
     Quality policies (quality_policy arg to recognize_page):
       None / 'default': single EasyOCR call with configured parameters.
       'adaptive': two candidates (default + high-recall); best wins.
-      'exhaustive': four candidates (default, high-recall, beamsearch,
-                    layout-sensitive); best wins.
+      'exhaustive': five candidates (default, high-recall, beamsearch,
+                    layout-sensitive, low-contrast); best wins.
 
     See module docstring for all tunable environment variables.
     """

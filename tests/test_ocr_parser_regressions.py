@@ -147,3 +147,69 @@ class TestPtBrSpacingRules:
         tokens = [_ocr_token("uma", 0, 30), _ocr_token("palavra", 32, 80)]
         text = _reconstruct_text(tokens)
         assert "uma palavra" in text
+
+
+# ---------------------------------------------------------------------------
+# §30 — OCR dehyphenation after line reconstruction
+# ---------------------------------------------------------------------------
+
+def _make_two_line_tokens(line1_text: str, line2_text: str) -> "list[Any]":
+    """Create two groups of tokens on separate y-bands."""
+    from structured_pdf_text.document import OcrToken, SourceKind
+    t1 = OcrToken(line1_text, BBox(0, 0, 50, 10), 0.9, "pt", SourceKind.OCR_PAGE)
+    t2 = OcrToken(line2_text, BBox(0, 15, 50, 25), 0.9, "pt", SourceKind.OCR_PAGE)
+    return [t1, t2]
+
+
+class TestDehyphenation:
+    """§30: OCR line reconstruction must join line-break hyphens conservatively."""
+
+    def _lines(self, tok_list):
+        from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+        return reconstruct_ocr_lines(tok_list, page_index=0)
+
+    def test_hyphen_break_joins_continuation(self):
+        """'docu-' + 'mento' → 'documento' on one line."""
+        toks = _make_two_line_tokens("docu-", "mento")
+        lines = self._lines(toks)
+        full_text = " ".join(l.text for l in lines)
+        assert "documento" in full_text
+        assert "docu-" not in full_text
+
+    def test_hyphen_break_single_line_result(self):
+        """Two-line input joined to one line."""
+        toks = _make_two_line_tokens("rela-", "tório")
+        lines = self._lines(toks)
+        assert len(lines) == 1
+
+    def test_compound_noun_not_joined(self):
+        """'segunda-feira' is never split across OCR lines; if it were, the
+        heuristic should leave it alone (uppercase follows, or same-line)."""
+        from structured_pdf_text.document import OcrToken, SourceKind
+        t1 = OcrToken("segunda-", BBox(0, 0, 50, 10), 0.9, "pt", SourceKind.OCR_PAGE)
+        t2 = OcrToken("Feira", BBox(0, 15, 50, 25), 0.9, "pt", SourceKind.OCR_PAGE)
+        lines = self._lines([t1, t2])
+        full = " ".join(l.text for l in lines)
+        # Next word starts with uppercase → not joined
+        assert "segunda-" in full or "segunda" in full
+        assert len(lines) == 2  # kept separate — uppercase continuation
+
+    def test_id_like_stem_not_joined(self):
+        """A hyphen after a digit/code stem must not be joined."""
+        toks = _make_two_line_tokens("12A-", "código")
+        lines = self._lines(toks)
+        assert len(lines) == 2
+
+    def test_normal_two_lines_kept_separate(self):
+        """Lines without trailing hyphen remain separate."""
+        toks = _make_two_line_tokens("primeira linha", "segunda linha")
+        lines = self._lines(toks)
+        assert len(lines) == 2
+
+    def test_dehyphenate_false_skips_joining(self):
+        """dehyphenate=False must leave the hyphen-break lines as-is."""
+        from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+        toks = _make_two_line_tokens("docu-", "mento")
+        lines = reconstruct_ocr_lines(toks, page_index=0, dehyphenate=False)
+        assert len(lines) == 2
+        assert any("docu-" in l.text for l in lines)

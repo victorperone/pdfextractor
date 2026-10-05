@@ -224,7 +224,7 @@ def assess_ocr_coverage(
     try:
         from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
 
-        line_count = len(reconstruct_ocr_lines(values, 0, page_bbox))
+        line_count = len(reconstruct_ocr_lines(values, 0, page_bbox, dehyphenate=False))
     except (ImportError, TypeError, ValueError):
         line_count = 0
     boxes = [token.bbox for token in values]
