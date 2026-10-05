@@ -410,3 +410,54 @@ def test_page_ocr_exception_and_successful_empty_result_have_distinct_diagnostic
     empty_page = empty.pages[0]
     assert "page_ocr_unavailable" not in empty_page.diagnostics.facts["partial_reasons"]
     assert any("OCR completed successfully but produced no usable tokens" in warning for warning in empty_page.diagnostics.warnings)
+
+
+# ---------------------------------------------------------------------------
+# §50 — max_quality_extraction_config
+# ---------------------------------------------------------------------------
+
+def test_max_quality_extraction_config_is_importable() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    assert callable(max_quality_extraction_config)
+
+
+def test_max_quality_config_sets_exhaustive_policy() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    from structured_pdf_text.config import OcrQualityPolicy
+    config = max_quality_extraction_config()
+    assert config.ocr_quality_policy == OcrQualityPolicy.EXHAUSTIVE
+
+
+def test_max_quality_config_enables_quality_variants() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config()
+    assert config.ocr_quality_variants is True
+
+
+def test_max_quality_config_uses_easyocr_by_default() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config()
+    assert config.ocr_engine == "easyocr"
+
+
+def test_max_quality_config_enables_tables() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config()
+    assert config.enable_tables is True
+    assert config.merge_cross_page_tables is True
+
+
+def test_max_quality_config_language_override() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config(language="en")
+    assert config.language == "en"
+
+
+def test_max_quality_config_is_stricter_than_best_extraction_config() -> None:
+    """max_quality must use EXHAUSTIVE while best_extraction uses ADAPTIVE or less."""
+    from structured_pdf_text import best_extraction_config, max_quality_extraction_config
+    from structured_pdf_text.config import OcrQualityPolicy
+    best = best_extraction_config()
+    maxq = max_quality_extraction_config()
+    assert maxq.ocr_quality_policy == OcrQualityPolicy.EXHAUSTIVE
+    assert best.ocr_quality_policy != OcrQualityPolicy.EXHAUSTIVE

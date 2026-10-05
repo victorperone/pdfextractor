@@ -1,6 +1,7 @@
 """Reconstruct structured text lines from flat OCR token lists."""
 from __future__ import annotations
 
+import re
 from statistics import median
 
 from structured_pdf_text.document import (
@@ -15,6 +16,16 @@ from structured_pdf_text.document import (
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.text.normalize import normalize_text
+
+# Characters that must not be preceded by a space in Portuguese text.
+# Includes standard punctuation, closing brackets, and the percent sign.
+_NO_SPACE_BEFORE: frozenset[str] = frozenset(",.:;!?%)]}")
+# Characters that must not be followed by a space.
+_NO_SPACE_AFTER: frozenset[str] = frozenset("([{")
+# Currency prefix that must stay attached to the following digits (R$ 1.234 → R$1.234 would
+# be wrong; only the *internal* gap between "R$" and the digits is closed when geometrically
+# they appear separated by OCR box boundaries).
+_CURRENCY_PREFIX_RE = re.compile(r"^R\$$", re.IGNORECASE)
 
 
 def reconstruct_ocr_lines(
@@ -135,17 +146,45 @@ def _should_insert_space(
     previous_bbox: BBox,
     current_bbox: BBox,
 ) -> bool:
-    """Recover separators when OCR word boxes overlap by a few pixels.
+    """Decide whether an inter-token space should be inserted.
 
-    Detectors sometimes return adjacent word boxes with a small overlap after
-    rotation mapping. Only apply the overlap fallback when the token boundary
-    looks like a word boundary; ordinary gaps continue to use the geometric
-    rule above.
+    Two rules govern the decision:
+
+    1. **Geometric gap**: when the current box starts to the right of the
+       previous box, a gap exists and a space is normally warranted.
+    2. **Overlap fallback**: detectors sometimes return adjacent word boxes
+       with a small overlap after rotation mapping.  A space is still
+       inserted when the overlap is small and the boundary looks like a
+       word boundary.
+
+    **pt-BR punctuation rules (§31)** — applied to the *geometric gap* path
+    only (overlap path already requires alphanumeric boundaries):
+
+    - No space before: ``,.:;!?%)]}``.  Prevents ``palavra ,`` and
+      ``12 %``.
+    - No space after: ``([{``.  Prevents ``( texto``.
+    - Currency prefix ``R$``: no space between ``R$`` and the following
+      digits.  Prevents ``R$ 1.234``.
+
+    These rules apply to all OCR backends — they operate on the assembled
+    token text, not on any engine-specific data.
     """
-    if current_bbox.x0 >= previous_bbox.x1:
-        return True
     previous_text = previous.text.rstrip()
     current_text = current.text.lstrip()
+
+    if current_bbox.x0 >= previous_bbox.x1:
+        # Geometric gap exists — apply pt-BR punctuation suppression rules.
+        if not previous_text or not current_text:
+            return True
+        if current_text[0] in _NO_SPACE_BEFORE:
+            return False
+        if previous_text[-1] in _NO_SPACE_AFTER:
+            return False
+        if _CURRENCY_PREFIX_RE.match(previous_text) and current_text[:1].isdigit():
+            return False
+        return True
+
+    # Overlap path — only insert a space at alphanumeric word boundaries.
     if not previous_text or not current_text:
         return False
     if previous_text[-1].isspace() or current_text[0].isspace():

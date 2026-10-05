@@ -349,6 +349,50 @@ def best_extraction_config(
     )
 
 
+def max_quality_extraction_config(
+    *,
+    language: str = "pt",
+    preserve_headers: bool = False,
+) -> "ExtractorConfig":
+    """Return the config optimised for maximum extraction quality.
+
+    Activates every quality improvement currently implemented for EasyOCR:
+
+    - ``ocr_quality_variants=True`` — enables multi-candidate OCR passes.
+    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — runs all four
+      candidate families (default, high-recall, beamsearch, layout-sensitive)
+      on every page, selecting the best by the rich scoring model
+      (confidence, low-confidence ratio, duplicate ratio, replacement
+      character ratio).
+    - Table detection and cross-page merging enabled.
+    - Header/footer suppression enabled by default.
+
+    Resource cost: approximately 4× the OCR inference time of
+    ``best_extraction_config`` because the exhaustive policy runs four
+    EasyOCR passes per page.  Use this config for documents where accuracy
+    is more important than throughput — e.g. financial reports, legal filings,
+    or any document that will feed a critical downstream process.
+
+    The config is engine-agnostic: other OCR backends will ignore policies
+    they do not implement and fall back to their normal single pass.
+
+    Args:
+        language: OCR language hint (default "pt" for Brazilian Portuguese).
+        preserve_headers: set True to keep repeated page headers/footers in
+            reading_text (default False — removes them).
+    """
+    return ExtractorConfig(
+        mode=ExtractionMode.BALANCED,
+        language=language,
+        enable_tables=True,
+        merge_cross_page_tables=True,
+        preserve_headers_footers=preserve_headers,
+        ocr_quality_variants=True,
+        ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE,
+        enable_experimental_occlusion_redaction=True,
+    )
+
+
 # Per-engine render scale defaults for the E2E benchmark.
 #
 # Rationale (research-backed, subject to A/B refinement):

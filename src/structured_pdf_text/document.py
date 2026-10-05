@@ -229,6 +229,12 @@ class OcrToken:
 
     Immutable; produced by OCR backends and consumed by the fusion layer.
 
+    ``level`` distinguishes what the detector returned: EasyOCR and most
+    backends return one entry per text *line* (possibly spanning multiple
+    words), so the default is ``"line"``.  Word-level backends may set
+    ``"word"``.  Callers must not split by whitespace to derive word geometry
+    without independent alignment data.
+
     ``polygon`` carries the raw quadrilateral from the detector (e.g. EasyOCR
     CRAFT four-corner box) after coordinate transform.  It is ``None`` for
     backends that only return axis-aligned boxes.  Downstream code must always
@@ -243,6 +249,7 @@ class OcrToken:
     rotation: int = 0
     provenance: str | None = None
     polygon: "tuple[Point, ...] | None" = None
+    level: str = "line"
 
 
 @dataclass(slots=True)

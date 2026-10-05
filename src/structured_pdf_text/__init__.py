@@ -14,6 +14,7 @@ from .config import (
     OcrQualityThresholds,
     SecurityLimits,
     best_extraction_config,
+    max_quality_extraction_config,
 )
 from .errors import (
     ExtractionError,
@@ -38,6 +39,7 @@ __all__ = [
     "PdfTextExtractor",
     "SecurityLimits",
     "best_extraction_config",
+    "max_quality_extraction_config",
     "ExtractionError",
     "FatalExtractionError",
     "PaddleOcrUnavailable",

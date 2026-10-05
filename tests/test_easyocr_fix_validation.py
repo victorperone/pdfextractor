@@ -951,3 +951,109 @@ class TestCandidateDiagnostics:
         # Second consume (no new recognize_page) must have empty list
         diag2 = backend.consume_page_diagnostics()
         assert diag2["candidate_diagnostics"] == []
+
+    def test_candidate_diagnostics_include_rich_scoring_fields(self, monkeypatch):
+        """§22: diagnostics must include low_conf_ratio, duplicate_ratio, replacement_char_ratio."""
+        backend = self._make_counting_backend(monkeypatch)
+        backend.recognize_page(_make_image(), 0, quality_policy="adaptive")
+        diag = backend.consume_page_diagnostics()
+        rich_keys = {"low_conf_ratio", "duplicate_ratio", "replacement_char_ratio", "horizontal_ratio"}
+        for entry in diag["candidate_diagnostics"]:
+            assert rich_keys <= entry.keys(), f"Missing rich scoring fields in {entry}"
+
+
+# ---------------------------------------------------------------------------
+# §22 — _candidate_metrics and _score_candidate correctness
+# ---------------------------------------------------------------------------
+
+class TestCandidateScoring:
+    """§22: scoring must penalise low confidence, duplicates and garbled chars."""
+
+    def _make_token(self, text: str, conf: float, w: float = 10.0, h: float = 5.0):
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox
+        return OcrToken(text, BBox(0, 0, w, h), conf, "pt", SourceKind.OCR_PAGE)
+
+    def test_clean_tokens_score_higher_than_garbled(self):
+        from structured_pdf_text.ocr.backends.easyocr import _score_candidate
+        clean = [self._make_token("palavra", 0.95)]
+        garbled = [self._make_token("p�l�vr�", 0.95)]
+        assert _score_candidate(clean) > _score_candidate(garbled)
+
+    def test_low_confidence_tokens_penalised(self):
+        from structured_pdf_text.ocr.backends.easyocr import _score_candidate
+        high_conf = [self._make_token("texto", 0.95)]
+        low_conf = [self._make_token("texto", 0.30)]
+        assert _score_candidate(high_conf) > _score_candidate(low_conf)
+
+    def test_duplicate_tokens_penalised(self):
+        from structured_pdf_text.ocr.backends.easyocr import _score_candidate
+        unique = [self._make_token("a", 0.9), self._make_token("b", 0.9)]
+        duped = [self._make_token("a", 0.9), self._make_token("a", 0.9)]
+        assert _score_candidate(unique) > _score_candidate(duped)
+
+    def test_empty_tokens_return_minus_inf(self):
+        import math
+        from structured_pdf_text.ocr.backends.easyocr import _score_candidate
+        assert math.isinf(_score_candidate([]))
+        assert _score_candidate([]) < 0
+
+    def test_metrics_dict_has_all_keys(self):
+        from structured_pdf_text.ocr.backends.easyocr import _candidate_metrics
+        tokens = [self._make_token("texto", 0.9)]
+        m = _candidate_metrics(tokens)
+        required = {"mean_confidence", "low_conf_ratio", "replacement_char_ratio",
+                    "duplicate_ratio", "horizontal_ratio", "char_count", "token_count"}
+        assert required <= m.keys()
+
+    def test_metrics_empty_tokens(self):
+        from structured_pdf_text.ocr.backends.easyocr import _candidate_metrics
+        m = _candidate_metrics([])
+        assert m["token_count"] == 0
+        assert m["char_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# §25 — OcrToken.level field
+# ---------------------------------------------------------------------------
+
+class TestOcrTokenLevel:
+    """§25: OcrToken must carry a level field defaulting to 'line'."""
+
+    def test_ocrtoken_default_level_is_line(self):
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox
+        t = OcrToken("text", BBox(0, 0, 10, 5), 0.9, "pt", SourceKind.OCR_PAGE)
+        assert t.level == "line"
+
+    def test_ocrtoken_level_can_be_set(self):
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox
+        t = OcrToken("text", BBox(0, 0, 10, 5), 0.9, "pt", SourceKind.OCR_PAGE, level="word")
+        assert t.level == "word"
+
+    def test_pipeline_tokens_have_line_level(self):
+        """EasyOCR pipeline tokens must be tagged as level='line'."""
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        bbox_pts = [[0, 0], [50, 0], [50, 10], [0, 10]]
+        raw = [(bbox_pts, "uma linha de texto", 0.9)]
+        tokens = _result_to_pipeline_tokens(raw, 0, "pt")
+        assert tokens[0].level == "line"
+
+    def test_level_preserved_through_map_tokens_to_page(self):
+        """map_tokens_to_page must not drop or change the level field."""
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        token = OcrToken("word", BBox(0, 0, 100, 50), 0.9, "pt", SourceKind.OCR_PAGE, level="word")
+        mapped = map_tokens_to_page([token], BBox(0, 0, 100, 50), 100, 50)[0]
+        assert mapped.level == "word"
+
+    def test_level_preserved_through_offset_tokens(self):
+        """offset_tokens must not drop or change the level field."""
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox
+        from structured_pdf_text.ocr.coordinates import offset_tokens
+        token = OcrToken("word", BBox(0, 0, 10, 5), 0.9, "pt", SourceKind.OCR_PAGE, level="word")
+        shifted = offset_tokens([token], 5.0, 5.0)[0]
+        assert shifted.level == "word"

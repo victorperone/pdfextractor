@@ -79,3 +79,71 @@ def test_paddle_parser_preserves_good_row_after_malformed_geometry():
     parsed = _tokens_from_result(rows, 0, Image(), None)
     assert [token.text for token in parsed] == ["good"]
     assert parsed[0].bbox == BBox(1, 2, 11, 12)
+
+
+# ---------------------------------------------------------------------------
+# §31 — pt-BR punctuation spacing in reconstruct_ocr_lines
+# ---------------------------------------------------------------------------
+
+def _ocr_token(text: str, x0: float, x1: float, y0: float = 0.0, y1: float = 10.0) -> "Any":
+    """Create an OcrToken with a simple axis-aligned bbox."""
+    from structured_pdf_text.document import OcrToken, SourceKind
+    return OcrToken(text, BBox(x0, y0, x1, y1), 0.9, "pt", SourceKind.OCR_PAGE)
+
+
+def _reconstruct_text(tokens: list) -> str:
+    """Run reconstruct_ocr_lines and return joined text."""
+    from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+    lines = reconstruct_ocr_lines(tokens, page_index=0)
+    return " ".join(line.text for line in lines)
+
+
+class TestPtBrSpacingRules:
+    """§31: OCR reconstruction must suppress spaces before/after pt-BR punctuation."""
+
+    def test_no_space_before_comma(self):
+        tokens = [_ocr_token("palavra", 0, 50), _ocr_token(",", 52, 56)]
+        text = _reconstruct_text(tokens)
+        assert "palavra," in text, f"Expected 'palavra,' but got: {text!r}"
+        assert "palavra ," not in text
+
+    def test_no_space_before_period(self):
+        tokens = [_ocr_token("fim", 0, 30), _ocr_token(".", 31, 34)]
+        text = _reconstruct_text(tokens)
+        assert "fim." in text
+        assert "fim ." not in text
+
+    def test_no_space_before_percent(self):
+        tokens = [_ocr_token("12,5", 0, 30), _ocr_token("%", 31, 35)]
+        text = _reconstruct_text(tokens)
+        assert "12,5%" in text
+        assert "12,5 %" not in text
+
+    def test_no_space_before_closing_paren(self):
+        tokens = [_ocr_token("(texto", 0, 40), _ocr_token(")", 41, 44)]
+        text = _reconstruct_text(tokens)
+        assert "texto)" in text
+        assert "texto )" not in text
+
+    def test_no_space_before_colon(self):
+        tokens = [_ocr_token("Total", 0, 30), _ocr_token(":", 31, 34)]
+        text = _reconstruct_text(tokens)
+        assert "Total:" in text
+        assert "Total :" not in text
+
+    def test_no_space_before_semicolon(self):
+        tokens = [_ocr_token("item", 0, 30), _ocr_token(";", 31, 34)]
+        text = _reconstruct_text(tokens)
+        assert "item;" in text
+        assert "item ;" not in text
+
+    def test_currency_prefix_attached_to_digits(self):
+        tokens = [_ocr_token("R$", 0, 15), _ocr_token("1.234,56", 16, 60)]
+        text = _reconstruct_text(tokens)
+        assert "R$1.234,56" in text
+        assert "R$ 1.234" not in text
+
+    def test_normal_word_gap_still_inserts_space(self):
+        tokens = [_ocr_token("uma", 0, 30), _ocr_token("palavra", 32, 80)]
+        text = _reconstruct_text(tokens)
+        assert "uma palavra" in text

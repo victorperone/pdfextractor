@@ -604,20 +604,91 @@ def _result_to_pipeline_tokens(
     return tokens
 
 
-def _score_candidate(tokens: "list[OcrToken]") -> float:
-    """Score a list of pipeline tokens for candidate selection.
+def _candidate_metrics(tokens: "list[OcrToken]") -> "dict[str, float]":
+    """Compute quality metrics for a candidate token list.
 
-    Higher is better. Combines mean confidence, character count bonus and
-    a horizontal-orientation bonus.  Returns -inf for empty token lists.
+    Returns a dict with keys used both for scoring and for diagnostics:
+      mean_confidence         — average OCR confidence (0..1)
+      low_conf_ratio          — fraction of tokens below 0.60 confidence
+      replacement_char_ratio  — fraction of characters that are U+FFFD or control chars
+      duplicate_ratio         — fraction of token texts that are exact duplicates
+      horizontal_ratio        — fraction of tokens with width >= height (horizontal text)
+      char_count              — total non-whitespace characters
+      token_count             — number of tokens
+    """
+    import math as _math
+    import unicodedata as _ud
+
+    n = len(tokens)
+    if not n:
+        return {
+            "mean_confidence": 0.0, "low_conf_ratio": 1.0,
+            "replacement_char_ratio": 1.0, "duplicate_ratio": 1.0,
+            "horizontal_ratio": 0.0, "char_count": 0, "token_count": 0,
+        }
+
+    confidences = [t.confidence for t in tokens if t.confidence is not None]
+    mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    low_conf = sum(1 for c in confidences if c < 0.60) / max(len(confidences), 1)
+
+    all_chars = "".join(t.text for t in tokens)
+    bad_chars = sum(
+        1 for ch in all_chars
+        if ch == "�" or (_ud.category(ch).startswith("C") and ch not in " \t\n")
+    )
+    repl_ratio = bad_chars / max(len(all_chars), 1)
+
+    texts = [t.text.strip() for t in tokens if t.text.strip()]
+    seen: set[str] = set()
+    dups = 0
+    for txt in texts:
+        if txt in seen:
+            dups += 1
+        seen.add(txt)
+    dup_ratio = dups / max(len(texts), 1)
+
+    horiz = sum(t.bbox.width >= t.bbox.height for t in tokens) / n
+    chars = sum(len(t.text.strip()) for t in tokens)
+
+    return {
+        "mean_confidence": mean_conf,
+        "low_conf_ratio": low_conf,
+        "replacement_char_ratio": repl_ratio,
+        "duplicate_ratio": dup_ratio,
+        "horizontal_ratio": horiz,
+        "char_count": chars,
+        "token_count": n,
+    }
+
+
+def _score_candidate(tokens: "list[OcrToken]") -> float:
+    """Score a candidate token list for selection. Higher is better.
+
+    Scoring components:
+      + mean_confidence              — primary quality signal
+      + char_count bonus             — logarithmic, capped at 0.08, so content
+                                       coverage matters but never overrides confidence
+      + horizontal_ratio * 0.02      — small bonus for coherent horizontal text
+      - low_conf_ratio * 0.15        — penalise high fraction of uncertain tokens
+      - replacement_char_ratio * 0.30 — penalise garbled / control characters
+      - duplicate_ratio * 0.10       — penalise repeated token texts (hallucination)
+
+    A candidate may not win solely by having more characters if those characters
+    are low-confidence, garbled, or duplicated (§22 rollback rule).
     """
     import math as _math
     if not tokens:
         return -_math.inf
-    confidences = [t.confidence for t in tokens if t.confidence is not None]
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-    chars = sum(len(t.text.strip()) for t in tokens)
-    horizontal = sum(t.bbox.width >= t.bbox.height for t in tokens) / len(tokens)
-    return avg_conf + min(0.08, _math.log1p(chars) * 0.012) + horizontal * 0.02
+    m = _candidate_metrics(tokens)
+    score = (
+        m["mean_confidence"]
+        + min(0.08, _math.log1p(m["char_count"]) * 0.012)
+        + m["horizontal_ratio"] * 0.02
+        - m["low_conf_ratio"] * 0.15
+        - m["replacement_char_ratio"] * 0.30
+        - m["duplicate_ratio"] * 0.10
+    )
+    return score
 
 
 def _best_candidate(
@@ -625,8 +696,8 @@ def _best_candidate(
 ) -> "tuple[list[OcrToken], list[dict[str, Any]]]":
     """Return (best tokens, per-candidate diagnostics) sorted highest-score first.
 
-    The diagnostics list contains one dict per candidate with keys:
-      candidate_id, token_count, char_count, mean_confidence, score, selected.
+    Each diagnostics entry contains the candidate_id, all quality metrics from
+    _candidate_metrics, the composite score, and a ``selected`` flag.
     """
     import math as _math
     if not candidates:
@@ -634,24 +705,26 @@ def _best_candidate(
 
     scored = []
     for label, tokens in candidates:
+        metrics = _candidate_metrics(tokens)
         score = _score_candidate(tokens)
-        confidences = [t.confidence for t in tokens if t.confidence is not None]
-        mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
-        char_count = sum(len(t.text.strip()) for t in tokens)
-        scored.append((score, label, tokens, mean_conf, char_count))
+        scored.append((score, label, tokens, metrics))
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    best_score, best_label, best_tokens, _, _ = scored[0]
+    _best_score, best_label, best_tokens, _best_metrics = scored[0]
     diagnostics = [
         {
             "candidate_id": label,
-            "token_count": len(tokens),
-            "char_count": char_count,
-            "mean_confidence": round(mean_conf, 4),
+            "token_count": metrics["token_count"],
+            "char_count": metrics["char_count"],
+            "mean_confidence": round(metrics["mean_confidence"], 4),
+            "low_conf_ratio": round(metrics["low_conf_ratio"], 4),
+            "replacement_char_ratio": round(metrics["replacement_char_ratio"], 4),
+            "duplicate_ratio": round(metrics["duplicate_ratio"], 4),
+            "horizontal_ratio": round(metrics["horizontal_ratio"], 4),
             "score": round(score, 4) if _math.isfinite(score) else None,
             "selected": label == best_label,
         }
-        for score, label, tokens, mean_conf, char_count in scored
+        for score, label, tokens, metrics in scored
     ]
     return best_tokens, diagnostics
 
