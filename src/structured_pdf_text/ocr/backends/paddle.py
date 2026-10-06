@@ -140,10 +140,10 @@ class PaddleOCRBackend:
 
         # Resolve cache_home once at construction time, mirroring PaddleOcrEngine's
         # own resolution, so healthcheck() checks the same directory the engine uses.
-        self._cache_home: str = os.environ.get(
+        self._cache_home: str = str(getattr(config, "ocr_cache_home", None) or os.environ.get(
             "PADDLE_PDX_CACHE_HOME",
             str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
-        )
+        ))
         self._artifact_hashes = self._resolve_artifact_hashes()
 
         if _has_torch_conflict():
@@ -159,6 +159,7 @@ class PaddleOCRBackend:
                 "quality_thresholds": dataclasses.asdict(config.ocr_quality_thresholds),
                 "mkldnn": _enable_mkldnn,
                 "disable_pir_api": self._runtime_policy.disable_pir_api,
+                "cache_home": self._cache_home,
             }
             self._engine = None
         else:
@@ -174,6 +175,7 @@ class PaddleOCRBackend:
                 quality_policy=effective_ocr_quality_policy(config).value,
                 quality_thresholds=config.ocr_quality_thresholds,
                 enable_mkldnn=_enable_mkldnn,
+                cache_home=self._cache_home,
             )
 
     # ------------------------------------------------------------------
@@ -224,9 +226,16 @@ class PaddleOCRBackend:
             raise
         if response.get("status") != "ok":
             self._discard_worker()
-            raise RuntimeError(
-                f"Paddle worker init failed: {response.get('error')}"
-            )
+            from structured_pdf_text.errors import ResourceExhaustedExtractionError, FatalExtractionError
+            error_type = response.get("error_type", "RuntimeError")
+            message = f"Paddle worker init failed: {response.get('error') or error_type}"
+            if response.get("fatal") or error_type in {"MemoryError", "ResourceExhaustedExtractionError"}:
+                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
+            if error_type == "OSError" and response.get("errno") == 12:
+                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
+            if error_type.endswith("ExtractionError"):
+                raise FatalExtractionError(message, stage=response.get("stage"))
+            raise RuntimeError(message)
 
     def _raw_send(self, request: dict, timeout: float | None = None) -> dict:
         """Write one request and read one response on the raw pipe.
@@ -319,6 +328,7 @@ class PaddleOCRBackend:
         quality_policy: str | None = None,
         page_bbox: BBox | None = None,
         quality_variants: bool | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         """Write a temporary PNG path, send it to the worker, and decode tokens."""
         from PIL import Image
@@ -341,6 +351,8 @@ class PaddleOCRBackend:
                 req["page_bbox"] = [page_bbox.x0, page_bbox.y0, page_bbox.x1, page_bbox.y1]
             if quality_variants is not None:
                 req["quality_variants"] = quality_variants
+            if method == "recognize_page":
+                req["page_rotation"] = page_rotation
             if region_bbox is not None:
                 req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
 
@@ -352,7 +364,16 @@ class PaddleOCRBackend:
                 pass
 
         if response.get("status") != "ok":
-            raise RuntimeError(response.get("error", "unknown subprocess error"))
+            from structured_pdf_text.errors import ResourceExhaustedExtractionError, FatalExtractionError
+            error_type = response.get("error_type", "RuntimeError")
+            message = response.get("error") or error_type
+            if response.get("fatal") or error_type in {"MemoryError", "ResourceExhaustedExtractionError"}:
+                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
+            if error_type == "OSError" and response.get("errno") == 12:
+                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
+            if error_type.endswith("ExtractionError"):
+                raise FatalExtractionError(message, stage=response.get("stage"))
+            raise RuntimeError(message)
 
         tokens: list[OcrToken] = []
         for item in response.get("tokens", []):
@@ -524,6 +545,7 @@ class PaddleOCRBackend:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         """Run OCR on a full page image, routing through the subprocess worker when needed."""
         if self._closed:
@@ -531,7 +553,8 @@ class PaddleOCRBackend:
         if self._subprocess_config is not None:
             return self._call_subprocess(
                 "recognize_page", page_image, page_index, page_bbox=page_bbox,
-                quality_variants=quality_variants, quality_policy=quality_policy
+                quality_variants=quality_variants, quality_policy=quality_policy,
+                page_rotation=page_rotation
             )
         return self._engine.recognize_page(  # type: ignore[union-attr]
             page_image,
@@ -539,6 +562,7 @@ class PaddleOCRBackend:
             page_bbox,
             quality_variants=quality_variants,
             quality_policy=quality_policy,
+            page_rotation=page_rotation,
         )
 
     def recognize_region(
@@ -600,13 +624,27 @@ class PaddleOCRBackend:
             return
         with self._worker_lock:
             if self._worker_proc is not None:
+                process = self._worker_proc
                 try:
-                    self._worker_proc.stdin.write(b"QUIT\n")  # type: ignore[union-attr]
-                    self._worker_proc.stdin.flush()  # type: ignore[union-attr]
-                    self._worker_proc.wait(timeout=10)
+                    if process.stdin is not None:
+                        process.stdin.write(b"QUIT\n")
+                        process.stdin.flush()
+                    process.wait(timeout=10)
                 except Exception:
-                    self._worker_proc.kill()
+                    try:
+                        process.kill()
+                    finally:
+                        try:
+                            process.wait(timeout=5)
+                        except Exception:
+                            pass
                 finally:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
                     self._worker_proc = None
         engine = self._engine
         close = getattr(engine, "close", None)

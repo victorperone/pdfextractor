@@ -76,8 +76,7 @@ def recover_cell_text(text: str, extracted_text: str) -> str:
             compact += _compact(words[end])
             if compact == target:
                 candidate = " ".join(words[start : end + 1]).strip()
-                punctuation = sum(not character.isalnum() and not character.isspace() for character in candidate)
-                matches.append((punctuation, end - start, candidate))
+                matches.append((0, end - start, candidate))
             if len(compact) > len(target):
                 break
     if matches:
@@ -86,7 +85,9 @@ def recover_cell_text(text: str, extracted_text: str) -> str:
 
 
 def _compact(value: str) -> str:
-    return "".join(character.casefold() for character in value if character.isalnum())
+    # Ignore whitespace and case only. Punctuation carries meaning in decimal
+    # values, signs and identifiers and must not be normalized away.
+    return "".join(value.casefold().split())
 
 
 def _join_character_tokens(tokens: list[TextToken]) -> str:

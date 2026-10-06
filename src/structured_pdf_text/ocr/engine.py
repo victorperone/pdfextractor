@@ -24,6 +24,7 @@ class OcrEngine(Protocol):
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         """Run OCR on a fully rendered page image.
 

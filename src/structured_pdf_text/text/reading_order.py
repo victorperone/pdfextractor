@@ -174,6 +174,10 @@ def order_lines_in_region(
     if not region.native_lines:
         if region.kind == RegionKind.FIGURE and region.ocr_lines:
             return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
+        if region.ocr_lines and region.kind in {
+            RegionKind.HEADER, RegionKind.FOOTER, RegionKind.FOOTNOTE, RegionKind.MARGINALIA,
+        }:
+            return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
         if region.kind in _prose_kinds and region.ocr_lines:
             # Apply the same column-detection path used for native prose lines.
             lines, groups = _order_prose_lines(
@@ -1323,37 +1327,6 @@ def _preserves_line_set(lines: list[TextLine], columns: list[list[TextLine]]) ->
     input_ids = [id(line) for line in lines]
     output_ids = [id(line) for column in columns for line in column]
     return len(output_ids) == len(input_ids) and sorted(output_ids) == sorted(input_ids)
-
-
-def _spans_lanes(line: TextLine, lines: list[TextLine], region_width: float) -> bool:
-    if len(lines) < 6:
-        return False
-    narrow = [candidate for candidate in lines if candidate is not line and candidate.bbox.width < region_width * 0.55]
-    if len(narrow) < 4:
-        return False
-    starts = sorted(candidate.bbox.x0 for candidate in narrow)
-    if len(starts) < 4:
-        return False
-    midpoint = (starts[0] + starts[-1]) / 2
-    has_left = any(start < midpoint - region_width * 0.08 for start in starts)
-    has_right = any(start > midpoint + region_width * 0.08 for start in starts)
-    return has_left and has_right and line.bbox.width >= region_width * 0.45
-
-
-def _looks_like_form(lines: list[TextLine]) -> bool:
-    if len(lines) < 4:
-        return False
-    starts: dict[int, int] = {}
-    for line in lines:
-        key = round(line.bbox.x0 / 8.0)
-        starts[key] = starts.get(key, 0) + 1
-    tracks = sorted(starts.values(), reverse=True)
-    paired = sum(
-        1 for left, right in zip(lines, lines[1:])
-        if abs(left.bbox.cy - right.bbox.cy) <= max(left.bbox.height, right.bbox.height) * 0.8
-        and left.bbox.x0 < right.bbox.x0
-    )
-    return len([value for value in tracks if value >= 2]) >= 2 and paired >= 2
 
 
 def _order_form_rows(lines: list[TextLine]) -> list[TextLine]:

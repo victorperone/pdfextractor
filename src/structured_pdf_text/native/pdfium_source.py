@@ -260,7 +260,9 @@ class PdfiumNativeEvidenceSource:
         # explicit binding transitions made by this method.
         self._record_metric("ffi_calls_estimated", 5)
         try:
-            bitmap = page.render(scale=float(scale), rev_byteorder=True)
+            width, height = (float(value) for value in page.get_size())
+            effective_scale = _bounded_render_scale(width, height, float(scale), self.config)
+            bitmap = page.render(scale=effective_scale, rev_byteorder=True)
             try:
                 return bitmap.to_pil().convert("RGB")
             finally:
@@ -275,6 +277,7 @@ class PdfiumNativeEvidenceSource:
         bbox: BBox,
         scale: float,
         page_bbox: BBox | None = None,
+        page_rotation: int = 0,
     ) -> Any:
         """Rasterize a PDF-coordinate region at the requested source scale."""
         if self._doc is None:
@@ -291,18 +294,29 @@ class PdfiumNativeEvidenceSource:
         self._record_metric("region_render_calls")
         self._record_metric("ffi_calls_estimated", 5)
         try:
-            bitmap = page.render(scale=float(scale), rev_byteorder=True)
+            if page_bbox is None:
+                width, height = (float(value) for value in page.get_size())
+                page_bbox = BBox(0.0, 0.0, width, height)
+            clipped = bbox.intersection(page_bbox)
+            if clipped is None or clipped.area <= 0:
+                raise ValueError("Requested PDF region does not intersect the page raster")
+            rotation = int(getattr(page, "get_rotation", lambda: 0)() or 0) % 360
+            visual = clipped.rotate_to_visual(rotation, page_bbox.width, page_bbox.height)
+            visual_width = page_bbox.height if rotation in (90, 270) else page_bbox.width
+            visual_height = page_bbox.width if rotation in (90, 270) else page_bbox.height
+            crop = (
+                max(0.0, visual.x0),
+                max(0.0, visual_height - visual.y1),
+                max(0.0, visual_width - visual.x1),
+                max(0.0, visual.y0),
+            )
+            effective_scale = _bounded_render_scale(clipped.width, clipped.height, float(scale), self.config)
+            bitmap = page.render(scale=effective_scale, crop=crop, rev_byteorder=True)
             try:
                 rendered = bitmap.to_pil().convert("RGB")
-                if page_bbox is None:
-                    width, height = (float(value) for value in page.get_size())
-                    page_bbox = BBox(0.0, 0.0, width, height)
-                from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
-                crop, _, _ = crop_region_in_raster(rendered, bbox, page_bbox)
-                if crop.size == 0:
+                if rendered.size == 0:
                     raise ValueError("Requested PDF region does not intersect the page raster")
-                from PIL import Image
-                return Image.fromarray(crop)
+                return rendered
             finally:
                 bitmap.close()
         finally:
@@ -335,9 +349,19 @@ class PdfiumNativeEvidenceSource:
             a, b, c, d, _, _ = matrix
             if abs(b) > 1e-5 or abs(c) > 1e-5 or a <= 0 or d <= 0:
                 return None
-            bounds = _get_object_bbox(image_obj, float(page.get_size()[1]), 0.0, 0.0)
+            effective_box = _get_page_box(page, "get_bbox") or _get_page_box(page, "get_cropbox")
+            origin_x = float(effective_box[0]) if effective_box else 0.0
+            origin_y = float(effective_box[1]) if effective_box else 0.0
+            bounds = _get_object_bbox(image_obj, float(page.get_size()[1]), origin_x, origin_y)
             if bounds is None or bounds.area <= 0:
                 return None
+            try:
+                source_width, source_height = image_obj.get_px_size()
+                limits = self.config.security_limits
+                if source_width * source_height > limits.max_render_pixels or source_width * source_height * 3 > limits.max_render_bytes:
+                    return None
+            except (AttributeError, TypeError, ValueError):
+                pass
             bitmap = image_obj.get_bitmap(render=False, scale_to_original=True)
             try:
                 pil = bitmap.to_pil().convert("RGB")
@@ -589,6 +613,16 @@ def _pdfium_version() -> str | None:
     return f"pypdfium2 {pypdfium_version}; PDFium {info}" if info else f"pypdfium2 {pypdfium_version}"
 
 
+def _bounded_render_scale(width: float, height: float, requested: float, config: ExtractorConfig) -> float:
+    """Cap raster dimensions before PDFium allocates the destination bitmap."""
+    limits = config.security_limits
+    area = max(width, 1.0) * max(height, 1.0)
+    scale = min(requested, math.sqrt(limits.max_render_pixels / area), math.sqrt(limits.max_render_bytes / (3.0 * area)))
+    while math.ceil(width * scale) * math.ceil(height * scale) > limits.max_render_pixels or math.ceil(width * scale) * math.ceil(height * scale) * 3 > limits.max_render_bytes:
+        scale *= 0.999
+    return scale
+
+
 def _get_page_box(page: Any, method_name: str) -> tuple[float, float, float, float] | None:
     method = getattr(page, method_name, None)
     if not callable(method):
@@ -618,7 +652,8 @@ def _canonical_page_box(
     x0, y0, x1, y1 = box
     width = max(0.0, x1 - x0) or fallback_width
     height = max(0.0, y1 - y0) or fallback_height
-    return BBox(x0 - origin_x, y1 - origin_y - height, x0 - origin_x + width, y1 - origin_y)
+    page_top = origin_y + fallback_height
+    return BBox(x0 - origin_x, page_top - y1, x0 - origin_x + width, page_top - y1 + height)
 
 
 def _get_char_text(textpage: Any, index: int) -> str:
@@ -1040,11 +1075,15 @@ def _get_annotation_contents(annot: Any) -> str | None:
         if size <= 0:
             return None
         buffer = ctypes.create_string_buffer(size)
-        function(annot, b"Contents", buffer, size)
+        function(annot, b"Contents", ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ushort)), size)
         raw = bytes(buffer.raw[:size])
-        if raw.startswith(b"\xff\xfe"):
-            return raw[2:].decode("utf-16-le", errors="replace").rstrip("\x00")
-        return raw.rstrip(b"\x00").decode("utf-8", errors="replace")
+        # FPDFAnnot_GetStringValue returns a UTF-16LE string, including when
+        # the byte-order mark is omitted.
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            raw = raw[2:]
+        if len(raw) % 2:
+            raw = raw[:-1]
+        return raw.decode("utf-16-le", errors="replace").rstrip("\x00")
     except Exception:
         return None
 

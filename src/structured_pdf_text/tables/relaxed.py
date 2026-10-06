@@ -15,8 +15,6 @@ from statistics import median
 from structured_pdf_text.document import (
     LayoutRegion,
     NativePageEvidence,
-    OcrToken,
-    RegionKind,
     StructuredTable,
     TableCell,
     TableFragment,

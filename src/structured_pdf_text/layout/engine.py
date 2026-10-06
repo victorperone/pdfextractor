@@ -148,7 +148,9 @@ class NativeHeuristicLayoutEngine:
         """
         predictions: list[LayoutRegionPrediction] = []
         page_bbox = page.bbox
-        header_lines, footer_lines = _edge_band_lines(lines)
+        header_lines, footer_lines = _edge_band_lines(
+            lines, page_bbox, page.objects.rotation
+        )
 
         if header_lines:
             predictions.append(
@@ -516,7 +518,7 @@ def _table_boxes(page: NativePageEvidence) -> list[BBox]:
     ]
 
 
-def _edge_band_lines(lines: list[Any]) -> tuple[list[Any], list[Any]]:
+def _edge_band_lines(lines: list[Any], page_bbox: BBox | None = None, rotation: int = 0) -> tuple[list[Any], list[Any]]:
     """Select compact top/bottom bands without swallowing nearby content.
 
     A fixed percentage of page height classifies large titles and short
@@ -529,10 +531,14 @@ def _edge_band_lines(lines: list[Any]) -> tuple[list[Any], list[Any]]:
     line_height = median(heights) if heights else 10.0
     band_gap = max(14.0, line_height * 2.0)
     ordered = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
-    first_y = ordered[0].bbox.y0
-    last_y = ordered[-1].bbox.y0
-    header_lines = [line for line in ordered if line.bbox.y0 <= first_y + band_gap]
-    footer_lines = [line for line in ordered if line.bbox.y0 >= last_y - band_gap]
+    if page_bbox is None:
+        return [], []
+    width, height = page_bbox.width, page_bbox.height
+    visual_page = BBox(0.0, 0.0, height if rotation % 180 else width, width if rotation % 180 else height)
+    edge_distance = max(24.0, min(48.0, visual_page.height * 0.06))
+    visual_boxes = {id(line): line.bbox.rotate_to_visual(rotation, width, height) for line in ordered}
+    header_lines = [line for line in ordered if visual_boxes[id(line)].y0 <= edge_distance]
+    footer_lines = [line for line in ordered if visual_boxes[id(line)].y1 >= visual_page.height - edge_distance]
     header_ids = {id(line) for line in header_lines}
     footer_lines = [line for line in footer_lines if id(line) not in header_ids]
     return header_lines, footer_lines

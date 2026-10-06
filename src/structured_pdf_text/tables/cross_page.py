@@ -474,12 +474,6 @@ def _track_delta(first: tuple[float, ...], second: tuple[float, ...]) -> float |
     return mean(abs(left - right) for left, right in zip(first, second))
 
 
-def _boundary_proximity(previous: StructuredTable, following: StructuredTable) -> bool:
-    previous_signature = table_signature(previous)
-    following_signature = table_signature(following)
-    return previous_signature.touches_bottom and following_signature.touches_top
-
-
 def _continuation_marker(table: StructuredTable) -> bool:
     text = " ".join(cell.text for cell in table.cells[: min(len(table.cells), 40)])
     return _has_continuation_marker(text)

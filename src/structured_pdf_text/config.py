@@ -235,6 +235,8 @@ class ExtractorConfig:
             raise ConfigurationError("mode='ocr' requires OCR and cannot set enable_ocr=False")
         if ExtractionMode(self.mode) in (ExtractionMode.NATIVE, ExtractionMode.FAST) and self.enable_ocr is True:
             raise ConfigurationError("native/fast modes are raster-free and cannot enable OCR")
+        if ExtractionMode(self.mode) in (ExtractionMode.NATIVE, ExtractionMode.FAST) and self.enable_table_cell_ocr:
+            raise ConfigurationError("native/fast modes are raster-free and cannot enable table-cell OCR")
         for name in ("complexity_render_scale",):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:

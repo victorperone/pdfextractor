@@ -34,7 +34,7 @@ from __future__ import annotations
 import inspect
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import isfinite
 from typing import Any
@@ -44,7 +44,7 @@ from structured_pdf_text.errors import (
     FatalExtractionError,
     raise_if_resource_exhausted,
 )
-from structured_pdf_text.geometry import BBox
+from structured_pdf_text.geometry import BBox, Point
 
 # ---------------------------------------------------------------------------
 # OCR RGB budget — configurable upper bound on the estimated uncompressed size
@@ -512,6 +512,8 @@ class OcrRegionRefiner:
                             inverse,
                             scaled_size,
                             region_bbox,
+                            page_bbox=page_bbox,
+                            page_rotation=request.page_rotation,
                         )
                         for token in tokens
                     ]
@@ -679,10 +681,12 @@ def resize_image(image: Any, factor: float) -> Any:
         max(width + 1, round(width * factor)),
         max(height + 1, round(height * factor)),
     )
-    if hasattr(image, "resize"):
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+    if Image is not None and isinstance(image, Image.Image):
         try:
-            from PIL import Image
-
             return image.resize(size, Image.Resampling.LANCZOS)
         except (ImportError, AttributeError, TypeError, ValueError):
             return image.resize(size)
@@ -781,6 +785,9 @@ def _map_token_to_page(
     inverse: tuple[float, float, float, float, float, float],
     source_size: tuple[int, int],
     region_bbox: BBox,
+    *,
+    page_bbox: BBox | None = None,
+    page_rotation: int = 0,
 ) -> OcrToken:
     """Map an OCR token from the rotated/scaled variant back to page coordinates.
 
@@ -804,21 +811,43 @@ def _map_token_to_page(
     xs = [min(max(x, 0.0), float(width)) for x, _ in mapped]
     ys = [min(max(y, 0.0), float(height)) for _, y in mapped]
     local = BBox(min(xs), min(ys), max(xs), max(ys))
-    bbox = BBox(
-        region_bbox.x0 + local.x0 * region_bbox.width / max(width, 1),
-        region_bbox.y0 + local.y0 * region_bbox.height / max(height, 1),
-        region_bbox.x0 + local.x1 * region_bbox.width / max(width, 1),
-        region_bbox.y0 + local.y1 * region_bbox.height / max(height, 1),
+    visual_region = region_bbox.rotate_to_visual(
+        page_rotation, page_bbox.width, page_bbox.height
+    ) if page_bbox is not None else region_bbox
+    visual_box = BBox(
+        visual_region.x0 + local.x0 * visual_region.width / max(width, 1),
+        visual_region.y0 + local.y0 * visual_region.height / max(height, 1),
+        visual_region.x0 + local.x1 * visual_region.width / max(width, 1),
+        visual_region.y0 + local.y1 * visual_region.height / max(height, 1),
     )
-    return OcrToken(
-        text=token.text,
-        bbox=bbox,
-        confidence=token.confidence,
-        language=token.language,
-        source=SourceKind.OCR_REGION,
-        rotation=0,
-        provenance="targeted_region_recovery",
-    )
+    rotation = page_rotation % 360
+    if page_bbox is not None and rotation == 90:
+        bbox = BBox(visual_box.y0, page_bbox.height - visual_box.x1, visual_box.y1, page_bbox.height - visual_box.x0)
+    elif page_bbox is not None and rotation == 180:
+        bbox = BBox(page_bbox.width - visual_box.x1, page_bbox.height - visual_box.y1, page_bbox.width - visual_box.x0, page_bbox.height - visual_box.y0)
+    elif page_bbox is not None and rotation == 270:
+        bbox = BBox(page_bbox.width - visual_box.y1, visual_box.x0, page_bbox.width - visual_box.y0, visual_box.x1)
+    else:
+        bbox = visual_box
+    mapped_polygon = None
+    if token.polygon:
+        points = []
+        for point in token.polygon:
+            px, py = a * point.x + b * point.y + c, d * point.x + e * point.y + f
+            px = min(max(px, 0.0), float(width))
+            py = min(max(py, 0.0), float(height))
+            vx = visual_region.x0 + px * visual_region.width / max(width, 1)
+            vy = visual_region.y0 + py * visual_region.height / max(height, 1)
+            if page_bbox is not None and rotation == 90:
+                points.append(Point(page_bbox.x0 + vy, page_bbox.y0 + page_bbox.height - vx))
+            elif page_bbox is not None and rotation == 180:
+                points.append(Point(page_bbox.x0 + page_bbox.width - vx, page_bbox.y0 + page_bbox.height - vy))
+            elif page_bbox is not None and rotation == 270:
+                points.append(Point(page_bbox.x0 + page_bbox.width - vy, page_bbox.y0 + vx))
+            else:
+                points.append(Point(page_bbox.x0 + vx, page_bbox.y0 + vy) if page_bbox is not None else Point(vx, vy))
+        mapped_polygon = tuple(points)
+    return replace(token, bbox=bbox, polygon=mapped_polygon, source=SourceKind.OCR_REGION, provenance="targeted_region_recovery")
 
 
 def _filter_tokens(

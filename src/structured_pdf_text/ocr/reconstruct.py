@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import replace
 from statistics import median
 
 from structured_pdf_text.document import (
@@ -35,6 +36,7 @@ def reconstruct_ocr_lines(
     page_bbox: BBox | None = None,
     *,
     dehyphenate: bool = True,
+    page_rotation: int = 0,
 ) -> list[TextLine]:
     """Convert OCR tokens into lines using the OCR reading coordinate system.
 
@@ -57,7 +59,7 @@ def reconstruct_ocr_lines(
     if not visible:
         return []
     page_width, page_height = _page_size(visible, page_bbox)
-    virtual_boxes = {id(token): _virtual_bbox(token, page_bbox, page_width, page_height) for token in visible}
+    virtual_boxes = {id(token): _virtual_bbox(token, page_bbox, page_width, page_height, page_rotation) for token in visible}
     heights = [box.height for box in virtual_boxes.values() if box.height > 0]
     tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.65)
     groups: list[list[OcrToken]] = []
@@ -93,7 +95,7 @@ def reconstruct_ocr_lines(
                 gap_bbox = _gap_bbox(
                     previous_virtual,
                     current_virtual,
-                    token.rotation,
+                    (token.rotation + page_rotation) % 360,
                     page_bbox,
                     page_width,
                     page_height,
@@ -230,7 +232,7 @@ def _page_size(tokens: list[OcrToken], page_bbox: BBox | None) -> tuple[float, f
     return max(token.bbox.x1 for token in tokens), max(token.bbox.y1 for token in tokens)
 
 
-def _virtual_bbox(token: OcrToken, page_bbox: BBox | None, page_width: float, page_height: float) -> BBox:
+def _virtual_bbox(token: OcrToken, page_bbox: BBox | None, page_width: float, page_height: float, page_rotation: int = 0) -> BBox:
     """Map a token's bounding box into the upright (0°) coordinate frame.
 
     Tokens from rotated-page OCR passes carry their original page coordinates
@@ -260,11 +262,12 @@ def _virtual_bbox(token: OcrToken, page_bbox: BBox | None, page_width: float, pa
     y0 = token.bbox.y0 - origin_y
     x1 = token.bbox.x1 - origin_x
     y1 = token.bbox.y1 - origin_y
-    if token.rotation % 360 == 90:
+    rotation = (token.rotation + page_rotation) % 360
+    if rotation == 90:
         return BBox(y0, page_width - x1, y1, page_width - x0)
-    if token.rotation % 360 == 270:
+    if rotation == 270:
         return BBox(page_height - y1, x0, page_height - y0, x1)
-    if token.rotation % 360 == 180:
+    if rotation == 180:
         return BBox(page_width - x1, page_height - y1, page_width - x0, page_height - y0)
     return BBox(x0, y0, x1, y1)
 
@@ -421,9 +424,13 @@ def dehyphenate_ocr_lines(lines: list[TextLine]) -> list[TextLine]:
 
         # Check vertical gap between lines
         vertical_gap = next_line.bbox.y0 - line.bbox.y1
-        gap_ok = vertical_gap <= max_gap
+        gap_ok = 0 <= vertical_gap <= max_gap
+        horizontal_continuation = (
+            line.bbox.x0 <= next_line.bbox.x1
+            and next_line.bbox.x0 <= line.bbox.x1 + max(12.0, median_height * 1.5)
+        )
 
-        if gap_ok and _is_hyphen_break(prev_text, next_text):
+        if gap_ok and horizontal_continuation and _is_hyphen_break(prev_text, next_text):
             # Build merged token list: strip trailing hyphen from last token of
             # current line, then append all tokens from next line (no extra space).
             merged_tokens = list(line.tokens)
@@ -434,9 +441,10 @@ def dehyphenate_ocr_lines(lines: list[TextLine]) -> list[TextLine]:
                 if tok.text.rstrip():
                     stripped = tok.text.rstrip("-")
                     if stripped != tok.text:
-                        tok.text = stripped
-                        tok.normalized_text = normalize_text(stripped)
-                        tok.flags.add(TokenFlag.WHITESPACE_INFERRED)
+                        merged_tokens[rev_idx] = replace(
+                            tok, text=stripped, normalized_text=normalize_text(stripped),
+                            flags=set(tok.flags) | {TokenFlag.WHITESPACE_INFERRED},
+                        )
                     break
 
             # Append next line tokens directly (no leading space — the join
@@ -702,5 +710,3 @@ def merge_ocr_bullet_markers(
         result.append(line)
 
     return result
-
-    return output

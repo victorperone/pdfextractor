@@ -45,6 +45,32 @@ class OcrImageView:
     preprocessing: tuple[str, ...] = ()
 
 
+def canonicalize_page_image(image: Any, page_rotation: int) -> Any:
+    """Undo PDF page presentation rotation so raster axes match canonical boxes."""
+    rotation = page_rotation % 360
+    if rotation == 0:
+        return image
+    if rotation not in (90, 180, 270):
+        return image
+    try:
+        import numpy as np
+
+        rotated = np.rot90(np.asarray(image), k={90: 1, 180: 2, 270: 3}[rotation])
+        return rotated.copy()
+    except (ImportError, TypeError, ValueError):
+        transpose = getattr(image, "transpose", None)
+        if not callable(transpose):
+            return image
+        from PIL import Image
+
+        operation = {
+            90: Image.Transpose.ROTATE_90,
+            180: Image.Transpose.ROTATE_180,
+            270: Image.Transpose.ROTATE_270,
+        }[rotation]
+        return transpose(operation)
+
+
 def tile_image_views(
     image: Any,
     page_bbox: BBox,

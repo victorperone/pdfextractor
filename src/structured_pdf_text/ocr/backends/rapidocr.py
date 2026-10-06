@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, safe_crop_array, sha256_file
+from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -270,6 +270,11 @@ class RapidOCRBackend:
         det_path = os.environ.get("RAPIDOCR_DET_MODEL")
         rec_path = os.environ.get("RAPIDOCR_REC_MODEL")
         rec_keys = os.environ.get("RAPIDOCR_REC_KEYS")
+        configured_cache = getattr(config, "ocr_cache_home", None)
+        if configured_cache:
+            cache = Path(configured_cache).expanduser() / "rapidocr"
+            rec_path = rec_path or str(cache / "latin_PP-OCRv3_rec_mobile.onnx")
+            rec_keys = rec_keys or str(cache / "latin_dict.txt")
         if not rec_path and not rec_keys:
             cache = Path.home() / ".cache" / "pdfextractor" / "rapidocr"
             cached_rec = cache / "latin_PP-OCRv3_rec_mobile.onnx"
@@ -484,6 +489,7 @@ class RapidOCRBackend:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         """Run OCR on a full page image and return pipeline-format tokens."""
         if self._closed:
@@ -492,7 +498,7 @@ class RapidOCRBackend:
         out = _run_rapidocr(self._engine, img)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         tokens = _result_to_pipeline_tokens(_extract_raw(out), page_index, self._language)
-        return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0])
+        return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0], page_rotation)
 
     def recognize_region(
         self,

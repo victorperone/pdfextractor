@@ -29,6 +29,7 @@ def assemble_page(
     diagnostics: PageDiagnostics,
     raw_text: str,
     native_evidence: NativePageEvidence | None = None,
+    page_rotation: int = 0,
 ) -> StructuredPage:
     """Build a provisional StructuredPage.
 
@@ -81,5 +82,6 @@ def assemble_page(
         reading_text="",  # filled by assemble_document() via assemble_page_content()
         diagnostics=diagnostics,
         native_evidence=native_evidence,
+        page_rotation=page_rotation,
         content_blocks=[],  # filled by assemble_document() via assemble_page_content()
     )

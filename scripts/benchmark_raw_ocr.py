@@ -84,10 +84,17 @@ def _render_page(doc: object, page_index: int, scale: float) -> tuple[object, by
     """Render one page from an already-open PdfDocument and return (PIL.Image, png_bytes)."""
     import io
     page = doc[page_index]
-    image = page.render(scale=scale).to_pil().convert("RGB")
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return image, buf.getvalue()
+    try:
+        bitmap = page.render(scale=scale)
+        try:
+            image = bitmap.to_pil().convert("RGB")
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            return image, buf.getvalue()
+        finally:
+            bitmap.close()
+    finally:
+        page.close()
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +160,6 @@ def run_benchmark(
     import pypdfium2 as pdfium
     from structured_pdf_text.config import ExtractorConfig
     from structured_pdf_text.ocr.factory import build_ocr_backend
-    from structured_pdf_text.ocr.contracts import OCRRequest
 
     # --- set cache home early (must be before any Paddle import) ---
     if cache_home:
@@ -163,16 +169,33 @@ def run_benchmark(
 
     config = ExtractorConfig(language=language, ocr_engine=engine_name)
     backend = build_ocr_backend(config)
+    doc = pdfium.PdfDocument(str(pdf_path))
+    try:
+        return _run_benchmark_impl(
+            pdf_path, engine_name, language, render_scale, output_dir, run_id,
+            page_range, ref_pages, manifesto, verbose, backend, doc,
+        )
+    finally:
+        try:
+            backend.close()
+        finally:
+            doc.close()
+
+
+def _run_benchmark_impl(
+    pdf_path: Path, engine_name: str, language: str, render_scale: float,
+    output_dir: Path, run_id: str, page_range: tuple[int, int] | None,
+    ref_pages: dict[int, str] | None, manifesto: dict | None, verbose: bool,
+    backend: object, doc: object,
+) -> dict:
+    from structured_pdf_text.ocr.contracts import OCRRequest
 
     health = backend.healthcheck()
     if health != "ready":
-        print(f"[FAIL] OCR backend healthcheck: {health}", file=sys.stderr)
-        sys.exit(1)
-
+        raise RuntimeError(f"OCR backend healthcheck: {health}")
     identity = backend.identity
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    doc = pdfium.PdfDocument(str(pdf_path))
     total_pages = len(doc)
     p_start, p_end = (page_range or (1, total_pages))
     p_start = max(1, p_start)
@@ -240,6 +263,10 @@ def run_benchmark(
             errors += 1
             if verbose:
                 print(f"  [FAIL] page {page_num}: {exc}", file=sys.stderr)
+        finally:
+            image = locals().get("pil_image")
+            if image is not None:
+                image.close()
 
         elapsed = time.perf_counter() - t0
 
@@ -391,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Diretório de cache de modelos OCR",
     )
     parser.add_argument("--quiet", action="store_true", help="Suprime progresso por página")
+    parser.add_argument("--allow-partial", action="store_true", help="Retorna sucesso quando ao menos uma página OCR foi concluída")
 
     args = parser.parse_args(argv)
 
@@ -422,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[INFO] Manifesto: {manifesto.get('corpus_id', '?')}  ({manifesto.get('page_count', '?')} páginas)")
 
     try:
-        run_benchmark(
+        result = run_benchmark(
             pdf_path=args.pdf,
             engine_name=args.engine,
             language=args.language,
@@ -437,6 +465,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:
         print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
+    failed = int(result.get("summary", {}).get("pages_failed", 0))
+    ok = int(result.get("summary", {}).get("pages_ok", 0))
+    if failed and (not args.allow_partial or ok == 0):
         return 1
     return 0
 

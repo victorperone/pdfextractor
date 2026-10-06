@@ -51,7 +51,10 @@ def detect_opaque_occlusion_boxes(
         if pixels is None:
             continue
         dark_ratio, mean_luma, luma_stddev = pixels
-        solid_dark = dark_ratio >= 0.60 and mean_luma <= 70.0 and luma_stddev <= 100.0
+        # A dark region can be a deliberate high-contrast text background.
+        # Pixel statistics alone cannot establish paint order, so only the
+        # near-uniform white case remains eligible for opaque-object cleanup.
+        solid_dark = False
         solid_white = mean_luma >= 248.0 and luma_stddev <= 8.0
         if solid_dark or solid_white:
             if not any(box.iou(previous) >= 0.85 for previous in candidates):
@@ -122,6 +125,8 @@ def _crop_pixels(
     try:
         pixels = image.crop((left, top, right, bottom)).convert("RGB")
         values = list(pixels.getdata())
+    except MemoryError:
+        raise
     except Exception:
         return None
     if not values:

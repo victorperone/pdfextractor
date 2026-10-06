@@ -8,6 +8,8 @@ recording conflicts where the two sources disagree.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import defaultdict
+from statistics import median
 
 from structured_pdf_text.document import OcrToken, TextLine, TextToken
 from structured_pdf_text.text.normalize import normalize_text
@@ -49,15 +51,19 @@ def fuse_native_tokens(native_tokens: list[TextToken]) -> list[TextToken]:
     if len(native_tokens) <= 1:
         return native_tokens
     kept: list[TextToken] = []
+    sizes = [max(token.bbox.height, token.bbox.width, 1.0) for token in native_tokens]
+    cell_size = max(4.0, median(sizes))
+    index: dict[tuple[str, int, int], list[int]] = defaultdict(list)
     for token in native_tokens:
         token_key = normalize_text(token.text).replace(" ", "")
-        is_duplicate = any(
-            existing.bbox.iou(token.bbox) > 0.5
-            and normalize_text(existing.text).replace(" ", "") == token_key
-            for existing in kept
-        )
+        bins = _bbox_bins(token.bbox, cell_size)
+        nearby = {item for key in bins for item in index.get((token_key, key[0], key[1]), ())}
+        is_duplicate = any(kept[item].bbox.iou(token.bbox) > 0.5 for item in nearby)
         if not is_duplicate:
+            kept_index = len(kept)
             kept.append(token)
+            for bx, by in bins:
+                index[(token_key, bx, by)].append(kept_index)
     return kept
 
 
@@ -83,8 +89,9 @@ def fuse_native_and_ocr(
     unmatched: list[OcrToken] = []
     conflicts: list[TokenConflict] = []
     matched = 0
+    spatial_index = _build_spatial_index(native_tokens)
     for ocr_token in ocr_tokens:
-        candidates = find_native_candidates(ocr_token, native_tokens)
+        candidates = _indexed_native_candidates(ocr_token, native_tokens, spatial_index)
         if not candidates:
             unmatched.append(ocr_token)
             continue
@@ -120,3 +127,33 @@ def fuse_native_and_ocr(
                     )
                 )
     return FusionResult(tuple(unmatched), matched, tuple(conflicts))
+
+
+def _bbox_bins(box, cell_size: float) -> set[tuple[int, int]]:
+    x0, x1 = int(box.x0 // cell_size), int(box.x1 // cell_size)
+    y0, y1 = int(box.y0 // cell_size), int(box.y1 // cell_size)
+    return {(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)}
+
+
+def _build_spatial_index(tokens: list[TextToken]) -> tuple[float, dict[tuple[int, int], list[int]]]:
+    heights = [max(token.bbox.height, token.bbox.width, 1.0) for token in tokens]
+    cell_size = max(4.0, median(heights)) if heights else 16.0
+    index: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for token_index, token in enumerate(tokens):
+        for key in _bbox_bins(token.bbox, cell_size):
+            index[key].append(token_index)
+    return cell_size, index
+
+
+def _indexed_native_candidates(ocr_token: OcrToken, native_tokens: list[TextToken], spatial_index) -> list[TextToken]:
+    cell_size, index = spatial_index
+    candidate_indexes = {
+        token_index
+        for key in _bbox_bins(ocr_token.bbox, cell_size)
+        for token_index in index.get(key, ())
+    }
+    return [
+        native_tokens[token_index]
+        for token_index in sorted(candidate_indexes)
+        if native_tokens[token_index].bbox.overlap_ratio(ocr_token.bbox) > 0.5
+    ]

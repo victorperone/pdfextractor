@@ -169,6 +169,7 @@ Offline OCR readiness: READY
 ```bash
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
+  --ocr-engine paddle \
   --paddle-model-profile pt \
   --output markdown \
   -o documento.md
@@ -194,6 +195,7 @@ python -m structured_pdf_text.cli paddle-models-status
 
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
+  --ocr-engine paddle \
   --paddle-model-profile pt \
   --output markdown \
   -o documento.md

@@ -41,6 +41,10 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
         from structured_pdf_text.ocr.paddle import validate_local_ocr_models
         from structured_pdf_text.errors import PaddleOcrUnavailable
 
+        missing = [name for name in ("paddle", "paddleocr") if importlib.util.find_spec(name) is None]
+        if missing:
+            return ReadinessResult(ReadinessStatus.MISSING, "package_missing", {"packages": missing})
+
         try:
             validate_local_ocr_models(language=config.paddle_model_profile, cache_home=cache_home)
             return ReadinessResult(ReadinessStatus.READY, details={"profile": config.paddle_model_profile})
@@ -86,7 +90,7 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
         if importlib.util.find_spec(provider_module) is None:
             return ReadinessResult(ReadinessStatus.MISSING, "provider_missing", {"provider": provider_module})
         det = os.environ.get("RAPIDOCR_DET_MODEL")
-        cache = Path.home() / ".cache" / "pdfextractor" / "rapidocr"
+        cache = Path(cache_home).expanduser() / "rapidocr" if cache_home else Path.home() / ".cache" / "pdfextractor" / "rapidocr"
         configured_rec = os.environ.get("RAPIDOCR_REC_MODEL")
         configured_keys = os.environ.get("RAPIDOCR_REC_KEYS")
         if configured_rec or configured_keys:

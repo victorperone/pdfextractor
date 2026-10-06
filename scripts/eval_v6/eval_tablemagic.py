@@ -308,15 +308,20 @@ def _pdf_page_to_image(pdf_path: Path, page_number: int, bbox: tuple[float, floa
             f"bbox {bbox} is outside page {page_number} bounds "
             f"(0, 0, {page_width:.2f}, {page_height:.2f})"
         )
-    bitmap = page.render(scale=scale)
-    image = bitmap.to_pil()
-    crop = (
-        round(x0 * scale),
-        round(y0 * scale),
-        round(x1 * scale),
-        round(y1 * scale),
-    )
-    return image.crop(crop)
+    try:
+        bitmap = page.render(scale=scale)
+        try:
+            image = bitmap.to_pil()
+            crop = (
+                round(x0 * scale), round(y0 * scale),
+                round(x1 * scale), round(y1 * scale),
+            )
+            return image.crop(crop).copy()
+        finally:
+            bitmap.close()
+    finally:
+        page.close()
+        pdf.close()
 
 
 def _image_input(image_path: Path, output_dir: Path) -> tuple[Path, dict[str, Any]]:

@@ -446,6 +446,8 @@ def _ink_ratio(image: Any) -> float:
         if arr.size == 0:
             return 0.0
         return float(np.mean(arr.min(axis=2) < 245))
+    except MemoryError:
+        raise
     except Exception:
         return 0.0
 

@@ -326,6 +326,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
         default="pymupdf",
     )
     compare_parser.add_argument("--language", default=None, help="Explicit OCR profile when an OCR adapter is selected")
+    compare_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
+    compare_parser.add_argument("--cache-home", default=None, metavar="DIR")
     compare_parser.add_argument(
         "--ocr-model-profile", default=None, metavar="PROFILE",
         help="Explicit OCR profile required when structured-balanced is selected",
@@ -403,27 +405,21 @@ def _main_impl(argv: list[str] | None = None) -> int:
         effective_engine: str = args.ocr_engine or "easyocr"
         if args.max_quality:
             config = max_quality_extraction_config(language=language)
-            if args.ocr_engine is not None or args.ocr_provider is not None:
-                from dataclasses import replace as _replace
-                config = _replace(
-                    config,
-                    ocr_engine=args.ocr_engine or config.ocr_engine,
-                    ocr_provider=args.ocr_provider,
-                    paddle_model_profile=profile_name,
-                    ocr_cache_home=args.cache_home,
-                )
+            from dataclasses import replace as _replace
+            config = _replace(config, num_threads=args.threads,
+                              ocr_engine=args.ocr_engine or config.ocr_engine,
+                              ocr_provider=args.ocr_provider,
+                              paddle_model_profile=profile_name,
+                              ocr_cache_home=args.cache_home)
         elif args.best:
             config = best_extraction_config(language=language)
             # F05: --best must not silently ignore an explicit --ocr-engine.
-            if args.ocr_engine is not None or args.ocr_provider is not None:
-                from dataclasses import replace as _replace
-                config = _replace(
-                    config,
-                    ocr_engine=args.ocr_engine or config.ocr_engine,
-                    ocr_provider=args.ocr_provider,
-                    paddle_model_profile=profile_name,
-                    ocr_cache_home=args.cache_home,
-                )
+            from dataclasses import replace as _replace
+            config = _replace(config, num_threads=args.threads,
+                              ocr_engine=args.ocr_engine or config.ocr_engine,
+                              ocr_provider=args.ocr_provider,
+                              paddle_model_profile=profile_name,
+                              ocr_cache_home=args.cache_home)
         else:
             config = ExtractorConfig(
                 mode=args.mode,
@@ -527,6 +523,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             page_indices=(args.page - 1,) if args.page is not None else None,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            ocr_cache_home=args.cache_home,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if _mode_requires_ocr(config.mode):
@@ -584,6 +581,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             paddle_model_profile=profile_name,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            ocr_cache_home=args.cache_home,
             page_indices=(index,),
         )
         if mode != ExtractionMode.NATIVE:
@@ -622,6 +620,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             num_threads=args.threads,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            ocr_cache_home=args.cache_home,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if args.workers < 1:
@@ -649,30 +648,25 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     if args.command == "compare":
         ocr_adapters = {"structured-balanced"}
+        comparison_config = ExtractorConfig(
+            mode=ExtractionMode.BALANCED,
+            language=args.language or "pt-BR",
+            ocr_engine=args.ocr_engine,
+            paddle_model_profile=args.ocr_model_profile or "pt",
+            ocr_cache_home=args.cache_home,
+        )
         if any(adapter in ocr_adapters for adapter in args.adapters):
-            if args.ocr_model_profile is None and args.language is None:
-                print("An explicit --ocr-model-profile or --language is required when structured-balanced is selected", file=sys.stderr)
-                return 2
-            profile_name = args.ocr_model_profile or args.language or "pt"
-            try:
-                get_profile(profile_name)
-                validate_local_ocr_models(language=profile_name)
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-            except PaddleOcrUnavailable as exc:
-                print(str(exc), file=sys.stderr)
-                print(
-                    f"Run: pdftext setup-paddle-models --paddle-model-profile {profile_name}",
-                    file=sys.stderr,
-                )
+            readiness = probe_static(comparison_config, cache_home=args.cache_home)
+            if readiness.status.value != "ready":
+                print(f"OCR backend is not ready: {readiness.status.value} ({readiness.reason_code})", file=sys.stderr)
                 return 1
         try:
             comparison = compare_extractors(
                 args.pdf,
                 args.adapters,
                 reference=args.reference,
-                language=args.ocr_model_profile or args.language or "pt",
+                language=args.language or "pt-BR",
+                config=comparison_config,
                 include_text=args.include_text,
             )
         except ValueError as exc:

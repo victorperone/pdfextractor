@@ -91,6 +91,7 @@ def _make_engine(config: dict):
         quality_policy=config.get("quality_policy", "fast"),
         quality_thresholds=quality_thresholds,
         enable_mkldnn=config.get("mkldnn", False),
+        cache_home=config.get("cache_home"),
     )
 
 
@@ -164,7 +165,8 @@ def main() -> None:
                     tokens = engine.recognize_page(
                         image, page_index, page_bbox,
                         quality_variants=req.get("quality_variants"),
-                        quality_policy=req.get("quality_policy")
+                        quality_policy=req.get("quality_policy"),
+                        page_rotation=req.get("page_rotation", 0),
                     )
                 else:
                     from structured_pdf_text.geometry import BBox
@@ -179,7 +181,14 @@ def main() -> None:
                 _reply({"status": "error", "tokens": [], "error": f"unknown method: {method!r}"}, req_id)
 
         except Exception as exc:
-            _reply({"status": "error", "tokens": [], "error": str(exc)}, req_id)
+            import errno
+            _reply({
+                "status": "error", "tokens": [], "error": str(exc),
+                "error_type": type(exc).__name__,
+                "errno": exc.errno if isinstance(exc, OSError) else None,
+                "fatal": isinstance(exc, MemoryError) or (isinstance(exc, OSError) and exc.errno == errno.ENOMEM),
+                "stage": method,
+            }, req_id)
 
 
 def _reply(obj: dict, request_id: int | None = None) -> None:

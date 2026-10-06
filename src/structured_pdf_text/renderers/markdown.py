@@ -6,8 +6,6 @@ blocks — this module only formats text and tables (INV-06).
 """
 from __future__ import annotations
 
-import string
-
 from structured_pdf_text.document import (
     ContentKind,
     PageContentBlock,
@@ -294,7 +292,7 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
         rows[cell.row].append(f"<{tag}{attribute_text}>{value}</{tag}>")
     body = "\n".join(
         "  <tr>\n    " + "\n    ".join(cells) + "\n  </tr>"
-        for cells in rows if cells
+        for cells in rows
     )
     return "<table>\n" + body + "\n</table>"
 

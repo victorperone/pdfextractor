@@ -11,7 +11,7 @@ fragment bbox (fallback). A TABLE region label alone is not sufficient.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from structured_pdf_text.document import (
     ContentKind,
@@ -20,7 +20,6 @@ from structured_pdf_text.document import (
     RegionKind,
     StructuredPage,
     StructuredTable,
-    TableFragment,
     TextLine,
     WritingDirection,
 )
@@ -283,10 +282,10 @@ def _line_claimed_by_table(
 
     cell_bboxes = [cell.bbox for cell in table.cells if cell.bbox is not None]
     if cell_bboxes:
-        line_cx, line_cy = line.bbox.cx, line.bbox.cy
-        return any(
-            cb.x0 <= line_cx <= cb.x1 and cb.y0 <= line_cy <= cb.y1
-            for cb in cell_bboxes
+        return all(
+            not token.text.strip()
+            or any(cell_bbox.overlap_ratio(token.bbox) >= 0.25 for cell_bbox in cell_bboxes)
+            for token in line.tokens
         )
 
     fragment_bbox = _table_fragment_bbox(table, page_index)
@@ -409,18 +408,39 @@ def _build_region_blocks(
     table_blocks: dict[str, PageContentBlock] = {}
 
     for line in ordered_lines:
-        owner = next(
-            (t for t in usable_tables if _line_claimed_by_table(line, t, page_index)),
-            None,
-        )
+        owner = next((t for t in usable_tables if _line_claimed_by_table(line, t, page_index)), None)
+        partial_owner = None
+        residual_line = None
         if owner is None:
-            pending_prose.append(line)
-            continue
-
+            for candidate in usable_tables:
+                cell_token_ids = {id(token) for cell in candidate.cells for token in cell.tokens}
+                claimed_tokens = [token for token in line.tokens if token.text.strip() and id(token) in cell_token_ids]
+                residual_tokens = [token for token in line.tokens if token.text.strip() and id(token) not in cell_token_ids]
+                if claimed_tokens and residual_tokens:
+                    partial_owner = candidate
+                    residual_line = replace(
+                        line,
+                        tokens=residual_tokens,
+                        bbox=BBox.union_all([token.bbox for token in residual_tokens]),
+                        line_id=f"{line_identity(line)}:unclaimed",
+                        text_override=None,
+                    )
+                    break
+        if owner is None:
+            if partial_owner is None:
+                pending_prose.append(line)
+                continue
+            owner = partial_owner
+            pending_prose.append(residual_line)
+        else:
+            claimed_count += 1
+        # A partially consumed source line keeps its remaining tokens as prose.
+        partial = residual_line is not None
+        if partial:
+            claimed_count += 1
         # Emit any accumulated prose before this table.
         flush_prose(pending_prose)
         pending_prose = []
-        claimed_count += 1
 
         if owner.table_id not in emitted_table_ids and owner.table_id not in emitted_in_pass:
             emitted_in_pass.add(owner.table_id)
@@ -428,7 +448,8 @@ def _build_region_blocks(
             table_blocks[owner.table_id] = table_block
             blocks.append(table_block)
         if owner.table_id in table_blocks:
-            table_blocks[owner.table_id].line_ids.append(line_identity(line))
+            if not partial:
+                table_blocks[owner.table_id].line_ids.append(line_identity(line))
 
     # Emit remaining prose after the last table.
     flush_prose(pending_prose)
@@ -489,7 +510,8 @@ def _attach_table_source_line_claims(
         claimed = set(block.line_ids)
         for region in regions:
             for line in [*region.native_lines, *region.ocr_lines]:
-                if any(id(token) in cell_token_ids for token in line.tokens):
+                visible_ids = {id(token) for token in line.tokens if token.text.strip()}
+                if visible_ids and visible_ids.issubset(cell_token_ids):
                     line_id = line_identity(line)
                     if line_id not in claimed:
                         block.line_ids.append(line_id)
@@ -593,10 +615,23 @@ def _emit_table_block(
         kind=ContentKind.TABLE,
         bbox=bbox,
         order_index=0,  # reindexed by _reindex_blocks
+        text=_table_plain_text(table),
         table_id=table.table_id,
         source_region_ids=[region.region_id],
         confidence=table.confidence,
         line_ids=[],
+    )
+
+
+def _table_plain_text(table: StructuredTable) -> str:
+    """Return table cell text in logical row order for plain-text consumers."""
+    cells_by_row: dict[int, list[Any]] = {}
+    for cell in table.cells:
+        if cell.text.strip():
+            cells_by_row.setdefault(cell.row, []).append(cell)
+    return "\n".join(
+        "\t".join(cell.text.strip() for cell in sorted(cells_by_row[row], key=lambda item: item.col))
+        for row in sorted(cells_by_row)
     )
 
 
@@ -621,6 +656,7 @@ def _insert_orphan_tables(
                 kind=ContentKind.TABLE,
                 bbox=bbox,
                 order_index=0,
+                text=_table_plain_text(table),
                 table_id=table.table_id,
                 source_region_ids=[],
             )
@@ -722,8 +758,6 @@ def _build_reading_text(blocks: list[PageContentBlock]) -> str:
     for block in sorted(blocks, key=lambda b: b.order_index):
         if block.suppressed:
             continue
-        if block.kind == ContentKind.TABLE:
-            continue
         if block.kind == ContentKind.FIGURE and not block.text:
             continue
         if block.text:
@@ -737,8 +771,5 @@ def _decorative_suppression_confirmed(region: LayoutRegion) -> bool:
     if not role.startswith("decorative_watermark:"):
         return False
     reasons = set(role.split(":", 1)[1].split(","))
-    return bool(
-        reasons.intersection(
-            {"unusual_angle", "light_luminance", "low_opacity", "large_font"}
-        )
-    )
+    # Light color and broad boxes also describe readable text on dark fills.
+    return "unusual_angle" in reasons and bool(reasons.intersection({"low_opacity", "large_font"}))

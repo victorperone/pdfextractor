@@ -336,7 +336,7 @@ def test_models_status_requires_uvdoc_when_unwarping_is_enabled(tmp_path, capsys
             continue
         model_dir = tmp_path / "official_models" / model_name
         model_dir.mkdir(parents=True)
-        (model_dir / "model.pdparams").write_text("fixture", encoding="utf-8")
+        (model_dir / "model.pdparams").write_text("x" * 2048, encoding="utf-8")
 
     assert _cmd_models_status("pt", str(tmp_path)) == 1
     output = capsys.readouterr().out
@@ -345,7 +345,7 @@ def test_models_status_requires_uvdoc_when_unwarping_is_enabled(tmp_path, capsys
 
     uvdoc_dir = tmp_path / "official_models" / "UVDoc"
     uvdoc_dir.mkdir()
-    (uvdoc_dir / "model.pdparams").write_text("fixture", encoding="utf-8")
+    (uvdoc_dir / "model.pdparams").write_text("x" * 2048, encoding="utf-8")
     assert _cmd_models_status("pt", str(tmp_path)) == 0
     output = capsys.readouterr().out
     assert "[ok] UVDoc" in output
@@ -362,7 +362,30 @@ def test_paddle_direct_and_subprocess_modes_share_the_resolved_policy(monkeypatc
     monkeypatch.setattr(paddle_backend, "_has_torch_conflict", lambda: True)
     subprocess_backend = paddle_backend.PaddleOCRBackend(config)
     assert subprocess_backend._subprocess_config["mkldnn"] is False
-    assert subprocess_backend._subprocess_config["disable_pir_api"] is False
+    assert (
+        subprocess_backend._subprocess_config["disable_pir_api"]
+        is subprocess_backend._runtime_policy.disable_pir_api
+    )
+
+def test_paddle_cpu_runtime_policy_disables_pir_api_on_windows(monkeypatch) -> None:
+    import structured_pdf_text.ocr.backends.paddle as paddle_backend
+    import structured_pdf_text.ocr.paddle as paddle_engine
+    from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
+    config = ExtractorConfig(language="pt")
+    monkeypatch.setenv("PADDLE_ENABLE_MKLDNN", "0")
+    monkeypatch.setattr(paddle_backend, "_has_torch_conflict", lambda: True)
+    subprocess_backend = PaddleOCRBackend(config)
+    from structured_pdf_text.ocr.runtime_policy import (
+        resolve_paddle_runtime_policy,
+    )
+
+    policy = resolve_paddle_runtime_policy(
+        env={"PADDLE_ENABLE_MKLDNN": "0"},
+        system="Windows",
+    )
+
+    assert policy.enable_mkldnn is False
+    assert policy.disable_pir_api is True
 
     direct_options = {}
 

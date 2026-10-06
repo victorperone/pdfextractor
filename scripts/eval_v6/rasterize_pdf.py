@@ -28,10 +28,21 @@ def _has_extractable_text(path: Path) -> list[int]:
 
     document = pdfium.PdfDocument(str(path))
     non_empty: list[int] = []
-    for index in range(len(document)):
-        text = document[index].get_textpage().get_text_range() or ""
-        if text.strip():
-            non_empty.append(index + 1)
+    try:
+        for index in range(len(document)):
+            page = document[index]
+            try:
+                textpage = page.get_textpage()
+                try:
+                    text = textpage.get_text_range() or ""
+                finally:
+                    textpage.close()
+                if text.strip():
+                    non_empty.append(index + 1)
+            finally:
+                page.close()
+    finally:
+        document.close()
     return non_empty
 
 
@@ -51,24 +62,34 @@ def rasterize_pdf(source: Path, output: Path, manifest: Path, scale: float = 2.0
 
     document = pdfium.PdfDocument(str(source))
     output.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="pdfextractor-raster-") as temp:
-        canvas_pdf = None
-        for index in range(len(document)):
-            page = document[index]
-            width, height = page.get_size()
-            image = page.render(scale=scale).to_pil().convert("RGB")
+    try:
+        with TemporaryDirectory(prefix="pdfextractor-raster-"):
+            canvas_pdf = None
+            for index in range(len(document)):
+                page = document[index]
+                try:
+                    width, height = page.get_size()
+                    bitmap = page.render(scale=scale)
+                    try:
+                        image = bitmap.to_pil().convert("RGB")
+                    finally:
+                        bitmap.close()
+                    try:
+                        if canvas_pdf is None:
+                            canvas_pdf = canvas.Canvas(str(output), pagesize=(width, height))
+                        else:
+                            canvas_pdf.setPageSize((width, height))
+                        canvas_pdf.drawImage(ImageReader(image), 0, 0, width=width, height=height, mask="auto")
+                        canvas_pdf.showPage()
+                    finally:
+                        image.close()
+                finally:
+                    page.close()
             if canvas_pdf is None:
-                canvas_pdf = canvas.Canvas(str(output), pagesize=(width, height))
-            else:
-                canvas_pdf.setPageSize((width, height))
-            # ReportLab embeds only the pixels; it does not copy the source PDF
-            # content stream or its text layer.
-            canvas_pdf.drawImage(ImageReader(image), 0, 0, width=width, height=height, mask="auto")
-            canvas_pdf.showPage()
-            image.close()
-        if canvas_pdf is None:
-            raise ValueError("source PDF has no pages")
-        canvas_pdf.save()
+                raise ValueError("source PDF has no pages")
+            canvas_pdf.save()
+    finally:
+        document.close()
 
     remaining_text_pages = _has_extractable_text(output)
     if remaining_text_pages:

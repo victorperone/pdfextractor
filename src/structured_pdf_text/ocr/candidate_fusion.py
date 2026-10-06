@@ -34,6 +34,7 @@ class OcrCandidateFusionEngine:
         ranked = sorted(candidates, key=lambda item: item.score, reverse=True)
         selected: list[OcrToken] = []
         families_by_token: list[set[str]] = []
+        candidates_by_token: list[set[str]] = []
         consensus = conflicts = 0
         for candidate in ranked:
             for raw_token in candidate.tokens:
@@ -53,14 +54,17 @@ class OcrCandidateFusionEngine:
                 )
                 overlaps = [
                     index for index, current in enumerate(selected)
-                    if _same_evidence(current, token)
+                    if candidate.candidate_id not in candidates_by_token[index]
+                    and _same_evidence(current, token)
                 ]
                 if not overlaps:
                     selected.append(token)
                     families_by_token.append({candidate.family})
+                    candidates_by_token.append({candidate.candidate_id})
                     continue
                 index = max(overlaps, key=lambda i: _token_score(selected[i]))
                 current = selected[index]
+                candidates_by_token[index].add(candidate.candidate_id)
                 if _norm(current.text) == _norm(token.text):
                     if candidate.family not in families_by_token[index]:
                         consensus += 1
@@ -94,10 +98,11 @@ def recognize_page_with_tiles(
     rows: int = 2,
     columns: int = 2,
     overlap: float = 0.15,
+    page_rotation: int = 0,
 ) -> tuple[list[OcrToken], dict[str, int]]:
     """Run overlapping page tiles and fuse their evidence with the full page."""
     from inspect import signature, Parameter
-    from structured_pdf_text.ocr.image_views import tile_image_views
+    from structured_pdf_text.ocr.image_views import canonicalize_page_image, tile_image_views
     method = getattr(engine, "recognize_page", None)
     if not callable(method):
         return baseline_tokens, {"tiles": 0, "tile_tokens": 0, "fusion_conflicts": 0}
@@ -111,11 +116,18 @@ def recognize_page_with_tiles(
     except (TypeError, ValueError):
         params = {}
     accepts_policy = "quality_policy" in params or any(p.kind is Parameter.VAR_KEYWORD for p in params.values())
-    for view in tile_image_views(image, page_bbox, rows=rows, columns=columns, overlap=overlap):
+    canonical_image = canonicalize_page_image(image, page_rotation)
+    for view in tile_image_views(canonical_image, page_bbox, rows=rows, columns=columns, overlap=overlap):
         kwargs = {"quality_policy": quality_policy} if accepts_policy else {}
+        if "page_rotation" in params or any(p.kind is Parameter.VAR_KEYWORD for p in params.values()):
+            kwargs["page_rotation"] = 0
         try:
             tokens = method(view.image, page_index, view.source_bbox, **kwargs)
-        except Exception:
+        except Exception as exc:
+            from structured_pdf_text.errors import FatalExtractionError, raise_if_resource_exhausted
+            if isinstance(exc, FatalExtractionError):
+                raise
+            raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_tile")
             continue
         total_tokens += len(tokens)
         candidates.append(OcrCandidateResult(
@@ -150,10 +162,12 @@ def _same_evidence(first: OcrToken, second: OcrToken) -> bool:
     overlap = first.bbox.iou(second.bbox)
     if overlap >= 0.28:
         return True
-    distance = ((first.bbox.cx - second.bbox.cx) ** 2 + (first.bbox.cy - second.bbox.cy) ** 2) ** 0.5
-    line_height = max(first.bbox.height, second.bbox.height, 1.0)
+    intersection = first.bbox.intersection(second.bbox)
+    smaller_area = min(first.bbox.area, second.bbox.area)
+    if intersection is None or smaller_area <= 0:
+        return False
     similarity = SequenceMatcher(None, _norm(first.text), _norm(second.text)).ratio()
-    return similarity >= 0.68 and distance <= 1.8 * line_height
+    return similarity >= 0.68 and intersection.area / smaller_area >= 0.65
 
 
 def _token_score(token: OcrToken) -> float:

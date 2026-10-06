@@ -22,7 +22,11 @@ def tokens_in_cell(
     for line in sorted(lines, key=lambda item: (item.bbox.y0, item.bbox.x0)):
         for token in line.tokens:
             if token.bbox.area == 0:
-                if token.text.isspace() and cell.x0 <= token.bbox.x0 <= cell.x1:
+                if (
+                    token.text.isspace()
+                    and cell.x0 <= token.bbox.x0 <= cell.x1
+                    and cell.y0 <= token.bbox.cy <= cell.y1
+                ):
                     tokens.append(token)
                 continue
             if (

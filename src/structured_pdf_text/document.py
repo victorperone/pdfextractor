@@ -533,6 +533,7 @@ class StructuredPage:
     reading_text: str
     diagnostics: PageDiagnostics
     native_evidence: NativePageEvidence | None = None
+    page_rotation: int = 0
     content_blocks: list[PageContentBlock] = field(default_factory=list)
 
 

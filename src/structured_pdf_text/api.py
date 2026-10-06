@@ -365,6 +365,7 @@ class PdfTextExtractor:
                 )
                 if (
                     page_ocr_requested
+                    and mode != ExtractionMode.OCR
                     and ComplexityReason.INVISIBLE_TEXT in complexity.reasons
                     and not native_page.objects.images
                     and native_lines
@@ -394,7 +395,10 @@ class PdfTextExtractor:
                 if ocr_requested or figure_ocr_requested:
                     try:
                         self._ensure_ocr_engine()
+                    except FatalExtractionError:
+                        raise
                     except Exception as exc:
+                        raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_backend_init", details=_process_memory_snapshot())
                         warnings.append(f"OCR backend unavailable: {type(exc).__name__}: {exc}")
                         partial_reasons.append("ocr_backend_unavailable")
                         page_ocr_requested = region_ocr_requested = figure_ocr_requested = False
@@ -426,9 +430,15 @@ class PdfTextExtractor:
                         ) * 1000
                         warnings.append(
                             f"OCR render unavailable: {type(exc).__name__}: {exc}"
+                            + (
+                                f"; regions={[region.region_id for region in selected_regions]}"
+                                if region_ocr_requested else ""
+                            )
                         )
-                        if mode == ExtractionMode.OCR or page_ocr_requested:
+                        if page_ocr_requested or mode == ExtractionMode.OCR:
                             partial_reasons.append("page_ocr_unavailable")
+                        elif region_ocr_requested:
+                            partial_reasons.append("ocr_region_recovery_unavailable")
                     else:
                         timings["render_ocr_ms"] = (
                             time.perf_counter() - ocr_render_start
@@ -481,6 +491,7 @@ class PdfTextExtractor:
                                             rows=self.config.ocr_tile_rows,
                                             columns=self.config.ocr_tile_columns,
                                             overlap=self.config.ocr_tile_overlap,
+                                            page_rotation=native_page.objects.rotation,
                                         )
                                     ocr_passes_total = getattr(
                                         self.ocr_engine, "last_pass_count", None
@@ -579,8 +590,11 @@ class PdfTextExtractor:
                         page_index=page_index,
                         native_lines=native_lines,
                         quality_policy=effective_ocr_quality_policy(self.config).value,
+                        page_rotation=native_page.objects.rotation,
                         warnings=warnings,
                     )
+                    if any(item.startswith("figure_ocr_failed:") for item in warnings):
+                        partial_reasons.append("figure_ocr_unavailable")
                     if figure_refinements:
                         for (
                             box,
@@ -646,7 +660,13 @@ class PdfTextExtractor:
                                     OcrCandidateResult("full-page", "full-page", tuple(ocr_tokens), _ocr_token_score(ocr_tokens), type(self.ocr_engine).__name__),
                                     OcrCandidateResult("embedded-image", "embedded-image", tuple(original_candidate), _ocr_token_score(original_candidate), type(self.ocr_engine).__name__),
                                 ]).tokens)
+                        except FatalExtractionError:
+                            raise
                         except Exception as exc:
+                            raise_if_resource_exhausted(
+                                exc, page_index=page_index, stage="embedded_image_ocr",
+                                details=_process_memory_snapshot(),
+                            )
                             warnings.append(f"Embedded image OCR candidate unavailable: {type(exc).__name__}: {exc}")
                     weak_start = time.perf_counter()
                     try:
@@ -665,6 +685,7 @@ class PdfTextExtractor:
                                 ocr_tokens,
                                 page_index,
                                 native_page.bbox,
+                                page_rotation=native_page.objects.rotation,
                             ),
                             quality_policy=effective_ocr_quality_policy(self.config).value,
                             thresholds=effective_ocr_quality_thresholds(self.config),
@@ -674,6 +695,7 @@ class PdfTextExtractor:
                     except FatalExtractionError:
                         raise
                     except Exception as exc:
+                        raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_backend_init", details=_process_memory_snapshot())
                         raise_if_resource_exhausted(
                             exc,
                             page_index=page_index,
@@ -705,12 +727,12 @@ class PdfTextExtractor:
                         tokens=ocr_tokens,
                         lines=[
                             *native_lines,
-                            *reconstruct_ocr_lines(ocr_tokens, page_index, native_page.bbox),
+                            *reconstruct_ocr_lines(ocr_tokens, page_index, native_page.bbox, page_rotation=native_page.objects.rotation),
                         ],
                         quality_policy=effective_ocr_quality_policy(self.config).value,
                         page_rotation=native_page.objects.rotation,
                         region_renderer=lambda bbox, scale: source.render_region(
-                            page_index, bbox, scale, native_page.bbox
+                            page_index, bbox, scale, native_page.bbox, native_page.objects.rotation
                         ),
                         base_scale=ocr_render_scale,
                     )
@@ -732,7 +754,7 @@ class PdfTextExtractor:
                         tokens=ocr_tokens,
                         quality_policy=effective_ocr_quality_policy(self.config).value,
                         region_renderer=lambda bbox, scale: source.render_region(
-                            page_index, bbox, scale, native_page.bbox
+                            page_index, bbox, scale, native_page.bbox, native_page.objects.rotation
                         ),
                         base_scale=ocr_render_scale,
                         page_rotation=native_page.objects.rotation,
@@ -746,6 +768,7 @@ class PdfTextExtractor:
                         ocr_tokens,
                         page_index,
                         native_page.bbox,
+                        page_rotation=native_page.objects.rotation,
                     )
                     fusion_start = time.perf_counter()
                     fusion = fuse_native_and_ocr(native_lines, ocr_tokens)
@@ -757,6 +780,7 @@ class PdfTextExtractor:
                         unmatched_ocr_tokens,
                         page_index,
                         native_page.bbox,
+                        page_rotation=native_page.objects.rotation,
                     )
                     timings["fusion_ms"] = (
                         time.perf_counter() - fusion_start
@@ -779,10 +803,8 @@ class PdfTextExtractor:
                     tables = detect_tables_native(
                         native_page,
                         regions,
-                        # Geometry confines recovery to the assigned cell.
-                        # Covered cells are blanked immediately afterward.
                         allow_textpage_recovery=outside_page_character_count == 0,
-                    )
+                    ) if self.config.enable_tables else []
                     _clear_occluded_table_cells(tables, opaque_occlusion_boxes)
                 except FatalExtractionError:
                     raise
@@ -800,16 +822,13 @@ class PdfTextExtractor:
                     partial_reasons.append("native_table_detection_unavailable")
                 table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] = {}
                 visual_table = None
-                if not tables and rendered_page is not None and (
-                    self.config.enable_tables
-                    or complexity.layout_needed
-                    or mode in {ExtractionMode.BALANCED, ExtractionMode.OCR}
-                ):
+                if not tables and self.config.enable_tables and rendered_page is not None:
                     try:
                         visual_table = detect_visual_table(
                             native_page,
                             rendered_page,
                             tokens=[token for line in ocr_lines for token in line.tokens],
+                            page_rotation=native_page.objects.rotation,
                         )
                     except FatalExtractionError:
                         raise
@@ -836,6 +855,7 @@ class PdfTextExtractor:
                                 table=visual_table,
                                 native_lines=native_lines,
                                 quality_policy=effective_ocr_quality_policy(self.config).value,
+                                page_rotation=native_page.objects.rotation,
                             )
                         except FatalExtractionError:
                             raise
@@ -883,10 +903,11 @@ class PdfTextExtractor:
                         unmatched_ocr_tokens,
                         page_index,
                         native_page.bbox,
+                        page_rotation=native_page.objects.rotation,
                     )
                     ocr_table_tokens += len(consumed_table_ocr)
                 table_cell_refinements = 0
-                if self.config.enable_table_cell_ocr and tables:
+                if self.config.enable_table_cell_ocr and _ocr_enabled(self.config) and tables:
                     try:
                         self._ensure_ocr_engine()
                         cell_image = ocr_image if ocr_image is not None else rendered_page
@@ -904,13 +925,16 @@ class PdfTextExtractor:
                                 tables=tables,
                                 quality_policy=effective_ocr_quality_policy(self.config).value,
                                 region_renderer=lambda bbox, scale: source.render_region(
-                                    page_index, bbox, scale, native_page.bbox
+                                    page_index, bbox, scale, native_page.bbox, native_page.objects.rotation
                                 ),
                                 base_scale=ocr_render_scale,
                                 page_rotation=native_page.objects.rotation,
                             )
+                    except FatalExtractionError:
+                        raise
                     except Exception as exc:
                         warnings.append(f"Table cell OCR refinement unavailable: {type(exc).__name__}: {exc}")
+                        raise_if_resource_exhausted(exc, page_index=page_index, stage="table_cell_ocr", details=_process_memory_snapshot())
                         partial_reasons.append("table_cell_ocr_unavailable")
                 try:
                     (
@@ -954,7 +978,13 @@ class PdfTextExtractor:
                         )
                     if ocr_tokens:
                         regions = reconstruct_ocr_layout(regions, native_page.bbox)
+                except FatalExtractionError:
+                    raise
                 except Exception as exc:
+                    raise_if_resource_exhausted(
+                        exc, page_index=page_index, stage="layout_assembly",
+                        details=_process_memory_snapshot(),
+                    )
                     warnings.append(f"Layout assembly failed: {type(exc).__name__}: {exc}")
                     partial_reasons.append("layout_assembly_failed")
                 timings["table_ms"] = (time.perf_counter() - table_start) * 1000
@@ -1186,6 +1216,7 @@ class PdfTextExtractor:
                         native_evidence=(
                             native_page if self.config.retain_native_evidence else None
                         ),
+                        page_rotation=native_page.objects.rotation,
                     )
                 )
             metadata = DocumentMetadata(
@@ -1507,7 +1538,7 @@ def _recover_selected_regions(
         region_tokens = list(result.tokens)
         region.ocr_tokens = region_tokens
         region.ocr_lines = reconstruct_ocr_lines(
-            region_tokens, page_index, page_bbox
+            region_tokens, page_index, page_bbox, page_rotation=page_rotation
         )
         tokens.extend(region_tokens)
         passes += result.ocr_passes
@@ -1541,7 +1572,7 @@ def _refine_small_footnote_tokens(
     """Rerender tiny bottom-page OCR lines directly from PDFium in max quality."""
     if not tokens or page_bbox.height <= 0 or not callable(region_renderer):
         return tokens, 0
-    lines = reconstruct_ocr_lines(tokens, page_index, page_bbox)
+    lines = reconstruct_ocr_lines(tokens, page_index, page_bbox, page_rotation=page_rotation)
     heights = sorted(line.bbox.height for line in lines if line.bbox.height > 0)
     if len(heights) < 3:
         return tokens, 0
@@ -1566,7 +1597,10 @@ def _refine_small_footnote_tokens(
                 engine.recognize_page, image, page_index, box, quality_policy,
                 page_rotation=page_rotation,
             )
-        except Exception:
+        except FatalExtractionError:
+            raise
+        except Exception as exc:
+            raise_if_resource_exhausted(exc, page_index=page_index, stage="footnote_reread")
             continue
         reread = [token for token in reread if token.text.strip()]
         if not reread:
@@ -1642,19 +1676,23 @@ def _refine_critical_data_tokens(
         if box is None or box.area <= 0:
             continue
         refined_tokens: list[OcrToken] = []
+        hypotheses: list[list[OcrToken]] = []
         if callable(region_renderer):
             try:
                 region_image = region_renderer(box, base_scale * 1.75)
-                refined_tokens = _call_page_recognition(
+                hypotheses.append(_call_page_recognition(
                     engine.recognize_page, region_image, page_index, box, quality_policy
-                )
+                ))
                 if _backend_supports(engine, "direct_recognition") and callable(getattr(engine, "recognize_direct", None)):
-                    refined_tokens.extend(engine.recognize_direct(
+                    hypotheses.append(engine.recognize_direct(
                         region_image, page_index, box, quality_policy=quality_policy
                     ))
-            except Exception:
-                refined_tokens = []
-        if not refined_tokens:
+            except FatalExtractionError:
+                raise
+            except Exception as exc:
+                raise_if_resource_exhausted(exc, page_index=page_index, stage="critical_data_refinement")
+                hypotheses = []
+        if not any(hypothesis for hypothesis in hypotheses):
             result = OcrRegionRefiner(engine).refine(
                 page_image, page_index, page_bbox,
                 RegionRefinementRequest(
@@ -1668,7 +1706,14 @@ def _refine_critical_data_tokens(
                     quality_reasons=(f"critical_data:{data_type}",),
                 ),
             )
-            refined_tokens = list(result.tokens)
+            hypotheses.append(list(result.tokens))
+        hypotheses = [hypothesis for hypothesis in hypotheses if hypothesis]
+        if hypotheses:
+            def hypothesis_score(items: list[OcrToken]) -> float:
+                text = " ".join(item.text.strip() for item in items if item.text.strip())
+                candidate = replace(token, text=text)
+                return refiner.score_token(candidate, data_type) + sum(item.confidence or 0.0 for item in items) / max(len(items), 1) * 0.01
+            refined_tokens = max(hypotheses, key=hypothesis_score)
         if not refined_tokens:
             continue
         observed_text = " ".join(item.text.strip() for item in refined_tokens if item.text.strip())
@@ -1716,7 +1761,10 @@ def _refine_table_cells_ocr(
             if callable(region_renderer):
                 try:
                     crop = np.asarray(region_renderer(cell.bbox, base_scale * 1.75))
-                except Exception:
+                except FatalExtractionError:
+                    raise
+                except Exception as exc:
+                    raise_if_resource_exhausted(exc, page_index=page_index, stage="table_cell_render")
                     pass
             cell_header = next((
                 item.text for item in table.cells
@@ -1729,12 +1777,18 @@ def _refine_table_cells_ocr(
                     engine.recognize_page, crop, page_index, cell.bbox, quality_policy,
                     page_rotation=page_rotation,
                 ))
-            except Exception:
+            except FatalExtractionError:
+                raise
+            except Exception as exc:
+                raise_if_resource_exhausted(exc, page_index=page_index, stage="table_cell_render")
                 pass
             if direct_supported and callable(direct):
                 try:
                     candidates.append(direct(crop, page_index, cell.bbox, quality_policy=quality_policy))
-                except Exception:
+                except FatalExtractionError:
+                    raise
+                except Exception as exc:
+                    raise_if_resource_exhausted(exc, page_index=page_index, stage="table_cell_direct_ocr")
                     pass
             # A direct render from the existing crop still provides a useful
             # recognizer hypothesis when the detector misses very small text.
@@ -1744,7 +1798,10 @@ def _refine_table_cells_ocr(
                     engine.recognize_page, enlarged, page_index, cell.bbox, quality_policy,
                     page_rotation=page_rotation,
                 ))
-            except Exception:
+            except FatalExtractionError:
+                raise
+            except Exception as exc:
+                raise_if_resource_exhausted(exc, page_index=page_index, stage="table_cell_ocr")
                 pass
             candidates = [candidate for candidate in candidates if candidate]
             if not candidates:
@@ -1983,6 +2040,8 @@ def _is_visually_blank(image: Any) -> bool:
         gray = image.convert("L")
         low, high = gray.resize((min(64, gray.width), min(64, gray.height))).getextrema()
         return low >= 250 and high - low <= 3
+    except MemoryError:
+        raise
     except Exception:
         return False
 
@@ -2472,6 +2531,7 @@ def _refine_visual_table_ocr(
     table: Any,
     native_lines: list[TextLine],
     quality_policy: str = "baseline",
+    page_rotation: int = 0,
 ) -> tuple[Any, list[TextLine], list[OcrToken], int, int] | None:
     """Run a quality-first OCR pass over a detected visual table crop."""
     if (
@@ -2494,6 +2554,7 @@ def _refine_visual_table_ocr(
             quality_variants=True,
             quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
+            page_rotation=page_rotation,
         ),
     )
     refined_tokens = [
@@ -2507,6 +2568,7 @@ def _refine_visual_table_ocr(
         image=page_image,
         table_id=table.table_id,
         tokens=refined_tokens,
+        page_rotation=page_rotation,
     )
     if refined_table is None:
         # Keep the original grid and only replace its cell text through the
@@ -2514,7 +2576,7 @@ def _refine_visual_table_ocr(
         refined_table = table
     refined_fusion = fuse_native_and_ocr(native_lines, refined_tokens)
     unmatched = list(refined_fusion.unmatched_ocr_tokens)
-    lines = reconstruct_ocr_lines(unmatched, page_index, page.bbox)
+    lines = reconstruct_ocr_lines(unmatched, page_index, page.bbox, page_rotation=page_rotation)
     lines = _rebuild_table_ocr_lines(refined_table, lines, page_index)
     return refined_table, lines, unmatched, result.ocr_passes, result.ocr_batches
 
@@ -2526,6 +2588,7 @@ def _refine_figure_ocr(
     page_index: int,
     native_lines: list[TextLine],
     quality_policy: str = "baseline",
+    page_rotation: int = 0,
     warnings: list[str] | None = None,
 ) -> list[
     tuple[
@@ -2589,7 +2652,7 @@ def _refine_figure_ocr(
         else:
             # Check whether the figure has any area within the rendered page.
             # _subfigure_boxes returns [] when the crop is None (no overlap).
-            ocr_boxes = _subfigure_boxes(page_image, page.bbox, figure_bbox)
+            ocr_boxes = _subfigure_boxes(page_image, page.bbox, figure_bbox, page_rotation)
             if not ocr_boxes:
                 if warnings is not None:
                     warnings.append(
@@ -2610,18 +2673,21 @@ def _refine_figure_ocr(
                         quality_variants=str(quality_policy).lower() != "baseline",
                         quality_policy=quality_policy,
                         goal=RegionRefinementGoal.TEXT,
+                        page_rotation=page_rotation,
                     ),
                 )
+                if not result.tokens and result.status in {"runtime_error", "timeout", "budget_blocked"} and warnings is not None:
+                    warnings.append(f"figure_ocr_failed:region={ocr_box}:status={result.status}:reason={result.reason_code}")
                 figure_tokens = [
                     replace(token, provenance="figure_ocr")
                     for token in result.tokens
                 ]
                 if not figure_tokens:
                     continue
-                all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox)
+                all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox, page_rotation=page_rotation)
                 figure_fusion = fuse_native_and_ocr(native_lines, figure_tokens)
                 unmatched_tokens = list(figure_fusion.unmatched_ocr_tokens)
-                unmatched_lines = reconstruct_ocr_lines(unmatched_tokens, page_index, page.bbox)
+                unmatched_lines = reconstruct_ocr_lines(unmatched_tokens, page_index, page.bbox, page_rotation=page_rotation)
                 refinements.append(
                     (
                         ocr_box,
@@ -2636,7 +2702,7 @@ def _refine_figure_ocr(
     return refinements
 
 
-def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox) -> list[BBox]:
+def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox, page_rotation: int = 0) -> list[BBox]:
     """Find well-separated horizontal subfigures using rendered ink gaps.
 
     Returns an empty list when the figure has no rendereable area within the
@@ -2644,15 +2710,18 @@ def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox) -> list[BBo
     ``[figure_bbox]`` as a single undivided box when the crop exists but is too
     small to split or splitting finds no significant gaps.
     """
-    crop = _crop_page_image(image, page_bbox, figure_bbox)
+    crop = _crop_page_image(image, page_bbox, figure_bbox, page_rotation)
     if crop is None:
         # Figure is completely outside the rendered page area; no subfigures.
         return []
     width, height = _image_size(crop)
-    if width < 240 or height < 80 or figure_bbox.width / max(figure_bbox.height, 1.0) < 2.0:
+    visual_figure = figure_bbox.rotate_to_visual(page_rotation, page_bbox.width, page_bbox.height)
+    if width < 240 or height < 80 or visual_figure.width / max(visual_figure.height, 1.0) < 2.0:
         return [figure_bbox]
     try:
         pixels = list(crop.convert("L").getdata())
+    except MemoryError:
+        raise
     except Exception:
         return [figure_bbox]
     occupied: list[bool] = []
@@ -2683,21 +2752,23 @@ def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox) -> list[BBo
         segments.append((left, width))
     if len(segments) < 2 or len(segments) > 4:
         return [figure_bbox]
-    scale_x = figure_bbox.width / max(width, 1)
-    return [
-        BBox(
-            figure_bbox.x0 + left * scale_x,
-            figure_bbox.y0,
-            figure_bbox.x0 + right * scale_x,
-            figure_bbox.y1,
-        )
-        for left, right in segments
-    ]
-
-
-def _replace_lines_in_box(lines: list[TextLine], box: BBox, replacement: list[TextLine]) -> list[TextLine]:
-    outside = [line for line in lines if not _line_in_box(line, box)]
-    return outside + replacement
+    scale_x = visual_figure.width / max(width, 1)
+    output: list[BBox] = []
+    for left, right in segments:
+        visual_box = BBox(visual_figure.x0 + left * scale_x, visual_figure.y0,
+                          visual_figure.x0 + right * scale_x, visual_figure.y1)
+        rotation = page_rotation % 360
+        if rotation == 90:
+            box = BBox(visual_box.y0, page_bbox.height - visual_box.x1, visual_box.y1, page_bbox.height - visual_box.x0)
+        elif rotation == 180:
+            box = BBox(page_bbox.width - visual_box.x1, page_bbox.height - visual_box.y1,
+                       page_bbox.width - visual_box.x0, page_bbox.height - visual_box.y0)
+        elif rotation == 270:
+            box = BBox(page_bbox.width - visual_box.y1, visual_box.x0, page_bbox.width - visual_box.y0, visual_box.x1)
+        else:
+            box = visual_box
+        output.append(box)
+    return output
 
 
 def _replace_tokens_in_box(tokens: list[OcrToken], box: BBox, replacement: list[OcrToken]) -> list[OcrToken]:
@@ -2705,7 +2776,7 @@ def _replace_tokens_in_box(tokens: list[OcrToken], box: BBox, replacement: list[
     return outside + replacement
 
 
-def _crop_page_image(image: Any, page_bbox: BBox, region_bbox: BBox) -> Any | None:
+def _crop_page_image(image: Any, page_bbox: BBox, region_bbox: BBox, page_rotation: int = 0) -> Any | None:
     """Crop a rendered page using PDF-point coordinates at any render scale.
 
     Returns the cropped image when the region has a positive rendereable area,
@@ -2725,50 +2796,14 @@ def _crop_page_image(image: Any, page_bbox: BBox, region_bbox: BBox) -> Any | No
     outside the rendered area.  When ``page_bbox`` is degenerate the caller
     should treat the entire page as un-renderable.
     """
-    import math
-
-    width, height = _image_size(image)
-
-    # Guard: page geometry must be well-formed and match the image.
-    if page_bbox.width <= 0 or page_bbox.height <= 0 or width <= 0 or height <= 0:
-        return None
-
-    # Guard: figure coordinates must be finite.
-    for coord in (region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1):
-        if not math.isfinite(coord):
-            return None
-
-    # Intersect the figure bbox with the page bbox to find the visible area.
-    # BBox.intersection() returns None when there is no overlap.
+    from .ocr.recovery import crop_page_region
     visible = region_bbox.intersection(page_bbox)
     if visible is None:
         return None
-
-    scale_x = width / page_bbox.width
-    scale_y = height / page_bbox.height
-
-    # Convert the visible intersection to pixel coordinates using the page
-    # origin so that pages with a non-zero CropBox origin are handled correctly.
-    left = int((visible.x0 - page_bbox.x0) * scale_x)
-    top = int((visible.y0 - page_bbox.y0) * scale_y)
-    # Use ceil for the right/bottom edges to preserve sub-pixel areas.
-    right = math.ceil((visible.x1 - page_bbox.x0) * scale_x)
-    bottom = math.ceil((visible.y1 - page_bbox.y0) * scale_y)
-
-    # Clamp to the actual image dimensions.
-    left = min(width, max(0, left))
-    right = min(width, max(0, right))
-    top = min(height, max(0, top))
-    bottom = min(height, max(0, bottom))
-
-    # After clamping, the region may have collapsed to zero pixels.
-    if right <= left or bottom <= top:
+    try:
+        return crop_page_region(image, page_bbox, visible, page_rotation)
+    except (ValueError, TypeError, IndexError):
         return None
-
-    if hasattr(image, "crop"):
-        return image.crop((left, top, right, bottom))
-    return image[top:bottom, left:right]
-
 
 def _image_size(image: Any) -> tuple[int, int]:
     if hasattr(image, "size") and isinstance(image.size, tuple):
@@ -2815,16 +2850,20 @@ def _layout_regions_if_requested(
 
 
 def _clear_occluded_table_cells(tables: list[Any], boxes: list[BBox]) -> None:
-    """Remove all cell text where an opaque visual object covers the cell."""
+    """Remove only cell tokens whose own glyph bounds are occluded."""
     if not boxes:
         return
     for table in tables:
         for cell in table.cells:
             if cell.bbox is None:
                 continue
-            if any(cell.bbox.overlap_ratio(box) >= 0.05 for box in boxes):
-                cell.text = ""
-                cell.tokens.clear()
+            surviving = [
+                token for token in cell.tokens
+                if not any(token.bbox.overlap_ratio(box) >= 0.35 for box in boxes)
+            ]
+            if len(surviving) != len(cell.tokens):
+                cell.tokens[:] = surviving
+                cell.text = join_table_tokens(surviving)
 
 
 def _bbox_to_dict(box: BBox) -> dict[str, float]:

@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import safe_crop_array, sha256_file
+from structured_pdf_text.ocr.backends._parser_utils import sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -524,10 +524,16 @@ class TesseractBackend:
         # Use DPI from request when available (benchmark sets it explicitly).
         dpi = request.dpi if request.dpi else self._dpi
         try:
-            tsv, _rotation, _width, _height = self._run_effective_tesseract(request.image, dpi)
+            tsv, rotation, original_width, original_height = self._run_effective_tesseract(request.image, dpi)
             rows = _parse_tsv(tsv)
             rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
-            tokens = tuple(_tsv_to_ocr_tokens(rows, "tesseract", self._conf_min, offset_x=rx0, offset_y=ry0))
+            parsed = _tsv_to_ocr_tokens(rows, "tesseract", self._conf_min)
+            if rotation:
+                parsed = _map_rotated_tokens_to_original(parsed, rotation, original_width, original_height)
+            if request.region_bbox:
+                from dataclasses import replace
+                parsed = [replace(token, bbox=BBox(token.bbox.x0 + rx0, token.bbox.y0 + ry0, token.bbox.x1 + rx0, token.bbox.y1 + ry0)) for token in parsed]
+            tokens = tuple(parsed)
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
         except FileNotFoundError:
@@ -577,6 +583,7 @@ class TesseractBackend:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         """Run OCR on a full page image; applies OSD rotation when TESSERACT_OSD=1."""
         tsv, osd_rotation, original_width, original_height = self._run_effective_tesseract(
@@ -589,7 +596,7 @@ class TesseractBackend:
         if osd_rotation:
             tokens = _map_rotated_tokens_to_original(tokens, osd_rotation, original_width, original_height)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
-        return map_tokens_to_page(tokens, page_bbox, original_width, original_height)
+        return map_tokens_to_page(tokens, page_bbox, original_width, original_height, page_rotation)
 
     def recognize_region(
         self,
@@ -699,7 +706,6 @@ def _map_rotated_tokens_to_original(
             bbox = BBox(original_width - box.y1, box.x0, original_width - box.y0, box.x1)
         else:
             bbox = box
-        mapped.append(OcrToken(text=token.text, bbox=bbox, confidence=token.confidence,
-                               language=token.language, source=token.source,
-                               rotation=token.rotation, provenance=token.provenance))
+        from dataclasses import replace
+        mapped.append(replace(token, bbox=bbox))
     return mapped

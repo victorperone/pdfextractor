@@ -154,6 +154,7 @@ def model_directory_is_ready(model_dir: str | "Path") -> bool:
     weight_suffixes = {".pdmodel", ".pdiparams", ".pdparams", ".nb", ".onnx", ".bin", ".pt"}
     return any(
         item.is_file()
-        and (item.suffix.lower() in weight_suffixes or item.name.endswith(".pdiparams.info"))
+        and item.stat().st_size >= 1024
+        and item.suffix.lower() in weight_suffixes
         for item in path.iterdir()
     )

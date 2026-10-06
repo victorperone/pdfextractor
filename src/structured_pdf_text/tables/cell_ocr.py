@@ -28,7 +28,7 @@ Design constraints
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from structured_pdf_text.document import StructuredTable, TableCell
@@ -72,18 +72,17 @@ def crop_cell_image(
         if ph == 0 or pw == 0:
             return None
 
-        # PDF coordinates: origin at bottom-left, y increases upward.
-        # Raster: origin at top-left, y increases downward.
+        # Both canonical page boxes and raster arrays use a top-left origin.
         page_w = page_bbox.width or pw
         page_h = page_bbox.height or ph
         x_scale = pw / page_w if page_w > 0 else 1.0
         y_scale = ph / page_h if page_h > 0 else 1.0
 
-        # Convert PDF coords to raster coords (flip Y).
+        # Convert canonical page coordinates directly to raster coordinates.
         rx0 = int((cell_bbox.x0 - page_bbox.x0) * x_scale) - pad_px
-        ry0 = int((page_bbox.y1 - cell_bbox.y1) * y_scale) - pad_px
+        ry0 = int((cell_bbox.y0 - page_bbox.y0) * y_scale) - pad_px
         rx1 = int((cell_bbox.x1 - page_bbox.x0) * x_scale) + pad_px
-        ry1 = int((page_bbox.y1 - cell_bbox.y0) * y_scale) + pad_px
+        ry1 = int((cell_bbox.y1 - page_bbox.y0) * y_scale) + pad_px
 
         rx0 = max(0, rx0)
         ry0 = max(0, ry0)
@@ -94,6 +93,8 @@ def crop_cell_image(
             return None
 
         return arr[ry0:ry1, rx0:rx1].copy()
+    except MemoryError:
+        raise
     except Exception:
         return None
 
@@ -160,7 +161,13 @@ def ocr_table_cells(
                 ))
                 processed += 1
                 continue
-        except Exception:
+        except MemoryError:
+            raise
+        except Exception as exc:
+            from structured_pdf_text.errors import FatalExtractionError, raise_if_resource_exhausted
+            if isinstance(exc, FatalExtractionError):
+                raise
+            raise_if_resource_exhausted(exc, stage="table_cell_ocr")
             pass
 
         refined_cells.append(cell)
@@ -218,5 +225,11 @@ def simple_crop_ocr(
             texts = [item[1] for item in result if len(item) >= 2 and str(item[1]).strip()]
             return " ".join(texts)
         return ""
-    except Exception:
+    except MemoryError:
+        raise
+    except Exception as exc:
+        from structured_pdf_text.errors import FatalExtractionError, raise_if_resource_exhausted
+        if isinstance(exc, FatalExtractionError):
+            raise
+        raise_if_resource_exhausted(exc, stage="table_cell_direct_ocr")
         return ""
