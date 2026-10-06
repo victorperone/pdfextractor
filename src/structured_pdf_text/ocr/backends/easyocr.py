@@ -133,7 +133,7 @@ from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, safe_crop_array, sha256_file
+from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -449,6 +449,7 @@ def _run_easyocr(
     blocklist: "str | None",
     workers: int,
     rotation_info: "list[int] | None" = None,
+    mag_ratio: "float | None" = None,
     # Detector parameters
     text_threshold: float = 0.7,
     low_text: float = 0.4,
@@ -481,9 +482,10 @@ def _run_easyocr(
     The fallback receives the same parameters so behaviour is consistent.
     """
     import numpy as np
-    from structured_pdf_text.ocr.env import env_float
-    mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
     arr = np.asarray(img)
+    if mag_ratio is None:
+        from structured_pdf_text.ocr.env import env_float
+        mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
 
     # --- Prepare colour + grayscale arrays (mirrors upstream reformat_input) ---
     try:
@@ -496,6 +498,7 @@ def _run_easyocr(
             adjust_contrast=adjust_contrast,
             allowlist=allowlist, blocklist=blocklist, workers=workers,
             rotation_info=rotation_info,
+            mag_ratio=mag_ratio,
             text_threshold=text_threshold, low_text=low_text,
             link_threshold=link_threshold, min_size=min_size,
             slope_ths=slope_ths, ycenter_ths=ycenter_ths,
@@ -538,6 +541,7 @@ def _run_easyocr(
             adjust_contrast=adjust_contrast,
             allowlist=allowlist, blocklist=blocklist, workers=workers,
             rotation_info=rotation_info,
+            mag_ratio=mag_ratio,
             text_threshold=text_threshold, low_text=low_text,
             link_threshold=link_threshold, min_size=min_size,
             slope_ths=slope_ths, ycenter_ths=ycenter_ths,
@@ -573,6 +577,7 @@ def _run_easyocr(
             adjust_contrast=adjust_contrast,
             allowlist=allowlist, blocklist=blocklist, workers=workers,
             rotation_info=rotation_info,
+            mag_ratio=mag_ratio,
             text_threshold=text_threshold, low_text=low_text,
             link_threshold=link_threshold, min_size=min_size,
             slope_ths=slope_ths, ycenter_ths=ycenter_ths,
@@ -594,6 +599,7 @@ def _fallback_readtext(
     workers: int,
     rotation_info: "list[int] | None",
     reason: str,
+    mag_ratio: "float | None" = None,
     # Detector parameters — forwarded for parity with nominal path
     text_threshold: float = 0.7,
     low_text: float = 0.4,
@@ -615,8 +621,9 @@ def _fallback_readtext(
     All parameters match the nominal path so the fallback result is comparable.
     """
     import warnings as _warnings
-    from structured_pdf_text.ocr.env import env_float
-    mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
+    if mag_ratio is None:
+        from structured_pdf_text.ocr.env import env_float
+        mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
     h, w = arr.shape[:2]
     canvas_size = int(mag_ratio * max(h, w))
 
@@ -1457,21 +1464,13 @@ def _exhaustive_candidates(
         _base_mag = 1.2
         _high_mag = 1.8
     if _high_mag > _base_mag + 0.1:
-        import os as _os
-        _prev_mag = _os.environ.get("EASYOCR_MAG_RATIO")
         try:
-            _os.environ["EASYOCR_MAG_RATIO"] = str(_high_mag)
-            raw_j, _fb_j = _run_easyocr(reader, img, **base_kwargs)
+            raw_j, _fb_j = _run_easyocr(reader, img, **base_kwargs, mag_ratio=_high_mag)
             if record_call is not None:
                 record_call(_fb_j)
             results.append(("high_mag", raw_j))
         except Exception:
             pass
-        finally:
-            if _prev_mag is None:
-                _os.environ.pop("EASYOCR_MAG_RATIO", None)
-            else:
-                _os.environ["EASYOCR_MAG_RATIO"] = _prev_mag
 
     # Candidate N: DBNet18 detector ensemble (§11) — runs the second EasyOCR detector
     # on the same image.  DBNet18 uses differentiable binarisation (DB) and can detect
@@ -1756,6 +1755,7 @@ class EasyOCRBackend:
         # probe check the same directory regardless of EASYOCR_MODULE_PATH being set.
         configured_cache = getattr(config, "ocr_cache_home", None)
         if configured_cache and not os.environ.get("EASYOCR_MODULE_PATH"):
+            from pathlib import Path
             self._model_cache_dir = Path(configured_cache).expanduser() / "easyocr"
         else:
             self._model_cache_dir = _model_cache_dir()
@@ -2151,6 +2151,7 @@ class EasyOCRBackend:
             blocklist=self._blocklist,
             workers=self._workers,
         )
+        self._record_call(None)
         tokens = _result_to_pipeline_tokens(result or [], page_index, self._language)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)
