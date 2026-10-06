@@ -322,6 +322,80 @@ def _check_model_files(cache_dir: "Path", recog_network: str) -> list[str]:
     return missing
 
 
+def _dbnet18_weights_available(cache_dir: "Path | None" = None) -> bool:
+    """Return True when the EasyOCR-configured DBNet18 weights exist on disk.
+
+    Resolve the filename from EasyOCR's own detection model registry instead
+    of hardcoding it so the check remains compatible with the installed
+    EasyOCR version.
+    """
+    from pathlib import Path
+
+    try:
+        import easyocr.config as easy_config  # type: ignore
+
+        model = easy_config.detection_models.get("dbnet18", {})
+        filename = model.get("filename")
+        if not filename:
+            return False
+
+        root = Path(cache_dir) if cache_dir is not None else _model_cache_dir()
+        return (root / str(filename)).is_file()
+    except Exception:
+        return False
+
+
+# Module-level cache so the runtime probe runs at most once per process.
+# None = not yet probed; True/False = result of the last probe.
+_DBNET18_RUNTIME_STATE: "bool | None" = None
+_DBNET18_FAILURE_REASON: "str | None" = None
+
+
+def _probe_dbnet18_runtime(reader: "Any", cache_dir: "Path | None" = None) -> "tuple[bool, str | None]":
+    """Check whether DBNet18 can actually execute on this host.
+
+    Builds a DBNet18 Reader from ``reader``'s parameters and runs a minimal
+    detection call on a blank image.  The result is cached at module level so
+    the probe runs at most once per process, avoiding repeated compilation on
+    every EXHAUSTIVE page.
+
+    Returns ``(available, failure_reason)`` where ``failure_reason`` is None
+    when available is True, or a short string describing the failure.
+
+    Separates two distinct failure modes:
+      - weights_missing: the .pth file is not on disk → ``False, "weights_missing"``
+      - runtime_unavailable: weights present but inference failed (e.g. missing
+        Build Tools on Windows) → ``False, "runtime_probe_failed: <exception>"``
+    """
+    global _DBNET18_RUNTIME_STATE, _DBNET18_FAILURE_REASON
+    if _DBNET18_RUNTIME_STATE is not None:
+        return _DBNET18_RUNTIME_STATE, _DBNET18_FAILURE_REASON
+
+    if not _dbnet18_weights_available(cache_dir):
+        _DBNET18_RUNTIME_STATE = False
+        _DBNET18_FAILURE_REASON = "weights_missing"
+        return False, "weights_missing"
+
+    try:
+        import numpy as _np
+        dbnet_reader = _build_dbnet18_reader(reader)
+        if dbnet_reader is None:
+            _DBNET18_RUNTIME_STATE = False
+            _DBNET18_FAILURE_REASON = "reader_construction_failed"
+            return False, "reader_construction_failed"
+        probe_img = _np.full((96, 320, 3), 255, dtype=_np.uint8)
+        dbnet_reader.detect(probe_img)
+    except Exception as exc:
+        reason = f"runtime_probe_failed: {type(exc).__name__}: {exc}"
+        _DBNET18_RUNTIME_STATE = False
+        _DBNET18_FAILURE_REASON = reason
+        return False, reason
+
+    _DBNET18_RUNTIME_STATE = True
+    _DBNET18_FAILURE_REASON = None
+    return True, None
+
+
 _LANG_MAP: dict[str, list[str]] = {
     "pt": ["pt"],
     "por": ["pt"],
@@ -1205,6 +1279,7 @@ def _exhaustive_candidates(
     base_kwargs: "dict[str, Any]",
     *,
     quantize: bool = True,
+    _dbnet_diag: "list[dict[str, Any]] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
     """Run up to 13 EasyOCR candidates for exhaustive quality policy.
 
@@ -1237,10 +1312,15 @@ def _exhaustive_candidates(
                             without degrading already-correct pages.
       N. dbnet18          — runs DBNet18 detector on the same image; provides
                             independent detection complementary to CRAFT (§11).
-                            Only added when the reader exposes enough attributes
-                            to build a DBNet18 Reader; graceful fallback otherwise.
+                            Skipped when runtime probe fails; failure reason is
+                            recorded in ``_dbnet_diag`` when supplied.
 
     All candidates share the same loaded Reader (no second model download).
+
+    ``_dbnet_diag`` is an optional mutable list.  When provided, a single dict
+    is appended with keys ``weights_available``, ``runtime_available``, and
+    ``failure_reason`` so the caller can surface the DBNet18 runtime state in
+    page diagnostics without changing this function's return type.
     """
     results = _adaptive_candidates(reader, img, base_kwargs)
 
@@ -1359,15 +1439,36 @@ def _exhaustive_candidates(
     # text boxes that CRAFT misses in dense or irregular layouts.  Both detector outputs
     # enter the candidate set independently; the scorer picks the better result or a
     # later merge pass can combine non-overlapping boxes from both.
-    # Only attempt when the Reader exposes enough attributes to build a DBNet18 reader;
-    # graceful fallback if model files are absent or reader attributes missing.
-    try:
-        _dbnet_reader = _build_dbnet18_reader(reader)
-        if _dbnet_reader is not None:
-            raw_n, _ = _run_easyocr(_dbnet_reader, img, **base_kwargs)
-            results.append(("dbnet18", raw_n))
-    except Exception:
-        pass
+    # Two distinct failure modes are now distinguished and recorded:
+    #   - weights_missing: .pth file not on disk → skip silently, record in diag
+    #   - runtime_unavailable: weights present but inference failed (e.g. missing
+    #     Build Tools on Windows) → skip candidate, record cause in diag
+    # CRAFT continues as the primary detector in both cases.
+    _model_dir = getattr(reader, "model_storage_directory", None)
+    _cache_for_probe = None
+    if _model_dir:
+        from pathlib import Path as _Path
+        _cache_for_probe = _Path(_model_dir)
+    _dbnet_runtime_ok, _dbnet_failure = _probe_dbnet18_runtime(reader, _cache_for_probe)
+    _dbnet_weights_ok = _dbnet18_weights_available(_cache_for_probe)
+    if _dbnet_diag is not None:
+        _dbnet_diag.append({
+            "weights_available": _dbnet_weights_ok,
+            "runtime_available": _dbnet_runtime_ok,
+            "failure_reason": _dbnet_failure,
+        })
+    if _dbnet_runtime_ok:
+        try:
+            _dbnet_reader = _build_dbnet18_reader(reader)
+            if _dbnet_reader is not None:
+                raw_n, _ = _run_easyocr(_dbnet_reader, img, **base_kwargs)
+                results.append(("dbnet18", raw_n))
+        except Exception as _dbnet_exc:
+            if _dbnet_diag is not None and _dbnet_diag:
+                _dbnet_diag[-1]["runtime_available"] = False
+                _dbnet_diag[-1]["failure_reason"] = (
+                    f"runtime_probe_failed: {type(_dbnet_exc).__name__}: {_dbnet_exc}"
+                )
 
     # Candidates K/L/M: page orientation variants (§16) — 90°/180°/270° clockwise.
     # For fully rotated pages (landscape PDFs, upside-down scans) EasyOCR cannot
@@ -1413,39 +1514,35 @@ def _build_dbnet18_reader(reader: "Any") -> "Any":
     and evaluated by the candidate scoring system, so a genuine detection is not
     discarded even if the other detector misses it.
 
-    Returns None when:
-      - ``reader`` does not expose ``lang_list`` (missing attribute)
-      - easyocr is not importable
-      - Any other instantiation error (model file missing, etc.)
+    Returns None when ``reader`` does not expose ``lang_list`` (missing attribute).
 
-    The caller must always check for None before using the result.
+    Raises the underlying exception for all other failures (import error, model
+    file missing, deformable-conv compile failure, etc.) so callers can distinguish
+    ``weights_missing`` from ``runtime_unavailable`` and record the cause.
     """
-    try:
-        lang = getattr(reader, "lang_list", None)
-        if not lang:
-            return None
-        gpu = getattr(reader, "device", "cpu") != "cpu"
-        model_dir = getattr(reader, "model_storage_directory", None)
-        user_net_dir = getattr(reader, "user_network_directory", None)
-        recog = getattr(reader, "recog_network", None)
-        quantize = getattr(reader, "quantize", True)
-
-        import easyocr as _easyocr  # type: ignore
-        kwargs: dict[str, object] = {
-            "gpu": gpu,
-            "detect_network": "dbnet18",
-            "quantize": quantize,
-            "download_enabled": False,
-        }
-        if model_dir:
-            kwargs["model_storage_directory"] = model_dir
-        if user_net_dir:
-            kwargs["user_network_directory"] = user_net_dir
-        if recog:
-            kwargs["recog_network"] = recog
-        return _easyocr.Reader(lang, **kwargs)
-    except Exception:
+    lang = getattr(reader, "lang_list", None)
+    if not lang:
         return None
+    gpu = getattr(reader, "device", "cpu") != "cpu"
+    model_dir = getattr(reader, "model_storage_directory", None)
+    user_net_dir = getattr(reader, "user_network_directory", None)
+    recog = getattr(reader, "recog_network", None)
+    quantize = getattr(reader, "quantize", True)
+
+    import easyocr as _easyocr  # type: ignore
+    kwargs: dict[str, object] = {
+        "gpu": gpu,
+        "detect_network": "dbnet18",
+        "quantize": quantize,
+        "download_enabled": False,
+    }
+    if model_dir:
+        kwargs["model_storage_directory"] = model_dir
+    if user_net_dir:
+        kwargs["user_network_directory"] = user_net_dir
+    if recog:
+        kwargs["recog_network"] = recog
+    return _easyocr.Reader(lang, **kwargs)
 
 
 def _rebuild_reader_no_quantize(reader: "Any") -> "Any":
@@ -1602,6 +1699,7 @@ class EasyOCRBackend:
         self.last_easyocr_fallback_used = False
         self.last_easyocr_fallback_reason: str | None = None
         self._last_candidate_diagnostics: list[dict[str, Any]] = []
+        self._last_dbnet_diag: list[dict[str, Any]] = []
 
     def consume_page_diagnostics(self) -> dict[str, Any]:
         """Return and reset accumulated diagnostics for one page.
@@ -1615,6 +1713,8 @@ class EasyOCRBackend:
         and contains the runtime environment snapshot used for thread allocation:
         cpu_count_logical, cpu_count_physical, cpu_load_1m, max_quality_env.
         """
+        dbnet_diag = list(getattr(self, "_last_dbnet_diag", []))
+        dbnet_entry = dbnet_diag[0] if dbnet_diag else {}
         result = {
             "easyocr_calls": self._easyocr_calls,
             "easyocr_fallback_count": self._easyocr_fallback_count,
@@ -1627,6 +1727,9 @@ class EasyOCRBackend:
             "env_probe": dict(getattr(self, "_env_probe", {})),
             "effective_workers": getattr(self, "_workers", None),
             "effective_torch_intra_threads": getattr(self, "_torch_num_threads", None),
+            "dbnet_weights_available": dbnet_entry.get("weights_available"),
+            "dbnet_runtime_available": dbnet_entry.get("runtime_available"),
+            "dbnet_failure_reason": dbnet_entry.get("failure_reason"),
         }
         self.reset_page_diagnostics()
         return result
@@ -1704,6 +1807,7 @@ class EasyOCRBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
+        dbnet_runtime_ok, _ = _probe_dbnet18_runtime(self._reader, self._model_cache_dir)
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -1716,22 +1820,10 @@ class EasyOCRBackend:
             detector_profiles=True,
             decoder_profiles=True,
             orientation_search=True,
-            multiple_detectors=self._dbnet18_available(),
+            multiple_detectors=dbnet_runtime_ok,
             word_beam_search=True,
             native_confidence=True,
         )
-
-    def _dbnet18_available(self) -> bool:
-        """Report whether the local EasyOCR package and DBNet weights exist."""
-        try:
-            import easyocr.config as easy_config  # type: ignore
-            model = easy_config.detection_models.get("dbnet18", {})
-            filename = model.get("filename")
-            if not filename:
-                return False
-            return (self._model_cache_dir / filename).is_file()
-        except Exception:
-            return False
 
     def _run_kwargs(self) -> "dict[str, Any]":
         """Return the full set of keyword arguments for _run_easyocr calls."""
@@ -1824,8 +1916,12 @@ class EasyOCRBackend:
         if use_variants:
             base_kwargs = self._run_kwargs()
             if policy == "exhaustive":
-                raw_candidates = _exhaustive_candidates(self._reader, img, base_kwargs,
-                                                        quantize=self._quantize)
+                self._last_dbnet_diag = []
+                raw_candidates = _exhaustive_candidates(
+                    self._reader, img, base_kwargs,
+                    quantize=self._quantize,
+                    _dbnet_diag=self._last_dbnet_diag,
+                )
             else:
                 raw_candidates = _adaptive_candidates(self._reader, img, base_kwargs)
             # Convert each candidate's raw result to pipeline tokens, pick best

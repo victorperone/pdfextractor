@@ -45,6 +45,11 @@ class OCRCapabilities:
     """Capabilities declared by a backend.
 
     Use these flags instead of ``if engine == "tesseract"`` branches.
+
+    ``multiple_detectors`` is True only when the backend can run more than one
+    text detector algorithm in the same session and all of them are confirmed
+    functional at runtime (weights present AND inference probe passed).  A backend
+    that knows about a second detector but cannot execute it must leave this False.
     """
 
     detection: bool
