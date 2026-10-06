@@ -1744,28 +1744,6 @@ class TestProbeDbnet18RuntimeUncached:
 class TestEasyOCRBackendDbnetInstanceCache:
     """Per-instance _dbnet_runtime_state cache: probe runs at most once per instance."""
 
-    def _make_backend_stub(self, monkeypatch, *, probe_returns=(False, "weights_missing")):
-        """Return a minimal EasyOCRBackend-like object with mocked probe."""
-        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
-
-        call_count = {"n": 0}
-
-        def fake_probe(reader, cache_dir=None):
-            call_count["n"] += 1
-            return probe_returns
-
-        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached", fake_probe)
-
-        class MinimalBackend:
-            _dbnet_runtime_state = None
-            _dbnet_failure_reason = None
-            _reader = None
-            _model_cache_dir = None
-
-            _ensure_dbnet18_runtime = easyocr_mod.EasyOCRBackend._ensure_dbnet18_runtime
-
-        return MinimalBackend(), call_count
-
     def test_capabilities_does_not_trigger_probe(self, monkeypatch):
         """capabilities property must not run _probe_dbnet18_runtime_uncached."""
         from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
@@ -1980,6 +1958,103 @@ class TestExhaustiveCandidatesSkipsDbnetWhenUnavailable:
         assert "dbnet18" in candidate_ids
         assert dbnet_diag[0]["runtime_available"] is True
 
+    def test_dbnet_reader_construction_returns_none_marks_runtime_unavailable(self, monkeypatch):
+        """When _build_dbnet18_reader() returns None (absorbed exception), diag must show
+        runtime_available=False so recognize_page() can invalidate the cache."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_minimal_reader()
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+        base_kwargs: dict[str, Any] = {
+            "decoder": "greedy",
+            "beamwidth": 5,
+            "adjust_contrast": 0.5,
+            "allowlist": None,
+            "blocklist": None,
+            "workers": 0,
+            "rotation_info": None,
+            "text_threshold": 0.7,
+            "low_text": 0.4,
+            "link_threshold": 0.4,
+            "min_size": 20,
+            "slope_ths": 0.1,
+            "ycenter_ths": 0.5,
+            "height_ths": 0.5,
+            "width_ths": 0.5,
+            "add_margin": 0.1,
+            "contrast_ths": 0.1,
+            "filter_ths": 0.003,
+        }
+
+        # Probe passes (True) but reader construction silently returns None.
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader", lambda r: None)
+        monkeypatch.setattr(easyocr_mod, "_dbnet18_weights_available", lambda cache_dir=None: True)
+
+        dbnet_diag: list[dict] = []
+        candidates = easyocr_mod._exhaustive_candidates(
+            reader, img, base_kwargs,
+            _dbnet_diag=dbnet_diag,
+            _dbnet_precomputed=(True, None),
+        )
+
+        candidate_ids = [cid for cid, _ in candidates]
+        assert "dbnet18" not in candidate_ids, "dbnet18 must not appear when reader returns None"
+        assert dbnet_diag, "_dbnet_diag must be populated"
+        assert dbnet_diag[0]["runtime_available"] is False
+        assert dbnet_diag[0]["failure_reason"] == "reader_construction_failed"
+
+    def test_precomputed_weights_missing_does_not_produce_contradictory_diag(self, monkeypatch):
+        """When precomputed=(False, 'weights_missing'), diag must show weights_available=False.
+
+        A contradictory diag (weights_available=True while failure_reason='weights_missing')
+        would be produced if _dbnet18_weights_available() were called again after the probe
+        already determined they are absent. Fix B ensures the diag derives from the snapshot.
+        """
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_minimal_reader()
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+        base_kwargs: dict[str, Any] = {
+            "decoder": "greedy",
+            "beamwidth": 5,
+            "adjust_contrast": 0.5,
+            "allowlist": None,
+            "blocklist": None,
+            "workers": 0,
+            "rotation_info": None,
+            "text_threshold": 0.7,
+            "low_text": 0.4,
+            "link_threshold": 0.4,
+            "min_size": 20,
+            "slope_ths": 0.1,
+            "ycenter_ths": 0.5,
+            "height_ths": 0.5,
+            "width_ths": 0.5,
+            "add_margin": 0.1,
+            "contrast_ths": 0.1,
+            "filter_ths": 0.003,
+        }
+
+        # Fresh disk check would say True (weights appeared after probe ran).
+        monkeypatch.setattr(easyocr_mod, "_dbnet18_weights_available", lambda cache_dir=None: True)
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader", lambda r: None)
+
+        dbnet_diag: list[dict] = []
+        easyocr_mod._exhaustive_candidates(
+            reader, img, base_kwargs,
+            _dbnet_diag=dbnet_diag,
+            _dbnet_precomputed=(False, "weights_missing"),
+        )
+
+        assert dbnet_diag, "_dbnet_diag must be populated"
+        diag = dbnet_diag[0]
+        # weights_available must reflect the probe snapshot (False), not the fresh disk check (True).
+        assert diag["weights_available"] is False, (
+            f"contradictory diag: weights_available={diag['weights_available']} "
+            f"but failure_reason={diag.get('failure_reason')!r}"
+        )
+        assert diag["runtime_available"] is False
+
 
 # ---------------------------------------------------------------------------
 # Preflight --max-quality guards
@@ -2022,6 +2097,37 @@ class TestPreflightMaxQualityGuards:
             ["--max-quality", "--deep-smoke", "--configuration", "paddle"]
         )
         assert rc == 2
+
+    def test_configuration_rapidocr_onnxruntime_is_accepted(self):
+        """--configuration rapidocr-onnxruntime must be a valid argparse choice (no exit 2)."""
+        # We just run static (no --deep-smoke) so it doesn't need a real install.
+        rc, stdout, stderr = self._run_preflight(["--configuration", "rapidocr-onnxruntime"])
+        # argparse exit 2 means unrecognized arg; any other exit code is fine (the backend
+        # may not be installed in the test environment, giving 1 or 0).
+        assert rc != 2, f"argparse rejected rapidocr-onnxruntime; stderr={stderr!r}"
+
+    def test_configuration_rapidocr_openvino_is_accepted(self):
+        """--configuration rapidocr-openvino must be a valid argparse choice (no exit 2)."""
+        rc, stdout, stderr = self._run_preflight(["--configuration", "rapidocr-openvino"])
+        assert rc != 2, f"argparse rejected rapidocr-openvino; stderr={stderr!r}"
+
+    def test_configurations_cli_keys_match_argparse_choices(self):
+        """All CONFIGURATIONS cli_key values must match the argparse --configuration choices."""
+        import importlib.util, importlib
+        spec = importlib.util.spec_from_file_location(
+            "preflight",
+            str(__import__("pathlib").Path(__file__).resolve().parent.parent
+                / "scripts" / "preflight_ocr_backends.py"),
+        )
+        preflight = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(preflight)  # type: ignore[union-attr]
+
+        choices = {"paddle", "rapidocr-onnxruntime", "rapidocr-openvino", "easyocr", "tesseract"}
+        for label, engine, provider, cli_key in preflight.CONFIGURATIONS:
+            assert cli_key in choices, (
+                f"CONFIGURATIONS entry {label!r} has cli_key={cli_key!r} "
+                f"which is not in argparse choices {choices}"
+            )
 
 
 # ---------------------------------------------------------------------------

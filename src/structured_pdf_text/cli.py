@@ -692,7 +692,6 @@ def _cmd_setup_easyocr_models(language: str, cache_home: str | None, include_dbn
         from .ocr.backends.easyocr import (
             _dbnet18_weights_available,
             _probe_dbnet18_runtime_uncached,
-            _build_dbnet18_reader_strict,
         )
         cache = Path(cache_home).expanduser() / "easyocr" if cache_home else Path.home() / ".cache" / "pdfextractor" / "easyocr"
         cache.mkdir(parents=True, exist_ok=True)

@@ -24,12 +24,14 @@ from structured_pdf_text.config import ExtractorConfig, ExtractionMode
 from structured_pdf_text.ocr.readiness import ReadinessResult, ReadinessStatus, probe_deep, probe_static
 
 
+# Each entry: (display_label, engine, provider, cli_key)
+# cli_key must match the argparse choices below; used in re-exec and --configuration filter.
 CONFIGURATIONS = (
-    ("paddle", "paddle", None),
-    ("rapidocr [onnxruntime]", "rapidocr", "onnxruntime"),
-    ("rapidocr [openvino]", "rapidocr", "openvino"),
-    ("easyocr", "easyocr", None),
-    ("tesseract", "tesseract", None),
+    ("paddle", "paddle", None, "paddle"),
+    ("rapidocr [onnxruntime]", "rapidocr", "onnxruntime", "rapidocr-onnxruntime"),
+    ("rapidocr [openvino]", "rapidocr", "openvino", "rapidocr-openvino"),
+    ("easyocr", "easyocr", None, "easyocr"),
+    ("tesseract", "tesseract", None, "tesseract"),
 )
 
 
@@ -65,11 +67,11 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
       dbnet_weights_available, dbnet_runtime_available, dbnet_failure_reason,
       multiple_detectors, max_quality_status, max_quality_reason
     """
-    import io
     from PIL import Image, ImageDraw
 
     from structured_pdf_text.config import ExtractorConfig, ExtractionMode, max_quality_extraction_config
     from structured_pdf_text.ocr.factory import build_ocr_backend
+    from structured_pdf_text.ocr.readiness import _load_smoke_font
 
     report: dict[str, Any] = {
         "baseline_ready": False,
@@ -110,10 +112,12 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
         report["max_quality_reason"] = baseline.reason_code or "baseline_not_ready"
         return report
 
-    # Build a small smoke image for the real inference paths.
-    smoke_image = Image.new("RGB", (640, 80), "white")
+    # Build a smoke image large enough for CRAFT to detect text at font size 42.
+    # Use _load_smoke_font to get the same deterministic font used by deep probes.
+    smoke_image = Image.new("RGB", (640, 120), "white")
     draw = ImageDraw.Draw(smoke_image)
-    draw.text((10, 10), "Texto de teste OCR 1234", fill="black")
+    _smoke_font = _load_smoke_font(42)
+    draw.text((10, 10), "Texto de teste OCR 1234", fill="black", font=_smoke_font)
 
     # Use the full smoke image as the crop for recognize_direct.
     smoke_crop = smoke_image
@@ -127,7 +131,10 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
         # 2a: run recognize_page with exhaustive quality policy
         try:
             tokens = backend.recognize_page(smoke_image, 0, quality_policy="exhaustive")
-            report["exhaustive_planner_ready"] = True
+            if not tokens:
+                report["exhaustive_planner_reason"] = "exhaustive_planner_returned_no_tokens"
+            else:
+                report["exhaustive_planner_ready"] = True
         except Exception as exc:
             report["exhaustive_planner_reason"] = f"{type(exc).__name__}: {exc}"
 
@@ -139,8 +146,11 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
 
         # 2c: run recognize_direct
         try:
-            backend.recognize_direct(smoke_crop, 0)
-            report["direct_recognition_ready"] = True
+            direct_tokens = backend.recognize_direct(smoke_crop, 0)
+            if not direct_tokens:
+                report["direct_recognition_reason"] = "direct_recognition_returned_no_tokens"
+            else:
+                report["direct_recognition_ready"] = True
         except Exception as exc:
             report["direct_recognition_reason"] = f"{type(exc).__name__}: {exc}"
 
@@ -254,10 +264,10 @@ def main() -> int:
         # profile so the check matches the benchmark's process isolation.
         all_ready = True
         script = str(Path(__file__).resolve())
-        for name, _, _ in CONFIGURATIONS:
+        for _label, _, _, _cli_key in CONFIGURATIONS:
             result = subprocess.run(
                 [sys.executable, script, "--language", args.language,
-                 "--deep-smoke", "--configuration", name],
+                 "--deep-smoke", "--configuration", _cli_key],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -278,15 +288,14 @@ def main() -> int:
     if args.configuration:
         configurations = tuple(
             item for item in CONFIGURATIONS
-            if item[0].replace(" [onnxruntime]", "").replace(" [openvino]", "").replace(" ", "-")
-            == args.configuration
+            if item[3] == args.configuration
         )
 
-    name_width = max(len(label) for label, _, _ in configurations) + 2
+    name_width = max(len(label) for label, _, _, _ in configurations) + 2
     print(f"\n{'Configuration':<{name_width}}  {'Status':<12}  Reason / details")
     print("-" * 100)
     all_ready = True
-    for label, engine, provider in configurations:
+    for label, engine, provider, _ in configurations:
         result = _check(engine, provider, args.language, args.deep_smoke)
         if result.status.value != "ready":
             all_ready = False

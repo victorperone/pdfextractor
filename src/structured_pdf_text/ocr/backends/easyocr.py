@@ -1265,7 +1265,7 @@ def _exhaustive_candidates(
     _dbnet_diag: "list[dict[str, Any]] | None" = None,
     _dbnet_precomputed: "tuple[bool, str | None] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run up to 13 EasyOCR candidates for exhaustive quality policy.
+    """Run up to 14 EasyOCR candidates for exhaustive quality policy.
 
     Candidates (§8, §9, §10, §12, §13, §14, §15, §16, §17 from review):
       A. default          — base parameters as configured
@@ -1433,12 +1433,17 @@ def _exhaustive_candidates(
     # called without a precomputed state (e.g. in tests), the uncached probe runs.
     if _dbnet_precomputed is not None:
         _dbnet_runtime_ok, _dbnet_failure = _dbnet_precomputed
-        _model_dir = getattr(reader, "model_storage_directory", None)
-        _cache_for_probe = None
-        if _model_dir:
-            from pathlib import Path as _Path
-            _cache_for_probe = _Path(_model_dir)
-        _dbnet_weights_ok = _dbnet18_weights_available(_cache_for_probe)
+        # Derive weights availability from the same probe snapshot to keep the
+        # diagnostic internally consistent. A fresh _dbnet18_weights_available()
+        # call here could disagree with the precomputed state if weights moved
+        # on disk between the probe and this execution.
+        if _dbnet_runtime_ok:
+            _dbnet_weights_ok = True
+        elif _dbnet_failure == "weights_missing":
+            _dbnet_weights_ok = False
+        else:
+            # Probe reached the runtime/construction stage — weights were present
+            _dbnet_weights_ok = True
     else:
         _model_dir = getattr(reader, "model_storage_directory", None)
         _cache_for_probe = None
@@ -1459,6 +1464,13 @@ def _exhaustive_candidates(
             if _dbnet_reader is not None:
                 raw_n, _ = _run_easyocr(_dbnet_reader, img, **base_kwargs)
                 results.append(("dbnet18", raw_n))
+            else:
+                # _build_dbnet18_reader absorbed an exception and returned None.
+                # The probe passed but construction failed — mark runtime unavailable
+                # so the cache invalidation in recognize_page() fires correctly.
+                if _dbnet_diag is not None and _dbnet_diag:
+                    _dbnet_diag[-1]["runtime_available"] = False
+                    _dbnet_diag[-1]["failure_reason"] = "reader_construction_failed"
         except Exception as _dbnet_exc:
             if _dbnet_diag is not None and _dbnet_diag:
                 _dbnet_diag[-1]["runtime_available"] = False
@@ -1610,8 +1622,10 @@ class EasyOCRBackend:
     Quality policies (quality_policy arg to recognize_page):
       None / 'default': single EasyOCR call with configured parameters.
       'adaptive': two candidates (default + high-recall); best wins.
-      'exhaustive': five candidates (default, high-recall, beamsearch,
-                    layout-sensitive, low-contrast); best wins.
+      'exhaustive': up to 14 candidate profiles (A–N); conditional candidates
+                    are skipped when inapplicable (e.g. DBNet18 when weights or
+                    runtime are unavailable, rotation when already upright).
+                    Best candidate wins.
 
     See module docstring for all tunable environment variables.
     """
