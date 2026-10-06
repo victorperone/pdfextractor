@@ -689,16 +689,39 @@ def _cmd_setup_easyocr_models(language: str, cache_home: str | None, include_dbn
     try:
         import easyocr
         from .ocr.languages import backend_language
+        from .ocr.backends.easyocr import (
+            _dbnet18_weights_available,
+            _probe_dbnet18_runtime_uncached,
+            _build_dbnet18_reader_strict,
+        )
         cache = Path(cache_home).expanduser() / "easyocr" if cache_home else Path.home() / ".cache" / "pdfextractor" / "easyocr"
         cache.mkdir(parents=True, exist_ok=True)
         langs = [backend_language(language, "easyocr")]
-        easyocr.Reader(langs, gpu=False, model_storage_directory=str(cache), download_enabled=True)
+        craft_reader = easyocr.Reader(langs, gpu=False, model_storage_directory=str(cache), download_enabled=True)
+
+        result: dict = {"status": "ready", "cache": str(cache), "dbnet18_requested": include_dbnet}
+
         if include_dbnet:
             easyocr.Reader(
                 langs, gpu=False, detect_network="dbnet18",
                 model_storage_directory=str(cache), download_enabled=True,
             )
-        print(json.dumps({"status": "ready", "cache": str(cache), "dbnet18_requested": include_dbnet}, ensure_ascii=False))
+            dbnet_weights = _dbnet18_weights_available(cache)
+            dbnet_ok, dbnet_fail = _probe_dbnet18_runtime_uncached(craft_reader, cache)
+            result["dbnet18_weights_available"] = dbnet_weights
+            result["dbnet18_runtime_available"] = dbnet_ok
+            if dbnet_fail:
+                result["reason"] = dbnet_fail
+            if not dbnet_ok:
+                result["status"] = "incomplete"
+                print(json.dumps(result, ensure_ascii=False))
+                print(
+                    f"DBNet18 runtime probe failed: {dbnet_fail}",
+                    file=sys.stderr,
+                )
+                return 1
+
+        print(json.dumps(result, ensure_ascii=False))
         return 0
     except Exception as exc:
         print(f"EasyOCR model setup failed: {type(exc).__name__}: {exc}", file=sys.stderr)

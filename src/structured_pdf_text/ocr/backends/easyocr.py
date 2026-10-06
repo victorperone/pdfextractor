@@ -345,54 +345,37 @@ def _dbnet18_weights_available(cache_dir: "Path | None" = None) -> bool:
         return False
 
 
-# Module-level cache so the runtime probe runs at most once per process.
-# None = not yet probed; True/False = result of the last probe.
-_DBNET18_RUNTIME_STATE: "bool | None" = None
-_DBNET18_FAILURE_REASON: "str | None" = None
-
-
-def _probe_dbnet18_runtime(reader: "Any", cache_dir: "Path | None" = None) -> "tuple[bool, str | None]":
-    """Check whether DBNet18 can actually execute on this host.
+def _probe_dbnet18_runtime_uncached(reader: "Any", cache_dir: "Path | None" = None) -> "tuple[bool, str | None]":
+    """Execute a DBNet18 runtime probe without any caching.
 
     Builds a DBNet18 Reader from ``reader``'s parameters and runs a minimal
-    detection call on a blank image.  The result is cached at module level so
-    the probe runs at most once per process, avoiding repeated compilation on
-    every EXHAUSTIVE page.
+    detection call on a blank image to confirm the detector can actually execute.
 
     Returns ``(available, failure_reason)`` where ``failure_reason`` is None
-    when available is True, or a short string describing the failure.
+    when available is True, or a short descriptive string on failure.
 
     Separates two distinct failure modes:
       - weights_missing: the .pth file is not on disk → ``False, "weights_missing"``
       - runtime_unavailable: weights present but inference failed (e.g. missing
-        Build Tools on Windows) → ``False, "runtime_probe_failed: <exception>"``
-    """
-    global _DBNET18_RUNTIME_STATE, _DBNET18_FAILURE_REASON
-    if _DBNET18_RUNTIME_STATE is not None:
-        return _DBNET18_RUNTIME_STATE, _DBNET18_FAILURE_REASON
+        MSVC Build Tools on Windows) → ``False, "runtime_probe_failed: <type>: <msg>"``
+      - reader_construction_failed: lang_list missing or None returned → similar
 
+    This function never caches.  Callers that want per-instance caching should
+    use :meth:`EasyOCRBackend._ensure_dbnet18_runtime` instead.
+    """
     if not _dbnet18_weights_available(cache_dir):
-        _DBNET18_RUNTIME_STATE = False
-        _DBNET18_FAILURE_REASON = "weights_missing"
         return False, "weights_missing"
 
     try:
         import numpy as _np
-        dbnet_reader = _build_dbnet18_reader(reader)
+        dbnet_reader = _build_dbnet18_reader_strict(reader)
         if dbnet_reader is None:
-            _DBNET18_RUNTIME_STATE = False
-            _DBNET18_FAILURE_REASON = "reader_construction_failed"
             return False, "reader_construction_failed"
         probe_img = _np.full((96, 320, 3), 255, dtype=_np.uint8)
         dbnet_reader.detect(probe_img)
     except Exception as exc:
-        reason = f"runtime_probe_failed: {type(exc).__name__}: {exc}"
-        _DBNET18_RUNTIME_STATE = False
-        _DBNET18_FAILURE_REASON = reason
-        return False, reason
+        return False, f"runtime_probe_failed: {type(exc).__name__}: {exc}"
 
-    _DBNET18_RUNTIME_STATE = True
-    _DBNET18_FAILURE_REASON = None
     return True, None
 
 
@@ -1280,6 +1263,7 @@ def _exhaustive_candidates(
     *,
     quantize: bool = True,
     _dbnet_diag: "list[dict[str, Any]] | None" = None,
+    _dbnet_precomputed: "tuple[bool, str | None] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
     """Run up to 13 EasyOCR candidates for exhaustive quality policy.
 
@@ -1439,18 +1423,30 @@ def _exhaustive_candidates(
     # text boxes that CRAFT misses in dense or irregular layouts.  Both detector outputs
     # enter the candidate set independently; the scorer picks the better result or a
     # later merge pass can combine non-overlapping boxes from both.
-    # Two distinct failure modes are now distinguished and recorded:
-    #   - weights_missing: .pth file not on disk → skip silently, record in diag
+    # Two distinct failure modes are distinguished and recorded:
+    #   - weights_missing: .pth file not on disk → skip, record in diag
     #   - runtime_unavailable: weights present but inference failed (e.g. missing
     #     Build Tools on Windows) → skip candidate, record cause in diag
     # CRAFT continues as the primary detector in both cases.
-    _model_dir = getattr(reader, "model_storage_directory", None)
-    _cache_for_probe = None
-    if _model_dir:
-        from pathlib import Path as _Path
-        _cache_for_probe = _Path(_model_dir)
-    _dbnet_runtime_ok, _dbnet_failure = _probe_dbnet18_runtime(reader, _cache_for_probe)
-    _dbnet_weights_ok = _dbnet18_weights_available(_cache_for_probe)
+    # The runtime state is supplied by the caller via _dbnet_precomputed so that
+    # the probe runs at most once per instance (cached in EasyOCRBackend); when
+    # called without a precomputed state (e.g. in tests), the uncached probe runs.
+    if _dbnet_precomputed is not None:
+        _dbnet_runtime_ok, _dbnet_failure = _dbnet_precomputed
+        _model_dir = getattr(reader, "model_storage_directory", None)
+        _cache_for_probe = None
+        if _model_dir:
+            from pathlib import Path as _Path
+            _cache_for_probe = _Path(_model_dir)
+        _dbnet_weights_ok = _dbnet18_weights_available(_cache_for_probe)
+    else:
+        _model_dir = getattr(reader, "model_storage_directory", None)
+        _cache_for_probe = None
+        if _model_dir:
+            from pathlib import Path as _Path
+            _cache_for_probe = _Path(_model_dir)
+        _dbnet_runtime_ok, _dbnet_failure = _probe_dbnet18_runtime_uncached(reader, _cache_for_probe)
+        _dbnet_weights_ok = _dbnet18_weights_available(_cache_for_probe)
     if _dbnet_diag is not None:
         _dbnet_diag.append({
             "weights_available": _dbnet_weights_ok,
@@ -1502,23 +1498,15 @@ def _exhaustive_candidates(
     return results
 
 
-def _build_dbnet18_reader(reader: "Any") -> "Any":
-    """Build a new EasyOCR Reader using DBNet18 detector instead of CRAFT (§11).
+def _build_dbnet18_reader_strict(reader: "Any") -> "Any":
+    """Build a DBNet18 EasyOCR Reader, propagating all exceptions.
 
-    CRAFT and DBNet18 use fundamentally different text region proposal strategies:
-      - CRAFT: character-region affinity map, excellent for curved/complex layouts
-      - DBNet18: differentiable binarisation, faster and better for straight text
+    Used by the runtime probe so the caller can distinguish:
+      - ``lang_list`` missing → returns None (not a real failure)
+      - import error, model file missing, deformable-conv compile failure → raises
 
-    Running both provides an ensemble of independent detections.  The two readers
-    produce different box sets; boxes present in only one are retained as candidates
-    and evaluated by the candidate scoring system, so a genuine detection is not
-    discarded even if the other detector misses it.
-
-    Returns None when ``reader`` does not expose ``lang_list`` (missing attribute).
-
-    Raises the underlying exception for all other failures (import error, model
-    file missing, deformable-conv compile failure, etc.) so callers can distinguish
-    ``weights_missing`` from ``runtime_unavailable`` and record the cause.
+    The normal pipeline helper :func:`_build_dbnet18_reader` wraps this with a
+    ``try/except`` so that a runtime failure never aborts the CRAFT-based extraction.
     """
     lang = getattr(reader, "lang_list", None)
     if not lang:
@@ -1543,6 +1531,31 @@ def _build_dbnet18_reader(reader: "Any") -> "Any":
     if recog:
         kwargs["recog_network"] = recog
     return _easyocr.Reader(lang, **kwargs)
+
+
+def _build_dbnet18_reader(reader: "Any") -> "Any":
+    """Build a new EasyOCR Reader using DBNet18 detector instead of CRAFT (§11).
+
+    CRAFT and DBNet18 use fundamentally different text region proposal strategies:
+      - CRAFT: character-region affinity map, excellent for curved/complex layouts
+      - DBNet18: differentiable binarisation, faster and better for straight text
+
+    Running both provides an ensemble of independent detections.  The two readers
+    produce different box sets; boxes present in only one are retained as candidates
+    and evaluated by the candidate scoring system, so a genuine detection is not
+    discarded even if the other detector misses it.
+
+    Returns None when ``reader`` does not expose ``lang_list`` or when any
+    instantiation error occurs (import failure, missing weights, compile error).
+    The pipeline should always check for None before using the result.
+
+    For a version that propagates exceptions (needed by the runtime probe), see
+    :func:`_build_dbnet18_reader_strict`.
+    """
+    try:
+        return _build_dbnet18_reader_strict(reader)
+    except Exception:
+        return None
 
 
 def _rebuild_reader_no_quantize(reader: "Any") -> "Any":
@@ -1689,7 +1702,36 @@ class EasyOCRBackend:
             kwargs["recog_network"] = recog_network
 
         self._reader = easyocr_mod.Reader(self._langs, **kwargs)
+
+        # DBNet18 runtime state cached per instance.  None = not yet probed.
+        # Populated lazily by _ensure_dbnet18_runtime(); never reset between pages.
+        self._dbnet_runtime_state: bool | None = None
+        self._dbnet_failure_reason: str | None = None
+
         self.reset_page_diagnostics()
+
+    # ------------------------------------------------------------------
+    # DBNet18 per-instance runtime probe
+    # ------------------------------------------------------------------
+
+    def _ensure_dbnet18_runtime(self, *, force: bool = False) -> "tuple[bool, str | None]":
+        """Return (available, failure_reason), running the probe at most once.
+
+        The result is cached in ``_dbnet_runtime_state`` / ``_dbnet_failure_reason``
+        for the lifetime of this backend instance.  Pass ``force=True`` to re-run
+        (e.g. after provisioning new weights).
+
+        This method must NOT be called from ``capabilities``; it is only called
+        by code paths that actually need to execute DBNet18 (exhaustive planner,
+        preflight, setup command).
+        """
+        if self._dbnet_runtime_state is None or force:
+            ok, reason = _probe_dbnet18_runtime_uncached(
+                self._reader, self._model_cache_dir
+            )
+            self._dbnet_runtime_state = ok
+            self._dbnet_failure_reason = reason
+        return self._dbnet_runtime_state, self._dbnet_failure_reason
 
     def reset_page_diagnostics(self) -> None:
         """Start a fresh per-page diagnostic accumulator for the extraction pipeline."""
@@ -1807,7 +1849,6 @@ class EasyOCRBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
-        dbnet_runtime_ok, _ = _probe_dbnet18_runtime(self._reader, self._model_cache_dir)
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -1820,7 +1861,7 @@ class EasyOCRBackend:
             detector_profiles=True,
             decoder_profiles=True,
             orientation_search=True,
-            multiple_detectors=dbnet_runtime_ok,
+            multiple_detectors=self._dbnet_runtime_state is True,
             word_beam_search=True,
             native_confidence=True,
         )
@@ -1917,11 +1958,20 @@ class EasyOCRBackend:
             base_kwargs = self._run_kwargs()
             if policy == "exhaustive":
                 self._last_dbnet_diag = []
+                dbnet_state = self._ensure_dbnet18_runtime()
                 raw_candidates = _exhaustive_candidates(
                     self._reader, img, base_kwargs,
                     quantize=self._quantize,
                     _dbnet_diag=self._last_dbnet_diag,
+                    _dbnet_precomputed=dbnet_state,
                 )
+                if (
+                    self._last_dbnet_diag
+                    and not self._last_dbnet_diag[-1].get("runtime_available", True)
+                    and self._dbnet_runtime_state is True
+                ):
+                    self._dbnet_runtime_state = False
+                    self._dbnet_failure_reason = self._last_dbnet_diag[-1].get("failure_reason")
             else:
                 raw_candidates = _adaptive_candidates(self._reader, img, base_kwargs)
             # Convert each candidate's raw result to pipeline tokens, pick best

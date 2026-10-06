@@ -289,9 +289,19 @@ pdftext extract arquivo.pdf --max-quality --ocr-engine easyocr -o saida.md
 pdftext setup-easyocr-models --language pt-BR --include-dbnet
 ```
 
-DBNet18 is used when its local weights are provisioned. Readiness reports a
-degraded status when those weights are missing, and extraction continues with
-the remaining supported EasyOCR capabilities.
+DBNet18 is used as an additional candidate (N) in the exhaustive pipeline when
+both its weights *and* runtime are functional.  Having the weights on disk is
+not sufficient — on Windows, DBNet18 also requires compiled native extensions
+(deformable convolution via MSVC Build Tools).  Two distinct failure modes are
+reported separately:
+
+- `dbnet18_weights_missing` — weights file absent; run `setup-easyocr-models --include-dbnet`
+- `dbnet18_runtime_unavailable` — weights present but inference failed (install MSVC Build Tools)
+
+Run `scripts/preflight_ocr_backends.py --deep-smoke --max-quality` to verify
+full max-quality readiness.  When CRAFT and the exhaustive planner pass but
+DBNet18 is unavailable, the result is reported as `INCOMPLETE` (not broken) and
+extraction continues with the remaining 12 candidate families.
 
 ## CLI examples
 

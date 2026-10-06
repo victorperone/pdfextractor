@@ -50,67 +50,107 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
     """Run a max-quality preflight for EasyOCR.
 
     Verifies:
-      - CRAFT + recognizer runtime (via existing probe_deep)
+      - CRAFT + recognizer baseline (probe_deep with plain EasyOCR config, no DBNet requirement)
+      - Full exhaustive pipeline via recognize_page(..., quality_policy="exhaustive")
+      - Direct recognition path via recognize_direct()
+      - Candidate planner diagnostics via consume_page_diagnostics()
       - DBNet18 weights present on disk
-      - DBNet18 runtime functional (via _probe_dbnet18_runtime)
+      - DBNet18 runtime functional
       - multiple_detectors capability flag
 
     Returns a dict with keys:
-      baseline_status, baseline_reason, dbnet_weights, dbnet_runtime,
-      dbnet_failure_reason, multiple_detectors, max_quality_status,
-      max_quality_reason
+      baseline_ready, baseline_reason,
+      exhaustive_planner_ready, exhaustive_planner_reason,
+      direct_recognition_ready, direct_recognition_reason,
+      dbnet_weights_available, dbnet_runtime_available, dbnet_failure_reason,
+      multiple_detectors, max_quality_status, max_quality_reason
     """
-    from structured_pdf_text.config import max_quality_extraction_config
+    import io
+    from PIL import Image, ImageDraw
+
+    from structured_pdf_text.config import ExtractorConfig, ExtractionMode, max_quality_extraction_config
     from structured_pdf_text.ocr.factory import build_ocr_backend
 
     report: dict[str, Any] = {
-        "baseline_status": "unknown",
+        "baseline_ready": False,
         "baseline_reason": None,
-        "dbnet_weights": False,
-        "dbnet_runtime": False,
+        "exhaustive_planner_ready": False,
+        "exhaustive_planner_reason": None,
+        "direct_recognition_ready": False,
+        "direct_recognition_reason": None,
+        "dbnet_weights_available": False,
+        "dbnet_runtime_available": False,
         "dbnet_failure_reason": None,
         "multiple_detectors": False,
         "max_quality_status": "unknown",
         "max_quality_reason": None,
     }
 
-    # Step 1: baseline deep smoke (CRAFT + recognizer)
+    # Step 1: baseline deep smoke using plain EasyOCR config (no DBNet requirement).
+    # Must NOT use max_quality_extraction_config() here — probe_static for easyocr
+    # returns DEGRADED when max_quality=True and DBNet weights are absent, which would
+    # make the baseline fail even when CRAFT + recognizer are fully functional.
     try:
-        config = max_quality_extraction_config(language=language)
-        baseline = probe_deep(config)
-        report["baseline_status"] = baseline.status.value
+        baseline_config = ExtractorConfig(
+            mode=ExtractionMode.OCR,
+            language=language,
+            ocr_engine="easyocr",
+        )
+        baseline = probe_deep(baseline_config)
+        report["baseline_ready"] = baseline.status == ReadinessStatus.READY
         report["baseline_reason"] = baseline.reason_code
     except Exception as exc:
-        report["baseline_status"] = "unknown"
-        report["baseline_reason"] = f"probe_error: {exc}"
+        report["baseline_reason"] = f"probe_error: {type(exc).__name__}: {exc}"
         report["max_quality_status"] = "unknown"
         report["max_quality_reason"] = "baseline_probe_failed"
         return report
 
-    if baseline.status != ReadinessStatus.READY:
+    if not report["baseline_ready"]:
         report["max_quality_status"] = baseline.status.value
         report["max_quality_reason"] = baseline.reason_code or "baseline_not_ready"
         return report
 
-    # Step 2: DBNet18 runtime probe — reuse cached result
+    # Build a small smoke image for the real inference paths.
+    smoke_image = Image.new("RGB", (640, 80), "white")
+    draw = ImageDraw.Draw(smoke_image)
+    draw.text((10, 10), "Texto de teste OCR 1234", fill="black")
+
+    # Use the full smoke image as the crop for recognize_direct.
+    smoke_crop = smoke_image
+
+    # Step 2: build max-quality backend and run real exhaustive pipeline + direct path.
     backend = None
     try:
-        backend = build_ocr_backend(config)
-        from structured_pdf_text.ocr.backends.easyocr import (
-            _dbnet18_weights_available,
-            _probe_dbnet18_runtime,
-            _model_cache_dir,
-        )
-        cache_dir = _model_cache_dir()
-        report["dbnet_weights"] = _dbnet18_weights_available(cache_dir)
-        dbnet_ok, dbnet_fail = _probe_dbnet18_runtime(
-            getattr(backend, "_reader", None), cache_dir
-        )
-        report["dbnet_runtime"] = dbnet_ok
-        report["dbnet_failure_reason"] = dbnet_fail
+        mq_config = max_quality_extraction_config(language=language)
+        backend = build_ocr_backend(mq_config)
+
+        # 2a: run recognize_page with exhaustive quality policy
+        try:
+            tokens = backend.recognize_page(smoke_image, 0, quality_policy="exhaustive")
+            report["exhaustive_planner_ready"] = True
+        except Exception as exc:
+            report["exhaustive_planner_reason"] = f"{type(exc).__name__}: {exc}"
+
+        # 2b: collect candidate planner diagnostics
+        diag = backend.consume_page_diagnostics()
+        report["dbnet_weights_available"] = bool(diag.get("dbnet_weights_available"))
+        report["dbnet_runtime_available"] = bool(diag.get("dbnet_runtime_available"))
+        report["dbnet_failure_reason"] = diag.get("dbnet_failure_reason")
+
+        # 2c: run recognize_direct
+        try:
+            backend.recognize_direct(smoke_crop, 0)
+            report["direct_recognition_ready"] = True
+        except Exception as exc:
+            report["direct_recognition_reason"] = f"{type(exc).__name__}: {exc}"
+
+        # 2d: read capability flag (no probe triggered here, just reads cached state)
         report["multiple_detectors"] = backend.capabilities.multiple_detectors
+
     except Exception as exc:
-        report["dbnet_failure_reason"] = f"probe_error: {type(exc).__name__}: {exc}"
+        report["exhaustive_planner_reason"] = (
+            report["exhaustive_planner_reason"] or f"backend_error: {type(exc).__name__}: {exc}"
+        )
     finally:
         if backend is not None:
             try:
@@ -118,14 +158,23 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
             except Exception:
                 pass
 
-    # Step 3: determine max-quality overall status
-    if report["dbnet_runtime"]:
+    # Step 3: determine overall max-quality status.
+    # Mandatory: baseline + exhaustive planner + direct recognition.
+    # DBNet18: optional — INCOMPLETE when baseline passes but DBNet unavailable.
+    if not report["exhaustive_planner_ready"]:
+        report["max_quality_status"] = "incomplete"
+        report["max_quality_reason"] = report["exhaustive_planner_reason"] or "exhaustive_planner_failed"
+    elif not report["direct_recognition_ready"]:
+        report["max_quality_status"] = "incomplete"
+        report["max_quality_reason"] = report["direct_recognition_reason"] or "direct_recognition_failed"
+    elif report["dbnet_runtime_available"]:
         report["max_quality_status"] = "ready"
         report["max_quality_reason"] = None
     else:
-        # CRAFT is fine but DBNet18 is unavailable — degraded, not broken
+        # CRAFT and direct path both work — max-quality extraction runs, but without
+        # DBNet18 as an additional candidate.
         report["max_quality_status"] = "incomplete"
-        if report["dbnet_weights"]:
+        if report["dbnet_weights_available"]:
             report["max_quality_reason"] = "dbnet18_runtime_unavailable"
         else:
             report["max_quality_reason"] = "dbnet18_weights_missing"
@@ -157,17 +206,30 @@ def main() -> int:
         print("Error: --max-quality requires --deep-smoke", file=sys.stderr)
         return 2
 
+    if args.max_quality and args.configuration is not None and args.configuration != "easyocr":
+        print(
+            f"Error: --max-quality is only valid for EasyOCR, not --configuration {args.configuration!r}",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.max_quality:
-        # Max-quality mode: run only the EasyOCR max-quality check
-        # (other engines are not subject to the exhaustive candidate requirement)
+        # Max-quality mode: run only the EasyOCR max-quality check.
+        # Other engines are not subject to the exhaustive candidate requirement.
         print(f"\nMax-quality EasyOCR preflight  (language={args.language})")
         print("-" * 60)
         mq = _check_max_quality_easyocr(args.language)
 
-        print(f"  Baseline (CRAFT + recognizer): {mq['baseline_status']}"
+        _yes_no = lambda v: "yes" if v else "no"
+        _ok_fail = lambda v: "OK" if v else "FAIL"
+        print(f"  Baseline (CRAFT + recognizer): {_ok_fail(mq['baseline_ready'])}"
               + (f"  [{mq['baseline_reason']}]" if mq["baseline_reason"] else ""))
-        print(f"  DBNet18 weights on disk:       {'yes' if mq['dbnet_weights'] else 'no'}")
-        print(f"  DBNet18 runtime functional:    {'yes' if mq['dbnet_runtime'] else 'no'}"
+        print(f"  Exhaustive planner:            {_ok_fail(mq['exhaustive_planner_ready'])}"
+              + (f"  [{mq['exhaustive_planner_reason']}]" if mq["exhaustive_planner_reason"] else ""))
+        print(f"  Direct recognition:            {_ok_fail(mq['direct_recognition_ready'])}"
+              + (f"  [{mq['direct_recognition_reason']}]" if mq["direct_recognition_reason"] else ""))
+        print(f"  DBNet18 weights on disk:       {_yes_no(mq['dbnet_weights_available'])}")
+        print(f"  DBNet18 runtime functional:    {_yes_no(mq['dbnet_runtime_available'])}"
               + (f"  [{mq['dbnet_failure_reason']}]" if mq["dbnet_failure_reason"] else ""))
         print(f"  multiple_detectors capability: {mq['multiple_detectors']}")
         print()
@@ -175,14 +237,14 @@ def main() -> int:
         mq_status = mq["max_quality_status"]
         mq_reason = mq["max_quality_reason"] or ""
         if mq_status == "ready":
-            print(f"Max-quality EasyOCR: READY")
+            print("Max-quality EasyOCR: READY")
             return 0
         else:
             print(f"Max-quality EasyOCR: {mq_status.upper()}"
                   + (f"  [{mq_reason}]" if mq_reason else ""))
-            if mq["baseline_status"] == "ready":
-                print("  Note: baseline EasyOCR (CRAFT) is READY — extraction will work "
-                      "but the full exhaustive candidate set is not available.")
+            if mq["baseline_ready"] and mq["exhaustive_planner_ready"]:
+                print("  Note: baseline EasyOCR (CRAFT) and exhaustive planner are READY — "
+                      "extraction will work but the full candidate set is not available.")
             return 1
 
     if args.deep_smoke and args.configuration is None:

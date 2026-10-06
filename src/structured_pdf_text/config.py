@@ -378,19 +378,28 @@ def max_quality_extraction_config(
     Activates every quality improvement currently implemented for EasyOCR:
 
     - ``ocr_quality_variants=True`` — enables multi-candidate OCR passes.
-    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — runs all five
-      candidate families (default, high-recall, beamsearch, layout-sensitive,
-      low-contrast) on every page, selecting the best by the rich scoring model
-      (confidence, low-confidence ratio, duplicate ratio, replacement
-      character ratio).
+    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — runs up to 13
+      candidate families (A–N) on every page, including CRAFT variants,
+      beamsearch, layout-sensitive, low-contrast, CLAHE, deskew, rotation,
+      high-magnification, and DBNet18 when available.  The best candidate is
+      selected by a rich scoring model (confidence, low-confidence ratio,
+      duplicate ratio, replacement character ratio).
     - Table detection and cross-page merging enabled.
     - Header/footer suppression enabled by default.
 
-    Resource cost: approximately 4× the OCR inference time of
-    ``best_extraction_config`` because the exhaustive policy runs four
+    Resource cost: approximately 4–6× the OCR inference time of
+    ``best_extraction_config`` because the exhaustive policy runs many
     EasyOCR passes per page.  Use this config for documents where accuracy
     is more important than throughput — e.g. financial reports, legal filings,
     or any document that will feed a critical downstream process.
+
+    **DBNet18 note**: DBNet18 adds an independent detector candidate (N) when
+    both the weights file *and* runtime are functional.  Weights being present
+    on disk does not guarantee runtime availability — on Windows, DBNet18
+    requires compiled native extensions (deformable convolution via MSVC Build
+    Tools).  Run ``preflight --max-quality --deep-smoke`` to verify full
+    readiness; the result is reported as INCOMPLETE (not broken) when CRAFT
+    is available but DBNet18 is not.
 
     The config is engine-agnostic: other OCR backends will ignore policies
     they do not implement and fall back to their normal single pass.

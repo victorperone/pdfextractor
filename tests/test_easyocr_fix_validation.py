@@ -1572,3 +1572,536 @@ class TestBuildDbnet18Reader:
         result = easyocr_mod._build_dbnet18_reader(FakeReader())
         assert result is not None
         assert captured["kwargs"].get("detect_network") == "dbnet18"
+
+
+# ---------------------------------------------------------------------------
+# §11 — _build_dbnet18_reader_strict propagates exceptions
+# ---------------------------------------------------------------------------
+
+class TestBuildDbnet18ReaderStrict:
+    """_build_dbnet18_reader_strict raises instead of returning None on failure."""
+
+    def test_raises_when_easyocr_import_fails(self, monkeypatch):
+        """When easyocr is not importable, strict variant raises, does NOT return None."""
+        import sys
+        monkeypatch.setitem(sys.modules, "easyocr", None)
+        from structured_pdf_text.ocr.backends.easyocr import _build_dbnet18_reader_strict
+
+        class FakeReader:
+            lang_list = ["pt"]
+            device = "cpu"
+            model_storage_directory = "/tmp/x"
+            user_network_directory = "/tmp/x"
+            recog_network = "latin_g2"
+            quantize = True
+
+        with pytest.raises(Exception):
+            _build_dbnet18_reader_strict(FakeReader())
+
+    def test_returns_none_for_missing_lang_list(self):
+        """Reader without lang_list → returns None (not a probe failure)."""
+        from structured_pdf_text.ocr.backends.easyocr import _build_dbnet18_reader_strict
+
+        class BadReader:
+            pass
+
+        result = _build_dbnet18_reader_strict(BadReader())
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# §11 — _dbnet18_weights_available
+# ---------------------------------------------------------------------------
+
+class TestDbnet18WeightsAvailable:
+    """_dbnet18_weights_available checks the correct file path from EasyOCR registry."""
+
+    def _make_fake_easyocr_config(self, filename: str | None):
+        import types
+        config_mod = types.ModuleType("easyocr.config")
+        config_mod.detection_models = (  # type: ignore[attr-defined]
+            {"dbnet18": {"filename": filename}} if filename is not None else {}
+        )
+        return config_mod
+
+    def test_returns_false_when_file_absent(self, monkeypatch, tmp_path):
+        """Returns False when the .pth file does not exist."""
+        import sys
+        config_mod = self._make_fake_easyocr_config("craft_mlt_25k.pth")
+        easyocr_pkg = types.ModuleType("easyocr")
+        monkeypatch.setitem(sys.modules, "easyocr", easyocr_pkg)
+        monkeypatch.setitem(sys.modules, "easyocr.config", config_mod)
+
+        from structured_pdf_text.ocr.backends.easyocr import _dbnet18_weights_available
+        assert _dbnet18_weights_available(tmp_path) is False
+
+    def test_returns_true_when_file_present(self, monkeypatch, tmp_path):
+        """Returns True when the .pth file exists on disk."""
+        import sys
+        pth_name = "craft_dbnet18.pth"
+        (tmp_path / pth_name).write_bytes(b"\x00" * 8)
+        config_mod = self._make_fake_easyocr_config(pth_name)
+        easyocr_pkg = types.ModuleType("easyocr")
+        monkeypatch.setitem(sys.modules, "easyocr", easyocr_pkg)
+        monkeypatch.setitem(sys.modules, "easyocr.config", config_mod)
+
+        from structured_pdf_text.ocr.backends.easyocr import _dbnet18_weights_available
+        assert _dbnet18_weights_available(tmp_path) is True
+
+    def test_returns_false_when_config_has_no_filename(self, monkeypatch, tmp_path):
+        """Returns False gracefully when the registry entry has no filename key."""
+        import sys
+        config_mod = self._make_fake_easyocr_config(None)
+        easyocr_pkg = types.ModuleType("easyocr")
+        monkeypatch.setitem(sys.modules, "easyocr", easyocr_pkg)
+        monkeypatch.setitem(sys.modules, "easyocr.config", config_mod)
+
+        from structured_pdf_text.ocr.backends.easyocr import _dbnet18_weights_available
+        assert _dbnet18_weights_available(tmp_path) is False
+
+    def test_returns_false_when_easyocr_config_not_importable(self, monkeypatch, tmp_path):
+        """Returns False (never raises) when easyocr.config cannot be imported."""
+        import sys
+        monkeypatch.setitem(sys.modules, "easyocr.config", None)
+        from structured_pdf_text.ocr.backends.easyocr import _dbnet18_weights_available
+        assert _dbnet18_weights_available(tmp_path) is False
+
+
+# ---------------------------------------------------------------------------
+# §11 — _probe_dbnet18_runtime_uncached
+# ---------------------------------------------------------------------------
+
+class TestProbeDbnet18RuntimeUncached:
+    """_probe_dbnet18_runtime_uncached returns (False, reason) when weights are absent."""
+
+    def test_returns_weights_missing_when_no_pth_file(self, monkeypatch, tmp_path):
+        """Returns (False, 'weights_missing') immediately if weights file is absent."""
+        import sys
+        config_mod = types.ModuleType("easyocr.config")
+        config_mod.detection_models = {"dbnet18": {"filename": "craft_db.pth"}}  # type: ignore[attr-defined]
+        easyocr_pkg = types.ModuleType("easyocr")
+        monkeypatch.setitem(sys.modules, "easyocr", easyocr_pkg)
+        monkeypatch.setitem(sys.modules, "easyocr.config", config_mod)
+
+        class FakeReader:
+            lang_list = ["pt"]
+            model_storage_directory = str(tmp_path)
+
+        from structured_pdf_text.ocr.backends.easyocr import _probe_dbnet18_runtime_uncached
+        ok, reason = _probe_dbnet18_runtime_uncached(FakeReader(), tmp_path)
+        assert ok is False
+        assert reason == "weights_missing"
+
+    def test_returns_true_when_probe_succeeds(self, monkeypatch, tmp_path):
+        """Returns (True, None) when weights exist and detect() completes without error."""
+        import sys
+        pth_name = "craft_db.pth"
+        (tmp_path / pth_name).write_bytes(b"\x00" * 8)
+        config_mod = types.ModuleType("easyocr.config")
+        config_mod.detection_models = {"dbnet18": {"filename": pth_name}}  # type: ignore[attr-defined]
+        easyocr_pkg = types.ModuleType("easyocr")
+        monkeypatch.setitem(sys.modules, "easyocr", easyocr_pkg)
+        monkeypatch.setitem(sys.modules, "easyocr.config", config_mod)
+
+        # Monkeypatch _build_dbnet18_reader_strict to return a fake reader
+        # whose detect() succeeds without needing native extensions.
+        fake_dbnet_reader = MagicMock()
+        fake_dbnet_reader.detect.return_value = ([], [])
+
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader_strict", lambda r: fake_dbnet_reader)
+
+        ok, reason = easyocr_mod._probe_dbnet18_runtime_uncached(MagicMock(), tmp_path)
+        assert ok is True
+        assert reason is None
+
+    def test_returns_runtime_probe_failed_when_detect_raises(self, monkeypatch, tmp_path):
+        """Returns (False, 'runtime_probe_failed: ...') when detect() raises."""
+        import sys
+        pth_name = "craft_db.pth"
+        (tmp_path / pth_name).write_bytes(b"\x00" * 8)
+        config_mod = types.ModuleType("easyocr.config")
+        config_mod.detection_models = {"dbnet18": {"filename": pth_name}}  # type: ignore[attr-defined]
+        easyocr_pkg = types.ModuleType("easyocr")
+        monkeypatch.setitem(sys.modules, "easyocr", easyocr_pkg)
+        monkeypatch.setitem(sys.modules, "easyocr.config", config_mod)
+
+        fake_dbnet_reader = MagicMock()
+        fake_dbnet_reader.detect.side_effect = RuntimeError("deformable conv failed")
+
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader_strict", lambda r: fake_dbnet_reader)
+
+        ok, reason = easyocr_mod._probe_dbnet18_runtime_uncached(MagicMock(), tmp_path)
+        assert ok is False
+        assert reason is not None and "runtime_probe_failed" in reason
+
+
+# ---------------------------------------------------------------------------
+# §11 — EasyOCRBackend per-instance DBNet cache
+# ---------------------------------------------------------------------------
+
+class TestEasyOCRBackendDbnetInstanceCache:
+    """Per-instance _dbnet_runtime_state cache: probe runs at most once per instance."""
+
+    def _make_backend_stub(self, monkeypatch, *, probe_returns=(False, "weights_missing")):
+        """Return a minimal EasyOCRBackend-like object with mocked probe."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        call_count = {"n": 0}
+
+        def fake_probe(reader, cache_dir=None):
+            call_count["n"] += 1
+            return probe_returns
+
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached", fake_probe)
+
+        class MinimalBackend:
+            _dbnet_runtime_state = None
+            _dbnet_failure_reason = None
+            _reader = None
+            _model_cache_dir = None
+
+            _ensure_dbnet18_runtime = easyocr_mod.EasyOCRBackend._ensure_dbnet18_runtime
+
+        return MinimalBackend(), call_count
+
+    def test_capabilities_does_not_trigger_probe(self, monkeypatch):
+        """capabilities property must not run _probe_dbnet18_runtime_uncached."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        probe_calls = {"n": 0}
+
+        def counting_probe(reader, cache_dir=None):
+            probe_calls["n"] += 1
+            return False, "weights_missing"
+
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached", counting_probe)
+
+        # Build a minimal object that has the capabilities property via the class.
+        class FakeBackend:
+            _dbnet_runtime_state = None
+            _dbnet_failure_reason = None
+            capabilities = easyocr_mod.EasyOCRBackend.capabilities.fget  # type: ignore[attr-defined]
+
+        fb = FakeBackend()
+        # Access the property directly (simulate property call on instance).
+        _ = easyocr_mod.EasyOCRBackend.capabilities.fget(fb)
+        assert probe_calls["n"] == 0, (
+            "capabilities must NOT trigger _probe_dbnet18_runtime_uncached"
+        )
+
+    def test_capabilities_reports_false_when_state_is_none(self, monkeypatch):
+        """When _dbnet_runtime_state is None (not yet probed), multiple_detectors is False."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        class FakeBackend:
+            _dbnet_runtime_state = None
+
+        result = easyocr_mod.EasyOCRBackend.capabilities.fget(FakeBackend())
+        assert result.multiple_detectors is False
+
+    def test_capabilities_reports_true_when_state_is_true(self, monkeypatch):
+        """When _dbnet_runtime_state is True, multiple_detectors is True."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        class FakeBackend:
+            _dbnet_runtime_state = True
+
+        result = easyocr_mod.EasyOCRBackend.capabilities.fget(FakeBackend())
+        assert result.multiple_detectors is True
+
+    def test_ensure_dbnet18_runtime_caches_on_second_call(self, monkeypatch):
+        """_ensure_dbnet18_runtime only calls the probe once per instance."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        call_count = {"n": 0}
+
+        def counting_probe(reader, cache_dir=None):
+            call_count["n"] += 1
+            return True, None
+
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached", counting_probe)
+
+        class FakeBackend:
+            _dbnet_runtime_state = None
+            _dbnet_failure_reason = None
+            _reader = None
+            _model_cache_dir = None
+
+        fb = FakeBackend()
+        ok1, _ = easyocr_mod.EasyOCRBackend._ensure_dbnet18_runtime(fb)
+        ok2, _ = easyocr_mod.EasyOCRBackend._ensure_dbnet18_runtime(fb)
+        assert call_count["n"] == 1, "probe must only be called once (cached)"
+        assert ok1 is True
+        assert ok2 is True
+
+    def test_ensure_dbnet18_runtime_force_reruns_probe(self, monkeypatch):
+        """force=True re-runs probe even when result is already cached."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        call_count = {"n": 0}
+        results = [(False, "weights_missing"), (True, None)]
+
+        def counting_probe(reader, cache_dir=None):
+            call_count["n"] += 1
+            return results[min(call_count["n"] - 1, len(results) - 1)]
+
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached", counting_probe)
+
+        class FakeBackend:
+            _dbnet_runtime_state = None
+            _dbnet_failure_reason = None
+            _reader = None
+            _model_cache_dir = None
+
+        fb = FakeBackend()
+        ok1, _ = easyocr_mod.EasyOCRBackend._ensure_dbnet18_runtime(fb)
+        ok2, _ = easyocr_mod.EasyOCRBackend._ensure_dbnet18_runtime(fb, force=True)
+        assert call_count["n"] == 2
+        assert ok1 is False
+        assert ok2 is True
+
+
+# ---------------------------------------------------------------------------
+# §11 — _exhaustive_candidates skips DBNet when precomputed says unavailable
+# ---------------------------------------------------------------------------
+
+class TestExhaustiveCandidatesSkipsDbnetWhenUnavailable:
+    """_exhaustive_candidates respects _dbnet_precomputed=(False, reason)."""
+
+    def _make_minimal_reader(self):
+        reader = MagicMock()
+        reader.lang_list = ["pt"]
+        reader.model_storage_directory = None
+        reader.detect.return_value = (
+            [[[10, 90, 10, 30]]],
+            [[]],
+        )
+        reader.recognize.return_value = [("hello", 0.9)]
+        reader.readtext.return_value = [([[0, 0], [10, 0], [10, 10], [0, 10]], "hello", 0.9)]
+        return reader
+
+    def test_dbnet_candidate_skipped_when_precomputed_false(self, monkeypatch):
+        """When _dbnet_precomputed=(False, reason), the dbnet18 candidate is not added."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_minimal_reader()
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+        base_kwargs: dict[str, Any] = {
+            "decoder": "greedy",
+            "beamwidth": 5,
+            "adjust_contrast": 0.5,
+            "allowlist": None,
+            "blocklist": None,
+            "workers": 0,
+            "rotation_info": None,
+            "text_threshold": 0.7,
+            "low_text": 0.4,
+            "link_threshold": 0.4,
+            "min_size": 20,
+            "slope_ths": 0.1,
+            "ycenter_ths": 0.5,
+            "height_ths": 0.5,
+            "width_ths": 0.5,
+            "add_margin": 0.1,
+            "contrast_ths": 0.1,
+            "filter_ths": 0.003,
+        }
+
+        dbnet_probe_called = {"n": 0}
+
+        def should_not_be_called(*a, **kw):
+            dbnet_probe_called["n"] += 1
+            return False, "weights_missing"
+
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached", should_not_be_called)
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader", lambda r: None)
+
+        dbnet_diag: list[dict] = []
+        candidates = easyocr_mod._exhaustive_candidates(
+            reader, img, base_kwargs,
+            _dbnet_diag=dbnet_diag,
+            _dbnet_precomputed=(False, "weights_missing"),
+        )
+
+        assert dbnet_probe_called["n"] == 0, "probe must not run when precomputed is given"
+        candidate_ids = [cid for cid, _ in candidates]
+        assert "dbnet18" not in candidate_ids
+        assert dbnet_diag, "_dbnet_diag must be populated"
+        assert dbnet_diag[0]["runtime_available"] is False
+
+    def test_dbnet_candidate_present_when_precomputed_true(self, monkeypatch):
+        """When _dbnet_precomputed=(True, None) and DBNet reader works, dbnet18 candidate appears."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_minimal_reader()
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+        base_kwargs: dict[str, Any] = {
+            "decoder": "greedy",
+            "beamwidth": 5,
+            "adjust_contrast": 0.5,
+            "allowlist": None,
+            "blocklist": None,
+            "workers": 0,
+            "rotation_info": None,
+            "text_threshold": 0.7,
+            "low_text": 0.4,
+            "link_threshold": 0.4,
+            "min_size": 20,
+            "slope_ths": 0.1,
+            "ycenter_ths": 0.5,
+            "height_ths": 0.5,
+            "width_ths": 0.5,
+            "add_margin": 0.1,
+            "contrast_ths": 0.1,
+            "filter_ths": 0.003,
+        }
+
+        # Make _build_dbnet18_reader return a working fake reader.
+        dbnet_reader = MagicMock()
+        dbnet_reader.lang_list = ["pt"]
+        dbnet_reader.detect.return_value = (
+            [[[10, 90, 10, 30]]],
+            [[]],
+        )
+        dbnet_reader.recognize.return_value = [("dbnet_word", 0.85)]
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader", lambda r: dbnet_reader)
+        monkeypatch.setattr(easyocr_mod, "_dbnet18_weights_available", lambda cache_dir=None: True)
+
+        dbnet_diag: list[dict] = []
+        candidates = easyocr_mod._exhaustive_candidates(
+            reader, img, base_kwargs,
+            _dbnet_diag=dbnet_diag,
+            _dbnet_precomputed=(True, None),
+        )
+
+        candidate_ids = [cid for cid, _ in candidates]
+        assert "dbnet18" in candidate_ids
+        assert dbnet_diag[0]["runtime_available"] is True
+
+
+# ---------------------------------------------------------------------------
+# Preflight --max-quality guards
+# ---------------------------------------------------------------------------
+
+class TestPreflightMaxQualityGuards:
+    """preflight_ocr_backends.py --max-quality guards and field names."""
+
+    def _run_preflight(self, args: list[str]) -> tuple[int, str, str]:
+        import subprocess
+        script = str(
+            (
+                __import__("pathlib").Path(__file__).resolve().parent.parent
+                / "scripts" / "preflight_ocr_backends.py"
+            )
+        )
+        result = subprocess.run(
+            [sys.executable, script] + args,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_max_quality_without_deep_smoke_exits_2(self):
+        """--max-quality without --deep-smoke must exit with code 2."""
+        rc, _, stderr = self._run_preflight(["--max-quality"])
+        assert rc == 2
+        assert "deep-smoke" in stderr.lower() or "deep_smoke" in stderr.lower() or "deep-smoke" in stderr
+
+    def test_max_quality_with_wrong_configuration_exits_2(self):
+        """--max-quality --configuration tesseract must exit with code 2."""
+        rc, _, stderr = self._run_preflight(
+            ["--max-quality", "--deep-smoke", "--configuration", "tesseract"]
+        )
+        assert rc == 2
+        assert "easyocr" in stderr.lower()
+
+    def test_max_quality_with_paddle_configuration_exits_2(self):
+        """--max-quality --configuration paddle must exit with code 2."""
+        rc, _, stderr = self._run_preflight(
+            ["--max-quality", "--deep-smoke", "--configuration", "paddle"]
+        )
+        assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# _cmd_setup_easyocr_models — unit tests
+# ---------------------------------------------------------------------------
+
+class TestCmdSetupEasyocrModels:
+    """_cmd_setup_easyocr_models returns correct JSON and exit codes."""
+
+    def _invoke(self, monkeypatch, *, include_dbnet: bool, craft_ok: bool = True,
+                dbnet_weights: bool = True, dbnet_runtime: tuple = (True, None),
+                cache_home: str | None = None) -> tuple[int, dict]:
+        import json as _json
+        import io as _io
+        import sys as _sys
+
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+        import structured_pdf_text.cli as cli_mod
+
+        # Fake easyocr.Reader — just a no-op constructor
+        class FakeReader:
+            lang_list = ["pt"]
+            device = "cpu"
+            model_storage_directory = "/tmp/x"
+            user_network_directory = None
+            recog_network = "latin_g2"
+            quantize = True
+            def __init__(self, *a, **kw): pass
+
+        fake_easyocr = types.ModuleType("easyocr")
+        fake_easyocr.Reader = FakeReader  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "easyocr", fake_easyocr)
+
+        monkeypatch.setattr(easyocr_mod, "_dbnet18_weights_available", lambda cache_dir=None: dbnet_weights)
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached", lambda r, c=None: dbnet_runtime)
+
+        # Capture stdout
+        captured = _io.StringIO()
+        monkeypatch.setattr(_sys, "stdout", captured)
+
+        rc = cli_mod._cmd_setup_easyocr_models("pt", cache_home, include_dbnet)
+
+        output = captured.getvalue().strip()
+        data = _json.loads(output) if output else {}
+        return rc, data
+
+    def test_without_dbnet_returns_ready_and_exit_0(self, monkeypatch, tmp_path):
+        rc, data = self._invoke(monkeypatch, include_dbnet=False, cache_home=str(tmp_path))
+        assert rc == 0
+        assert data["status"] == "ready"
+        assert data["dbnet18_requested"] is False
+        assert "dbnet18_runtime_available" not in data
+
+    def test_with_dbnet_runtime_ok_returns_ready_and_exit_0(self, monkeypatch, tmp_path):
+        rc, data = self._invoke(
+            monkeypatch, include_dbnet=True, cache_home=str(tmp_path),
+            dbnet_weights=True, dbnet_runtime=(True, None),
+        )
+        assert rc == 0
+        assert data["status"] == "ready"
+        assert data["dbnet18_weights_available"] is True
+        assert data["dbnet18_runtime_available"] is True
+        assert "reason" not in data
+
+    def test_with_dbnet_runtime_fail_returns_incomplete_and_exit_1(self, monkeypatch, tmp_path):
+        rc, data = self._invoke(
+            monkeypatch, include_dbnet=True, cache_home=str(tmp_path),
+            dbnet_weights=True,
+            dbnet_runtime=(False, "runtime_probe_failed: RuntimeError: deformable conv failed"),
+        )
+        assert rc == 1
+        assert data["status"] == "incomplete"
+        assert data["dbnet18_runtime_available"] is False
+        assert "reason" in data
+
+    def test_with_dbnet_weights_missing_returns_incomplete_and_exit_1(self, monkeypatch, tmp_path):
+        rc, data = self._invoke(
+            monkeypatch, include_dbnet=True, cache_home=str(tmp_path),
+            dbnet_weights=False, dbnet_runtime=(False, "weights_missing"),
+        )
+        assert rc == 1
+        assert data["status"] == "incomplete"
+        assert data["dbnet18_weights_available"] is False
