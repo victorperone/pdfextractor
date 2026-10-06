@@ -143,6 +143,7 @@ from structured_pdf_text.ocr.contracts import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from structured_pdf_text.config import ExtractorConfig
 
 
@@ -1031,19 +1032,24 @@ def _adaptive_candidates(
     reader: "Any",
     img: "Any",
     base_kwargs: "dict[str, Any]",
+    *,
+    record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run at least 2 EasyOCR candidates (default + high-recall) and return raw results.
+    """Run EasyOCR candidates for the adaptive quality policy.
 
-    Used when quality_policy='adaptive' or quality_variants=True.  The high-recall
-    candidate uses lower CRAFT thresholds to catch faint or small text that the
-    default profile may miss.  Both share the same decoder and recognizer settings.
+    Always runs at least two candidates: default (A) and high-recall (B).
+    When the image is detected as low-contrast or dark-background,
+    additional preprocessing variants are appended by
+    :func:`_image_preprocessing_candidates` with ``adaptive=True``.
 
-    When the image is detected as low-contrast or dark-background, additional image
-    preprocessing variants (grayscale, autocontrast, inverted) are appended
-    by :func:`_image_preprocessing_candidates` with ``adaptive=True``.
+    The total number of candidates is therefore dynamic (image-dependent).
+    Every call to :func:`_run_easyocr` is reported to ``record_call`` when
+    provided, so the caller can track per-call fallback statistics.
     """
     # Candidate A: default profile
-    raw_a, _ = _run_easyocr(reader, img, **base_kwargs)
+    raw_a, _fb_a = _run_easyocr(reader, img, **base_kwargs)
+    if record_call is not None:
+        record_call(_fb_a)
 
     # Candidate B: high-recall — lower detection thresholds
     hr_kwargs = dict(base_kwargs)
@@ -1051,12 +1057,16 @@ def _adaptive_candidates(
     hr_kwargs["low_text"] = min(base_kwargs["low_text"], 0.30)
     hr_kwargs["link_threshold"] = min(base_kwargs["link_threshold"], 0.35)
     hr_kwargs["min_size"] = max(1, base_kwargs["min_size"] // 2)
-    raw_b, _ = _run_easyocr(reader, img, **hr_kwargs)
+    raw_b, _fb_b = _run_easyocr(reader, img, **hr_kwargs)
+    if record_call is not None:
+        record_call(_fb_b)
     results = [("default", raw_a), ("high_recall", raw_b)]
     # Adaptive mode activates image transforms only when the raster signals
     # low contrast or a dark background. The original remains the baseline.
     for label, variant in _image_preprocessing_candidates(img, adaptive=True):
-        raw, _ = _run_easyocr(reader, variant, **base_kwargs)
+        raw, _fb = _run_easyocr(reader, variant, **base_kwargs)
+        if record_call is not None:
+            record_call(_fb)
         results.append((label, raw))
     return results
 
@@ -1296,67 +1306,56 @@ def _exhaustive_candidates(
     quantize: bool = True,
     _dbnet_diag: "list[dict[str, Any]] | None" = None,
     _dbnet_precomputed: "tuple[bool, str | None] | None" = None,
+    record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run up to 14 named EasyOCR candidates (A–N) for exhaustive quality policy.
+    """Run the exhaustive candidate set for maximum-quality OCR.
 
-    In addition to the 14 named candidates, adaptive image preprocessing variants
-    (grayscale, autocontrast, etc.) may be appended by :func:`_adaptive_candidates`
-    when the image is detected as low-contrast or dark-background, and unconditionally
-    via a non-adaptive :func:`_image_preprocessing_candidates` call after candidate F.
+    The candidate set is dynamic: its size depends on the image content,
+    installed dependencies, and runtime state of optional components
+    (DBNet18, cv2, wordbeamsearch, quantize).  Candidate categories:
 
-    Candidates (§8, §9, §10, §11, §12, §13, §14, §15, §16, §17 from review):
-      A. default          — base parameters as configured
-      B. high_recall      — lower CRAFT thresholds for faint/small text
-      C. beamsearch       — CTC beam search decoder (if not already default)
-      D. layout_sensitive — conservative merging to avoid cross-gutter joins
-      E. low_contrast     — relaxed contrast_ths + boosted adjust_contrast for
-                            scans with low-contrast text (grey on white, etc.)
-      F. clahe            — CLAHE-enhanced image for low-contrast scans where
-                            internal EasyOCR contrast adjustment is insufficient
-                            (§14: real preprocessing variant, not just a param change)
-      G. wordbeamsearch   — CTC wordbeamsearch decoder, best for pt-BR prose where
-                            vocabulary context helps resolve ambiguous characters
-                            (§9). Skipped if already using wordbeamsearch.
-      H. no_quantize      — same as default but quantize=False; avoids rounding
-                            loss in borderline characters (§10). Skipped when
-                            quantize is already False or Reader was built without
-                            quantize support.
-      I. deskew           — corrects small page rotation (skew ≤ 15°) using
-                            minAreaRect + warpAffine before CRAFT detection (§15).
-                            Degrades gracefully if cv2 is unavailable.
-      J. high_mag         — higher mag_ratio (1.8) for pages with small text;
-                            increases effective resolution seen by CRAFT (§17).
-      K. rot90            — page rotated 90° clockwise before OCR; polygons
-      L. rot180             remapped back to original coordinates (§16).
-      M. rot270           — Only added when they produce more tokens than the
-                            default, so landscape/upside-down pages are recovered
-                            without degrading already-correct pages.
-      N. dbnet18          — runs DBNet18 detector on the same image; provides
-                            independent detection complementary to CRAFT (§11).
-                            Skipped when runtime probe fails; failure reason is
-                            recorded in ``_dbnet_diag`` when supplied.
+      Baseline / detection variants (always run):
+        default, high_recall, beamsearch, layout_sensitive, low_contrast,
+        clahe, wordbeamsearch (if not default decoder), no_quantize (if
+        quantize=True and rebuild succeeds), deskew (if image changed),
+        high_mag, DBNet18 (if runtime probe passed).
 
-    All candidates share the same loaded Reader (no second model download).
+      Preprocessing variants (conditional on image content):
+        autocontrast, inverted_grayscale (dark background only), sharpen,
+        median_denoise, bilateral_denoise, otsu, adaptive_threshold.
+        Each preprocessing label is executed at most once per page — labels
+        already added by the adaptive baseline are not repeated.
+
+      Orientation variants (conditional on result count):
+        rot90, rot180, rot270 — added when they produce any result tokens;
+        remapped back to original-image coordinates before scoring.
+
+    Every :func:`_run_easyocr` call is reported via ``record_call`` when
+    provided, so the caller can track per-call fallback statistics.
 
     ``_dbnet_diag`` is an optional mutable list.  When provided, a single dict
     is appended with keys ``weights_available``, ``runtime_available``, and
     ``failure_reason`` so the caller can surface the DBNet18 runtime state in
     page diagnostics without changing this function's return type.
     """
-    results = _adaptive_candidates(reader, img, base_kwargs)
+    results = _adaptive_candidates(reader, img, base_kwargs, record_call=record_call)
 
     # Candidate C: beamsearch decoder (if not already)
     if base_kwargs.get("decoder") != "beamsearch":
         bs_kwargs = dict(base_kwargs)
         bs_kwargs["decoder"] = "beamsearch"
-        raw_c, _ = _run_easyocr(reader, img, **bs_kwargs)
+        raw_c, _fb_c = _run_easyocr(reader, img, **bs_kwargs)
+        if record_call is not None:
+            record_call(_fb_c)
         results.append(("beamsearch", raw_c))
 
     # Candidate D: layout-sensitive — conservative merging to avoid cross-gutter joins
     ls_kwargs = dict(base_kwargs)
     ls_kwargs["width_ths"] = min(base_kwargs["width_ths"], 0.25)
     ls_kwargs["add_margin"] = min(base_kwargs["add_margin"], 0.05)
-    raw_d, _ = _run_easyocr(reader, img, **ls_kwargs)
+    raw_d, _fb_d = _run_easyocr(reader, img, **ls_kwargs)
+    if record_call is not None:
+        record_call(_fb_d)
     results.append(("layout_sensitive", raw_d))
 
     # Candidate E: low-contrast recovery — lower contrast_ths so more crops
@@ -1365,7 +1364,9 @@ def _exhaustive_candidates(
     lc_kwargs = dict(base_kwargs)
     lc_kwargs["contrast_ths"] = max(base_kwargs.get("contrast_ths", 0.1), 0.20)
     lc_kwargs["adjust_contrast"] = min(base_kwargs.get("adjust_contrast", 0.5) + 0.15, 0.70)
-    raw_e, _ = _run_easyocr(reader, img, **lc_kwargs)
+    raw_e, _fb_e = _run_easyocr(reader, img, **lc_kwargs)
+    if record_call is not None:
+        record_call(_fb_e)
     results.append(("low_contrast", raw_e))
 
     # Candidate F: CLAHE preprocessing (§14) — apply adaptive histogram equalization
@@ -1374,14 +1375,22 @@ def _exhaustive_candidates(
     # contrast adjustment misses (grey-on-white, fax degraded, uneven illumination).
     # Degrades gracefully if cv2 is unavailable (returns same result as default).
     clahe_img = _apply_clahe(img)
-    raw_f, _ = _run_easyocr(reader, clahe_img, **base_kwargs)
+    raw_f, _fb_f = _run_easyocr(reader, clahe_img, **base_kwargs)
+    if record_call is not None:
+        record_call(_fb_f)
     results.append(("clahe", raw_f))
 
+    # Preprocessing variants: run only labels not already produced by _adaptive_candidates
+    # to avoid executing the same preprocessing profile twice on low-contrast or dark pages.
+    existing_labels = {label for label, _ in results}
     for label, variant in _image_preprocessing_candidates(img, adaptive=False):
-        if label == "grayscale":
+        if label == "grayscale" or label in existing_labels:
             continue
-        raw, _ = _run_easyocr(reader, variant, **base_kwargs)
+        raw, _fb = _run_easyocr(reader, variant, **base_kwargs)
+        if record_call is not None:
+            record_call(_fb)
         results.append((label, raw))
+        existing_labels.add(label)
 
     # Candidate G: wordbeamsearch decoder (§9) — CTC with vocabulary-constrained
     # beam search.  Best for pt-BR prose where word-level context resolves ambiguous
@@ -1391,7 +1400,9 @@ def _exhaustive_candidates(
         wbs_kwargs = dict(base_kwargs)
         wbs_kwargs["decoder"] = "wordbeamsearch"
         try:
-            raw_g, _ = _run_easyocr(reader, img, **wbs_kwargs)
+            raw_g, _fb_g = _run_easyocr(reader, img, **wbs_kwargs)
+            if record_call is not None:
+                record_call(_fb_g)
             results.append(("wordbeamsearch", raw_g))
         except Exception:
             pass
@@ -1406,7 +1417,9 @@ def _exhaustive_candidates(
         try:
             nq_reader = _rebuild_reader_no_quantize(reader)
             if nq_reader is not None:
-                raw_h, _ = _run_easyocr(nq_reader, img, **base_kwargs)
+                raw_h, _fb_h = _run_easyocr(nq_reader, img, **base_kwargs)
+                if record_call is not None:
+                    record_call(_fb_h)
                 results.append(("no_quantize", raw_h))
         except Exception:
             pass
@@ -1425,7 +1438,9 @@ def _exhaustive_candidates(
     except Exception:
         _changed = True
     if _changed:
-        raw_i, _ = _run_easyocr(reader, deskew_img, **base_kwargs)
+        raw_i, _fb_i = _run_easyocr(reader, deskew_img, **base_kwargs)
+        if record_call is not None:
+            record_call(_fb_i)
         raw_i = _remap_raw_affine(raw_i, deskew_inverse)
         results.append(("deskew", raw_i))
 
@@ -1445,7 +1460,9 @@ def _exhaustive_candidates(
         _prev_mag = _os.environ.get("EASYOCR_MAG_RATIO")
         try:
             _os.environ["EASYOCR_MAG_RATIO"] = str(_high_mag)
-            raw_j, _ = _run_easyocr(reader, img, **base_kwargs)
+            raw_j, _fb_j = _run_easyocr(reader, img, **base_kwargs)
+            if record_call is not None:
+                record_call(_fb_j)
             results.append(("high_mag", raw_j))
         except Exception:
             pass
@@ -1499,7 +1516,9 @@ def _exhaustive_candidates(
         try:
             _dbnet_reader = _build_dbnet18_reader(reader)
             if _dbnet_reader is not None:
-                raw_n, _ = _run_easyocr(_dbnet_reader, img, **base_kwargs)
+                raw_n, _fb_n = _run_easyocr(_dbnet_reader, img, **base_kwargs)
+                if record_call is not None:
+                    record_call(_fb_n)
                 results.append(("dbnet18", raw_n))
             else:
                 # _build_dbnet18_reader absorbed an exception and returned None.
@@ -1520,21 +1539,22 @@ def _exhaustive_candidates(
     # recognise text in the wrong orientation.  We try all three non-trivial
     # rotations and remap detected polygon coordinates back to the original image
     # space so downstream reading-order and coordinate mapping remain correct.
-    # Only append a rotation candidate when it yields *more* tokens than the
-    # default result (already in results[0]) to avoid polluting the candidate set
-    # with worse-or-equal outputs when the page is already upright.
+    # A rotation candidate is added whenever it produces any result tokens,
+    # regardless of whether that count exceeds the default — token count is
+    # not a reliable quality proxy, and the scorer already has full context
+    # to prefer the better candidate.
     try:
         import numpy as _np
-        _default_token_count = len(results[0][1]) if results else 0
         _arr_base = _np.asarray(img)
-        _rh, _rw = _arr_base.shape[:2]
 
         for _angle, _label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
             try:
                 _rot_img = _rotate_image(_arr_base, _angle)
                 _rot_h, _rot_w = _rot_img.shape[:2]
-                _raw_rot, _ = _run_easyocr(reader, _rot_img, **base_kwargs)
-                if len(_raw_rot) > _default_token_count:
+                _raw_rot, _fb_rot = _run_easyocr(reader, _rot_img, **base_kwargs)
+                if record_call is not None:
+                    record_call(_fb_rot)
+                if _raw_rot:
                     _raw_remapped = _remap_raw_for_rotation(
                         _raw_rot, _angle, _rot_h, _rot_w
                     )
@@ -1661,11 +1681,11 @@ class EasyOCRBackend:
       'adaptive': at least 2 candidates (default + high-recall, plus adaptive
                   image preprocessing variants when image quality signals warrant
                   it); best wins.
-      'exhaustive': up to 14 named candidate profiles (A–N), plus unconditional
-                    image preprocessing variants not listed in the A–N set.
-                    Conditional candidates are skipped when inapplicable (e.g.
-                    DBNet18 when weights or runtime are unavailable, rotation
-                    candidates when already upright).  Best candidate wins.
+      'exhaustive': evaluates a dynamic candidate set combining baseline,
+                    detector, decoder, preprocessing, deskew, magnification,
+                    orientation, and DBNet18 variants.  The total size varies
+                    with image content and available dependencies.
+                    Best candidate wins.
 
     See module docstring for all tunable environment variables.
     """
@@ -2048,6 +2068,7 @@ class EasyOCRBackend:
                     quantize=self._quantize,
                     _dbnet_diag=self._last_dbnet_diag,
                     _dbnet_precomputed=dbnet_state,
+                    record_call=self._record_call,
                 )
                 if (
                     self._last_dbnet_diag
@@ -2057,7 +2078,9 @@ class EasyOCRBackend:
                     self._dbnet_runtime_state = False
                     self._dbnet_failure_reason = self._last_dbnet_diag[-1].get("failure_reason")
             else:
-                raw_candidates = _adaptive_candidates(self._reader, img, base_kwargs)
+                raw_candidates = _adaptive_candidates(
+                    self._reader, img, base_kwargs, record_call=self._record_call
+                )
             # Convert each candidate's raw result to pipeline tokens, pick best
             pipeline_candidates: list[tuple[str, list[OcrToken]]] = []
             for label, raw in raw_candidates:
@@ -2065,7 +2088,7 @@ class EasyOCRBackend:
                 pipeline_candidates.append((label, pl_tokens))
             tokens, cand_diag = _best_candidate(pipeline_candidates)
             self._last_candidate_diagnostics = cand_diag
-            self._easyocr_calls += len(raw_candidates)
+            # _easyocr_calls is incremented per-call inside _record_call; no aggregate here
         else:
             raw, fallback = _run_easyocr(self._reader, img, **self._run_kwargs())
             self._record_call(fallback)

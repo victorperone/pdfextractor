@@ -389,13 +389,13 @@ def max_quality_extraction_config(
     Enables every quality flag in the pipeline:
 
     - ``ocr_quality_variants=True`` — enables multi-candidate OCR passes.
-    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — for EasyOCR, runs
-      up to 14 named candidate families (A–N) on every page, including CRAFT
-      variants, beamsearch, layout-sensitive, low-contrast, CLAHE, deskew,
-      rotation, high-magnification, and DBNet18 when available, plus adaptive
-      image preprocessing variants.  The best candidate is selected by a rich
-      scoring model (confidence, low-confidence ratio, duplicate ratio,
-      replacement character ratio).  Other engines run their own single pass.
+    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — for EasyOCR, evaluates
+      a dynamic candidate set per page combining baseline, detector, decoder,
+      preprocessing, deskew, magnification, orientation, and DBNet18 variants.
+      The candidate set size varies with image content and available dependencies.
+      The best candidate is selected by a rich scoring model (confidence,
+      low-confidence ratio, duplicate ratio, replacement character ratio).
+      Other engines run their own single pass.
     - Table detection and cross-page merging enabled.
     - Header/footer suppression enabled by default.
 

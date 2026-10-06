@@ -2211,3 +2211,426 @@ class TestCmdSetupEasyocrModels:
         assert rc == 1
         assert data["status"] == "incomplete"
         assert data["dbnet18_weights_available"] is False
+
+
+# ---------------------------------------------------------------------------
+# Deduplication of preprocessing candidates
+# ---------------------------------------------------------------------------
+
+def _make_exhaustive_reader():
+    """Minimal EasyOCR Reader mock sufficient for _exhaustive_candidates."""
+    reader = MagicMock()
+    reader.lang_list = ["pt"]
+    reader.model_storage_directory = None
+    reader.detect.return_value = (
+        [[[10, 90, 10, 30]]],
+        [[]],
+    )
+    reader.recognize.return_value = [("word", 0.9)]
+    reader.readtext.return_value = [([[0, 0], [10, 0], [10, 10], [0, 10]], "word", 0.9)]
+    return reader
+
+
+_BASE_KWARGS: dict[str, Any] = {
+    "decoder": "greedy",
+    "beamwidth": 5,
+    "adjust_contrast": 0.5,
+    "allowlist": None,
+    "blocklist": None,
+    "workers": 0,
+    "rotation_info": None,
+    "text_threshold": 0.7,
+    "low_text": 0.4,
+    "link_threshold": 0.4,
+    "min_size": 20,
+    "slope_ths": 0.1,
+    "ycenter_ths": 0.5,
+    "height_ths": 0.5,
+    "width_ths": 0.5,
+    "add_margin": 0.1,
+    "contrast_ths": 0.1,
+    "filter_ths": 0.003,
+}
+
+
+class TestNoDuplicateCandidateIds:
+    """_exhaustive_candidates must never emit the same label twice per page."""
+
+    def _run_exhaustive(self, monkeypatch, img):
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = _make_exhaustive_reader()
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader", lambda r: None)
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached",
+                            lambda r, c=None: (False, "weights_missing"))
+        monkeypatch.setattr(easyocr_mod, "_dbnet18_weights_available",
+                            lambda cache_dir=None: False)
+
+        candidates = easyocr_mod._exhaustive_candidates(
+            reader, img, _BASE_KWARGS,
+            _dbnet_precomputed=(False, "weights_missing"),
+        )
+        return [label for label, _ in candidates]
+
+    def test_no_duplicate_labels_on_normal_page(self, monkeypatch):
+        """White (high-contrast) page should produce no duplicate labels."""
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+        labels = self._run_exhaustive(monkeypatch, img)
+        assert len(labels) == len(set(labels)), (
+            f"Duplicate candidate labels on normal page: {[l for l in labels if labels.count(l) > 1]}"
+        )
+
+    def test_no_duplicate_labels_on_low_contrast_page(self, monkeypatch):
+        """Low-contrast page (uniform grey) triggers adaptive preprocessing;
+        those same labels must NOT be repeated by the exhaustive loop."""
+        # std≈0 → low_contrast signal triggers adaptive preprocessing
+        img = np.full((120, 320, 3), 128, dtype=np.uint8)
+        labels = self._run_exhaustive(monkeypatch, img)
+        assert len(labels) == len(set(labels)), (
+            f"Duplicate candidate labels on low-contrast page: "
+            f"{[l for l in labels if labels.count(l) > 1]}"
+        )
+
+    def test_no_duplicate_labels_on_dark_background_page(self, monkeypatch):
+        """Dark background page triggers both inverted_grayscale and other adaptive
+        variants; none of those must be repeated by the exhaustive loop."""
+        # mean<112, >55% pixels<96 → dark_background signal
+        img = np.full((120, 320, 3), 40, dtype=np.uint8)
+        labels = self._run_exhaustive(monkeypatch, img)
+        assert len(labels) == len(set(labels)), (
+            f"Duplicate candidate labels on dark-background page: "
+            f"{[l for l in labels if labels.count(l) > 1]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fallback propagation through record_call
+# ---------------------------------------------------------------------------
+
+class TestFallbackPropagation:
+    """Each _run_easyocr call in adaptive/exhaustive must report to record_call."""
+
+    def _make_fallback_reader(self, fallback: bool):
+        """Reader that always triggers (or skips) the readtext() fallback path."""
+        reader = MagicMock()
+        reader.lang_list = ["pt"]
+        reader.model_storage_directory = None
+        if fallback:
+            # reformat_input raises → fallback fires, readtext returns one token
+            reader.reformat_input = MagicMock(side_effect=RuntimeError("reformat_unavailable"))
+            reader.readtext.return_value = [
+                ([[0, 0], [10, 0], [10, 10], [0, 10]], "fallback_word", 0.9)
+            ]
+        else:
+            reader.detect.return_value = ([[[10, 90, 10, 30]]], [[]])
+            reader.recognize.return_value = [("word", 0.9)]
+            reader.readtext.return_value = []
+        return reader
+
+    def test_adaptive_all_fallback_counted(self, monkeypatch):
+        """When every _run_easyocr call in adaptive falls back, record_call
+        is invoked once per call with a non-None fallback dict."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_fallback_reader(fallback=True)
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+
+        recorded: list[Any] = []
+        easyocr_mod._adaptive_candidates(
+            reader, img, _BASE_KWARGS, record_call=recorded.append
+        )
+
+        calls = len(recorded)
+        fallbacks = sum(1 for fb in recorded if fb is not None)
+        assert calls >= 2, "adaptive must make at least 2 OCR calls"
+        assert fallbacks == calls, (
+            f"Expected all {calls} calls to be fallbacks, got {fallbacks}"
+        )
+
+    def test_adaptive_no_fallback_when_nominal(self, monkeypatch):
+        """When _run_easyocr returns None fallback, record_call receives None each time."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        nominal_result = [([[0, 0], [10, 0], [10, 10], [0, 10]], "word", 0.9)]
+
+        def fake_nominal(*args, **kwargs):
+            return nominal_result, None  # no fallback
+
+        monkeypatch.setattr(easyocr_mod, "_run_easyocr", fake_nominal)
+
+        reader = _make_exhaustive_reader()
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+
+        recorded: list[Any] = []
+        easyocr_mod._adaptive_candidates(
+            reader, img, _BASE_KWARGS, record_call=recorded.append
+        )
+
+        assert len(recorded) >= 2
+        assert all(fb is None for fb in recorded), (
+            "No fallbacks expected on nominal path"
+        )
+
+    def test_exhaustive_fallback_counted_per_call(self, monkeypatch):
+        """record_call is called once per _run_easyocr invocation inside exhaustive."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_fallback_reader(fallback=True)
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader", lambda r: None)
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached",
+                            lambda r, c=None: (False, "weights_missing"))
+
+        recorded: list[Any] = []
+        easyocr_mod._exhaustive_candidates(
+            reader, img, _BASE_KWARGS,
+            _dbnet_precomputed=(False, "weights_missing"),
+            record_call=recorded.append,
+        )
+
+        calls = len(recorded)
+        fallbacks = sum(1 for fb in recorded if fb is not None)
+        assert calls >= 2, "exhaustive must make at least 2 OCR calls"
+        assert fallbacks == calls, (
+            f"All {calls} calls should be fallbacks, got {fallbacks}"
+        )
+
+    def test_exhaustive_mixed_fallback_counts_correctly(self, monkeypatch):
+        """Verify easyocr_calls and easyocr_fallback_count via EasyOCRBackend.recognize_page."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        # Two calls: first always returns nominal, second always falls back.
+        call_n = {"n": 0}
+        nominal_result = [([[0, 0], [10, 0], [10, 10], [0, 10]], "word", 0.9)]
+        fallback_result = [([[0, 0], [10, 0], [10, 10], [0, 10]], "fallback", 0.8)]
+
+        def fake_run_easyocr(*args, **kwargs):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                return nominal_result, None  # nominal
+            else:
+                return fallback_result, {"primary_error": "test_fallback"}
+
+        monkeypatch.setattr(easyocr_mod, "_run_easyocr", fake_run_easyocr)
+
+        reader = _make_exhaustive_reader()
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+
+        recorded: list[Any] = []
+        easyocr_mod._adaptive_candidates(
+            reader, img, _BASE_KWARGS, record_call=recorded.append
+        )
+
+        assert len(recorded) >= 2, "Must have at least 2 calls"
+        none_count = sum(1 for fb in recorded if fb is None)
+        fallback_count = sum(1 for fb in recorded if fb is not None)
+        assert none_count >= 1, "At least the first call should be nominal"
+        assert fallback_count >= 1, "At least the second call should be fallback"
+
+
+# ---------------------------------------------------------------------------
+# Rotation candidates: scorer decides, not pre-filter
+# ---------------------------------------------------------------------------
+
+class TestRotationCandidateNotDiscarded:
+    """In exhaustive mode, rotation candidates with any tokens reach the scorer
+    regardless of whether they have fewer tokens than the default candidate."""
+
+    def _make_reader_with_token_counts(self, monkeypatch, default_tokens: int, rot_tokens: int):
+        """Build a reader where the first non-adaptive OCR call returns 'default_tokens'
+        and every subsequent call (rotations, candidates) returns 'rot_tokens'.
+
+        We use a counter to distinguish: the very first call is always the
+        default/adaptive baseline; all later calls (rotations etc.) are treated
+        as rotations for this test fixture.
+        """
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        call_n = {"n": 0}
+
+        def fake_run_easyocr(reader_arg, img_arg, **kwargs):
+            call_n["n"] += 1
+            # First 2 calls are the adaptive baseline (default + high_recall).
+            n = default_tokens if call_n["n"] <= 2 else rot_tokens
+            result = [
+                ([[i * 10, 0], [i * 10 + 8, 0], [i * 10 + 8, 10], [i * 10, 10]], f"t{i}", 0.9)
+                for i in range(n)
+            ]
+            return result, None
+
+        monkeypatch.setattr(easyocr_mod, "_run_easyocr", fake_run_easyocr)
+        monkeypatch.setattr(easyocr_mod, "_build_dbnet18_reader", lambda r: None)
+        monkeypatch.setattr(easyocr_mod, "_probe_dbnet18_runtime_uncached",
+                            lambda r, c=None: (False, "weights_missing"))
+        monkeypatch.setattr(easyocr_mod, "_apply_clahe", lambda img: img)
+        monkeypatch.setattr(easyocr_mod, "_apply_deskew_with_inverse",
+                            lambda img: (img, None))
+        monkeypatch.setattr(easyocr_mod, "_rebuild_reader_no_quantize", lambda r: None)
+        monkeypatch.setattr(easyocr_mod, "_image_preprocessing_candidates",
+                            lambda img, adaptive=False: [])
+
+        reader = _make_exhaustive_reader()
+        return reader
+
+    def test_rotation_with_fewer_tokens_than_default_is_included(self, monkeypatch):
+        """rot90 with fewer tokens than default must still appear in the candidate set."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_reader_with_token_counts(monkeypatch, default_tokens=10, rot_tokens=5)
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+
+        candidates = easyocr_mod._exhaustive_candidates(
+            reader, img, _BASE_KWARGS,
+            _dbnet_precomputed=(False, "weights_missing"),
+        )
+        candidate_ids = [label for label, _ in candidates]
+
+        # At least one rotation candidate must be present even with fewer tokens.
+        rotation_labels = [l for l in candidate_ids if l.startswith("rot")]
+        assert rotation_labels, (
+            "Expected at least one rotation candidate even when it has fewer tokens "
+            f"than default. Got labels: {candidate_ids}"
+        )
+
+    def test_rotation_with_no_tokens_is_excluded(self, monkeypatch):
+        """rot90 that returns zero tokens must NOT be added (empty result)."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        reader = self._make_reader_with_token_counts(monkeypatch, default_tokens=5, rot_tokens=0)
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+
+        candidates = easyocr_mod._exhaustive_candidates(
+            reader, img, _BASE_KWARGS,
+            _dbnet_precomputed=(False, "weights_missing"),
+        )
+        candidate_ids = [label for label, _ in candidates]
+
+        rotation_labels = [l for l in candidate_ids if l.startswith("rot")]
+        assert not rotation_labels, (
+            f"Expected no rotation candidates when result is empty; got {rotation_labels}"
+        )
+
+    def test_remap_called_before_adding_rotation_candidate(self, monkeypatch):
+        """_remap_raw_for_rotation must be invoked (not bypassed) for each rotation."""
+        from structured_pdf_text.ocr.backends import easyocr as easyocr_mod
+
+        remap_calls = {"n": 0}
+        original_remap = easyocr_mod._remap_raw_for_rotation
+
+        def counting_remap(raw, angle, rh, rw):
+            remap_calls["n"] += 1
+            return original_remap(raw, angle, rh, rw)
+
+        monkeypatch.setattr(easyocr_mod, "_remap_raw_for_rotation", counting_remap)
+
+        # 5 tokens for every call so all rotations are added
+        reader = self._make_reader_with_token_counts(monkeypatch, default_tokens=5, rot_tokens=5)
+        img = np.full((120, 320, 3), 255, dtype=np.uint8)
+
+        easyocr_mod._exhaustive_candidates(
+            reader, img, _BASE_KWARGS,
+            _dbnet_precomputed=(False, "weights_missing"),
+        )
+
+        assert remap_calls["n"] == 3, (
+            f"Expected _remap_raw_for_rotation to be called 3 times (one per rotation angle), "
+            f"got {remap_calls['n']}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Preflight _check_max_quality_easyocr: planner/direct-recognition guards
+# ---------------------------------------------------------------------------
+
+class TestPreflightCheckMaxQualityGuards:
+    """_check_max_quality_easyocr must set planner/direct flags to False when
+    the backend returns empty tokens, without raising exceptions."""
+
+    def _make_fake_backend(self, *, page_tokens: list, direct_tokens: list):
+        """Return a fake OCR backend object for injection into the preflight function."""
+        diag_data = {
+            "dbnet_weights_available": False,
+            "dbnet_runtime_available": False,
+            "dbnet_failure_reason": "weights_missing",
+        }
+
+        class FakeBackend:
+            def recognize_page(self, img, page_index, **kwargs):
+                return page_tokens
+
+            def recognize_direct(self, img, page_index, **kwargs):
+                return direct_tokens
+
+            def consume_page_diagnostics(self):
+                return diag_data
+
+            @property
+            def capabilities(self):
+                class Cap:
+                    multiple_detectors = False
+                return Cap()
+
+            def close(self):
+                pass
+
+        return FakeBackend()
+
+    def _make_ready_readiness(self):
+        from structured_pdf_text.ocr.readiness import ReadinessStatus
+        class _R:
+            status = ReadinessStatus.READY
+            reason_code = None
+        return _R()
+
+    def test_exhaustive_planner_false_when_recognize_page_returns_empty(self, monkeypatch):
+        """When recognize_page returns [], exhaustive_planner_ready must be False."""
+        import importlib.util
+        from pathlib import Path
+
+        spec = importlib.util.spec_from_file_location(
+            "preflight_test1",
+            str(Path(__file__).resolve().parent.parent / "scripts" / "preflight_ocr_backends.py"),
+        )
+        preflight = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(preflight)  # type: ignore[union-attr]
+
+        fake_backend = self._make_fake_backend(page_tokens=[], direct_tokens=[("tok", 0.9)])
+
+        # build_ocr_backend is imported locally inside _check_max_quality_easyocr;
+        # patch the factory module so the local import picks up our fake.
+        import structured_pdf_text.ocr.factory as factory_mod
+        monkeypatch.setattr(factory_mod, "build_ocr_backend", lambda cfg: fake_backend)
+        monkeypatch.setattr(preflight, "probe_deep", lambda cfg: self._make_ready_readiness())
+
+        report = preflight._check_max_quality_easyocr("pt-BR")
+
+        assert report["exhaustive_planner_ready"] is False
+        assert report["exhaustive_planner_reason"] == "exhaustive_planner_returned_no_tokens"
+
+    def test_direct_recognition_false_when_recognize_direct_returns_empty(self, monkeypatch):
+        """When recognize_direct returns [], direct_recognition_ready must be False."""
+        import importlib.util
+        from pathlib import Path
+
+        spec = importlib.util.spec_from_file_location(
+            "preflight_test2",
+            str(Path(__file__).resolve().parent.parent / "scripts" / "preflight_ocr_backends.py"),
+        )
+        preflight = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(preflight)  # type: ignore[union-attr]
+
+        fake_backend = self._make_fake_backend(
+            page_tokens=[("tok", 0.9)], direct_tokens=[]
+        )
+
+        import structured_pdf_text.ocr.factory as factory_mod
+        monkeypatch.setattr(factory_mod, "build_ocr_backend", lambda cfg: fake_backend)
+        monkeypatch.setattr(preflight, "probe_deep", lambda cfg: self._make_ready_readiness())
+
+        report = preflight._check_max_quality_easyocr("pt-BR")
+
+        assert report["direct_recognition_ready"] is False
+        assert report["direct_recognition_reason"] == "direct_recognition_returned_no_tokens"
+        # exhaustive must have passed since page_tokens was non-empty
+        assert report["exhaustive_planner_ready"] is True

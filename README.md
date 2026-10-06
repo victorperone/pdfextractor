@@ -301,7 +301,7 @@ reported separately:
 Run `scripts/preflight_ocr_backends.py --deep-smoke --max-quality` to verify
 full max-quality readiness.  When CRAFT and the exhaustive planner pass but
 DBNet18 is unavailable, the result is reported as `INCOMPLETE` (not broken) and
-extraction continues with the remaining 13 candidate families.
+extraction continues with the remaining candidate set (DBNet18 is skipped; all other candidates still run).
 
 ## CLI examples
 
