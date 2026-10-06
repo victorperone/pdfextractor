@@ -1,3 +1,9 @@
+"""Core extraction pipeline: PdfTextExtractor and page-level OCR orchestration.
+
+Provides :class:`PdfTextExtractor`, which coordinates native PDF text
+extraction, layout analysis, table detection, and OCR-based recovery into a
+unified :class:`~structured_pdf_text.document.StructuredDocument`.
+"""
 from __future__ import annotations
 
 import inspect

@@ -262,17 +262,16 @@ def _smoke_precision_checks(recognised_text: str) -> dict[str, bool]:
 def probe_deep(config: ExtractorConfig) -> ReadinessResult:
     """Load the selected backend, run a Portuguese smoke image, and validate CER.
 
-        Unlike :func:`probe_static`, this probe instantiates the OCR backend and
-        runs inference on a synthetic image containing:
-        - Real Portuguese words with diacritics
-        - Hyphenated Portuguese words
-        - Currency (R$ 1.234,56), date (03/10/2026), percentage (12,5%)
-        - CPF and CNPJ with their canonical punctuation
+    Unlike :func:`probe_static`, this probe instantiates the OCR backend and
+    runs inference on a synthetic image containing:
+    - Real Portuguese words with diacritics
+    - Hyphenated Portuguese words
+    - Currency (R$ 1.234,56), date (03/10/2026), percentage (12,5%)
+    - CPF and CNPJ with their canonical punctuation
 
-        The recognised text is compared against the expected ground truth using
-        character-level CER. A CER above ``_SMOKE_MAX_CER`` downgrades the result
-        to ``INCOMPLETE / deep_smoke_high_cer``.
-
+    The recognised text is compared against the expected ground truth using
+    character-level CER. A CER above ``_SMOKE_MAX_CER`` downgrades the result
+    to ``INCOMPLETE / deep_smoke_high_cer``.
     """
     static = probe_static(config)
     if static.status != ReadinessStatus.READY:

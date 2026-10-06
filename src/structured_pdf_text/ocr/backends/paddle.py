@@ -106,8 +106,11 @@ def _has_torch_conflict() -> bool:
 class PaddleOCRBackend:
     """OCRBackend implementation backed by PaddleOcrEngine.
 
-    Thin wrapper: all ``recognize_page`` / ``recognize_region`` calls are
-    forwarded unchanged so the existing pipeline output is preserved exactly.
+    Delegates ``recognize_page`` and ``recognize_region`` to the underlying
+    PaddleOcrEngine after applying CF-4 subprocess routing when needed (see
+    module docstring).  ``recognize_region`` adds page-bbox crop logic to map
+    region coordinates correctly before forwarding.  The ``recognize`` method
+    provides the canonical OCRResult contract for the benchmarking layer.
     """
 
     def __init__(self, config: ExtractorConfig) -> None:
@@ -381,6 +384,7 @@ class PaddleOCRBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
+        """Return engine identity including package versions, artifact hashes, and runtime mode."""
         return OCRBackendIdentity(
             engine="paddle",
             runtime="paddle_subprocess" if self._subprocess_config else "paddle_static",
@@ -433,6 +437,7 @@ class PaddleOCRBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
+        """Return static capability flags for this backend."""
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -449,6 +454,7 @@ class PaddleOCRBackend:
     # ------------------------------------------------------------------
 
     def recognize(self, request: OCRRequest) -> OCRResult:
+        """Run PaddleOCR inference (in-process or via subprocess) and return a canonical OCRResult."""
         t0 = time.perf_counter()
 
         if self._closed:
@@ -519,6 +525,7 @@ class PaddleOCRBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        """Run OCR on a full page image, routing through the subprocess worker when needed."""
         if self._closed:
             raise RuntimeError("PaddleOCR backend is closed")
         if self._subprocess_config is not None:
@@ -538,6 +545,7 @@ class PaddleOCRBackend:
         self, page_image: object, page_index: int, region_bbox: BBox,
         *, page_bbox: BBox | None = None,
     ) -> list[OcrToken]:
+        """Crop and recognize a region; applies raster-crop logic when page_bbox is provided."""
         if self._closed:
             raise RuntimeError("PaddleOCR backend is closed")
         if page_bbox is not None:
@@ -563,6 +571,7 @@ class PaddleOCRBackend:
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        """Return 'ready', 'missing', or 'unknown' after validating local model files and the subprocess."""
         from structured_pdf_text.ocr.paddle import validate_local_ocr_models
 
         try:
@@ -586,6 +595,7 @@ class PaddleOCRBackend:
         return "ready"
 
     def close(self) -> None:
+        """Gracefully shut down the subprocess worker (if active) and release the engine."""
         if self._closed:
             return
         with self._worker_lock:

@@ -1,3 +1,14 @@
+"""Extraction configuration: modes, quality policies, thresholds, and presets.
+
+Defines :class:`ExtractorConfig` and the supporting enums and dataclasses that
+control every configurable aspect of the extraction pipeline — OCR engine
+selection, quality policies, table detection, language, and render scale.
+
+Key functions:
+  :func:`max_quality_extraction_config` — preset for exhaustive-quality extraction.
+  :func:`best_extraction_config` — preset for balanced quality/speed.
+  :func:`effective_ocr_quality_policy` — resolves the active policy from a config.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -375,15 +386,16 @@ def max_quality_extraction_config(
 ) -> "ExtractorConfig":
     """Return the config optimised for maximum extraction quality.
 
-    Activates every quality improvement currently implemented for EasyOCR:
+    Enables every quality flag in the pipeline:
 
     - ``ocr_quality_variants=True`` — enables multi-candidate OCR passes.
-    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — runs up to 13
-      candidate families (A–N) on every page, including CRAFT variants,
-      beamsearch, layout-sensitive, low-contrast, CLAHE, deskew, rotation,
-      high-magnification, and DBNet18 when available.  The best candidate is
-      selected by a rich scoring model (confidence, low-confidence ratio,
-      duplicate ratio, replacement character ratio).
+    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — for EasyOCR, runs
+      up to 14 named candidate families (A–N) on every page, including CRAFT
+      variants, beamsearch, layout-sensitive, low-contrast, CLAHE, deskew,
+      rotation, high-magnification, and DBNet18 when available, plus adaptive
+      image preprocessing variants.  The best candidate is selected by a rich
+      scoring model (confidence, low-confidence ratio, duplicate ratio,
+      replacement character ratio).  Other engines run their own single pass.
     - Table detection and cross-page merging enabled.
     - Header/footer suppression enabled by default.
 

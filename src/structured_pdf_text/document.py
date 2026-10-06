@@ -1,3 +1,8 @@
+"""Domain model: token types, page/document structures, and content blocks.
+
+All public types in this module are the canonical pipeline representation used
+by layout, OCR, table extraction, reading order, and rendering stages.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass

@@ -1,11 +1,11 @@
-"""RAW OCR benchmark — Fase 3 do comparativo de engines.
+"""RAW OCR benchmark — page-level CER/WER evaluation across OCR engines.
 
-Renders each page of a PDF to pixels (congelado), runs one OCR engine,
-saves canonical OCRResult per page, and optionally computes CER/WER against
-a reference Markdown file.  Generates a run-manifest JSON (see §39 of
-Plano_Comparativo_Paddle.md).
+Renders each page of a PDF to pixels at a fixed render scale, runs one OCR
+engine, saves a canonical OCRResult per page, and optionally computes CER/WER
+against a reference Markdown file.  Produces a run-manifest JSON for
+reproducibility tracking.
 
-Usage (Windows PowerShell — servidor):
+Usage (Windows PowerShell):
     python scripts\\benchmark_raw_ocr.py corpus\\Document_AI_V3.pdf ^
         --engine paddle ^
         --reference corpus\\Corpus_Integrado_PDF_OCR_TableMagic_V3_REFERENCIA.md ^
@@ -19,15 +19,14 @@ Usage (Linux / WSL):
         --manifesto corpus/Corpus_Integrado_PDF_OCR_TableMagic_V3_MANIFESTO.json \\
         --output-dir output/benchmark_raw
 
-Benchmark rules (Plano_Comparativo_Paddle.md §60):
-  - Mesmos pixels para todas as engines (--render-scale fixado por run).
-  - Falhas permanecem no denominador.
-  - Pré-requisito: todos os pesos devem estar materializados antes da execução.
-    EasyOCR: o backend deve ser instanciado com download_enabled=False para
-    garantir que nenhum download ocorra durante a medição. Rodar
-    setup_ocr_benchmark.sh/.ps1 antes de qualquer run medido.
-  - Versões registradas no manifesto; hashes de modelo são registrados quando
-    o backend os disponibiliza via identity.artifact_hashes.
+Benchmark rules:
+  - All engines receive identical rendered pixels (--render-scale is fixed per run).
+  - Failures remain in the denominator; they are never excluded from CER/WER.
+  - All model weights must be present before measurement begins.
+    For EasyOCR, run setup_ocr_benchmark.sh/.ps1 first; the backend must not
+    download weights during a measured run (download_enabled=False).
+  - Package versions and model artifact hashes are recorded in the manifest
+    via identity.artifact_hashes when the backend provides them.
 """
 from __future__ import annotations
 

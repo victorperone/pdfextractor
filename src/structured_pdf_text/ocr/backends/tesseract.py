@@ -5,7 +5,7 @@ and parses the TSV output directly. Requires:
   - tesseract 5.x in PATH
   - por.traineddata in tessdata directory (for Portuguese)
 
-Language mapping: config.language "pt" → Tesseract "-l por"
+Language mapping: config.language "pt-BR" (or "pt") → Tesseract "-l por" via backend_language()
 PSM 3 (auto page segmentation) and OEM 1 (LSTM only) are the defaults.
 
 Environment variables
@@ -462,6 +462,7 @@ class TesseractBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
+        """Return engine identity including version, tessdata path, and active settings."""
         tessdata_dir_env = os.environ.get("TESSERACT_TESSDATA_DIR", "")
         effective_language = "+".join(
             "pt-BR" if item == "por" else "en" if item == "eng" else item
@@ -500,6 +501,7 @@ class TesseractBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
+        """Return static capability flags; page_orientation is True only when TESSERACT_OSD=1."""
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -517,6 +519,7 @@ class TesseractBackend:
     # ------------------------------------------------------------------
 
     def recognize(self, request: OCRRequest) -> OCRResult:
+        """Run Tesseract via subprocess and return a canonical OCRResult."""
         t0 = time.perf_counter()
         # Use DPI from request when available (benchmark sets it explicitly).
         dpi = request.dpi if request.dpi else self._dpi
@@ -575,6 +578,7 @@ class TesseractBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        """Run OCR on a full page image; applies OSD rotation when TESSERACT_OSD=1."""
         tsv, osd_rotation, original_width, original_height = self._run_effective_tesseract(
             page_image, self._dpi
         )
@@ -595,6 +599,7 @@ class TesseractBackend:
         *,
         page_bbox: "BBox | None" = None,
     ) -> list[OcrToken]:
+        """Crop region_bbox from page_image and run Tesseract, returning pipeline-format tokens."""
         import numpy as np
         from PIL import Image
 
@@ -651,6 +656,7 @@ class TesseractBackend:
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        """Return 'ready', 'missing', or 'unknown' based on tesseract --list-langs output."""
         try:
             result = subprocess.run(
                 [self._tesseract_cmd, *self._extra_flags, "--list-langs"],
@@ -673,6 +679,7 @@ class TesseractBackend:
             return "unknown"
 
     def close(self) -> None:
+        """No-op: Tesseract runs as a subprocess per call; no persistent state to release."""
         pass
 
 

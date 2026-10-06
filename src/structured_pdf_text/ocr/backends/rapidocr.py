@@ -1,16 +1,16 @@
 """RapidOCR backend with ONNX Runtime and OpenVINO inference providers.
 
-Both providers use the unified rapidocr package. Imports from the retired
-provider packages are retained only as a runtime compatibility fallback.
+Both providers use the unified ``rapidocr`` package (a single import, no
+provider-specific packages).  ONNX Runtime and OpenVINO are selected at
+instantiation time via the ``runtime`` parameter.
 
 CF-2: Direct PP-OCRv6 ONNX export from Paddle is blocked on Windows by a DLL
-incompatibility (paddle2onnx 2.x + PaddlePaddle 3.3.1). Both backends therefore
-use PP-OCRv4 models.  PP-OCRv6 ONNX files must be exported on Linux and then
-pointed to via the env vars below.
+incompatibility (paddle2onnx 2.x + PaddlePaddle 3.3.1).  PP-OCRv6 ONNX files
+must be exported on Linux and then pointed to via the env vars below.
 
-**Default bundled model is PP-OCRv4 ch (Chinese + basic ASCII), which does NOT
-cover Portuguese diacritics (ã ç ê õ).** For Portuguese, configure the paired
-PP-OCRv4 Latin recognizer and its matching dictionary:
+**Default bundled model is a Chinese + basic ASCII model that does NOT cover
+Portuguese diacritics (ã ç ê õ).** For Portuguese, configure the paired
+PP-OCRv3 Latin recognizer and its matching dictionary:
 
     RAPIDOCR_REC_MODEL=/path/to/latin_PP-OCRv3_rec_mobile.onnx
     RAPIDOCR_REC_KEYS=/path/to/latin_dict.txt
@@ -391,6 +391,7 @@ class RapidOCRBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
+        """Return engine identity: package versions, artifact hashes, and tuning parameters."""
         pkg_name = "rapidocr" if self._unified else (
             "rapidocr-onnxruntime" if self._runtime == "onnxruntime" else "rapidocr-openvino"
         )
@@ -424,6 +425,7 @@ class RapidOCRBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
+        """Return static capability flags for this backend."""
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -438,6 +440,7 @@ class RapidOCRBackend:
     # ------------------------------------------------------------------
 
     def recognize(self, request: OCRRequest) -> OCRResult:
+        """Run CLAHE-enhanced RapidOCR inference and return a canonical OCRResult."""
         t0 = time.perf_counter()
         if self._closed:
             return OCRResult(
@@ -482,6 +485,7 @@ class RapidOCRBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        """Run OCR on a full page image and return pipeline-format tokens."""
         if self._closed:
             raise RuntimeError("RapidOCR backend is closed")
         img = _to_numpy(page_image)
@@ -498,6 +502,7 @@ class RapidOCRBackend:
         *,
         page_bbox: "BBox | None" = None,
     ) -> list[OcrToken]:
+        """Crop region_bbox from page_image, run OCR, and return pipeline-format tokens."""
         if self._closed:
             raise RuntimeError("RapidOCR backend is closed")
         img = _to_numpy(page_image)
@@ -519,6 +524,7 @@ class RapidOCRBackend:
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        """Return 'ready', 'missing', or 'unknown' after probing the engine with a blank image."""
         try:
             _import_rapidocr(self._runtime)
         except ImportError:
@@ -537,6 +543,7 @@ class RapidOCRBackend:
             return "unknown"
 
     def close(self) -> None:
+        """Release the RapidOCR engine and mark this backend as closed."""
         if self._closed:
             return
         engine = getattr(self, "_engine", None)

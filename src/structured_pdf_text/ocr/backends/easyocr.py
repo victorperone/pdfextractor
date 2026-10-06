@@ -18,9 +18,12 @@ EASYOCR_RECOG_NETWORK      Recognition model name (default: '' → EasyOCR defau
 EASYOCR_ALLOW_DOWNLOAD     Set to '1' to allow model downloads during Reader init.
                            Default: '0' (download disabled). Use only during setup,
                            never during a measured benchmark run.
-EASYOCR_DECODER            CTC decoder: 'greedy' or 'beamsearch' (default: 'greedy').
-                           beamsearch reduces substitution errors but adds ~20-40%
-                           inference time and can produce overflow warnings on some inputs.
+EASYOCR_DECODER            CTC decoder: 'greedy', 'beamsearch', or 'wordbeamsearch'
+                           (default: 'greedy').  beamsearch reduces substitution errors
+                           but adds ~20-40% inference time and can produce overflow
+                           warnings on some inputs.  wordbeamsearch adds vocabulary-level
+                           beam search, best for pt-BR prose; slightly slower than
+                           beamsearch.
 EASYOCR_BEAMWIDTH          Beam width for beamsearch decoder (default: 5, min: 1).
                            Only used when EASYOCR_DECODER=beamsearch.
 EASYOCR_WORKERS            DataLoader workers for recognition.
@@ -97,9 +100,6 @@ EASYOCR_QUANTIZE           Set to '0' to disable PyTorch model quantization.
                            changing in production.
                            In exhaustive mode a no_quantize candidate is also run
                            even when this is '1' so the effect can be observed.
-EASYOCR_HIGH_MAG_RATIO     Target magnification for the high_mag exhaustive
-                           candidate (§17).  Default: 1.5× the base mag_ratio,
-                           capped at 2.5.  Only used in exhaustive mode.
 EASYOCR_MAX_QUALITY_THREADS
                            Set to '1' to enable maximum-quality thread allocation.
                            When active, the backend probes available CPUs at
@@ -707,6 +707,16 @@ def _result_to_pipeline_tokens(
     offset_x: float = 0.0, offset_y: float = 0.0,
     source: "SourceKind" = SourceKind.OCR_PAGE,
 ) -> list[OcrToken]:
+    """Convert EasyOCR raw result tuples to pipeline OcrToken instances.
+
+    Each raw item is ``(bbox_pts, text, confidence)`` as returned by
+    ``reader.detect()`` + ``reader.recognize()`` (or the readtext() fallback).
+    Invalid items (missing text, degenerate geometry) are silently skipped.
+
+    ``offset_x``/``offset_y`` shift all token coordinates into the parent
+    coordinate space when the result comes from a region crop rather than the
+    full page.  ``source`` is forwarded to every token for provenance tracking.
+    """
     if not raw:
         return []
     from structured_pdf_text.geometry import Point
@@ -751,13 +761,18 @@ def _candidate_metrics(tokens: "list[OcrToken]") -> "dict[str, float]":
     """Compute quality metrics for a candidate token list.
 
     Returns a dict with keys used both for scoring and for diagnostics:
-      mean_confidence         — average OCR confidence (0..1)
-      low_conf_ratio          — fraction of tokens below 0.60 confidence
-      replacement_char_ratio  — fraction of characters that are U+FFFD or control chars
-      duplicate_ratio         — fraction of token texts that are exact duplicates
-      horizontal_ratio        — fraction of tokens with width >= height (horizontal text)
-      char_count              — total non-whitespace characters
-      token_count             — number of tokens
+      mean_confidence              — average OCR confidence (0..1)
+      lower_quartile_confidence    — 25th-percentile confidence; guards against
+                                     outlier-driven mean inflation
+      low_conf_ratio               — fraction of tokens below 0.60 confidence
+      replacement_char_ratio       — fraction of characters that are U+FFFD or control chars
+      duplicate_ratio              — fraction of token texts that are exact duplicates
+      horizontal_ratio             — fraction of tokens with width >= height
+      invalid_geometry_ratio       — fraction of tokens with degenerate/zero-area bboxes
+      suspicious_insertion_ratio   — fraction of tokens whose text looks like
+                                     hallucinated insertions (very short, high-conf duplicates)
+      char_count                   — total non-whitespace characters
+      token_count                  — number of tokens
     """
     import math as _math
     import unicodedata as _ud
@@ -874,15 +889,19 @@ def _score_candidate(tokens: "list[OcrToken]") -> float:
     """Score a candidate token list for selection. Higher is better.
 
     Scoring components:
-      + mean_confidence              — primary quality signal
-      + char_count bonus             — logarithmic, capped at 0.08, so content
-                                       coverage matters but never overrides confidence
-      + horizontal_ratio * 0.02      — small bonus for coherent horizontal text
-      + lexical_plausibility * 0.03  — small bonus for pt-BR alphabetic plausibility
-                                       (§38); max 0.03 — only acts as tiebreaker
-      - low_conf_ratio * 0.15        — penalise high fraction of uncertain tokens
-      - replacement_char_ratio * 0.30 — penalise garbled / control characters
-      - duplicate_ratio * 0.10       — penalise repeated token texts (hallucination)
+      + mean_confidence                  — primary quality signal
+      + lower_quartile_confidence * 0.05 — guards against outlier-driven mean inflation
+      + char_count bonus                 — logarithmic, capped at 0.08, so content
+                                           coverage matters but never overrides confidence
+      + horizontal_ratio * 0.02          — small bonus for coherent horizontal text
+      + lexical_plausibility * 0.03      — small bonus for pt-BR alphabetic plausibility
+                                           (§38); max 0.03 — only acts as tiebreaker
+      - low_conf_ratio * 0.15            — penalise high fraction of uncertain tokens
+      - replacement_char_ratio * 0.30    — penalise garbled / control characters
+      - duplicate_ratio * 0.10           — penalise repeated token texts (hallucination)
+      - invalid_geometry_ratio * 0.40    — largest single penalty; degenerate bboxes
+                                           indicate a broken detection pass
+      - suspicious_insertion_ratio * 0.08 — penalise hallucinated short insertions
 
     A candidate may not win solely by having more characters if those characters
     are low-confidence, garbled, or duplicated (§22 rollback rule).
@@ -973,6 +992,15 @@ def _best_candidate(
 
 
 def _baseline_preservation_ratio(baseline: list[OcrToken], candidate: list[OcrToken]) -> float:
+    """Return the fraction of high-confidence baseline tokens preserved in the candidate.
+
+    A token is "preserved" when the candidate contains a text-and-position match:
+    same normalized text (case-folded, whitespace-collapsed) AND IoU ≥ 0.25.
+    Returns 1.0 when the baseline is empty (no baseline to compare against).
+
+    Used as a guard in :func:`_best_candidate` to penalise candidates that drop
+    reliable baseline detections even when their average confidence is higher.
+    """
     if not baseline:
         return 1.0
     preserved = 0
@@ -1004,11 +1032,15 @@ def _adaptive_candidates(
     img: "Any",
     base_kwargs: "dict[str, Any]",
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run 2 EasyOCR candidates (default + high-recall) and return raw results.
+    """Run at least 2 EasyOCR candidates (default + high-recall) and return raw results.
 
     Used when quality_policy='adaptive' or quality_variants=True.  The high-recall
     candidate uses lower CRAFT thresholds to catch faint or small text that the
     default profile may miss.  Both share the same decoder and recognizer settings.
+
+    When the image is detected as low-contrast or dark-background, additional image
+    preprocessing variants (grayscale, autocontrast, inverted) are appended
+    by :func:`_image_preprocessing_candidates` with ``adaptive=True``.
     """
     # Candidate A: default profile
     raw_a, _ = _run_easyocr(reader, img, **base_kwargs)
@@ -1265,9 +1297,14 @@ def _exhaustive_candidates(
     _dbnet_diag: "list[dict[str, Any]] | None" = None,
     _dbnet_precomputed: "tuple[bool, str | None] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run up to 14 EasyOCR candidates for exhaustive quality policy.
+    """Run up to 14 named EasyOCR candidates (A–N) for exhaustive quality policy.
 
-    Candidates (§8, §9, §10, §12, §13, §14, §15, §16, §17 from review):
+    In addition to the 14 named candidates, adaptive image preprocessing variants
+    (grayscale, autocontrast, etc.) may be appended by :func:`_adaptive_candidates`
+    when the image is detected as low-contrast or dark-background, and unconditionally
+    via a non-adaptive :func:`_image_preprocessing_candidates` call after candidate F.
+
+    Candidates (§8, §9, §10, §11, §12, §13, §14, §15, §16, §17 from review):
       A. default          — base parameters as configured
       B. high_recall      — lower CRAFT thresholds for faint/small text
       C. beamsearch       — CTC beam search decoder (if not already default)
@@ -1621,11 +1658,14 @@ class EasyOCRBackend:
 
     Quality policies (quality_policy arg to recognize_page):
       None / 'default': single EasyOCR call with configured parameters.
-      'adaptive': two candidates (default + high-recall); best wins.
-      'exhaustive': up to 14 candidate profiles (A–N); conditional candidates
-                    are skipped when inapplicable (e.g. DBNet18 when weights or
-                    runtime are unavailable, rotation when already upright).
-                    Best candidate wins.
+      'adaptive': at least 2 candidates (default + high-recall, plus adaptive
+                  image preprocessing variants when image quality signals warrant
+                  it); best wins.
+      'exhaustive': up to 14 named candidate profiles (A–N), plus unconditional
+                    image preprocessing variants not listed in the A–N set.
+                    Conditional candidates are skipped when inapplicable (e.g.
+                    DBNet18 when weights or runtime are unavailable, rotation
+                    candidates when already upright).  Best candidate wins.
 
     See module docstring for all tunable environment variables.
     """
@@ -1863,6 +1903,17 @@ class EasyOCRBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
+        """Return static capability flags for this backend instance.
+
+        ``multiple_detectors`` reflects the *cached* DBNet18 runtime probe result:
+        - False (default): probe has not run yet, or DBNet18 is unavailable.
+        - True: set only after a successful exhaustive page pass confirms that
+          DBNet18 weights are present *and* inference is functional on this runtime.
+
+        This property never triggers the DBNet18 probe; it only reads the cached
+        state set by :meth:`_ensure_dbnet18_runtime` (called by ``recognize_page``
+        with ``quality_policy="exhaustive"``).
+        """
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -1908,6 +1959,12 @@ class EasyOCRBackend:
     # ------------------------------------------------------------------
 
     def recognize(self, request: OCRRequest) -> OCRResult:
+        """Run OCR on an image crop and return a canonical OCRResult for the benchmarking layer.
+
+        Falls back to EasyOCR's readtext() when the detect/recognize split fails;
+        the result status is "recovered" in that case.  Returns "runtime_error"
+        when the backend has been closed.
+        """
         t0 = time.perf_counter()
         if self._closed:
             return OCRResult(
@@ -1960,6 +2017,19 @@ class EasyOCRBackend:
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
     ) -> list[OcrToken]:
+        """OCR a full page image and return pipeline OcrToken instances.
+
+        ``quality_policy`` controls the candidate strategy:
+          - ``None`` / ``'default'``: single EasyOCR call.
+          - ``'adaptive'``: default + high-recall + conditional preprocessing variants.
+          - ``'exhaustive'``: runs :func:`_exhaustive_candidates`, collects DBNet18
+            diagnostics via ``_last_dbnet_diag``, and selects the best candidate.
+
+        When ``quality_policy='exhaustive'``, the DBNet18 runtime state is probed
+        at most once per instance (via :meth:`_ensure_dbnet18_runtime`) and cached.
+        If the real execution fails after a positive probe, the cache is invalidated
+        so subsequent calls do not attempt DBNet18 again.
+        """
         if self._closed:
             raise RuntimeError("EasyOCR backend is closed")
         img = _to_numpy(page_image)
@@ -2012,6 +2082,11 @@ class EasyOCRBackend:
         *,
         page_bbox: "BBox | None" = None,
     ) -> list[OcrToken]:
+        """OCR a sub-region of a page and return tokens in page coordinate space.
+
+        Crops ``region_bbox`` from the full page raster, runs a single EasyOCR pass,
+        and maps token coordinates back to the page frame via the crop offset.
+        """
         if self._closed:
             raise RuntimeError("EasyOCR backend is closed")
         img = _to_numpy(page_image)
@@ -2082,6 +2157,11 @@ class EasyOCRBackend:
         return "ready"
 
     def close(self) -> None:
+        """Release the EasyOCR Reader and mark this backend as closed.
+
+        Subsequent calls to ``recognize_page`` will raise RuntimeError.
+        Idempotent — calling close() more than once is safe.
+        """
         if self._closed:
             return
         self._reader = None

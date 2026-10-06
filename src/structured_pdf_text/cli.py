@@ -1,3 +1,15 @@
+"""CLI entry point for the structured-pdf-text extractor (``pdftext`` command).
+
+Subcommands:
+  extract           — extract text or structured Markdown from a PDF
+  inspect           — inspect a single page (native evidence, raw JSON)
+  overlay           — render a page with character/token bounding boxes
+  report            — batch extraction report over a corpus directory
+  compare           — compare extractor outputs against reference adapters
+  setup-paddle-models   — download PaddleOCR model weights
+  paddle-models-status  — check PaddleOCR weight readiness
+  setup-easyocr-models  — download EasyOCR model weights (incl. optional DBNet18)
+"""
 from __future__ import annotations
 
 import argparse
@@ -71,7 +83,12 @@ def main(argv: list[str] | None = None) -> int:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pdftext",
-        description="PDF text extraction. CPU OCR defaults to oneDNN disabled; set PADDLE_ENABLE_MKLDNN=1 to opt in.",
+        description=(
+            "PDF text extraction. "
+            "Default OCR engine is EasyOCR (PyTorch CPU). "
+            "When using PaddleOCR, MKL-DNN/oneDNN is disabled by default on CPU; "
+            "set PADDLE_ENABLE_MKLDNN=1 to opt in."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -449,7 +466,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 return 1
 
         def _progress(current: int, total: int) -> None:
-            print(f"\rExtraindo página {current}/{total}...", end="", file=sys.stderr, flush=True)
+            print(f"\rExtracting page {current}/{total}...", end="", file=sys.stderr, flush=True)
 
         callback = _progress if args.progress else None
         password = None

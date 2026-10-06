@@ -191,7 +191,8 @@ class OCRBackend(Protocol):
 
         Use ``ocr.readiness.probe_static`` for checks that must not construct a
         model, and ``probe_deep`` for an explicit inference smoke test. Returned
-        values follow: ready, missing, incomplete, corrupt, unknown.
+        values follow: "ready", "missing", "unknown".  Backends may also return
+        "incomplete" when models are partially installed.
         """
         ...
 

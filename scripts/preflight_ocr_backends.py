@@ -3,12 +3,20 @@
 
 Static mode inspects packages, executables, model files and language data
 without constructing heavy inference runtimes. Pass ``--deep-smoke`` to load
-each deployment configuration and OCR a generated pt-BR sample.
+each deployment configuration and OCR a generated smoke image.
 
-Pass ``--max-quality`` (requires ``--deep-smoke`` and ``--configuration easyocr``)
-to verify the full exhaustive candidate set, including DBNet18 runtime availability.
-When CRAFT and recognizer pass but DBNet18 is unavailable the result is reported as
-INCOMPLETE/degraded rather than silently claiming max-quality is fully ready.
+Pass ``--max-quality`` (requires ``--deep-smoke``; only valid for EasyOCR)
+to verify the full exhaustive candidate set with a real inference smoke test,
+including DBNet18 weights and runtime availability.  The exhaustive planner and
+direct recognition paths are exercised with a real smoke image and must both
+return non-empty OCR tokens.  When CRAFT and the exhaustive planner pass but
+DBNet18 is unavailable, the result is reported as INCOMPLETE rather than
+silently claiming max-quality is fully ready.
+
+Exit codes:
+  0 — all checked configurations are READY
+  1 — one or more configurations are not ready (INCOMPLETE / MISSING / UNKNOWN)
+  2 — usage error (invalid flag combination or unsupported --configuration value)
 """
 from __future__ import annotations
 

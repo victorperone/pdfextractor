@@ -1,3 +1,4 @@
+"""2-D geometry primitives: Point and BBox used throughout the pipeline."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -5,6 +6,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Point:
+    """Immutable 2-D point in page-coordinate space (x right, y down, PDF points)."""
+
     x: float
     y: float
 
