@@ -780,13 +780,65 @@ class TestDeepReadinessCer:
         assert isinstance(_SMOKE_MAX_CER, float)
         assert 0.0 < _SMOKE_MAX_CER <= 1.0
 
-    def test_smoke_expected_text_contains_portuguese_chars(self):
-        """_SMOKE_EXPECTED must contain accented Portuguese characters."""
+    def test_smoke_expected_text_contains_real_portuguese_words(self):
         from structured_pdf_text.ocr.readiness import _SMOKE_EXPECTED
-        accented = set("ãõáéíóúçêô")
-        found = set(_SMOKE_EXPECTED)
-        assert accented & found, f"No accented chars found in smoke text: {_SMOKE_EXPECTED[:60]}"
 
+        expected = _SMOKE_EXPECTED.lower()
+
+        assert "ação" in expected
+        assert "órgão" in expected
+        assert "informações" in expected
+        assert "você" in expected
+        assert "avô" in expected
+
+    def test_smoke_expected_text_contains_real_hyphenated_words(self):
+        from structured_pdf_text.ocr.readiness import _SMOKE_EXPECTED
+
+        expected = _SMOKE_EXPECTED.lower()
+
+        assert "segunda-feira" in expected
+        assert "anti-inflamatório" in expected
+        assert "-" in expected
+
+    def test_smoke_precision_checks_accept_valid_pt_br_text(self):
+        from structured_pdf_text.ocr.readiness import _smoke_precision_checks
+
+        text = (
+            "Ação, órgão, informações, você, avô e põe. "
+            "segunda-feira e anti-inflamatório "
+            "R$ 1.234,56 03/10/2026 12,5% "
+            "CPF 123.456.789-09 CNPJ 12.345.678/0001-90"
+        )
+
+        checks = _smoke_precision_checks(text)
+
+        assert all(checks.values())
+
+    def test_smoke_precision_checks_reject_missing_accents(self):
+        from structured_pdf_text.ocr.readiness import _smoke_precision_checks
+
+        text = (
+            "Acao, orgao, informacoes, voce, avo e poe. "
+            "segunda-feira e anti-inflamatorio "
+            "R$ 1.234,56 03/10/2026 12,5%"
+        )
+
+        checks = _smoke_precision_checks(text)
+
+        assert checks["accented_portuguese"] is False
+
+    def test_smoke_precision_checks_reject_missing_hyphens(self):
+        from structured_pdf_text.ocr.readiness import _smoke_precision_checks
+
+        text = (
+            "Ação, órgão, informações, você, avô e põe. "
+            "segunda feira e anti inflamatório "
+            "R$ 1.234,56 03/10/2026 12,5%"
+        )
+
+        checks = _smoke_precision_checks(text)
+
+        assert checks["hyphen_preserved"] is False
 
 # ---------------------------------------------------------------------------
 # §33 — reading order uses OCR lines for prose/column detection

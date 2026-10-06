@@ -159,10 +159,10 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
 
 
 _SMOKE_LINES: list[str] = [
-    "ã õ á é í ó ú ç ê ô",
+    "Ação, órgão, informações, você, avô e põe.",
+    "segunda-feira e anti-inflamatório",
     "R$ 1.234,56 03/10/2026 12,5%",
     "CPF 123.456.789-09 CNPJ 12.345.678/0001-90",
-    "palavra com hífen",
 ]
 _SMOKE_EXPECTED: str = " ".join(_SMOKE_LINES)
 
@@ -172,6 +172,40 @@ _SMOKE_EXPECTED: str = " ".join(_SMOKE_LINES)
 # language pack, or a misconfigured recognizer.
 _SMOKE_MAX_CER: float = 0.40
 
+def _load_smoke_font(size: int = 42):
+    """Load a deterministic Unicode-capable font for the OCR readiness image."""
+    from PIL import ImageFont
+
+    candidates: list[Path] = []
+
+    configured = os.environ.get("PDFEXTRACTOR_SMOKE_FONT")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    if os.name == "nt":
+        windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+        fonts_dir = windows_dir / "Fonts"
+        candidates.extend([
+            fonts_dir / "arial.ttf",
+            fonts_dir / "segoeui.ttf",
+        ])
+    else:
+        candidates.extend([
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        ])
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return ImageFont.truetype(str(candidate), size=size)
+
+    # Pillow commonly resolves DejaVuSans.ttf even when its absolute
+    # location differs from the paths above.
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except OSError:
+        return ImageFont.load_default(size=size)
 
 def _simple_cer(hypothesis: str, reference: str) -> float:
     """Character Error Rate via Levenshtein edit distance (character-level).
@@ -195,22 +229,50 @@ def _simple_cer(hypothesis: str, reference: str) -> float:
         prev = curr
     return prev[len(r)] / len(r)
 
+def _smoke_precision_checks(recognised_text: str) -> dict[str, bool]:
+    """Validate critical pt-BR features in the deep-smoke OCR result."""
+    recognised_norm = " ".join(recognised_text.split())
+    recognised_lower = recognised_norm.lower()
+
+    return {
+        "currency_exact": "r$ 1.234,56" in recognised_lower,
+        "date_exact": "03/10/2026" in recognised_norm,
+        "percentage_exact": "12,5%" in recognised_norm,
+
+        "accented_portuguese": all(
+            word in recognised_lower
+            for word in (
+                "ação",
+                "órgão",
+                "informações",
+                "você",
+                "avô",
+            )
+        ),
+
+        "hyphen_preserved": all(
+            word in recognised_lower
+            for word in (
+                "segunda-feira",
+                "anti-inflamatório",
+            )
+        ),
+    }
 
 def probe_deep(config: ExtractorConfig) -> ReadinessResult:
     """Load the selected backend, run a Portuguese smoke image, and validate CER.
 
-    Unlike :func:`probe_static`, this probe instantiates the OCR backend and
-    runs inference on a synthetic image containing:
-      - Accented Portuguese characters (ã, õ, á, é, í, ó, ú, ç, ê, ô)
-      - Currency (R$ 1.234,56), date (03/10/2026), percentage (12,5%)
-      - CPF and CNPJ with their canonical punctuation
-      - A word with a soft hyphen
+        Unlike :func:`probe_static`, this probe instantiates the OCR backend and
+        runs inference on a synthetic image containing:
+        - Real Portuguese words with diacritics
+        - Hyphenated Portuguese words
+        - Currency (R$ 1.234,56), date (03/10/2026), percentage (12,5%)
+        - CPF and CNPJ with their canonical punctuation
 
-    The recognised text is compared against the expected ground-truth using
-    character-level CER.  A CER above ``_SMOKE_MAX_CER`` downgrades the result
-    to ``INCOMPLETE / deep_smoke_high_cer`` so that a wrong model or misconfigured
-    recognizer is surfaced before a full benchmark run.  This implements §43 of
-    the EasyOCR quality review.
+        The recognised text is compared against the expected ground truth using
+        character-level CER. A CER above ``_SMOKE_MAX_CER`` downgrades the result
+        to ``INCOMPLETE / deep_smoke_high_cer``.
+
     """
     static = probe_static(config)
     if static.status != ReadinessStatus.READY:
@@ -223,12 +285,12 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
         import hashlib
         import io
 
-        image = Image.new("RGB", (1500, 300), "white")
+        image = Image.new("RGB", (1800, 320), "white")
         draw = ImageDraw.Draw(image)
         # The default Pillow bitmap font is too small for OCR detectors at
         # this image scale. Use a large built-in font so deep readiness checks
         # exercise the backend instead of reporting a false no-text failure.
-        font = ImageFont.load_default(size=42)
+        font = _load_smoke_font(42)
         for i, line_text in enumerate(_SMOKE_LINES):
             draw.text((20, 12 + i * 66), line_text, fill="black", font=font)
         buffer = io.BytesIO()
@@ -253,13 +315,9 @@ def probe_deep(config: ExtractorConfig) -> ReadinessResult:
         recognised_norm = " ".join(recognised.split())
         expected_norm = " ".join(_SMOKE_EXPECTED.split())
         cer = _simple_cer(recognised_norm.lower(), expected_norm.lower())
-        precision_checks = {
-            "currency_exact": "r$ 1.234,56" in recognised_norm.lower(),
-            "date_exact": "03/10/2026" in recognised_norm,
-            "percentage_exact": "12,5%" in recognised_norm,
-            "accented_portuguese": all(ch in recognised_norm.lower() for ch in "ãõçêô"),
-            "hyphen_preserved": "hífen" in recognised_norm.lower(),
-        }
+        recognised_lower = recognised_norm.lower()
+
+        precision_checks = _smoke_precision_checks(recognised_norm)
 
         identity_repr = (backend.identity.__dict__ if hasattr(backend.identity, "__dict__")
                          else str(backend.identity))
