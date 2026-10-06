@@ -2130,8 +2130,14 @@ class EasyOCRBackend:
 
     def recognize_direct(
         self, image: object, page_index: int, page_bbox: "BBox | None" = None,
+        *, quality_policy: str | None = None,
     ) -> list[OcrToken]:
-        """Recognize a known crop without running EasyOCR's text detector."""
+        """Recognize a known crop without text detection.
+
+        quality_policy is accepted for compatibility with the common regional
+        recognition interface. Direct recognition is a single recognizer pass,
+        so candidate quality policies do not alter this path.
+        """
         if self._closed:
             return []
         import numpy as np
