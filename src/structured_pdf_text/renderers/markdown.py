@@ -323,18 +323,19 @@ def _escape_inline_text(value: str, *, context: str = "paragraph") -> str:
         ending = line[len(content):]
         stripped = content.lstrip()
         leading = content[: len(content) - len(stripped)]
+        line_escaped = set(escaped)
         if context == "heading" and stripped.startswith("#"):
-            escaped.add("#")
+            line_escaped.add("#")
         if context in {"paragraph", "list"}:
             if stripped.startswith((">", "#")):
-                escaped.add(stripped[0])
+                line_escaped.add(stripped[0])
             if stripped.startswith(("- ", "+ ", "* ")):
-                escaped.add(stripped[0])
+                line_escaped.add(stripped[0])
             if len(stripped) > 1 and stripped[0].isdigit():
                 marker = stripped.split(maxsplit=1)[0]
                 if marker.endswith((".", ")")):
-                    escaped.add(marker[-1])
-        output.append(leading + "".join(("\\" + char) if char in escaped else char for char in stripped) + ending)
+                    line_escaped.add(marker[-1])
+        output.append(leading + "".join(("\\" + char) if char in line_escaped else char for char in stripped) + ending)
     return "".join(output)
 
 

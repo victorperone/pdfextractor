@@ -317,6 +317,7 @@ class PdfTextExtractor:
                     complexity,
                     rendered_page,
                     native_page.bbox,
+                    native_page.objects.rotation,
                 )
                 region_quality_facts = {
                     region.region_id: {
@@ -455,11 +456,14 @@ class PdfTextExtractor:
                                             for p in parameters.values()
                                         )
                                     )
+                                    accepts_page_rotation = "page_rotation" in parameters
                                     page_kwargs = (
                                         {"quality_policy": quality_policy}
                                         if accepts_quality_policy
                                         else {}
                                     )
+                                    if accepts_page_rotation:
+                                        page_kwargs["page_rotation"] = native_page.objects.rotation
                                     ocr_tokens = recognize_page(
                                         ocr_image,
                                         page_index,
@@ -731,6 +735,7 @@ class PdfTextExtractor:
                             page_index, bbox, scale, native_page.bbox
                         ),
                         base_scale=ocr_render_scale,
+                        page_rotation=native_page.objects.rotation,
                     )
 
                 # Recompute alignment after refinements so diagnostics and
@@ -902,51 +907,56 @@ class PdfTextExtractor:
                                     page_index, bbox, scale, native_page.bbox
                                 ),
                                 base_scale=ocr_render_scale,
+                                page_rotation=native_page.objects.rotation,
                             )
                     except Exception as exc:
                         warnings.append(f"Table cell OCR refinement unavailable: {type(exc).__name__}: {exc}")
                         partial_reasons.append("table_cell_ocr_unavailable")
-                (
-                    tables,
-                    table_validation_facts,
-                    table_construction_facts,
-                    table_source_provenance,
-                ) = _validate_detected_tables(
-                    tables=tables,
-                    regions=regions,
-                    extra_lines=ocr_lines,
-                    table_ocr_overrides=table_ocr_overrides,
-                    warnings=warnings,
-                )
-                if use_ocr_as_primary and any(table.method == TableMethod.VISUAL_MODEL for table in tables):
-                    # In OCR-primary mode the page region would otherwise
-                    # bypass table-aware reading order entirely.
-                    regions = []
-                    _append_hybrid_ocr_regions(
-                        regions=regions,
+                try:
+                    (
+                        tables,
+                        table_validation_facts,
+                        table_construction_facts,
+                        table_source_provenance,
+                    ) = _validate_detected_tables(
                         tables=tables,
-                        unmatched_lines=ocr_lines,
-                        unmatched_tokens=ocr_tokens,
-                        page_index=page_index,
-                        page_bbox=native_page.bbox,
-                        complexity=complexity,
-                        table_ocr_overrides=table_ocr_overrides,
-                        figure_ocr_bindings=figure_ocr_bindings,
-                    )
-                elif not use_ocr_as_primary and (unmatched_ocr_lines or figure_ocr_bindings):
-                    _append_hybrid_ocr_regions(
                         regions=regions,
-                        tables=tables,
-                        unmatched_lines=unmatched_ocr_lines,
-                        unmatched_tokens=unmatched_ocr_tokens,
-                        page_index=page_index,
-                        page_bbox=native_page.bbox,
-                        complexity=complexity,
+                        extra_lines=ocr_lines,
                         table_ocr_overrides=table_ocr_overrides,
-                        figure_ocr_bindings=figure_ocr_bindings,
+                        warnings=warnings,
                     )
-                if ocr_tokens:
-                    regions = reconstruct_ocr_layout(regions, native_page.bbox)
+                    if use_ocr_as_primary and any(table.method == TableMethod.VISUAL_MODEL for table in tables):
+                        # In OCR-primary mode the page region would otherwise
+                        # bypass table-aware reading order entirely.
+                        regions = []
+                        _append_hybrid_ocr_regions(
+                            regions=regions,
+                            tables=tables,
+                            unmatched_lines=ocr_lines,
+                            unmatched_tokens=ocr_tokens,
+                            page_index=page_index,
+                            page_bbox=native_page.bbox,
+                            complexity=complexity,
+                            table_ocr_overrides=table_ocr_overrides,
+                            figure_ocr_bindings=figure_ocr_bindings,
+                        )
+                    elif not use_ocr_as_primary and (unmatched_ocr_lines or figure_ocr_bindings):
+                        _append_hybrid_ocr_regions(
+                            regions=regions,
+                            tables=tables,
+                            unmatched_lines=unmatched_ocr_lines,
+                            unmatched_tokens=unmatched_ocr_tokens,
+                            page_index=page_index,
+                            page_bbox=native_page.bbox,
+                            complexity=complexity,
+                            table_ocr_overrides=table_ocr_overrides,
+                            figure_ocr_bindings=figure_ocr_bindings,
+                        )
+                    if ocr_tokens:
+                        regions = reconstruct_ocr_layout(regions, native_page.bbox)
+                except Exception as exc:
+                    warnings.append(f"Layout assembly failed: {type(exc).__name__}: {exc}")
+                    partial_reasons.append("layout_assembly_failed")
                 timings["table_ms"] = (time.perf_counter() - table_start) * 1000
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 page_memory_end = _process_memory_snapshot()
@@ -1418,7 +1428,14 @@ def _recognize_dominant_embedded_image(
     return [replace(token, provenance="embedded_image_original") for token in tokens]
 
 
-def _call_page_recognition(method: Any, image: Any, page_index: int, bbox: BBox, quality_policy: str) -> list[OcrToken]:
+def _call_page_recognition(
+    method: Any,
+    image: Any,
+    page_index: int,
+    bbox: BBox,
+    quality_policy: str,
+    page_rotation: int = 0,
+) -> list[OcrToken]:
     try:
         parameters = inspect.signature(method).parameters
     except (TypeError, ValueError):
@@ -1427,6 +1444,8 @@ def _call_page_recognition(method: Any, image: Any, page_index: int, bbox: BBox,
         item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
     )
     kwargs = {"quality_policy": quality_policy} if accepts_policy else {}
+    if "page_rotation" in parameters:
+        kwargs["page_rotation"] = page_rotation
     return method(image, page_index, bbox, **kwargs)
 
 
@@ -1517,6 +1536,7 @@ def _recover_selected_regions(
 def _refine_small_footnote_tokens(
     *, engine: Any, page_index: int, page_bbox: BBox, tokens: list[OcrToken],
     quality_policy: str, region_renderer: Any, base_scale: float,
+    page_rotation: int = 0,
 ) -> tuple[list[OcrToken], int]:
     """Rerender tiny bottom-page OCR lines directly from PDFium in max quality."""
     if not tokens or page_bbox.height <= 0 or not callable(region_renderer):
@@ -1543,7 +1563,8 @@ def _refine_small_footnote_tokens(
         try:
             image = region_renderer(box, base_scale * 2.0)
             reread = _call_page_recognition(
-                engine.recognize_page, image, page_index, box, quality_policy
+                engine.recognize_page, image, page_index, box, quality_policy,
+                page_rotation=page_rotation,
             )
         except Exception:
             continue
@@ -1670,7 +1691,7 @@ def _refine_critical_data_tokens(
 def _refine_table_cells_ocr(
     *, engine: Any, page_image: Any, page_index: int, page_bbox: BBox,
     tables: list[Any], quality_policy: str, region_renderer: Any = None,
-    base_scale: float = 3.0,
+    base_scale: float = 3.0, page_rotation: int = 0,
 ) -> int:
     """Target weak cells using both detector and direct-recognition paths."""
     import numpy as np
@@ -1685,7 +1706,7 @@ def _refine_table_cells_ocr(
     direct = getattr(engine, "recognize_direct", None)
     refinements = 0
     for table in tables:
-        header_rows = table.header_rows or ((min((cell.row for cell in table.cells), default=0),) if table.cells else ())
+        header_rows = table.header_rows if table.header_rows is not None else ((min((cell.row for cell in table.cells), default=0),) if table.cells else ())
         for cell in table.cells:
             if cell.bbox is None or (cell.text.strip() and cell.confidence >= 0.70):
                 continue
@@ -1705,7 +1726,8 @@ def _refine_table_cells_ocr(
             candidates: list[list[OcrToken]] = []
             try:
                 candidates.append(_call_page_recognition(
-                    engine.recognize_page, crop, page_index, cell.bbox, quality_policy
+                    engine.recognize_page, crop, page_index, cell.bbox, quality_policy,
+                    page_rotation=page_rotation,
                 ))
             except Exception:
                 pass
@@ -1719,7 +1741,8 @@ def _refine_table_cells_ocr(
             try:
                 enlarged = Image.fromarray(crop).resize((crop.shape[1] * 2, crop.shape[0] * 2), Image.Resampling.LANCZOS)
                 candidates.append(_call_page_recognition(
-                    engine.recognize_page, enlarged, page_index, cell.bbox, quality_policy
+                    engine.recognize_page, enlarged, page_index, cell.bbox, quality_policy,
+                    page_rotation=page_rotation,
                 ))
             except Exception:
                 pass

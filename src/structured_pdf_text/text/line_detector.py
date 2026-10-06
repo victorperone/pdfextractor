@@ -405,8 +405,8 @@ def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
             text_override=None,
             merged_source_line_ids=(*target.merged_source_line_ids, candidate_id),
         )
-        output[output.index(target)] = merged
-        output.remove(candidate)
+        output[next(i for i, item in enumerate(output) if item is target)] = merged
+        del output[next(i for i, item in enumerate(output) if item is candidate)]
     return sorted(output, key=lambda line: (line.bbox.y0, line.bbox.x0))
 
 

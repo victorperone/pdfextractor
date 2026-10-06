@@ -1859,6 +1859,9 @@ class EasyOCRBackend:
             self._easyocr_fallback_reasons.append(reason)
             self.last_easyocr_fallback_used = True
             self.last_easyocr_fallback_reason = reason
+        else:
+            self.last_easyocr_fallback_used = False
+            self.last_easyocr_fallback_reason = None
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -2037,6 +2040,7 @@ class EasyOCRBackend:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         """OCR a full page image and return pipeline OcrToken instances.
 
@@ -2096,7 +2100,7 @@ class EasyOCRBackend:
             tokens = _result_to_pipeline_tokens(raw, page_index, self._language)
             self._last_candidate_diagnostics = []
 
-        return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0])
+        return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0], page_rotation)
 
     def recognize_region(
         self,

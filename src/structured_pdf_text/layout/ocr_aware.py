@@ -363,5 +363,5 @@ def _order_ocr_lines_by_columns(lines: list[TextLine], page_bbox: BBox) -> list[
         between = [line for line in middle if line.bbox.y0 <= max(item.bbox.y1 for item in column)]
         result.extend(line for line in sorted(between, key=lambda item: (item.bbox.y0, item.bbox.x0)) if line not in result)
     result.extend(line for line in middle if line not in result)
-    result.extend(trailing)
+    result.extend(line for line in trailing if line not in result)
     return result
