@@ -1292,7 +1292,7 @@ def _remap_raw_for_rotation(
             if conf is not None:
                 remapped.append((new_pts, text, conf))
             else:
-                remapped.append((new_pts, text))
+                remapped.append((new_pts, text, None))
         except (IndexError, TypeError, ValueError):
             remapped.append(item)
     return remapped
@@ -1314,11 +1314,11 @@ def _exhaustive_candidates(
     installed dependencies, and runtime state of optional components
     (DBNet18, cv2, wordbeamsearch, quantize).  Candidate categories:
 
-      Baseline / detection variants (always run):
-        default, high_recall, beamsearch, layout_sensitive, low_contrast,
-        clahe, wordbeamsearch (if not default decoder), no_quantize (if
-        quantize=True and rebuild succeeds), deskew (if image changed),
-        high_mag, DBNet18 (if runtime probe passed).
+      Conditional variants (depend on configuration or runtime state):
+        default, high_recall, layout_sensitive, low_contrast, clahe,
+        beamsearch (if not base decoder), wordbeamsearch (if not default
+        decoder), no_quantize (if quantize=True and rebuild succeeds),
+        deskew (if image changed), high_mag, DBNet18 (if runtime probe passed).
 
       Preprocessing variants (conditional on image content):
         autocontrast, inverted_grayscale (dark background only), sharpen,
@@ -1447,7 +1447,8 @@ def _exhaustive_candidates(
     # Candidate J: high_mag (§17) — higher magnification ratio so CRAFT sees the
     # page at a larger effective resolution.  Particularly helps pages with very
     # small fonts (footnotes, table captions, dense tables).  The base mag_ratio
-    # is typically 1.2; this candidate uses 1.8 (50% more resolution overhead).
+    # is read from EASYOCR_MAG_RATIO (default 1.2); this candidate uses base × 1.5
+    # (capped at 2.5), which is typically 1.8 for the default mag_ratio.
     try:
         from structured_pdf_text.ocr.env import env_float as _env_float
         _base_mag = _env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
@@ -2129,7 +2130,6 @@ class EasyOCRBackend:
 
     def recognize_direct(
         self, image: object, page_index: int, page_bbox: "BBox | None" = None,
-        *, quality_policy: str | None = None,
     ) -> list[OcrToken]:
         """Recognize a known crop without running EasyOCR's text detector."""
         if self._closed:

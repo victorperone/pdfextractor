@@ -1579,7 +1579,8 @@ class TestBuildDbnet18Reader:
 # ---------------------------------------------------------------------------
 
 class TestBuildDbnet18ReaderStrict:
-    """_build_dbnet18_reader_strict raises instead of returning None on failure."""
+    """_build_dbnet18_reader_strict raises on probe failures, but returns None when a
+    precondition is not met (e.g. reader has no lang_list attribute)."""
 
     def test_raises_when_easyocr_import_fails(self, monkeypatch):
         """When easyocr is not importable, strict variant raises, does NOT return None."""
