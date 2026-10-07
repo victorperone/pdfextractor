@@ -10,8 +10,10 @@ import inspect
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -386,12 +388,14 @@ class PdfTextExtractor:
                     ocr_available_by_mode and selected_regions and not page_ocr_requested
                 )
                 ocr_requested = page_ocr_requested or region_ocr_requested
-                figure_ocr_requested = bool(
-                    ocr_available_by_mode
-                    and native_page.objects.images
-                    and not page_ocr_requested
-                    and _figures_need_ocr(native_page, selected_regions)
+                # R71: compute the exact list of unresolved images up-front so
+                # the decision and execution paths cannot diverge.
+                _figures_pending_ocr = (
+                    _figures_requiring_ocr(native_page, selected_regions)
+                    if ocr_available_by_mode and native_page.objects.images and not page_ocr_requested
+                    else []
                 )
+                figure_ocr_requested = bool(_figures_pending_ocr)
                 if ocr_requested or figure_ocr_requested:
                     try:
                         self._ensure_ocr_engine()
@@ -540,6 +544,8 @@ class PdfTextExtractor:
                                 )
                                 if mode == ExtractionMode.OCR or page_ocr_requested:
                                     partial_reasons.append("page_ocr_unavailable")
+                                elif region_ocr_requested:
+                                    partial_reasons.append("ocr_region_recovery_unavailable")
 
                             if region_ocr_requested:
                                 for region in selected_regions:
@@ -592,6 +598,7 @@ class PdfTextExtractor:
                         quality_policy=effective_ocr_quality_policy(self.config).value,
                         page_rotation=native_page.objects.rotation,
                         warnings=warnings,
+                        images=_figures_pending_ocr,
                     )
                     if any(item.startswith("figure_ocr_failed:") for item in warnings):
                         partial_reasons.append("figure_ocr_unavailable")
@@ -695,7 +702,6 @@ class PdfTextExtractor:
                     except FatalExtractionError:
                         raise
                     except Exception as exc:
-                        raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_backend_init", details=_process_memory_snapshot())
                         raise_if_resource_exhausted(
                             exc,
                             page_index=page_index,
@@ -764,6 +770,14 @@ class PdfTextExtractor:
                         time.perf_counter() - footnote_start
                     ) * 1000
 
+                # D3: resync region.ocr_tokens after all refinements so that
+                # downstream table-cell merge and layout always see final tokens.
+                if region_ocr_requested and ocr_tokens:
+                    for region in selected_regions:
+                        region.ocr_tokens = [
+                            token for token in ocr_tokens if _line_in_box(token, region.bbox)
+                        ]
+
                 # Recompute alignment after refinements so diagnostics and
                 # supplemental text describe the final OCR evidence.
                 if ocr_tokens:
@@ -790,7 +804,15 @@ class PdfTextExtractor:
                         time.perf_counter() - fusion_start
                     ) * 1000
 
-                use_ocr_as_primary = bool(ocr_lines) and page_ocr_requested
+                # H1: page-level OCR must not replace strong native text.
+                # On hybrid pages (native + raster image), the unmatched OCR
+                # tokens are incorporated by the hybrid assembly path instead.
+                use_ocr_as_primary = _should_use_page_ocr_as_primary(
+                    native_lines=native_lines,
+                    ocr_lines=ocr_lines,
+                    page_ocr_requested=page_ocr_requested,
+                    mode=mode,
+                )
                 if use_ocr_as_primary:
                     ocr_region = full_page_text_region(
                         page_index,
@@ -1111,8 +1133,8 @@ class PdfTextExtractor:
                         "ocr_fusion_duplicate_clusters": getattr(ocr_diag_engine, "last_fusion_duplicate_clusters", 0),
                         "ocr_consensus_replacements": getattr(ocr_diag_engine, "last_consensus_replacements", 0),
                         "ocr_consensus_insertions": getattr(ocr_diag_engine, "last_consensus_insertions", 0),
-                        "ocr_orientation_selected": getattr(ocr_diag_engine, "last_orientation_selected", None),
-                        "ocr_orientation_attempts": list(getattr(ocr_diag_engine, "last_orientation_attempts", [])),
+                        "ocr_orientation_selected": easyocr_page_diagnostics.get("orientation_selected"),
+                        "ocr_orientation_attempts": list(easyocr_page_diagnostics.get("orientation_attempts") or []),
                         "ocr_enhancement_orientation": getattr(ocr_diag_engine, "last_enhancement_orientation", None),
                         "ocr_targeted_refinement_regions": [
                             region_id for region_id, stat in {
@@ -1513,14 +1535,21 @@ def _recover_selected_regions(
         attempt counts, errors and selected scale/rotation for diagnostics.
     """
     refiner = OcrRegionRefiner(engine)
+    # R66: resolve the scale and variant profile before building requests so
+    # that the declared quality_policy is actually respected.  Baseline must
+    # not silently expand into multi-scale / quality-variant work regardless
+    # of how the caller configured ocr_quality_variants.
+    _is_baseline_policy = str(quality_policy or "").lower() == "baseline"
     requests = [
         RegionRefinementRequest(
             bbox=region.bbox,
-            scale_factors=(1.0, 1.5, 2.0) if any(
-                marker in " ".join(region.quality.reasons).lower()
-                for marker in ("small", "sparse", "missing", "damaged")
-            ) else (1.0,),
-            quality_variants=quality_variants,
+            scale_factors=(1.0,) if _is_baseline_policy else (
+                (1.0, 1.5, 2.0) if any(
+                    marker in " ".join(region.quality.reasons).lower()
+                    for marker in ("small", "sparse", "missing", "damaged")
+                ) else (1.0,)
+            ),
+            quality_variants=False if _is_baseline_policy else quality_variants,
             quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
             page_rotation=page_rotation,
@@ -1568,6 +1597,38 @@ def _recover_selected_regions(
     return _deduplicate_region_ocr_tokens(tokens), passes, batches, stats
 
 
+def _deduplicate_refinement_tokens(tokens: list[OcrToken]) -> list[OcrToken]:
+    """Remove spatially and textually duplicate tokens from a reread result.
+
+    When EasyOCR rerenders at high scale it can return the same text span
+    twice (e.g. "NOTA ABC" and "NOTA ABC" at nearly the same position).
+    Only the higher-confidence copy of each duplicate group is retained.
+    """
+    if len(tokens) <= 1:
+        return tokens
+    from unicodedata import normalize
+    def _norm(text: str) -> str:
+        return " ".join(normalize("NFKC", text).casefold().split())
+    kept: list[OcrToken] = []
+    for token in tokens:
+        norm = _norm(token.text)
+        replaced = False
+        duplicate = False
+        for idx, existing in enumerate(kept):
+            if _norm(existing.text) != norm:
+                continue
+            if token.bbox.iou(existing.bbox) < 0.50:
+                continue
+            duplicate = True
+            if (token.confidence or 0.0) > (existing.confidence or 0.0):
+                kept[idx] = token
+                replaced = True
+            break
+        if not duplicate:
+            kept.append(token)
+    return kept
+
+
 def _refine_small_footnote_tokens(
     *, engine: Any, page_index: int, page_bbox: BBox, tokens: list[OcrToken],
     quality_policy: str, region_renderer: Any, base_scale: float,
@@ -1609,6 +1670,10 @@ def _refine_small_footnote_tokens(
         reread = [token for token in reread if token.text.strip()]
         if not reread:
             continue
+        # R65: deduplicate the reread result before evaluating it.
+        # High-scale renders can return the same span twice (e.g. "NOTA ABC"
+        # twice), which inflates char count and bypasses conservation checks.
+        reread = _deduplicate_refinement_tokens(reread)
         old_indices = [
             index for index, token in enumerate(output)
             if box.x0 <= token.bbox.cx <= box.x1 and box.y0 <= token.bbox.cy <= box.y1
@@ -1618,10 +1683,15 @@ def _refine_small_footnote_tokens(
         new_text = " ".join(token.text.strip() for token in reread)
         old_score = _ocr_token_score(old_tokens)
         new_score = _ocr_token_score(reread)
-        # A rerender can win on better confidence or recover at least 20% more
-        # non-whitespace characters without a confidence drop over 0.10.
         old_chars = len(re.sub(r"\s+", "", old_text))
         new_chars = len(re.sub(r"\s+", "", new_text))
+        # R65: use the shared conservation gate (≥60% char retention) so that
+        # the same rule applies to both footnote refinements and weak-region
+        # recovery. This replaces the previous hard-coded 70% check.
+        if not _refinement_conserves_content(old_tokens, reread):
+            continue
+        # A rerender can win on better confidence or recover at least 20% more
+        # non-whitespace characters without a confidence drop over 0.10.
         if not (
             new_score > old_score + 0.05
             or (new_chars >= old_chars * 1.2 and new_score >= old_score - 0.10)
@@ -1860,6 +1930,144 @@ def _refine_table_cells_ocr(
     return refinements
 
 
+# ---------------------------------------------------------------------------
+# B2/R67 — semantic conservation helpers
+# ---------------------------------------------------------------------------
+
+# Strict patterns for critical data values in Brazilian Portuguese documents.
+# Each pattern must match only well-formed values so OCR noise (e.g. "9.87G,54")
+# is not extracted and therefore cannot create a false conflict with the cleaned
+# version ("9.876,54").
+_CRITICAL_PATTERNS = [
+    # CPF: 000.000.000-00 (11 digits, various separators)
+    re.compile(r"\b\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}\b"),
+    # CNPJ: 00.000.000/0000-00 (14 digits)
+    re.compile(r"\b\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}\b"),
+    # Monetary BRL: R$ 1.234,56 — lowercase because _extract_critical_values lowercases input
+    re.compile(r"r\$\s*\d{1,3}(?:\.\d{3})*,\d{2}"),
+    # Dates: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (4-digit year only)
+    re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b"),
+    # Percentages: 12,5% or 12%
+    re.compile(r"\b\d{1,3}[,.]?\d{0,2}\s*%"),
+    # CNJ process number: 0000000-00.0000.0.00.0000
+    re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4}\b"),
+]
+
+
+def _similarity_key(text: str) -> str:
+    """Collapse text to a whitespace-free key for SequenceMatcher comparison.
+
+    Removing all whitespace before comparison prevents spacing differences
+    (e.g. "A B C" vs "ABC") from artificially lowering similarity scores,
+    while keeping character-level differences (e.g. "G" vs "6") detectable.
+    """
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return re.sub(r"\s", "", text)
+
+
+def _extract_critical_values(text: str) -> set[str]:
+    """Extract normalized critical data tokens for conflict detection.
+
+    Returned values have separators stripped so ``529.982.247-25`` and
+    ``52998224725`` compare equal.  Only well-formed patterns are extracted;
+    OCR noise that partially resembles a critical value is silently ignored.
+    """
+    values: set[str] = set()
+    lower = text.lower()
+    for pattern in _CRITICAL_PATTERNS:
+        for m in pattern.finditer(lower):
+            key = re.sub(r"[\s.,\-/]", "", m.group())
+            if key:
+                values.add(key)
+    return values
+
+_SIGNED_MONEY_PATTERN = re.compile(
+    r"r\$\s*([+-]?)\s*(\d{1,3}(?:\.\d{3})*,\d{2})",
+    re.IGNORECASE,
+)
+
+_SIGNED_PERCENTAGE_PATTERN = re.compile(
+    r"(?<![\w\d])([+-]?)\s*(\d{1,3}(?:[,.]\d{1,2})?)\s*%"
+)
+
+def _extract_signed_critical_values(text: str) -> set[str]:
+    """Extract sign-sensitive monetary and percentage values.
+
+    Missing sign and explicit '+' are both normalized as positive.
+    The negative sign is preserved because changing it changes the
+    semantic value of financial and percentage data.
+    """
+    values: set[str] = set()
+
+    for match in _SIGNED_MONEY_PATTERN.finditer(text):
+        sign = "-" if match.group(1) == "-" else "+"
+        number = re.sub(r"[.,\s]", "", match.group(2))
+        values.add(f"money:{sign}:{number}")
+
+    for match in _SIGNED_PERCENTAGE_PATTERN.finditer(text):
+        sign = "-" if match.group(1) == "-" else "+"
+        number = re.sub(r"[.,\s]", "", match.group(2))
+        values.add(f"percentage:{sign}:{number}")
+
+    return values
+
+def _refinement_conserves_content(
+    old_tokens: list[OcrToken],
+    new_tokens: list[OcrToken],
+    *,
+    min_coverage: float = 0.60,
+    min_similarity: float = 0.60,
+) -> bool:
+    """Return True when new_tokens retains sufficient content from old_tokens.
+
+    Three independent checks must all pass (B2/R67):
+
+    1. Character coverage — new must have >= (min_coverage) of old's
+       non-whitespace characters.  Trivially short old content (<= 4 chars)
+       is always accepted.
+
+    2. Text similarity — even same-length but completely unrelated text is
+       rejected; SequenceMatcher ratio must be >= min_similarity.  Skipped
+       when old has fewer than 15 non-whitespace characters, because character-
+       level ratios are too noisy on short texts (e.g. single-word OCR corrections
+       may replace one 5-char word with an entirely different 5-char word).
+       Whitespace is stripped before comparison so spacing never lowers the score.
+
+    3. Critical data preservation — if old contains a well-formed CPF, CNPJ,
+       monetary value, date, percentage, or process number, and new replaces
+       it with a *different* value of the same type, the refinement is
+       rejected even when similarity is high.
+    """
+    old_text = " ".join(t.text.strip() for t in old_tokens if t.text.strip())
+    new_text = " ".join(t.text.strip() for t in new_tokens if t.text.strip())
+    old_chars = len(re.sub(r"\s+", "", old_text))
+    new_chars = len(re.sub(r"\s+", "", new_text))
+    # Check 0: critical data must not disappear or be substituted (before short-text bypass)
+    old_critical = _extract_critical_values(old_text)
+    if old_critical:
+        new_critical = _extract_critical_values(new_text)
+        if old_critical - new_critical:
+            return False
+    old_signed_critical = _extract_signed_critical_values(old_text)
+    if old_signed_critical:
+        new_signed_critical = _extract_signed_critical_values(new_text)
+        if old_signed_critical - new_signed_critical:
+            return False
+    if old_chars <= 4:
+        return True
+    # Check 1: character coverage
+    if new_chars < old_chars * min_coverage:
+        return False
+    # Check 2: text similarity (same-length unrelated replacement).
+    # Only meaningful when old is long enough for the ratio to be stable.
+    if old_chars >= 15:
+        old_key = _similarity_key(old_text)
+        new_key = _similarity_key(new_text)
+        if SequenceMatcher(None, old_key, new_key).ratio() < min_similarity:
+            return False
+    return True
+
+
 def _recover_weak_ocr_regions(
     engine: Any,
     page_image: Any,
@@ -1953,6 +2161,11 @@ def _recover_weak_ocr_regions(
             or new_quality.score >= old_quality.score + 0.03
             or (new_quality.sufficient and not old_quality.sufficient)
         )
+        # R67: quality score alone cannot justify discarding most of the prior
+        # content. A short result with high confidence must still retain at
+        # least 60% of the previous non-whitespace character count.
+        if accepted and old_tokens:
+            accepted = _refinement_conserves_content(old_tokens, new_tokens)
         if accepted:
             refined_tokens = _replace_tokens_in_box(refined_tokens, box, new_tokens)
         stats[f"weak-region-{index}"] = {
@@ -2067,6 +2280,45 @@ def _selected_page_indices(page_indices: tuple[int, ...] | None, page_count: int
             f"page_indices must be zero-based values within [0, {page_count}); got {page_indices}"
         )
     return selected
+
+
+def _should_use_page_ocr_as_primary(
+    *,
+    native_lines: list[Any],
+    ocr_lines: list[Any],
+    page_ocr_requested: bool,
+    mode: Any,
+) -> bool:
+    """Return True only when OCR should replace native text as the primary source.
+
+    OCR taking ownership of the whole page discards all native regions.  This is
+    correct for pure-raster pages (no useful native text) and for forced OCR
+    mode, but it is *wrong* for hybrid pages where native text is strong.
+
+    On a hybrid page the correct policy is:
+      - native regions stay as primary;
+      - unmatched OCR tokens (from the image/raster portion) are appended as
+        supplemental coverage by the hybrid assembly path (line ~980).
+
+    Criteria for OCR becoming primary:
+    1. Forced OCR mode (user explicitly chose OCR as source) — always True.
+    2. No native lines at all — OCR must be primary.
+    3. Native is negligible (<20 non-WS chars) — OCR can take over.
+
+    In all other cases native is considered "strong" and stays primary.
+    """
+    if not page_ocr_requested or not ocr_lines:
+        return False
+    if mode == ExtractionMode.OCR:
+        return True
+    if not native_lines:
+        return True
+    native_chars = sum(
+        len(re.sub(r"\s+", "", line.text)) for line in native_lines
+    )
+    if native_chars >= 20:
+        return False
+    return True
 
 
 def _is_raster_primary_candidate(complexity: Any) -> bool:
@@ -2213,22 +2465,53 @@ def _bind_figure_ocr_to_regions(
     region.ocr_tokens = list(figure_tokens)
 
 
-def _figures_need_ocr(
+def _image_union_coverage(image_bbox: BBox, regions: list[LayoutRegion]) -> float:
+    """Fraction of image_bbox covered by the union of all region intersections.
+
+    Uses coordinate-compression sweep to avoid double-counting overlapping regions.
+    """
+    if image_bbox.area <= 0:
+        return 1.0
+    intersections: list[BBox] = []
+    for region in regions:
+        inter = region.bbox.intersection(image_bbox)
+        if inter is not None and inter.area > 0:
+            intersections.append(inter)
+    if not intersections:
+        return 0.0
+    # Coordinate-compression sweep over the intersection rectangles.
+    xs = sorted({r.x0 for r in intersections} | {r.x1 for r in intersections})
+    ys = sorted({r.y0 for r in intersections} | {r.y1 for r in intersections})
+    union_area = 0.0
+    for i in range(len(xs) - 1):
+        for j in range(len(ys) - 1):
+            cx = (xs[i] + xs[i + 1]) / 2
+            cy = (ys[j] + ys[j + 1]) / 2
+            if any(r.x0 <= cx <= r.x1 and r.y0 <= cy <= r.y1 for r in intersections):
+                union_area += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j])
+    return union_area / image_bbox.area
+
+
+def _figures_requiring_ocr(
     page: NativePageEvidence,
     selected_regions: list[LayoutRegion],
-) -> bool:
-    image_boxes = [image.bbox for image in page.objects.images if image.bbox is not None]
-    if not image_boxes:
-        return False
-    for image_bbox in image_boxes:
-        covered = any(
-            region.bbox.overlap_ratio(image_bbox) >= 0.80
-            or image_bbox.overlap_ratio(region.bbox) >= 0.80
-            for region in selected_regions
-        )
-        if not covered:
-            return True
-    return False
+) -> list[Any]:
+    """Return image objects whose content is not yet covered by selected regions.
+
+    R71: returns the exact list that _refine_figure_ocr should process, so the
+    decision and execution paths cannot diverge.
+    R72: coverage uses union(intersections) / image_bbox.area to avoid false
+    positives from tiny regions sitting wholly inside a large image.
+    """
+    result = []
+    for image in page.objects.images:
+        image_bbox = image.bbox
+        if image_bbox is None:
+            continue
+        # R72: use union coverage (image as denominator)
+        if _image_union_coverage(image_bbox, selected_regions) < 0.80:
+            result.append(image)
+    return result
 
 
 def _validate_detected_tables(
@@ -2602,6 +2885,7 @@ def _refine_figure_ocr(
     quality_policy: str = "baseline",
     page_rotation: int = 0,
     warnings: list[str] | None = None,
+    images: list[Any] | None = None,
 ) -> list[
     tuple[
         BBox,
@@ -2623,6 +2907,10 @@ def _refine_figure_ocr(
     expose them via ``PageDiagnostics`` without surfacing PIL/image internals.
     An invalid figure is skipped; other figures on the same page are still
     processed.
+
+    R71: when ``images`` is provided, only those image objects are processed —
+    the decision (which images need OCR) and execution (which images are OCRed)
+    cannot diverge.  When ``None``, falls back to all images on the page.
     """
     import math
 
@@ -2638,7 +2926,8 @@ def _refine_figure_ocr(
         ]
     ] = []
     refiner = OcrRegionRefiner(engine)
-    for image in page.objects.images:
+    images_to_process = images if images is not None else page.objects.images
+    for image in images_to_process:
         figure_bbox = image.bbox
         if figure_bbox is None or figure_bbox.height <= 0 or figure_bbox.width <= 0:
             if warnings is not None and figure_bbox is not None:

@@ -11,13 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import sys
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from audit_cli_execution import save
 from structured_pdf_text.api import (
     _recover_selected_regions, _recover_weak_ocr_regions, _refine_small_footnote_tokens,
-    _figures_need_ocr, _refine_figure_ocr,
+    _figures_requiring_ocr, _refine_figure_ocr,
 )
 from structured_pdf_text.config import OcrQualityThresholds
 from structured_pdf_text.document import OcrToken, RegionKind, SourceKind
@@ -156,26 +155,91 @@ def main():
             "output": [t.text for t in result], "stats": stats}
     save(args.output_dir / "weak_region_truncation_reproduction.json", weak)
     # Keep the rotated backend path real; substitute only the heavy candidates.
-    raw_rotated = [
-        ([[10, 10], [90, 10], [90, 20], [10, 20]], "LINHA UM", 1),
-        ([[10, 40], [90, 40], [90, 50], [10, 50]], "LINHA DOIS", 1),
+    # Exercise the real exhaustive orientation-selection path without loading
+    # EasyOCR models.  Upright is deliberately weak; rot90 is the winning probe.
+    raw_upright = [
+        (
+            [[10, 10], [30, 10], [30, 20], [10, 20]],
+            "x",
+            0.10,
+        ),
     ]
-    remapped = easyocr._remap_raw_for_rotation(raw_rotated, 90, 200, 100)
-    backend._quantize, backend._auxiliary_readers = True, {}
-    backend._ensure_dbnet18_runtime = lambda: False
+
+    raw_rotated = [
+        (
+            [[10, 10], [90, 10], [90, 20], [10, 20]],
+            "LINHA UM",
+            0.99,
+        ),
+        (
+            [[10, 40], [90, 40], [90, 50], [10, 50]],
+            "LINHA DOIS",
+            0.99,
+        ),
+    ]
+
+    probe_results = iter([
+        raw_upright,   # 0°
+        raw_rotated,   # 90°
+        [],            # 180°
+        [],            # 270°
+    ])
+
+
+    def orientation_probe(reader, image, **kwargs):
+        return next(probe_results, []), None
+
+
+    def exhaustive_selected_orientation(
+        reader,
+        image,
+        base_kwargs,
+        *,
+        _include_rotations=True,
+        **kwargs,
+    ):
+        assert _include_rotations is False
+        return [("default", raw_rotated)]
+
+
+    backend._quantize = True
+    backend._auxiliary_readers = {}
+    backend._ensure_dbnet18_runtime = lambda: (False, "model_free_reproduction")
+
     orientation_box = BBox(0, 0, 200, 100)
-    with patch.object(easyocr, "_exhaustive_candidates", return_value=[("rot90", remapped)]):
-        current_tokens = backend.recognize_page(np.zeros((100, 200, 3), dtype=np.uint8),
-                                                0, orientation_box, quality_policy="exhaustive")
-    # This illustrates the reconstruction contract, not an implemented fix.
-    oriented_tokens = [replace(t, rotation=270) for t in current_tokens]
+
+    with (
+        patch.object(easyocr, "_run_easyocr", orientation_probe),
+        patch.object(
+            easyocr,
+            "_exhaustive_candidates",
+            side_effect=exhaustive_selected_orientation,
+        ),
+    ):
+        current_tokens = backend.recognize_page(
+            np.zeros((100, 200, 3), dtype=np.uint8),
+            0,
+            orientation_box,
+            quality_policy="exhaustive",
+        )
     orientation = {
         "candidate": "rot90", "applied_clockwise_correction": 90,
         "tokens": [{"text": t.text, "rotation": t.rotation, "bbox": str(t.bbox)}
                    for t in current_tokens],
         "current_lines": [line.text for line in reconstruct_ocr_lines(current_tokens, 0, orientation_box)],
-        "orientation_preserved_lines": [line.text for line in reconstruct_ocr_lines(oriented_tokens, 0, orientation_box)],
-        "assessment_with_correct_orientation": asdict(assess_ocr_quality(oriented_tokens)),
+        "selected_angle": backend._last_orientation_decision.get("selected_angle"),
+        "reconstructed_lines": [
+            line.text
+            for line in reconstruct_ocr_lines(
+                current_tokens,
+                0,
+                orientation_box,
+            )
+        ],
+        "expected_lines": [
+            "LINHA UM",
+            "LINHA DOIS",
+        ],
         "assessment_single_horizontal_digit": asdict(assess_ocr_quality([
             token("1", (10, 10, 15, 30), 1),
         ])),
@@ -194,23 +258,23 @@ def main():
             return SimpleNamespace(tokens=[token("FIGURA", (request.bbox.x0, request.bbox.y0,
                                                            request.bbox.x1, request.bbox.y1), 1)],
                                    status="ok", ocr_passes=1, ocr_batches=1)
-    figure_needed = _figures_need_ocr(figure_page, selected)
+    images_pending = _figures_requiring_ocr(figure_page, selected)
     with patch("structured_pdf_text.api.OcrRegionRefiner", FigureRefiner):
-        figure_results = _refine_figure_ocr(object(), Image.new("RGB", (600, 300), "white"),
-                                          figure_page, 0, [])
+        figure_results = _refine_figure_ocr(object(), np.full((300, 600, 3), 255, dtype=np.uint8),
+                                          figure_page, 0, [], images=images_pending)
     partial_region = SimpleNamespace(bbox=BBox(10, 100, 20, 110))
     one_figure = SimpleNamespace(bbox=figure_page.bbox, objects=SimpleNamespace(
         images=[SimpleNamespace(bbox=image_one)]))
     figures = {
         "already_covered_image_reread": {
-            "figure_ocr_requested": figure_needed, "selected_bbox": str(image_one),
+            "figure_ocr_requested": bool(images_pending), "selected_bbox": str(image_one),
             "ocr_requests": [str(box) for box in figure_requests], "refinements": len(figure_results),
         },
         "partial_region_suppresses_whole_image": {
             "image_bbox": str(image_one), "selected_bbox": str(partial_region.bbox),
             "image_fraction_covered": image_one.overlap_ratio(partial_region.bbox),
             "selected_fraction_inside_image": partial_region.bbox.overlap_ratio(image_one),
-            "figure_ocr_requested": _figures_need_ocr(one_figure, [partial_region]),
+            "figure_ocr_requested": bool(_figures_requiring_ocr(one_figure, [partial_region])),
         },
     }
     save(args.output_dir / "figure_recovery_reproductions.json", figures)

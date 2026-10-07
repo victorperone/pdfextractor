@@ -41,7 +41,7 @@ def assemble_page(
     flow_lines_by_region = prose_flow_lines_by_region(regions, tables, page_index)
     reading_lines, reading_decision = order_region_lines(
         regions,
-        flow_lines_by_region=flow_lines_by_region or None,
+        flow_lines_by_region=flow_lines_by_region,
     )
 
     # F02: raw_text must include OCR-recovered content. For scan pages

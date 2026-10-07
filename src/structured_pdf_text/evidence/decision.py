@@ -195,7 +195,7 @@ def _assess_one_region(
         for line in region.native_lines
         if (intersection := line.bbox.intersection(region.bbox)) is not None
     ]
-    text_area = min(region.bbox.area, sum(box.area for box in intersections))
+    text_area = min(region.bbox.area, _union_area(intersections))
     text_coverage = text_area / max(region.bbox.area, 1.0)
     ink_ratio = _region_ink_ratio(page_image, page_bbox, region.bbox, page_rotation)
     visible = ink_ratio is None or ink_ratio >= 0.008

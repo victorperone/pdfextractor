@@ -2636,3 +2636,89 @@ class TestPreflightCheckMaxQualityGuards:
         assert report["direct_recognition_reason"] == "direct_recognition_returned_no_tokens"
         # exhaustive must have passed since page_tokens was non-empty
         assert report["exhaustive_planner_ready"] is True
+
+
+# ---------------------------------------------------------------------------
+# B6 — preprocessing deduplication must compare against the input image (P1)
+# ---------------------------------------------------------------------------
+
+class TestB6PreprocessingBaselineDedup:
+    """_image_preprocessing_candidates must skip variants identical to the input."""
+
+    def test_grayscale_identical_to_rgb_input_is_skipped(self):
+        """When a preprocessing variant is pixel-identical to the input, it must be
+        excluded so that no redundant OCR pass runs on the same pixels (B6)."""
+        import hashlib
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _image_preprocessing_candidates
+
+        dark_input = np.full((50, 50, 3), 50, dtype=np.uint8)
+
+        def fp(arr):
+            a = np.asarray(arr)
+            return f"{a.shape}:{a.dtype}:{hashlib.md5(a.tobytes()).hexdigest()}"
+
+        original_fp = fp(dark_input)
+        for label, variant in _image_preprocessing_candidates(dark_input, adaptive=False):
+            assert fp(variant) != original_fp, (
+                f"variant '{label}' is pixel-identical to the input — must be skipped (B6)"
+            )
+
+    def test_preprocessing_returns_only_unique_variants(self):
+        """No two returned variants may have the same pixel fingerprint."""
+        import numpy as np
+        import hashlib
+        from structured_pdf_text.ocr.backends.easyocr import _image_preprocessing_candidates
+
+        dark = np.full((60, 60, 3), 30, dtype=np.uint8)
+        variants = _image_preprocessing_candidates(dark, adaptive=False)
+
+        def fp(arr):
+            a = np.asarray(arr)
+            return f"{a.shape}:{a.dtype}:{hashlib.md5(a.tobytes()).hexdigest()}"
+
+        fingerprints = [fp(v) for _, v in variants]
+        assert len(fingerprints) == len(set(fingerprints)), (
+            "duplicate preprocessing variants must be deduplicated"
+        )
+
+
+# ---------------------------------------------------------------------------
+# T1 — reproduce_cli_review.py must import without error (smoke)
+# ---------------------------------------------------------------------------
+
+class TestReproduceCliReviewImports:
+    """The diagnostic script must be importable without errors.
+
+    Verifies that T1 (removal of _figures_need_ocr) and T2 (images= parameter)
+    are consistent with the current api.py exports.
+    """
+
+    def test_reproduce_cli_review_imports_cleanly(self):
+        """Importing the api symbols used by reproduce_cli_review must not raise."""
+        from structured_pdf_text.api import (
+            _recover_selected_regions,
+            _recover_weak_ocr_regions,
+            _refine_small_footnote_tokens,
+            _figures_requiring_ocr,
+            _refine_figure_ocr,
+        )
+        assert callable(_figures_requiring_ocr), "_figures_requiring_ocr must be callable"
+        assert callable(_refine_figure_ocr), "_refine_figure_ocr must be callable"
+
+    def test_figures_need_ocr_is_not_exported(self):
+        """The removed _figures_need_ocr must not be importable from api."""
+        import structured_pdf_text.api as api_mod
+        assert not hasattr(api_mod, "_figures_need_ocr"), (
+            "_figures_need_ocr was removed (R71) and must not be in api — "
+            "use _figures_requiring_ocr instead"
+        )
+
+    def test_refine_figure_ocr_accepts_images_kwarg(self):
+        """_refine_figure_ocr must accept an images= keyword argument (T2)."""
+        import inspect
+        from structured_pdf_text.api import _refine_figure_ocr
+        params = inspect.signature(_refine_figure_ocr).parameters
+        assert "images" in params, (
+            "_refine_figure_ocr must have an 'images' parameter (added for R71)"
+        )
