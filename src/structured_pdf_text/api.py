@@ -540,6 +540,8 @@ class PdfTextExtractor:
                                 )
                                 if mode == ExtractionMode.OCR or page_ocr_requested:
                                     partial_reasons.append("page_ocr_unavailable")
+                                elif region_ocr_requested:
+                                    partial_reasons.append("ocr_region_recovery_unavailable")
 
                             if region_ocr_requested:
                                 for region in selected_regions:
@@ -695,7 +697,6 @@ class PdfTextExtractor:
                     except FatalExtractionError:
                         raise
                     except Exception as exc:
-                        raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_backend_init", details=_process_memory_snapshot())
                         raise_if_resource_exhausted(
                             exc,
                             page_index=page_index,
@@ -763,6 +764,14 @@ class PdfTextExtractor:
                     timings["ocr_footnote_refinement_ms"] = (
                         time.perf_counter() - footnote_start
                     ) * 1000
+
+                # D3: resync region.ocr_tokens after all refinements so that
+                # downstream table-cell merge and layout always see final tokens.
+                if region_ocr_requested and ocr_tokens:
+                    for region in selected_regions:
+                        region.ocr_tokens = [
+                            token for token in ocr_tokens if _line_in_box(token, region.bbox)
+                        ]
 
                 # Recompute alignment after refinements so diagnostics and
                 # supplemental text describe the final OCR evidence.
@@ -1622,6 +1631,11 @@ def _refine_small_footnote_tokens(
         # non-whitespace characters without a confidence drop over 0.10.
         old_chars = len(re.sub(r"\s+", "", old_text))
         new_chars = len(re.sub(r"\s+", "", new_text))
+        # R65: reject refinements that truncate meaningful content. A rerender
+        # must not drop more than 30% of non-whitespace characters even when
+        # its confidence is higher, unless the original was nearly empty.
+        if old_chars > 4 and new_chars < old_chars * 0.70:
+            continue
         if not (
             new_score > old_score + 0.05
             or (new_chars >= old_chars * 1.2 and new_score >= old_score - 0.10)

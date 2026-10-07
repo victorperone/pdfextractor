@@ -186,10 +186,16 @@ class ComplexityAnalyzer:
             duplicate_char_ratio=duplicate_char_ratio,
             mapping_failure_ratio=mapping_failure_ratio,
         )
+        # D7: add EMBEDDED_IMAGES before evaluating layout_needed so the flag
+        # is effective in the set-intersection. Also cover pages with large
+        # images (>= 0.75) that have enough native text to escape SCANNED.
+        if image_coverage >= 0.05:
+            reasons.add(ComplexityReason.EMBEDDED_IMAGES)
         full_page_ocr_candidate = bool(
             {ComplexityReason.NO_TEXT, ComplexityReason.SCANNED} & reasons
         ) and not bool(
-            ComplexityReason.NO_TEXT in reasons
+            # D10: blank-page guard must cover SCANNED too, not only NO_TEXT.
+            (ComplexityReason.NO_TEXT in reasons or ComplexityReason.SCANNED in reasons)
             and visible_ink_ratio is not None
             and visible_ink_ratio < 0.002
         )
@@ -202,6 +208,7 @@ class ComplexityAnalyzer:
                 ComplexityReason.INVISIBLE_TEXT,
                 ComplexityReason.VECTOR_TEXT,
                 ComplexityReason.ANNOTATION_TEXT,
+                ComplexityReason.EMBEDDED_IMAGES,
             }
             & reasons
         )
@@ -214,10 +221,6 @@ class ComplexityAnalyzer:
             }
             & reasons
         )
-        if image_coverage >= 0.05 and image_coverage < 0.75:
-            reasons.add(ComplexityReason.EMBEDDED_IMAGES)
-            visual_recovery_needed = True
-            layout_needed = True
 
         if full_page_ocr_candidate:
             strategy = PageStrategy.OCR_CANDIDATE

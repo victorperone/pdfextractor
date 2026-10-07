@@ -1449,7 +1449,7 @@ def _exhaustive_candidates(
         record_call(_fb_d)
     results.append(("layout_sensitive", raw_d))
 
-    # Candidate E: low-contrast recovery — lower contrast_ths so more crops
+    # Candidate E: low-contrast recovery — raise contrast_ths so more crops
     # receive the second-pass contrast adjustment, and boost adjust_contrast
     # to recover faint text missed by the default recognizer parameters (§13).
     lc_kwargs = dict(base_kwargs)

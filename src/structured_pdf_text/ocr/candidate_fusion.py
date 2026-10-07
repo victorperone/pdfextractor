@@ -58,6 +58,11 @@ class OcrCandidateFusionEngine:
                     and _same_evidence(current, token)
                 ]
                 if not overlaps:
+                    # R55: new tokens with no spatial overlap must meet a
+                    # minimum quality bar before admission, to suppress
+                    # garbage detections that land in empty regions.
+                    if _token_score(token) < 0.10:
+                        continue
                     selected.append(token)
                     families_by_token.append({candidate.family})
                     candidates_by_token.append({candidate.candidate_id})
@@ -149,9 +154,14 @@ def _candidate_score(tokens: list[OcrToken]) -> float:
     if not tokens:
         return float("-inf")
     confidence = [token.confidence for token in tokens if token.confidence is not None]
-    return (sum(confidence) / len(confidence) if confidence else 0.5) + min(
-        sum(len(token.text.strip()) for token in tokens), 400
-    ) / 4000
+    mean_conf = sum(confidence) / len(confidence) if confidence else 0.5
+    texts = [token.text.strip() for token in tokens if token.text.strip()]
+    char_bonus = min(sum(len(t) for t in texts), 400) / 4000
+    # D8: penalise hallucination signals — replacement chars and duplicate spans.
+    all_chars = "".join(texts)
+    repl_penalty = len(re.findall(r"�", all_chars)) / max(len(all_chars), 1) * 0.40
+    dup_penalty = min((len(texts) - len(set(texts))) / max(len(texts), 1), 0.5) * 0.30
+    return mean_conf + char_bonus - repl_penalty - dup_penalty
 
 
 def _norm(text: str) -> str:

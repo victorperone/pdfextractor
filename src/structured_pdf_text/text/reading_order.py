@@ -264,7 +264,7 @@ def order_region_lines(
                 flow_lines=(
                     None
                     if flow_lines_by_region is None
-                    else flow_lines_by_region.get(region.region_id, [])
+                    else (flow_lines_by_region.get(region.region_id) or None)
                 ),
             )
             lines, groups = list(prose_result.lines), prose_result.column_groups

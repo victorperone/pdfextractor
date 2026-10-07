@@ -839,13 +839,13 @@ def _map_token_to_page(
             vx = visual_region.x0 + px * visual_region.width / max(width, 1)
             vy = visual_region.y0 + py * visual_region.height / max(height, 1)
             if page_bbox is not None and rotation == 90:
-                points.append(Point(page_bbox.x0 + vy, page_bbox.y0 + page_bbox.height - vx))
+                points.append(Point(vy, page_bbox.height - vx))
             elif page_bbox is not None and rotation == 180:
-                points.append(Point(page_bbox.x0 + page_bbox.width - vx, page_bbox.y0 + page_bbox.height - vy))
+                points.append(Point(page_bbox.width - vx, page_bbox.height - vy))
             elif page_bbox is not None and rotation == 270:
-                points.append(Point(page_bbox.x0 + page_bbox.width - vy, page_bbox.y0 + vx))
+                points.append(Point(page_bbox.width - vy, vx))
             else:
-                points.append(Point(page_bbox.x0 + vx, page_bbox.y0 + vy) if page_bbox is not None else Point(vx, vy))
+                points.append(Point(vx, vy))
         mapped_polygon = tuple(points)
     return replace(token, bbox=bbox, polygon=mapped_polygon, source=SourceKind.OCR_REGION, provenance="targeted_region_recovery")
 
