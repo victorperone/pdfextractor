@@ -1874,6 +1874,28 @@ def _refine_table_cells_ocr(
     return refinements
 
 
+def _refinement_conserves_content(
+    old_tokens: list[OcrToken],
+    new_tokens: list[OcrToken],
+    *,
+    min_coverage: float = 0.60,
+) -> bool:
+    """Return True when new_tokens retains enough non-whitespace content.
+
+    A refinement that drops more than (1 - min_coverage) of the prior
+    non-whitespace character count is considered destructive and should be
+    rejected regardless of quality score improvement. The guard does not
+    apply when old_tokens has <= 4 non-whitespace characters (trivially short).
+    """
+    old_text = " ".join(t.text.strip() for t in old_tokens if t.text.strip())
+    new_text = " ".join(t.text.strip() for t in new_tokens if t.text.strip())
+    old_chars = len(re.sub(r"\s+", "", old_text))
+    new_chars = len(re.sub(r"\s+", "", new_text))
+    if old_chars <= 4:
+        return True
+    return new_chars >= old_chars * min_coverage
+
+
 def _recover_weak_ocr_regions(
     engine: Any,
     page_image: Any,
@@ -1967,6 +1989,11 @@ def _recover_weak_ocr_regions(
             or new_quality.score >= old_quality.score + 0.03
             or (new_quality.sufficient and not old_quality.sufficient)
         )
+        # R67: quality score alone cannot justify discarding most of the prior
+        # content. A short result with high confidence must still retain at
+        # least 60% of the previous non-whitespace character count.
+        if accepted and old_tokens:
+            accepted = _refinement_conserves_content(old_tokens, new_tokens)
         if accepted:
             refined_tokens = _replace_tokens_in_box(refined_tokens, box, new_tokens)
         stats[f"weak-region-{index}"] = {

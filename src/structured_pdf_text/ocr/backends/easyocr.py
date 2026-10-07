@@ -1046,7 +1046,13 @@ def _best_candidate(
             "suspicious_insertion_ratio": round(metrics["suspicious_insertion_ratio"], 4),
             "baseline_preservation_ratio": round(metrics["baseline_preservation_ratio"], 4),
             "score": round(score, 4) if _math.isfinite(score) else None,
+            # D9: "selected" historically meant "this candidate won the ranking".
+            # It does NOT mean this candidate's tokens are the only ones in the
+            # fusion output. Use primary_candidate + contributed_token_count for
+            # accurate attribution of what actually appeared in the result.
             "selected": label == best_label,
+            "primary_candidate": label == best_label,
+            "contributed_token_count": fused.contribution_counts.get(label, 0),
             "fused_evidence_count": len(fused.tokens),
             "fusion_consensus_count": fused.consensus_count,
             "fusion_conflict_count": fused.conflict_count,

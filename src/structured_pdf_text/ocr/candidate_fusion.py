@@ -1,8 +1,9 @@
 """Spatial fusion of independent OCR candidate results."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
+import math
 import re
 import unicodedata
 
@@ -25,6 +26,10 @@ class OcrEvidence:
     candidate_count: int
     consensus_count: int
     conflict_count: int
+    # D9: maps candidate_id to the number of tokens that candidate contributed
+    # to the final fused result. Distinct from "selected" (the primary candidate)
+    # since multiple candidates can contribute tokens to the same fusion output.
+    contribution_counts: dict[str, int] = field(default_factory=dict)
 
 
 class OcrCandidateFusionEngine:
@@ -32,11 +37,15 @@ class OcrCandidateFusionEngine:
 
     def fuse(self, candidates: list[OcrCandidateResult]) -> OcrEvidence:
         ranked = sorted(candidates, key=lambda item: item.score, reverse=True)
+        best_score = ranked[0].score if ranked else float("-inf")
         selected: list[OcrToken] = []
         families_by_token: list[set[str]] = []
         candidates_by_token: list[set[str]] = []
+        # D9: track which candidate_id contributed each selected slot.
+        contributor_by_index: list[str] = []
         consensus = conflicts = 0
-        for candidate in ranked:
+        for rank_idx, candidate in enumerate(ranked):
+            is_primary = rank_idx == 0
             for raw_token in candidate.tokens:
                 token = replace(
                     raw_token,
@@ -58,14 +67,22 @@ class OcrCandidateFusionEngine:
                     and _same_evidence(current, token)
                 ]
                 if not overlaps:
-                    # R55: new tokens with no spatial overlap must meet a
-                    # minimum quality bar before admission, to suppress
-                    # garbage detections that land in empty regions.
-                    if _token_score(token) < 0.10:
+                    # R55: non-primary candidates must pass a stricter, candidate-
+                    # aware gate before admitting novel (spatially unmatched) evidence.
+                    if not is_primary and not _can_admit_novel_token(
+                        token, candidate, best_score
+                    ):
+                        continue
+                    # R56: suppress tokens whose text is already fully explained
+                    # by a larger selected span at the same location. This
+                    # prevents 1:N segmentation (e.g. "ABC DEF" vs "ABC"+"DEF")
+                    # from duplicating content when the larger span was selected first.
+                    if _is_explained_fragment(token, selected):
                         continue
                     selected.append(token)
                     families_by_token.append({candidate.family})
                     candidates_by_token.append({candidate.candidate_id})
+                    contributor_by_index.append(candidate.candidate_id)
                     continue
                 index = max(overlaps, key=lambda i: _token_score(selected[i]))
                 current = selected[index]
@@ -76,6 +93,7 @@ class OcrCandidateFusionEngine:
                         families_by_token[index].add(candidate.family)
                     if _token_score(token) > _token_score(current):
                         selected[index] = token
+                        contributor_by_index[index] = candidate.candidate_id
                     continue
                 conflicts += 1
                 # A surviving baseline span has a strong preservation bonus.
@@ -83,12 +101,28 @@ class OcrCandidateFusionEngine:
                 if _token_score(token) > _token_score(current) + 0.08:
                     selected[index] = token
                     families_by_token[index] = {candidate.family}
-        order = sorted(range(len(selected)), key=lambda i: (selected[i].bbox.y0, selected[i].bbox.x0))
+                    contributor_by_index[index] = candidate.candidate_id
+        # R56: post-fusion pass — remove tokens that became fragments of a larger
+        # span promoted during the loop (handles the N:1 → duplicate case).
+        suppressed = _suppressed_fragment_indices(selected)
+        order = [
+            i for i in sorted(
+                range(len(selected)),
+                key=lambda i: (selected[i].bbox.y0, selected[i].bbox.x0),
+            )
+            if i not in suppressed
+        ]
+        # D9: aggregate per-candidate contribution counts over non-suppressed slots.
+        contribution_counts: dict[str, int] = {}
+        for i, cid in enumerate(contributor_by_index):
+            if i not in suppressed:
+                contribution_counts[cid] = contribution_counts.get(cid, 0) + 1
         return OcrEvidence(
             tokens=tuple(selected[i] for i in order),
             candidate_count=len(candidates),
             consensus_count=consensus,
             conflict_count=conflicts,
+            contribution_counts=contribution_counts,
         )
 
 
@@ -157,11 +191,113 @@ def _candidate_score(tokens: list[OcrToken]) -> float:
     mean_conf = sum(confidence) / len(confidence) if confidence else 0.5
     texts = [token.text.strip() for token in tokens if token.text.strip()]
     char_bonus = min(sum(len(t) for t in texts), 400) / 4000
-    # D8: penalise hallucination signals — replacement chars and duplicate spans.
+    # D8: penalise hallucination signals that EasyOCR's main scorer also flags.
     all_chars = "".join(texts)
-    repl_penalty = len(re.findall(r"�", all_chars)) / max(len(all_chars), 1) * 0.40
+    repl_penalty = len(re.findall(r"â€|�", all_chars)) / max(len(all_chars), 1) * 0.40
     dup_penalty = min((len(texts) - len(set(texts))) / max(len(texts), 1), 0.5) * 0.30
-    return mean_conf + char_bonus - repl_penalty - dup_penalty
+    # Low-confidence ratio: fraction of tokens below 50% confidence.
+    low_conf_penalty = sum(1 for c in confidence if c < 0.50) / max(len(confidence), 1) * 0.15
+    # Single-character hallucinations inflate token count without real content.
+    single_char_penalty = min(
+        sum(1 for t in texts if len(t) == 1) / max(len(texts), 1), 0.5
+    ) * 0.10
+    return mean_conf + char_bonus - repl_penalty - dup_penalty - low_conf_penalty - single_char_penalty
+
+
+def _can_admit_novel_token(
+    token: OcrToken,
+    candidate: OcrCandidateResult,
+    best_score: float,
+) -> bool:
+    """Return True when a non-primary candidate may insert a spatially novel token.
+
+    Applies a candidate-aware gate that goes beyond the token-level score used
+    for the primary candidate. The goal is to distinguish new, reliable coverage
+    (e.g. a tile recovering a missed region) from isolated garbage from a bad
+    hypothesis.
+    """
+    # Candidates with non-finite or catastrophically bad scores cannot introduce
+    # novel evidence — they are likely noise or empty recognition passes.
+    if not math.isfinite(candidate.score) or candidate.score < -0.30:
+        return False
+    norm_text = _norm(token.text)
+    confidence = token.confidence if token.confidence is not None else 0.0
+    score_gap = best_score - candidate.score
+    # Single-character tokens are a common hallucination pattern; require very
+    # high confidence and a modest score gap.
+    if len(norm_text) <= 1:
+        return confidence >= 0.70 and score_gap <= 0.20
+    # Candidates far below the best need strong individual token evidence.
+    if score_gap > 0.50:
+        return False
+    if score_gap > 0.25:
+        return confidence >= 0.50 and _token_score(token) >= 0.30
+    # Modest score gap: standard token quality sufficient.
+    return confidence >= 0.30 and _token_score(token) >= 0.15
+
+
+def _is_explained_fragment(token: OcrToken, selected: list[OcrToken]) -> bool:
+    """Return True when token's text is a strict substring of a nearby selected span.
+
+    Used to suppress 1:N fragmentation duplicates: when a secondary candidate
+    splits an already-selected span (e.g. "ABC" and "DEF" from a candidate that
+    fused them as "ABC DEF"), the fragments should not be re-inserted.
+    """
+    norm_text = _norm(token.text)
+    if not norm_text:
+        return False
+    for existing in selected:
+        norm_existing = _norm(existing.text)
+        if norm_text not in norm_existing or norm_text == norm_existing:
+            continue
+        # Require meaningful spatial proximity.
+        intersection = token.bbox.intersection(existing.bbox)
+        if intersection is not None and intersection.area > 0:
+            smaller = max(min(token.bbox.area, existing.bbox.area), 1.0)
+            if intersection.area / smaller >= 0.30:
+                return True
+        # Same baseline, adjacent — text adjacency is sufficient spatial proximity.
+        x_gap = max(0.0, token.bbox.x0 - existing.bbox.x1, existing.bbox.x0 - token.bbox.x1)
+        height = max(token.bbox.height, existing.bbox.height, 1.0)
+        y_mid_diff = abs(
+            (token.bbox.y0 + token.bbox.y1) / 2
+            - (existing.bbox.y0 + existing.bbox.y1) / 2
+        )
+        if x_gap < height and y_mid_diff < height * 0.5:
+            return True
+    return False
+
+
+def _suppressed_fragment_indices(selected: list[OcrToken]) -> set[int]:
+    """Return the indices of tokens that are strict spatial fragments of a larger span.
+
+    Handles the N:1 case: two small tokens from the primary ("ABC", "DEF") plus a
+    large secondary token ("ABC DEF") — after "ABC" is replaced by "ABC DEF" in
+    the overlap resolution, "DEF" may remain as a fragment. This post-fusion pass
+    removes such stragglers.
+    """
+    to_suppress: set[int] = set()
+    for i, small in enumerate(selected):
+        if i in to_suppress:
+            continue
+        norm_small = _norm(small.text)
+        if not norm_small:
+            continue
+        for j, big in enumerate(selected):
+            if i == j or j in to_suppress:
+                continue
+            norm_big = _norm(big.text)
+            if norm_small not in norm_big or norm_small == norm_big:
+                continue
+            # Require the smaller token to be substantially inside the larger span.
+            intersection = small.bbox.intersection(big.bbox)
+            if intersection is None:
+                continue
+            small_area = max(small.bbox.area, 1.0)
+            if intersection.area / small_area >= 0.65:
+                to_suppress.add(i)
+                break
+    return to_suppress
 
 
 def _norm(text: str) -> str:
@@ -186,5 +322,5 @@ def _token_score(token: OcrToken) -> float:
         return -1.0
     confidence = 0.5 if token.confidence is None else max(0.0, min(1.0, token.confidence))
     printable = sum(ch.isprintable() and unicodedata.category(ch)[0] != "C" for ch in text) / len(text)
-    suspicious = len(re.findall(r"�|\ufffd", text)) / len(text)
+    suspicious = len(re.findall(r"â€|�", text)) / len(text)
     return confidence * 0.65 + min(len(text), 80) / 400 + printable * 0.2 - suspicious * 0.5
