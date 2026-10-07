@@ -203,6 +203,20 @@ class TestR56FragmentSuppression:
 
         assert not _is_explained_fragment(distant, [far_full])
 
+    def test_is_explained_fragment_not_triggered_for_adjacent_different_span(self):
+        """B3/R56: adjacent same-line token that is a substring must NOT be suppressed.
+
+        'texto' appears to the right of 'outro texto' on the same line but at a
+        different x position with no spatial overlap.  It must survive as a
+        legitimate separate token even though its text is a substring of the
+        selected span's text.
+        """
+        selected_span = _tok("outro texto", 0, 0, 70, 10)   # x=[0,70]
+        adjacent_token = _tok("texto", 70, 0, 120, 10)      # x=[70,120], touching at x=70
+
+        # They share an edge (x_gap=0) but have zero overlap area — not a fragment.
+        assert not _is_explained_fragment(adjacent_token, [selected_span])
+
     def test_suppressed_fragment_indices_finds_contained_tokens(self):
         """_suppressed_fragment_indices must identify fragments inside a larger span."""
         big = _tok("ABC DEF", 0, 0, 80, 10)

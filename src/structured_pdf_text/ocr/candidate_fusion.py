@@ -237,11 +237,15 @@ def _can_admit_novel_token(
 
 
 def _is_explained_fragment(token: OcrToken, selected: list[OcrToken]) -> bool:
-    """Return True when token's text is a strict substring of a nearby selected span.
+    """Return True when token is a strict spatial fragment of an already-selected span.
 
     Used to suppress 1:N fragmentation duplicates: when a secondary candidate
     splits an already-selected span (e.g. "ABC" and "DEF" from a candidate that
     fused them as "ABC DEF"), the fragments should not be re-inserted.
+
+    Requires actual spatial overlap — adjacency alone is not sufficient, because a
+    legitimate separate occurrence of the same word may appear adjacent on the same
+    line without being a duplicate of the selected span.
     """
     norm_text = _norm(token.text)
     if not norm_text:
@@ -250,21 +254,12 @@ def _is_explained_fragment(token: OcrToken, selected: list[OcrToken]) -> bool:
         norm_existing = _norm(existing.text)
         if norm_text not in norm_existing or norm_text == norm_existing:
             continue
-        # Require meaningful spatial proximity.
+        # Require meaningful spatial overlap — adjacency alone is not sufficient.
         intersection = token.bbox.intersection(existing.bbox)
         if intersection is not None and intersection.area > 0:
             smaller = max(min(token.bbox.area, existing.bbox.area), 1.0)
             if intersection.area / smaller >= 0.30:
                 return True
-        # Same baseline, adjacent — text adjacency is sufficient spatial proximity.
-        x_gap = max(0.0, token.bbox.x0 - existing.bbox.x1, existing.bbox.x0 - token.bbox.x1)
-        height = max(token.bbox.height, existing.bbox.height, 1.0)
-        y_mid_diff = abs(
-            (token.bbox.y0 + token.bbox.y1) / 2
-            - (existing.bbox.y0 + existing.bbox.y1) / 2
-        )
-        if x_gap < height and y_mid_diff < height * 0.5:
-            return True
     return False
 
 

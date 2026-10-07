@@ -1945,8 +1945,8 @@ _CRITICAL_PATTERNS = [
     re.compile(r"\b\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}\b"),
     # CNPJ: 00.000.000/0000-00 (14 digits)
     re.compile(r"\b\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}\b"),
-    # Monetary BRL: R$ 1.234,56 (strict format: "." thousands, "," cents)
-    re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}"),
+    # Monetary BRL: R$ 1.234,56 — lowercase because _extract_critical_values lowercases input
+    re.compile(r"r\$\s*\d{1,3}(?:\.\d{3})*,\d{2}"),
     # Dates: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (4-digit year only)
     re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b"),
     # Percentages: 12,5% or 12%
@@ -2001,8 +2001,10 @@ def _refinement_conserves_content(
 
     2. Text similarity — even same-length but completely unrelated text is
        rejected; SequenceMatcher ratio must be >= min_similarity.  Skipped
-       when old is trivially short.  Whitespace is stripped before comparison
-       so spacing differences never lower the score.
+       when old has fewer than 15 non-whitespace characters, because character-
+       level ratios are too noisy on short texts (e.g. single-word OCR corrections
+       may replace one 5-char word with an entirely different 5-char word).
+       Whitespace is stripped before comparison so spacing never lowers the score.
 
     3. Critical data preservation — if old contains a well-formed CPF, CNPJ,
        monetary value, date, percentage, or process number, and new replaces
@@ -2018,11 +2020,13 @@ def _refinement_conserves_content(
     # Check 1: character coverage
     if new_chars < old_chars * min_coverage:
         return False
-    # Check 2: text similarity (same-length unrelated replacement)
-    old_key = _similarity_key(old_text)
-    new_key = _similarity_key(new_text)
-    if SequenceMatcher(None, old_key, new_key).ratio() < min_similarity:
-        return False
+    # Check 2: text similarity (same-length unrelated replacement).
+    # Only meaningful when old is long enough for the ratio to be stable.
+    if old_chars >= 15:
+        old_key = _similarity_key(old_text)
+        new_key = _similarity_key(new_text)
+        if SequenceMatcher(None, old_key, new_key).ratio() < min_similarity:
+            return False
     # Check 3: critical data conflict
     old_critical = _extract_critical_values(old_text)
     if old_critical:
