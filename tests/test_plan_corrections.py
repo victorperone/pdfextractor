@@ -15,6 +15,7 @@ from structured_pdf_text.assemble.document import assemble_document
 from structured_pdf_text.config import ExtractorConfig, SecurityLimits, effective_ocr_quality_thresholds
 from structured_pdf_text.diagnostics.compare import ComparisonExtraction, compare_extractors
 from structured_pdf_text.ocr.models import PROFILES, get_profile
+from structured_pdf_text.ocr.readiness import ReadinessResult, ReadinessStatus
 
 
 def _pdf(path: Path) -> Path:
@@ -223,10 +224,14 @@ def test_cli_overlay_native_does_not_validate_ocr(monkeypatch, tmp_path: Path) -
     assert code == 0
 
 
-def test_cli_overlay_ocr_mode_does_not_require_model_profile(capsys, tmp_path: Path) -> None:
+def test_cli_overlay_ocr_mode_does_not_require_model_profile(monkeypatch, capsys, tmp_path: Path) -> None:
     # Verify that --ocr-model-profile is never required, even in balanced OCR mode.
-    # Uses paddle explicitly so the test fails on the missing PDF (exit 2) rather
-    # than on EasyOCR package availability in the test environment.
+    # Isolate argument validation from optional OCR package/model availability.
+    monkeypatch.setattr(
+        cli_module,
+        "probe_static",
+        lambda *_args, **_kwargs: ReadinessResult(ReadinessStatus.READY),
+    )
     code = cli_module.main([
         "overlay", str(tmp_path / "not-opened.pdf"), "--page", "1", "--out", str(tmp_path / "out.png"),
         "--mode", "balanced", "--ocr-engine", "paddle",

@@ -396,17 +396,6 @@ class TestR69RotatedCandidateTokenRotation:
         assert len(tokens) == 1
         assert tokens[0].rotation == 270
 
-    def test_label_to_token_rotation_helper(self):
-        """_label_to_token_rotation must return correct angles."""
-        from structured_pdf_text.ocr.backends.easyocr import _label_to_token_rotation
-        assert _label_to_token_rotation("default") == 0
-        assert _label_to_token_rotation("high_recall") == 0
-        assert _label_to_token_rotation("rot90") == 90
-        assert _label_to_token_rotation("rot180") == 180
-        assert _label_to_token_rotation("rot270") == 270
-        assert _label_to_token_rotation("otsu") == 0
-        assert _label_to_token_rotation("tile:tl") == 0
-
     def test_multiple_tokens_all_receive_rotation(self):
         """All tokens in a single raw result batch must receive the rotation."""
         from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens

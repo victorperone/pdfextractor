@@ -189,7 +189,7 @@ class TestExhaustiveOrientationIsolation:
         # A 90° clockwise raster correction maps back to token orientation 270°
         for _, toks in candidates:
             for tok in toks:
-                assert tok.rotation == 270, f"token rotation must be 90, got {tok.rotation}"
+                assert tok.rotation == 270, f"token rotation must be 270, got {tok.rotation}"
 
     # ------------------------------------------------------------------
     # Test 3 — rot180 selected
@@ -283,7 +283,7 @@ class TestExhaustiveOrientationIsolation:
         )
         for _, toks in candidates:
             for tok in toks:
-                assert tok.rotation == 90, f"expected rotation=270, got {tok.rotation}"
+                assert tok.rotation == 90, f"expected rotation=90, got {tok.rotation}"
 
     def test_rot90_selected_tokens_reconstruct_in_original_reading_order(self):
         from structured_pdf_text.geometry import BBox
@@ -331,6 +331,34 @@ class TestExhaustiveOrientationIsolation:
             "LINHA UM",
             "LINHA DOIS",
         ]
+
+    def test_rot180_selected_tokens_reconstruct_in_original_reading_order(self):
+        self._assert_rotated_tokens_reconstruct_in_original_reading_order(180)
+
+    def test_rot270_selected_tokens_reconstruct_in_original_reading_order(self):
+        self._assert_rotated_tokens_reconstruct_in_original_reading_order(270)
+
+    def _assert_rotated_tokens_reconstruct_in_original_reading_order(self, angle: int):
+        from structured_pdf_text.geometry import BBox
+        from structured_pdf_text.ocr.backends.easyocr import (
+            _remap_raw_for_rotation,
+            _result_to_pipeline_tokens,
+            _token_rotation_from_applied_correction,
+        )
+        from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+
+        raw_rotated = [
+            ([[10, 10], [90, 10], [90, 20], [10, 20]], "LINHA UM", 0.99),
+            ([[10, 40], [90, 40], [90, 50], [10, 50]], "LINHA DOIS", 0.99),
+        ]
+        remapped = _remap_raw_for_rotation(raw_rotated, angle, 200, 100)
+        token_rotation = _token_rotation_from_applied_correction(angle)
+        tokens = _result_to_pipeline_tokens(
+            remapped, 0, "pt", token_rotation=token_rotation,
+        )
+        lines = reconstruct_ocr_lines(tokens, 0, BBox(0, 0, 200, 100))
+        assert all(token.rotation == token_rotation for token in tokens)
+        assert [line.text for line in lines] == ["LINHA UM", "LINHA DOIS"]
 
 
     # ------------------------------------------------------------------

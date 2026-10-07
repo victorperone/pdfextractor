@@ -767,16 +767,6 @@ def _result_to_ocr_tokens(
     return tokens
 
 
-def _label_to_token_rotation(label: str) -> int:
-    """Return the clockwise rotation angle encoded in a candidate label.
-
-    Rotation candidates (rot90/rot180/rot270) remap polygon coordinates back to
-    the original image space via ``_remap_raw_for_rotation``, but the OcrToken
-    still needs to carry the angle so that downstream orientation-aware code
-    (quality gate, reading order) can treat the token correctly.
-    """
-    return {"rot90": 90, "rot180": 180, "rot270": 270}.get(label, 0)
-
 def _token_rotation_from_applied_correction(angle: int) -> int:
     """Convert the clockwise raster correction into token orientation.
 

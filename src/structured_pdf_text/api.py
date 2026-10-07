@@ -11,8 +11,10 @@ import math
 import re
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from decimal import Decimal
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -1934,24 +1936,14 @@ def _refine_table_cells_ocr(
 # B2/R67 — semantic conservation helpers
 # ---------------------------------------------------------------------------
 
-# Strict patterns for critical data values in Brazilian Portuguese documents.
-# Each pattern must match only well-formed values so OCR noise (e.g. "9.87G,54")
-# is not extracted and therefore cannot create a false conflict with the cleaned
-# version ("9.876,54").
-_CRITICAL_PATTERNS = [
-    # CPF: 000.000.000-00 (11 digits, various separators)
-    re.compile(r"\b\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}\b"),
-    # CNPJ: 00.000.000/0000-00 (14 digits)
-    re.compile(r"\b\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}\b"),
-    # Monetary BRL: R$ 1.234,56 — lowercase because _extract_critical_values lowercases input
-    re.compile(r"r\$\s*\d{1,3}(?:\.\d{3})*,\d{2}"),
-    # Dates: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (4-digit year only)
-    re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b"),
-    # Percentages: 12,5% or 12%
-    re.compile(r"\b\d{1,3}[,.]?\d{0,2}\s*%"),
-    # CNJ process number: 0000000-00.0000.0.00.0000
-    re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4}\b"),
-]
+# Strict patterns for structural critical data. Monetary and percentage values
+# use dedicated typed patterns below so each kind has a single source of truth.
+_STRUCTURAL_CRITICAL_PATTERNS = (
+    ("process", re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4}\b")),
+    ("cnpj", re.compile(r"\b\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}\b")),
+    ("cpf", re.compile(r"\b\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}\b")),
+    ("date", re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b")),
+)
 
 
 def _similarity_key(text: str) -> str:
@@ -1965,51 +1957,56 @@ def _similarity_key(text: str) -> str:
     return re.sub(r"\s", "", text)
 
 
-def _extract_critical_values(text: str) -> set[str]:
-    """Extract normalized critical data tokens for conflict detection.
-
-    Returned values have separators stripped so ``529.982.247-25`` and
-    ``52998224725`` compare equal.  Only well-formed patterns are extracted;
-    OCR noise that partially resembles a critical value is silently ignored.
-    """
-    values: set[str] = set()
-    lower = text.lower()
-    for pattern in _CRITICAL_PATTERNS:
-        for m in pattern.finditer(lower):
-            key = re.sub(r"[\s.,\-/]", "", m.group())
-            if key:
-                values.add(key)
+def _extract_structural_critical_values(text: str) -> Counter[str]:
+    """Extract typed identifiers and dates, retaining repeated occurrences."""
+    values: Counter[str] = Counter()
+    occupied: list[tuple[int, int]] = []
+    for kind, pattern in _STRUCTURAL_CRITICAL_PATTERNS:
+        for match in pattern.finditer(text):
+            span = match.span()
+            if any(span[0] < end and start < span[1] for start, end in occupied):
+                continue
+            normalized = re.sub(r"[\s.,/\-]", "", match.group())
+            if normalized:
+                values[f"{kind}:{normalized}"] += 1
+                occupied.append(span)
     return values
 
+
 _SIGNED_MONEY_PATTERN = re.compile(
-    r"r\$\s*([+-]?)\s*(\d{1,3}(?:\.\d{3})*,\d{2})",
+    r"(?<![\w\d])r\$\s*([+-]?)\s*((?:\d{1,3}(?:\.\d{3})*)|\d+),(\d{2})(?!\d)",
     re.IGNORECASE,
 )
 
 _SIGNED_PERCENTAGE_PATTERN = re.compile(
-    r"(?<![\w\d])([+-]?)\s*(\d{1,3}(?:[,.]\d{1,2})?)\s*%"
+    r"(?<![\w\d.,])([+-]?)\s*(\d{1,3})(?:([,.])(\d{1,3}))?\s*%(?!\w)"
 )
 
-def _extract_signed_critical_values(text: str) -> set[str]:
-    """Extract sign-sensitive monetary and percentage values.
+def _extract_signed_numeric_critical_values(text: str) -> Counter[str]:
+    """Extract canonical sign-sensitive monetary and percentage values.
 
     Missing sign and explicit '+' are both normalized as positive.
     The negative sign is preserved because changing it changes the
-    semantic value of financial and percentage data.
+    semantic value of financial and percentage data. Decimal normalization
+    preserves decimal position and repeated occurrences.
     """
-    values: set[str] = set()
+    values: Counter[str] = Counter()
 
     for match in _SIGNED_MONEY_PATTERN.finditer(text):
         sign = "-" if match.group(1) == "-" else "+"
-        number = re.sub(r"[.,\s]", "", match.group(2))
-        values.add(f"money:{sign}:{number}")
+        integer = match.group(2).replace(".", "")
+        amount = Decimal(f"{integer}.{match.group(3)}")
+        values[f"money:{sign}:{format(amount, '.2f')}"] += 1
 
     for match in _SIGNED_PERCENTAGE_PATTERN.finditer(text):
         sign = "-" if match.group(1) == "-" else "+"
-        number = re.sub(r"[.,\s]", "", match.group(2))
-        values.add(f"percentage:{sign}:{number}")
+        integer = match.group(2)
+        fraction = match.group(4)
+        number = Decimal(f"{integer}.{fraction}" if fraction else integer)
+        values[f"percentage:{sign}:{format(number.normalize(), 'f')}"] += 1
 
     return values
+
 
 def _refinement_conserves_content(
     old_tokens: list[OcrToken],
@@ -2034,23 +2031,22 @@ def _refinement_conserves_content(
        Whitespace is stripped before comparison so spacing never lowers the score.
 
     3. Critical data preservation — if old contains a well-formed CPF, CNPJ,
-       monetary value, date, percentage, or process number, and new replaces
-       it with a *different* value of the same type, the refinement is
-       rejected even when similarity is high.
+       monetary value, date, percentage, or process number, every typed value
+       and its occurrence count must remain in new, even when similarity is high.
     """
     old_text = " ".join(t.text.strip() for t in old_tokens if t.text.strip())
     new_text = " ".join(t.text.strip() for t in new_tokens if t.text.strip())
     old_chars = len(re.sub(r"\s+", "", old_text))
     new_chars = len(re.sub(r"\s+", "", new_text))
     # Check 0: critical data must not disappear or be substituted (before short-text bypass)
-    old_critical = _extract_critical_values(old_text)
+    old_critical = _extract_structural_critical_values(old_text)
     if old_critical:
-        new_critical = _extract_critical_values(new_text)
+        new_critical = _extract_structural_critical_values(new_text)
         if old_critical - new_critical:
             return False
-    old_signed_critical = _extract_signed_critical_values(old_text)
+    old_signed_critical = _extract_signed_numeric_critical_values(old_text)
     if old_signed_critical:
-        new_signed_critical = _extract_signed_critical_values(new_text)
+        new_signed_critical = _extract_signed_numeric_critical_values(new_text)
         if old_signed_critical - new_signed_critical:
             return False
     if old_chars <= 4:

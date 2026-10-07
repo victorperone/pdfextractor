@@ -10,7 +10,7 @@ import pytest
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.api import _refinement_conserves_content
+from structured_pdf_text.api import _extract_signed_numeric_critical_values, _refinement_conserves_content
 
 
 # ---------------------------------------------------------------------------
@@ -336,29 +336,58 @@ class TestB2CriticalDataDisappearance:
             "extension without critical data must be accepted"
         )
 
-def test_conservation_rejects_currency_sign_flip(self):
-    old = [_tok("Diferença: R$ -350,00", 0, 0, 200, 15)]
-    new = [_tok("Diferença: R$ +350,00", 0, 0, 200, 15, conf=0.99)]
+    def test_conservation_rejects_currency_sign_flip(self):
+        old = [_tok("Diferença: R$ -350,00", 0, 0, 200, 15)]
+        new = [_tok("Diferença: R$ +350,00", 0, 0, 200, 15, conf=0.99)]
+        assert not _refinement_conserves_content(old, new)
 
-    assert not _refinement_conserves_content(old, new)
+    def test_conservation_rejects_percentage_sign_flip(self):
+        old = [_tok("Desconto: -2,75%", 0, 0, 200, 15)]
+        new = [_tok("Desconto: +2,75%", 0, 0, 200, 15, conf=0.99)]
+        assert not _refinement_conserves_content(old, new)
 
+    def test_conservation_accepts_explicit_positive_sign(self):
+        old = [_tok("Valor: R$ 350,00", 0, 0, 200, 15)]
+        new = [_tok("Valor: R$ +350,00", 0, 0, 200, 15, conf=0.99)]
+        assert _refinement_conserves_content(old, new)
 
-def test_conservation_rejects_percentage_sign_flip(self):
-    old = [_tok("Desconto: -2,75%", 0, 0, 200, 15)]
-    new = [_tok("Desconto: +2,75%", 0, 0, 200, 15, conf=0.99)]
+    def test_conservation_accepts_removed_explicit_positive_sign(self):
+        old = [_tok("Valor: R$ +350,00", 0, 0, 200, 15)]
+        new = [_tok("Valor: R$ 350,00", 0, 0, 200, 15, conf=0.99)]
+        assert _refinement_conserves_content(old, new)
 
-    assert not _refinement_conserves_content(old, new)
+    def test_conservation_accepts_same_negative_value(self):
+        old = [_tok("Desconto: -2,75%", 0, 0, 200, 15)]
+        new = [_tok("Desconto corrigido: -2,75%", 0, 0, 220, 15, conf=0.99)]
+        assert _refinement_conserves_content(old, new)
 
+    def test_percentage_three_decimal_places_is_extracted_as_whole_value(self):
+        assert _extract_signed_numeric_critical_values("100,000%") == {"percentage:+:100": 1}
+        assert _extract_signed_numeric_critical_values("0,000%") == {"percentage:+:0": 1}
 
-def test_conservation_accepts_explicit_positive_sign(self):
-    old = [_tok("Valor: R$ 350,00", 0, 0, 200, 15)]
-    new = [_tok("Valor: R$ +350,00", 0, 0, 200, 15, conf=0.99)]
+    def test_negative_three_decimal_percentage_preserves_sign(self):
+        assert _extract_signed_numeric_critical_values("-100,000%") == {"percentage:-:100": 1}
 
-    assert _refinement_conserves_content(old, new)
+    def test_percentage_decimal_position_is_preserved(self):
+        assert _extract_signed_numeric_critical_values("1,20%") == {"percentage:+:1.2": 1}
+        assert _extract_signed_numeric_critical_values("12,0%") == {"percentage:+:12": 1}
 
+    def test_percentage_100_is_not_equal_to_zero(self):
+        old = [_tok("Percentual aplicado: 100,000%", 0, 0, 240, 15)]
+        new = [_tok("Percentual aplicado: 0,000%", 0, 0, 240, 15, conf=0.99)]
+        assert not _refinement_conserves_content(old, new)
 
-def test_conservation_accepts_same_negative_value(self):
-    old = [_tok("Desconto: -2,75%", 0, 0, 200, 15)]
-    new = [_tok("Desconto corrigido: -2,75%", 0, 0, 220, 15, conf=0.99)]
+    def test_duplicate_currency_occurrence_cannot_disappear(self):
+        old = [_tok("Valores R$ 100,00 e R$ 100,00 confirmados", 0, 0, 300, 15)]
+        new = [_tok("Valores R$ 100,00 confirmados no relatório", 0, 0, 300, 15, conf=0.99)]
+        assert not _refinement_conserves_content(old, new)
 
-    assert _refinement_conserves_content(old, new)
+    def test_duplicate_percentage_occurrence_cannot_disappear(self):
+        old = [_tok("Taxas 10,00% e 10,00% para duas etapas", 0, 0, 300, 15)]
+        new = [_tok("Taxas 10,00% para duas etapas independentes", 0, 0, 300, 15, conf=0.99)]
+        assert not _refinement_conserves_content(old, new)
+
+    def test_same_critical_value_multiplicity_is_accepted(self):
+        old = [_tok("Taxas 10,00% e 10,00% para duas etapas", 0, 0, 300, 15)]
+        new = [_tok("Taxas 10,00% e 10,00% para duas etapas", 0, 0, 300, 15, conf=0.99)]
+        assert _refinement_conserves_content(old, new)
