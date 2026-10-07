@@ -109,11 +109,19 @@ def validate_table_geometry(
 
     row_centers = _row_centers(table)
     column_anchors = _column_anchors(table)
-    row_indexes = {cell.row for cell in cells}
-    column_indexes = {cell.col for cell in cells}
-    if row_indexes != set(range(max(table.row_count, 0))):
+    occupied_rows = {row for cell in cells for row in range(cell.row, cell.row + max(cell.rowspan, 1))}
+    occupied_columns = {col for cell in cells for col in range(cell.col, cell.col + max(cell.colspan, 1))}
+    occupied_positions: set[tuple[int, int]] = set()
+    for cell in cells:
+        for row in range(cell.row, cell.row + max(cell.rowspan, 1)):
+            for col in range(cell.col, cell.col + max(cell.colspan, 1)):
+                position = (row, col)
+                if position in occupied_positions:
+                    reasons.append("overlapping_cell_spans")
+                occupied_positions.add(position)
+    if occupied_rows != set(range(max(table.row_count, 0))):
         reasons.append("missing_table_row")
-    if column_indexes != set(range(max(table.column_count, 0))):
+    if occupied_columns != set(range(max(table.column_count, 0))):
         reasons.append("missing_table_column")
     row_monotonicity = _monotonicity(row_centers)
     columns_increasing = writing_direction != WritingDirection.RIGHT_TO_LEFT

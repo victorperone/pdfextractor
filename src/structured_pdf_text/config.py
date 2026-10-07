@@ -1,3 +1,14 @@
+"""Extraction configuration: modes, quality policies, thresholds, and presets.
+
+Defines :class:`ExtractorConfig` and the supporting enums and dataclasses that
+control every configurable aspect of the extraction pipeline — OCR engine
+selection, quality policies, table detection, language, and render scale.
+
+Key functions:
+  :func:`max_quality_extraction_config` — preset for exhaustive-quality extraction.
+  :func:`best_extraction_config` — preset for balanced quality/speed.
+  :func:`effective_ocr_quality_policy` — resolves the active policy from a config.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -180,6 +191,14 @@ class ExtractorConfig:
     ocr_quality_variants: bool = True
     ocr_quality_policy: OcrQualityPolicy | str = OcrQualityPolicy.ADAPTIVE
     ocr_quality_thresholds: OcrQualityThresholds = OcrQualityThresholds()
+    max_quality: bool = False
+    ocr_tiling: bool = False
+    ocr_tile_rows: int = 2
+    ocr_tile_columns: int = 2
+    ocr_tile_overlap: float = 0.15
+    enable_critical_data_refinement: bool = False
+    enable_table_cell_ocr: bool = False
+    ocr_cache_home: str | None = None
     ocr_batch_size: int = 3
     preserve_headers_footers: bool = True
     # Low-level PDFium characters and object summaries are useful for a raw
@@ -216,6 +235,8 @@ class ExtractorConfig:
             raise ConfigurationError("mode='ocr' requires OCR and cannot set enable_ocr=False")
         if ExtractionMode(self.mode) in (ExtractionMode.NATIVE, ExtractionMode.FAST) and self.enable_ocr is True:
             raise ConfigurationError("native/fast modes are raster-free and cannot enable OCR")
+        if ExtractionMode(self.mode) in (ExtractionMode.NATIVE, ExtractionMode.FAST) and self.enable_table_cell_ocr:
+            raise ConfigurationError("native/fast modes are raster-free and cannot enable table-cell OCR")
         for name in ("complexity_render_scale",):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -263,6 +284,8 @@ class ExtractorConfig:
                     "ocr_provider must be 'onnxruntime' or 'openvino', "
                     f"got {self.ocr_provider!r}"
                 )
+        if self.ocr_cache_home is not None and not isinstance(self.ocr_cache_home, (str, Path)):
+            raise ConfigurationError("ocr_cache_home must be a path string or None")
         if self.ocr_runtime not in {None, "paddle_static", "onnxruntime", "openvino"}:
             raise ConfigurationError(f"Unsupported deprecated ocr_runtime value: {self.ocr_runtime!r}")
         if self.ocr_runtime in {"onnxruntime", "openvino"}:
@@ -293,6 +316,15 @@ class ExtractorConfig:
             raise ConfigurationError("RapidOCR ocr_runtime cannot be used with Paddle")
         if isinstance(self.ocr_batch_size, bool) or not isinstance(self.ocr_batch_size, int) or self.ocr_batch_size < 1:
             raise ConfigurationError(f"ocr_batch_size must be >= 1, got {self.ocr_batch_size!r}")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in (self.ocr_tile_rows, self.ocr_tile_columns)):
+            raise ConfigurationError("ocr_tile_rows and ocr_tile_columns must be positive integers")
+        if (
+            isinstance(self.ocr_tile_overlap, bool)
+            or not isinstance(self.ocr_tile_overlap, (int, float))
+            or not math.isfinite(self.ocr_tile_overlap)
+            or not 0.10 <= self.ocr_tile_overlap <= 0.20
+        ):
+            raise ConfigurationError("ocr_tile_overlap must be in [0.10, 0.20]")
         if isinstance(self.num_threads, bool) or not isinstance(self.num_threads, int) or self.num_threads < -1:
             raise ConfigurationError(f"num_threads must be -1, 0, or positive, got {self.num_threads!r}")
         if self.page_indices is not None:
@@ -349,6 +381,64 @@ def best_extraction_config(
     )
 
 
+def max_quality_extraction_config(
+    *,
+    language: str = "pt",
+    preserve_headers: bool = False,
+) -> "ExtractorConfig":
+    """Return the config optimised for maximum extraction quality.
+
+    Enables every quality flag in the pipeline:
+
+    - ``ocr_quality_variants=True`` — enables multi-candidate OCR passes.
+    - ``ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE`` — for EasyOCR, evaluates
+      a dynamic candidate set per page combining baseline, detector, decoder,
+      preprocessing, deskew, magnification, orientation, and DBNet18 variants.
+      The candidate set size varies with image content and available dependencies.
+      The best candidate is selected by a rich scoring model (confidence,
+      low-confidence ratio, duplicate ratio, replacement character ratio).
+      Other engines run their own single pass.
+    - Table detection and cross-page merging enabled.
+    - Header/footer suppression enabled by default.
+
+    Resource cost: approximately 4–6× the OCR inference time of
+    ``best_extraction_config`` because the exhaustive policy runs many
+    EasyOCR passes per page.  Use this config for documents where accuracy
+    is more important than throughput — e.g. financial reports, legal filings,
+    or any document that will feed a critical downstream process.
+
+    **DBNet18 note**: DBNet18 adds an independent detector candidate (N) when
+    both the weights file *and* runtime are functional.  Weights being present
+    on disk does not guarantee runtime availability — on Windows, DBNet18
+    requires compiled native extensions (deformable convolution via MSVC Build
+    Tools).  Run ``preflight --max-quality --deep-smoke`` to verify full
+    readiness; the result is reported as INCOMPLETE (not broken) when CRAFT
+    is available but DBNet18 is not.
+
+    The config is engine-agnostic: other OCR backends will ignore policies
+    they do not implement and fall back to their normal single pass.
+
+    Args:
+        language: OCR language hint (default "pt" for Brazilian Portuguese).
+        preserve_headers: set True to keep repeated page headers/footers in
+            reading_text (default False — removes them).
+    """
+    return ExtractorConfig(
+        mode=ExtractionMode.BALANCED,
+        language=language,
+        enable_tables=True,
+        merge_cross_page_tables=True,
+        preserve_headers_footers=preserve_headers,
+        ocr_quality_variants=True,
+        ocr_quality_policy=OcrQualityPolicy.EXHAUSTIVE,
+        max_quality=True,
+        ocr_tiling=True,
+        enable_critical_data_refinement=True,
+        enable_table_cell_ocr=True,
+        enable_experimental_occlusion_redaction=True,
+    )
+
+
 # Per-engine render scale defaults for the E2E benchmark.
 #
 # Rationale (research-backed, subject to A/B refinement):
@@ -401,15 +491,38 @@ def best_ocr_render_scale(engine: str) -> float:
 def effective_ocr_quality_thresholds(config: ExtractorConfig) -> OcrQualityThresholds:
     """Return confidence gates calibrated for the selected OCR family.
 
-    Confidence thresholds are neutralized for non-Paddle families until
-    backend-specific calibration data exists. Geometry, text-integrity, and
-    orientation gates are retained for all families. Native confidence values
-    remain available in diagnostics regardless.
+    Paddle: uses the configured thresholds directly (PP-OCRv6 operating point).
+
+    EasyOCR: uses empirically derived thresholds from the Phase 8 benchmark
+    (V3: 144 pages, V4: 224 pages).  EasyOCR confidence scores are generally
+    lower than Paddle's on clean text (~0.82 vs ~0.90 mean) and more variable
+    on degraded scans, so all thresholds are relaxed relative to Paddle.
+    These values allow detection of genuinely bad pages (triggering recovery)
+    without excessive false-positive recovery on good pages.
+
+    Other engines: confidence is neutralized (thresholds set to permissive values)
+    until backend-specific calibration data is available. Geometry, text-integrity,
+    and orientation gates are retained for all families.
     """
-    if config.ocr_engine == "paddle":
-        return config.ocr_quality_thresholds
     from dataclasses import replace
 
+    if config.ocr_engine == "paddle":
+        return config.ocr_quality_thresholds
+
+    if config.ocr_engine == "easyocr":
+        # Calibrated from Phase 8 benchmark — conservative starting point.
+        # Raise these values after per-document validation with real corpus data.
+        return replace(
+            config.ocr_quality_thresholds,
+            strong_mean_confidence=0.82,
+            strong_lower_quartile=0.65,
+            max_low_confidence_char_ratio=0.20,
+            severe_mean_confidence=0.55,
+            severe_low_confidence_char_ratio=0.45,
+            low_confidence_threshold=0.60,
+        )
+
+    # Unknown / uncalibrated engines — neutralize confidence gates, retain geometry gates.
     return replace(
         config.ocr_quality_thresholds,
         strong_mean_confidence=0.0,

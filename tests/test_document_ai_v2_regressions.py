@@ -71,6 +71,35 @@ def test_synthetic_redaction_hides_occluded_text(synthetic_regression_pdf: Path)
     assert page.diagnostics.facts["textpage_reconciliation_disabled_for_redaction"] is True
 
 
+@pytest.mark.parametrize("band_width", [120, 600])
+def test_redaction_preserves_visible_white_text_on_large_black_fill(
+    tmp_path: Path,
+    band_width: int,
+):
+    path = tmp_path / f"white-text-on-black-{band_width}.pdf"
+    pdf = canvas.Canvas(str(path), pagesize=(600, 400), pageCompression=0)
+    pdf.setFillColorRGB(0, 0, 0)
+    pdf.rect(0, 100, band_width, 180, fill=1, stroke=0)
+    pdf.setFillColorRGB(1, 1, 1)
+    pdf.setFont("Helvetica", 12)
+    pdf.drawString(40, 150, "TEXTO VISIVEL")
+    pdf.save()
+
+    config = ExtractorConfig(
+        mode=ExtractionMode.BALANCED,
+        enable_ocr=False,
+        enable_experimental_occlusion_redaction=True,
+    )
+    document = PdfTextExtractor(config).extract(path)
+    page = document.pages[0]
+    markdown = render_markdown(document)
+
+    assert "TEXTO VISIVEL" in page.raw_text
+    assert "TEXTO VISIVEL" in page.reading_text
+    assert "TEXTO VISIVEL" in markdown
+    assert page.diagnostics.facts["redacted_native_characters"] == 0
+
+
 def test_synthetic_columns_and_scripts_keep_text(synthetic_regression_pdf: Path):
     columns = _extract(synthetic_regression_pdf, 9).reading_text
     assert columns.index("HZ-901") < columns.index("HZ-902") < columns.index("HZ-903")

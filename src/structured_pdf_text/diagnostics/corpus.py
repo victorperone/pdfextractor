@@ -35,13 +35,13 @@ def corpus_report(
     normalized_config = config or ExtractorConfig()
     normalized_paths = [Path(path) for path in paths]
     if workers <= 1 or len(normalized_paths) <= 1:
-        extractor = PdfTextExtractor(normalized_config)
         documents = []
-        for path in normalized_paths:
-            try:
-                documents.append(_document_entry(extractor.extract(path)))
-            except Exception as exc:
-                documents.append(_error_entry(str(path), exc))
+        with PdfTextExtractor(normalized_config) as extractor:
+            for path in normalized_paths:
+                try:
+                    documents.append(_document_entry(extractor.extract(path)))
+                except Exception as exc:
+                    documents.append(_error_entry(str(path), exc))
     else:
         # ``spawn`` avoids inheriting a loaded Paddle runtime/model. Each
         # process owns one extractor; callers should keep OCR worker counts
@@ -66,7 +66,8 @@ def corpus_report(
 def _extract_document_entry(argument: tuple[str, ExtractorConfig]) -> dict[str, object]:
     path, config = argument
     try:
-        return _document_entry(PdfTextExtractor(config).extract(path))
+        with PdfTextExtractor(config) as extractor:
+            return _document_entry(extractor.extract(path))
     except Exception as exc:
         return _error_entry(path, exc)
 

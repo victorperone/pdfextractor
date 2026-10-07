@@ -80,6 +80,7 @@ def assess_region_recovery(
     page_complexity: PageComplexity,
     page_image: Any | None,
     page_bbox: BBox,
+    page_rotation: int = 0,
 ) -> RegionRecoveryPlan:
     """Assign local recovery decisions and decide whether crops should promote.
 
@@ -95,6 +96,7 @@ def assess_region_recovery(
             page_complexity,
             page_image,
             page_bbox,
+            page_rotation,
         )
         if region.quality.decision in {
             RegionDecision.MERGE_OCR,
@@ -172,6 +174,7 @@ def _assess_one_region(
     page_complexity: PageComplexity,
     page_image: Any | None,
     page_bbox: BBox,
+    page_rotation: int = 0,
 ) -> RegionQuality:
     """Assign a :class:`~structured_pdf_text.document.RegionQuality` decision to a single layout region.
 
@@ -192,9 +195,9 @@ def _assess_one_region(
         for line in region.native_lines
         if (intersection := line.bbox.intersection(region.bbox)) is not None
     ]
-    text_area = min(region.bbox.area, sum(box.area for box in intersections))
+    text_area = min(region.bbox.area, _union_area(intersections))
     text_coverage = text_area / max(region.bbox.area, 1.0)
-    ink_ratio = _region_ink_ratio(page_image, page_bbox, region.bbox)
+    ink_ratio = _region_ink_ratio(page_image, page_bbox, region.bbox, page_rotation)
     visible = ink_ratio is None or ink_ratio >= 0.008
     reasons: list[str] = []
 
@@ -258,17 +261,21 @@ def _assess_one_region(
     return RegionQuality(RegionDecision.KEEP_NATIVE, reasons, confidence)
 
 
-def _region_ink_ratio(image: Any | None, page_bbox: BBox, region_bbox: BBox) -> float | None:
+def _region_ink_ratio(
+    image: Any | None, page_bbox: BBox, region_bbox: BBox, page_rotation: int = 0,
+) -> float | None:
     """Return the fraction of dark pixels inside *region_bbox* on the rendered page.
 
-    Coordinates are converted from PDF space (relative to *page_bbox*) to the
-    pixel grid of *image*.  Returns *None* when *image* is absent or when any
-    conversion error occurs, which callers interpret as "ink presence unknown".
+    Coordinates are converted from canonical PDF space to the visual pixel grid
+    of *image* (PDFium renders with /Rotate applied, so axes may be swapped).
+    Returns *None* when *image* is absent or when any conversion error occurs,
+    which callers interpret as "ink presence unknown".
     """
     if image is None:
         return None
     try:
         import numpy as np
+        from structured_pdf_text.geometry import BBox as _BBox
 
         array = np.asarray(image)
         if array.ndim == 3:
@@ -276,10 +283,26 @@ def _region_ink_ratio(image: Any | None, page_bbox: BBox, region_bbox: BBox) -> 
         else:
             gray = array
         height, width = gray.shape[:2]
-        left = max(0, int((region_bbox.x0 - page_bbox.x0) * width / max(page_bbox.width, 1.0)))
-        top = max(0, int((region_bbox.y0 - page_bbox.y0) * height / max(page_bbox.height, 1.0)))
-        right = min(width, max(left + 1, int((region_bbox.x1 - page_bbox.x0) * width / max(page_bbox.width, 1.0))))
-        bottom = min(height, max(top + 1, int((region_bbox.y1 - page_bbox.y0) * height / max(page_bbox.height, 1.0))))
+        # Convert region from canonical space to visual space so coordinates
+        # align with the rendered image (which has /Rotate already applied).
+        rel = _BBox(
+            region_bbox.x0 - page_bbox.x0,
+            region_bbox.y0 - page_bbox.y0,
+            region_bbox.x1 - page_bbox.x0,
+            region_bbox.y1 - page_bbox.y0,
+        )
+        visual = rel.rotate_to_visual(page_rotation, page_bbox.width, page_bbox.height)
+        rotation = page_rotation % 360
+        if rotation in (90, 270):
+            visual_w = max(page_bbox.height, 1.0)
+            visual_h = max(page_bbox.width, 1.0)
+        else:
+            visual_w = max(page_bbox.width, 1.0)
+            visual_h = max(page_bbox.height, 1.0)
+        left = max(0, int(visual.x0 * width / visual_w))
+        top = max(0, int(visual.y0 * height / visual_h))
+        right = min(width, max(left + 1, int(visual.x1 * width / visual_w)))
+        bottom = min(height, max(top + 1, int(visual.y1 * height / visual_h)))
         sample = gray[top:bottom, left:right]
         return float((sample < 245).mean()) if sample.size else 0.0
     except (AttributeError, ImportError, TypeError, ValueError):

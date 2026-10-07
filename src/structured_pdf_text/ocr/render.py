@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-
 import pypdfium2 as pdfium
 from PIL import Image
 

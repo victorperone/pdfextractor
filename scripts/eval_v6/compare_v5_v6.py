@@ -188,6 +188,8 @@ def run_extract(
         str(out_file),
         "--mode",
         "balanced",
+        "--ocr-engine",
+        "paddle",
         "--ocr-model-profile",
         profile,
         "--ocr-quality-policy",

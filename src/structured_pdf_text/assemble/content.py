@@ -11,7 +11,7 @@ fragment bbox (fallback). A TABLE region label alone is not sufficient.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from structured_pdf_text.document import (
     ContentKind,
@@ -20,7 +20,6 @@ from structured_pdf_text.document import (
     RegionKind,
     StructuredPage,
     StructuredTable,
-    TableFragment,
     TextLine,
     WritingDirection,
 )
@@ -283,10 +282,10 @@ def _line_claimed_by_table(
 
     cell_bboxes = [cell.bbox for cell in table.cells if cell.bbox is not None]
     if cell_bboxes:
-        line_cx, line_cy = line.bbox.cx, line.bbox.cy
-        return any(
-            cb.x0 <= line_cx <= cb.x1 and cb.y0 <= line_cy <= cb.y1
-            for cb in cell_bboxes
+        return all(
+            not token.text.strip()
+            or any(token.bbox.overlap_ratio(cell_bbox) >= 0.25 for cell_bbox in cell_bboxes)
+            for token in line.tokens
         )
 
     fragment_bbox = _table_fragment_bbox(table, page_index)
@@ -297,6 +296,77 @@ def _line_claimed_by_table(
         )
 
     return False
+
+
+def _table_claims_token(
+    token: object,
+    table: StructuredTable,
+    page_index: int,
+) -> bool:
+    """Return whether one visible token belongs to a table cell."""
+    return _table_token_claim_strength(token, table, page_index) > 0
+
+
+def _table_token_claim_strength(
+    token: object,
+    table: StructuredTable,
+    page_index: int,
+) -> int:
+    """Return 2 for exact token ownership, 1 for geometry, and 0 otherwise."""
+    cell_token_ids = {id(item) for cell in table.cells for item in cell.tokens}
+    if cell_token_ids:
+        # Detectors preserve the source token objects in each cell. When that
+        # ownership evidence exists, it is stricter than the cell rectangle:
+        # a nearby outside word can overlap a large cell bbox without being a
+        # table value.
+        return 2 if id(token) in cell_token_ids else 0
+    bbox = getattr(token, "bbox", None)
+    if bbox is None:
+        return 0
+    cell_bboxes = [cell.bbox for cell in table.cells if cell.bbox is not None]
+    if cell_bboxes:
+        return 1 if any(bbox.overlap_ratio(cell_bbox) >= 0.25 for cell_bbox in cell_bboxes) else 0
+    fragment = _table_fragment_bbox(table, page_index)
+    return 1 if (
+        fragment is not None
+        and fragment.x0 <= bbox.cx <= fragment.x1
+        and fragment.y0 <= bbox.cy <= fragment.y1
+    ) else 0
+
+
+def _tokens_with_residual_whitespace(
+    tokens: list,
+    residual_visible_ids: set[int],
+) -> list:
+    """Keep only whitespace separating two residual prose tokens."""
+    if not residual_visible_ids:
+        return []
+    visible_positions = [
+        index for index, token in enumerate(tokens)
+        if token.text.strip()
+    ]
+    residual_positions = [
+        index for index in visible_positions
+        if id(tokens[index]) in residual_visible_ids
+    ]
+    first_residual = min(residual_positions)
+    last_residual = max(residual_positions)
+    residual: list = []
+    for index, token in enumerate(tokens):
+        if token.text.strip():
+            if id(token) in residual_visible_ids:
+                residual.append(token)
+            continue
+        if not token.text.isspace():
+            continue
+        # Preserve source separators between retained words even when a table
+        # token sits between them. The removed table token should not collapse
+        # two independent prose words into one.
+        if first_residual < index < last_residual:
+            if residual and residual[-1].text.isspace():
+                continue
+            residual.append(token)
+    return residual
 
 
 _REGION_TO_CONTENT_KIND: dict[RegionKind, ContentKind] = {
@@ -323,6 +393,20 @@ def _normalized_lines_text(lines: list[TextLine]) -> str:
     return normalize_reading_text(lines_to_text(lines)).strip()
 
 
+def _normalized_ocr_paragraph_text(lines: list[TextLine]) -> str:
+    """Join OCR physical lines into one logical paragraph string."""
+    parts: list[str] = []
+    for index, line in enumerate(lines):
+        value = line.text.strip()
+        if not value:
+            continue
+        if parts and lines[index - 1].join_next_without_space:
+            parts[-1] += value
+        else:
+            parts.append(value)
+    return normalize_reading_text(" ".join(parts)).strip()
+
+
 def _build_region_blocks(
     region: LayoutRegion,
     page_index: int,
@@ -340,11 +424,12 @@ def _build_region_blocks(
         ordered_lines, _ = order_lines_in_region(region)
     kind = _content_kind_from_region(region.kind)
 
-    # Find tables that intersect this region (can be >1 — INV-41).
+    # Find every table that intersects this region, even when its block was
+    # emitted in an earlier region. Previously emitted tables still own their
+    # cell tokens here; only the table-block emission below is deduplicated.
     candidate_tables = [
         t for t in tables
         if _table_intersects_region(t, region, page_index)
-        and t.table_id not in emitted_table_ids
     ]
     # Sort candidate tables by their fragment position inside the region.
     candidate_tables.sort(
@@ -395,26 +480,62 @@ def _build_region_blocks(
     table_blocks: dict[str, PageContentBlock] = {}
 
     for line in ordered_lines:
-        owner = next(
-            (t for t in usable_tables if _line_claimed_by_table(line, t, page_index)),
-            None,
-        )
-        if owner is None:
+        visible_tokens = [token for token in line.tokens if token.text.strip()]
+        token_owners: dict[int, StructuredTable] = {}
+        for token in visible_tokens:
+            owners = [
+                (strength, table)
+                for table in usable_tables
+                if (strength := _table_token_claim_strength(token, table, page_index)) > 0
+            ]
+            if owners:
+                # Prefer explicit cell-token ownership over geometric overlap;
+                # ties follow the stable visual order of usable_tables.
+                token_owners[id(token)] = max(owners, key=lambda item: item[0])[1]
+
+        line_tables = list({table.table_id: table for table in token_owners.values()}.values())
+        line_tables.sort(key=lambda table: _table_fragment_sort_key(table, page_index))
+        if not line_tables:
             pending_prose.append(line)
             continue
 
-        # Emit any accumulated prose before this table.
+        claimed_count += 1
+        residual_visible_ids = {
+            id(token) for token in visible_tokens if id(token) not in token_owners
+        }
+        residual_tokens = _tokens_with_residual_whitespace(line.tokens, residual_visible_ids)
+        residual_line = None
+        if residual_visible_ids:
+            residual_line = replace(
+                line,
+                tokens=residual_tokens,
+                bbox=BBox.union_all([token.bbox for token in residual_tokens if token.text.strip()]),
+                line_id=line_identity(line),
+                text_override=None,
+            )
+
+        # Preserve reading order for prose that preceded this table row, then
+        # emit every table that owns tokens from the line. A line may span
+        # multiple distinct tables, so selecting only the first owner loses
+        # ownership information and leaks the other table's text into prose.
         flush_prose(pending_prose)
         pending_prose = []
-        claimed_count += 1
-
-        if owner.table_id not in emitted_table_ids and owner.table_id not in emitted_in_pass:
-            emitted_in_pass.add(owner.table_id)
-            table_block = _emit_table_block(owner, page_index, region)
-            table_blocks[owner.table_id] = table_block
+        for table in line_tables:
+            if table.table_id in emitted_table_ids or table.table_id in emitted_in_pass:
+                continue
+            emitted_in_pass.add(table.table_id)
+            table_block = _emit_table_block(table, page_index, region)
+            table_blocks[table.table_id] = table_block
             blocks.append(table_block)
-        if owner.table_id in table_blocks:
-            table_blocks[owner.table_id].line_ids.append(line_identity(line))
+
+        # The source identity is conserved exactly once. A residual prose line
+        # carries it when present; otherwise the first owning table block does.
+        if residual_line is not None:
+            pending_prose.append(residual_line)
+        elif line_tables:
+            owner_block = table_blocks.get(line_tables[0].table_id)
+            if owner_block is not None:
+                owner_block.line_ids.append(line_identity(line))
 
     # Emit remaining prose after the last table.
     flush_prose(pending_prose)
@@ -459,27 +580,55 @@ def _attach_table_source_line_claims(
     not render that occurrence again as an orphan or figure line.
     """
     tables_by_id = {table.table_id: table for table in tables}
+    table_sources: list[tuple[PageContentBlock, StructuredTable]] = []
     for block in blocks:
         if block.kind != ContentKind.TABLE or block.table_id is None:
             continue
         table = tables_by_id.get(block.table_id)
         if table is None:
             continue
-        cell_token_ids = {
-            id(token)
-            for cell in table.cells
-            for token in cell.tokens
-        }
-        if not cell_token_ids:
-            continue
-        claimed = set(block.line_ids)
-        for region in regions:
-            for line in [*region.native_lines, *region.ocr_lines]:
-                if any(id(token) in cell_token_ids for token in line.tokens):
-                    line_id = line_identity(line)
-                    if line_id not in claimed:
-                        block.line_ids.append(line_id)
-                        claimed.add(line_id)
+        table_sources.append((block, table))
+
+    if not table_sources:
+        return
+
+    # A source line can be consumed by several physical tables. Treat their
+    # cell-token sets as one ownership union, then record the line identity on
+    # exactly one existing table block. This is needed when those blocks were
+    # emitted in an earlier region and no prose residual remains to carry the
+    # line identity into conservation.
+    claimed_line_ids = {
+        line_id
+        for block, _ in table_sources
+        for line_id in block.line_ids
+    }
+    for region in regions:
+        for line in [*region.native_lines, *region.ocr_lines]:
+            visible_tokens = [token for token in line.tokens if token.text.strip()]
+            if not visible_tokens:
+                continue
+            owners_by_token: list[PageContentBlock] = []
+            for token in visible_tokens:
+                candidates = [
+                    (strength, block)
+                    for block, table in table_sources
+                    if (strength := _table_token_claim_strength(
+                        token, table, block.page_index
+                    )) > 0
+                ]
+                if not candidates:
+                    owners_by_token = []
+                    break
+                owners_by_token.append(max(candidates, key=lambda item: item[0])[1])
+            if not owners_by_token:
+                continue
+            line_id = line_identity(line)
+            if line_id in claimed_line_ids:
+                continue
+            # Account for the source identity once, even if this line's tokens
+            # were consumed by several tables or by geometric evidence.
+            owners_by_token[0].line_ids.append(line_id)
+            claimed_line_ids.add(line_id)
 
 
 def _emit_prose_blocks(
@@ -507,38 +656,51 @@ def _emit_prose_blocks(
         source_segments = (ListSegment(tuple(lines), (), False),)
     blocks: list[PageContentBlock] = []
     for segment in source_segments:
-        segment_lines = list(segment.lines)
-        text = _normalized_lines_text(segment_lines)
-        if not text:
-            continue
-        decorative_suppressed = _decorative_suppression_confirmed(region)
-        bbox = BBox(
-            x0=min(l.bbox.x0 for l in segment_lines),
-            y0=min(l.bbox.y0 for l in segment_lines),
-            x1=max(l.bbox.x1 for l in segment_lines),
-            y1=max(l.bbox.y1 for l in segment_lines),
-        )
-        block_kind = ContentKind.LIST if segment.is_list else kind
-        blocks.append(
-            PageContentBlock(
-                block_id=f"page-{page_index + 1}:region-{region.region_id}",
-                page_index=page_index,
-                kind=block_kind,
-                bbox=bbox,
-                order_index=0,  # reindexed by _reindex_blocks
-                text=text,
-                heading_level=region.heading_level if block_kind == ContentKind.TITLE else None,
-                source_region_ids=[region.region_id],
-                fallback_from_table=fallback_from_table,
-                list_items=list(segment.items),
-                decorative=region.kind == RegionKind.DECORATIVE,
-                line_ids=[line_identity(line) for line in segment_lines],
-                suppressed=decorative_suppressed,
-                suppression_reason=(
-                    "decorative" if decorative_suppressed else None
-                ),
+        from structured_pdf_text.text.lists import ListSegment
+        if segment.is_list or region.native_lines or not region.ocr_lines:
+            paragraph_segments = [segment]
+        else:
+            from structured_pdf_text.ocr.reconstruct import segment_ocr_paragraphs
+            paragraph_segments = [
+                ListSegment(tuple(paragraph), (), False)
+                for paragraph in segment_ocr_paragraphs(list(segment.lines))
+            ]
+        for paragraph_index, paragraph_segment in enumerate(paragraph_segments, start=1):
+            segment_lines = list(paragraph_segment.lines)
+            if paragraph_segment.is_list:
+                text = _normalized_lines_text(segment_lines)
+            elif region.ocr_lines and not region.native_lines:
+                text = _normalized_ocr_paragraph_text(segment_lines)
+            else:
+                text = _normalized_lines_text(segment_lines)
+            if not text:
+                continue
+            decorative_suppressed = _decorative_suppression_confirmed(region)
+            bbox = BBox(
+                x0=min(l.bbox.x0 for l in segment_lines),
+                y0=min(l.bbox.y0 for l in segment_lines),
+                x1=max(l.bbox.x1 for l in segment_lines),
+                y1=max(l.bbox.y1 for l in segment_lines),
             )
-        )
+            block_kind = ContentKind.LIST if paragraph_segment.is_list else kind
+            blocks.append(
+                PageContentBlock(
+                    block_id=f"page-{page_index + 1}:region-{region.region_id}:{paragraph_index}",
+                    page_index=page_index,
+                    kind=block_kind,
+                    bbox=bbox,
+                    order_index=0,
+                    text=text,
+                    heading_level=region.heading_level if block_kind == ContentKind.TITLE else None,
+                    source_region_ids=[region.region_id],
+                    fallback_from_table=fallback_from_table,
+                    list_items=list(paragraph_segment.items),
+                    decorative=region.kind == RegionKind.DECORATIVE,
+                    line_ids=[line_identity(line) for line in segment_lines],
+                    suppressed=decorative_suppressed,
+                    suppression_reason="decorative" if decorative_suppressed else None,
+                )
+            )
     return blocks
 
 
@@ -566,10 +728,23 @@ def _emit_table_block(
         kind=ContentKind.TABLE,
         bbox=bbox,
         order_index=0,  # reindexed by _reindex_blocks
+        text=_table_plain_text(table),
         table_id=table.table_id,
         source_region_ids=[region.region_id],
         confidence=table.confidence,
         line_ids=[],
+    )
+
+
+def _table_plain_text(table: StructuredTable) -> str:
+    """Return table cell text in logical row order for plain-text consumers."""
+    cells_by_row: dict[int, list[Any]] = {}
+    for cell in table.cells:
+        if cell.text.strip():
+            cells_by_row.setdefault(cell.row, []).append(cell)
+    return "\n".join(
+        "\t".join(cell.text.strip() for cell in sorted(cells_by_row[row], key=lambda item: item.col))
+        for row in sorted(cells_by_row)
     )
 
 
@@ -594,6 +769,7 @@ def _insert_orphan_tables(
                 kind=ContentKind.TABLE,
                 bbox=bbox,
                 order_index=0,
+                text=_table_plain_text(table),
                 table_id=table.table_id,
                 source_region_ids=[],
             )
@@ -695,8 +871,6 @@ def _build_reading_text(blocks: list[PageContentBlock]) -> str:
     for block in sorted(blocks, key=lambda b: b.order_index):
         if block.suppressed:
             continue
-        if block.kind == ContentKind.TABLE:
-            continue
         if block.kind == ContentKind.FIGURE and not block.text:
             continue
         if block.text:
@@ -710,8 +884,5 @@ def _decorative_suppression_confirmed(region: LayoutRegion) -> bool:
     if not role.startswith("decorative_watermark:"):
         return False
     reasons = set(role.split(":", 1)[1].split(","))
-    return bool(
-        reasons.intersection(
-            {"unusual_angle", "light_luminance", "low_opacity", "large_font"}
-        )
-    )
+    # Light color and broad boxes also describe readable text on dark fills.
+    return "unusual_angle" in reasons and bool(reasons.intersection({"low_opacity", "large_font"}))

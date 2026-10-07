@@ -14,3 +14,4 @@ openvino==2024.4.0
 torch==2.14.0+cpu
 torchvision==0.29.0+cpu
 easyocr==1.7.2
+tifffile==2025.5.10

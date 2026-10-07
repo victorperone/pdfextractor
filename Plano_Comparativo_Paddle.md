@@ -13,6 +13,7 @@
 | 6 | Tesseract 5 | `backends/tesseract.py`, PSM 3 + OEM 1 | ✅ |
 | 7 | EasyOCR | `backends/easyocr.py`, PyTorch CPU | ✅ |
 | 8 | Benchmark E2E completo | `evaluate_e2e.py`, `compute_metrics.py`, `compare_engines.py` — 5 engines, 144/144 páginas | ✅ |
+| 9 | GPU opcional no WSL 2 | Seleção automática/CPU/CUDA, EasyOCR e PaddleOCR, fallback e benchmark por dispositivo | Planejado; condicionado à validação CPU abaixo |
 
 ---
 
@@ -626,3 +627,57 @@ um array, independente do número de arquivos retornados:
 $metricsFiles = @(Get-ChildItem "$OutDir\metrics_*_${RunSuffix}-*.json" ... |
     ForEach-Object { $_.FullName })
 ```
+
+---
+
+## Etapa 9 — GPU opcional no WSL 2 (planejamento de 07/10/2026)
+
+**Status: planejado; GPU não implementada nesta rodada.** As correções confirmadas do código CPU foram verificadas; R54 permanece adiado por decisão do usuário. Antes de implementar esta etapa, executar a avaliação E2E completa do CPU após as correções de desempenho, conferir integridade/precisão e resolver qualquer regressão encontrada. As medições locais e seus limites estão em [Analise_Desempenho_07-10-2026.md](Analise_Desempenho_07-10-2026.md). O baseline histórico do comparativo continua sendo CPU; resultados GPU terão identificação e arquivos próprios.
+
+### 9.1 — Preparar um ambiente GPU separado
+
+1. Conferir WSL 2, kernel atualizado, GPU NVIDIA compatível e driver Windows com suporte CUDA. Verificar `nvidia-smi` dentro do WSL; quando necessário, usar `/usr/lib/wsl/lib/nvidia-smi`. O driver é instalado no Windows; não instalar driver Linux NVIDIA dentro do WSL. Para compilar extensões CUDA, seguir a instalação do toolkit destinada ao WSL, evitando metapacotes que tragam outro driver. [Guia oficial NVIDIA para WSL](https://docs.nvidia.com/cuda/wsl-user-guide/index.html).
+2. Criar uma venv Python 3.12 separada, por exemplo `.venv-gpu`, para preservar a instalação CPU validada. Registrar driver, GPU, versões dos pacotes, CUDA/cuDNN e constraints do ambiente GPU.
+3. Instalar Torch e torchvision CUDA compatíveis entre si, usando o seletor oficial para Linux/pip/CUDA e uma combinação disponível para Python 3.12 e para o driver instalado. Não reutilizar o índice `/whl/cpu` nem os pins `+cpu` presentes em `requirements-ocr-benchmark.txt` e `scripts/setup_ocr_benchmark.sh`. Confirmar `torch.cuda.is_available()`, quantidade de dispositivos e uma operação real em tensor CUDA. [Instalação oficial PyTorch](https://pytorch.org/get-started/locally/).
+4. Para PaddleOCR, instalar a distribuição `paddlepaddle-gpu` correspondente ao CUDA suportado. Não instalar simultaneamente `paddlepaddle` CPU na mesma venv: as duas distribuições fornecem o módulo `paddle`. Conferir `paddle.is_compiled_with_cuda()`, `paddle.device.cuda.device_count()` e uma operação real na GPU. Escolher versões publicadas e compatíveis com PaddleOCR/PaddleX e Python 3.12, sem assumir que o pin CPU atual tenha um wheel GPU idêntico. [Instalação do framework Paddle](https://www.paddleocr.ai/main/en/version3.x/paddlepaddle_installation.html), [verificação oficial do ambiente OCR](https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/OCR.html).
+5. Criar constraints/scripts próprios para GPU e um extra de instalação que não imponha o pacote Paddle CPU. Executar `pip check` e o preflight após a instalação. Baixar/provisionar modelos explicitamente antes dos testes; a inferência medida continua offline.
+
+### 9.2 — Definir uma seleção comum de dispositivo
+
+Adicionar `ocr_device` em `ExtractorConfig` e `--ocr-device` na CLI, com valores `auto`, `cpu`, `cuda` e `cuda:N`. Encaminhar o campo também nos perfis `--best`/`--max-quality`, inspect, preflight, API e scripts de benchmark. Proposta para a execução normal após validação: `auto`; benchmarks CPU especificam `cpu` explicitamente.
+
+Implementar a resolução em um módulo compartilhado, por exemplo `ocr/device.py`, com imports tardios somente do motor selecionado. Em `auto`, selecionar CUDA apenas quando o framework escolhido tem suporte, o índice existe e o driver/runtime está operacional; caso contrário, selecionar CPU e registrar a causa uma vez. Não usar a disponibilidade de CUDA do Torch como prova de disponibilidade no Paddle.
+
+Um pedido explícito `cuda:N` deve falhar com diagnóstico claro se não puder ser atendido. Erros de modelo, configuração ou falta de memória durante a inferência não devem disparar repetição silenciosa em CPU. Preservar a classificação fatal de recursos e a indicação de saída incompleta. Testar índices diferentes de zero e a interação com `CUDA_VISIBLE_DEVICES`.
+
+### 9.3 — Adaptar EasyOCR
+
+- Substituir o `gpu=False` fixo em `ocr/backends/easyocr.py` pelo dispositivo resolvido: `False` em CPU e a string `cuda:N` em CUDA. O Reader aceita booleano ou string de dispositivo. [API oficial EasyOCR](https://www.jaided.ai/easyocr/documentation/), [implementação oficial do Reader](https://github.com/JaidedAI/EasyOCR/blob/master/easyocr/easyocr.py).
+- Preservar o dispositivo exato no snapshot e nos Readers alternativos. Não converter `cuda:1` em `True`, pois isso perde o índice escolhido. Manter o cache por instância e liberar referências no fechamento.
+- Na GPU, usar modelos compatíveis com CUDA sem quantização dinâmica de CPU. Refletir a quantização efetiva nos diagnósticos e no planejador: se o Reader base já está sem quantização, não criar uma variante idêntica `no_quantize`.
+- Manter workers zero inicialmente. Encaminhar e medir `batch_size` de reconhecimento em GPU antes de aumentar o lote; hoje `_run_easyocr` não encaminha esse parâmetro. Validar memória e equivalência de conteúdo, geometria e confiança. Não criar processos que façam fork de um contexto CUDA inicializado.
+- Validar CRAFT primeiro e DBNet18 separadamente. O DBNet18 pode requerer a compilação de extensões deformáveis compatíveis com Torch/CUDA; disponibilidade da GPU e presença dos pesos não garantem esse runtime. Preparar essas extensões no setup/preflight, preservando a indicação de DBNet18 indisponível quando aplicável. Manter a regra de canvas própria de cada detector.
+
+### 9.4 — Adaptar PaddleOCR e o worker
+
+- Encaminhar `device="cpu"` ou `device="gpu:N"` para a construção de PaddleOCR em `ocr/paddle.py`. A API 3.x usa o prefixo `gpu` para o índice do dispositivo. [Parâmetros oficiais PaddleOCR](https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/OCR.html).
+- Propagar o dispositivo no backend, na configuração enviada ao subprocesso e em `ocr/_paddle_subprocess_worker.py`; atualizar o protocolo e seus testes se o formato mudar. O worker deve construir e informar o mesmo dispositivo solicitado, incluindo o índice.
+- Resolver disponibilidade no processo que realiza a inferência, sem importar antecipadamente Paddle no processo principal quando isso contrariar o isolamento do worker.
+- Separar a política de runtime CPU da GPU em `ocr/runtime_policy.py`. Opções de oneDNN/MKLDNN, threads e workarounds CPU de PIR não devem ser aplicadas à GPU sem validação específica da versão. Preservar modelos locais, perfis, pré-processamento e mapeamento das coordenadas.
+- Verificar execução direta e via worker, timeouts, fechamento e falhas de memória. Um ambiente GPU quebrado não pode ser registrado como inferência CPU bem-sucedida sem explicar a seleção inicial.
+
+### 9.5 — Tornar identidade e readiness verificáveis
+
+Atualizar os campos hoje fixos em CPU: runtime/device das identidades, metadados de proveniência, diagnósticos da API, manifests e relatórios. Registrar dispositivo solicitado/resolvido, motivo de fallback inicial, modelo, versões e CUDA/cuDNN. Distinguir seleção de CPU por indisponibilidade de falha real de inferência.
+
+O probe estático verifica pacotes/configuração/modelos sem carregar redes. O probe profundo confirma alocação, operação no dispositivo e OCR de uma imagem local. Fazer essa verificação uma vez por instância ou em preflight, sem uma inferência de teste para cada página/crop nem chamadas caras a partir de `capabilities`.
+
+### 9.6 — Critérios para concluir a etapa
+
+1. Suíte CPU completa aprovada; testes com CUDA simulada cobrem `auto` sem GPU, CPU forçada, GPU solicitada indisponível, índices, worker, Readers alternativos, identidade e OOM. Os testes devem executar também em máquinas sem GPU.
+2. Smoke real no WSL com cada framework GPU, modelos locais e inferência comprovadamente na GPU. Conferir memória residente dos Readers e pico de VRAM nas variantes de maior escala.
+   O ensaio CPU da página 72 atingiu 11,71 GiB de RSS: a memória das ativações precisa ser medida; o tamanho RGB do raster não fornece um limite suficiente para o modelo. Definir o orçamento de execução GPU com base nessa medição, mantendo explícita qualquer limitação de variantes/escala e sem reduzir qualidade silenciosamente.
+3. Benchmark CPU/GPU das mesmas páginas, modelos, escalas e políticas, registrando aquecimento separadamente. Para tempos de inferência GPU, sincronizar o framework antes/depois da região cronometrada, pois a execução CUDA é assíncrona.
+4. Conferir leitura, Markdown/JSON, tabelas, duplicação, CPF/CNPJ, valores e regressões do corpus. Não exigir confidências numericamente idênticas entre CPU e GPU; exigir os limites de integridade e precisão definidos com o baseline CPU, inspecionando divergências.
+5. Executar `Document_AI_V3.pdf` inteiro com o comando equivalente ao informado pelo usuário, primeiro CPU e depois `--ocr-device auto`. Comparar duração total, p50/p95 de páginas e tempos de OCR inicial, recuperação regional e rodapés. Identificar o dispositivo em cada resultado.
+6. Promover a seleção automática somente após esses critérios. A GPU deve ser uma possibilidade opcional e auditável; não há promessa de tempo final antes dessa medição. Pré-processamento, decodificação beamsearch e montagem continuam tendo custos CPU.

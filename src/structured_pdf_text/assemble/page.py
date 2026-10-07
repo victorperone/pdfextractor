@@ -29,6 +29,7 @@ def assemble_page(
     diagnostics: PageDiagnostics,
     raw_text: str,
     native_evidence: NativePageEvidence | None = None,
+    page_rotation: int = 0,
 ) -> StructuredPage:
     """Build a provisional StructuredPage.
 
@@ -40,7 +41,7 @@ def assemble_page(
     flow_lines_by_region = prose_flow_lines_by_region(regions, tables, page_index)
     reading_lines, reading_decision = order_region_lines(
         regions,
-        flow_lines_by_region=flow_lines_by_region or None,
+        flow_lines_by_region=flow_lines_by_region,
     )
 
     # F02: raw_text must include OCR-recovered content. For scan pages
@@ -81,5 +82,6 @@ def assemble_page(
         reading_text="",  # filled by assemble_document() via assemble_page_content()
         diagnostics=diagnostics,
         native_evidence=native_evidence,
+        page_rotation=page_rotation,
         content_blocks=[],  # filled by assemble_document() via assemble_page_content()
     )

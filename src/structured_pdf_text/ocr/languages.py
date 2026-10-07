@@ -22,3 +22,10 @@ def backend_language(value: str, engine: str) -> str:
     if language == "pt-BR":
         return "por" if engine == "tesseract" else "pt"
     return "eng" if engine == "tesseract" else "en"
+
+
+def easyocr_recognition_model(value: str, configured: str | None = None) -> str:
+    """Resolve the upstream default model filename for the selected language."""
+    if configured and configured != "standard":
+        return configured
+    return "english_g2" if canonical_language(value) == "en" else "latin_g2"

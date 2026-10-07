@@ -93,6 +93,32 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+def _raise_worker_failure(response: dict[str, Any], context: str) -> None:
+    """Rebuild the worker's stable fatal-error contract in the parent process."""
+    import errno
+    from structured_pdf_text.errors import (
+        FatalExtractionError,
+        RequiredRuntimeUnavailableError,
+        ResourceExhaustedExtractionError,
+    )
+
+    error_type = str(response.get("error_type") or "RuntimeError")
+    message = f"{context}: {response.get('error') or error_type}"
+    stage = response.get("stage")
+    fatal_code = response.get("fatal_code")
+    if fatal_code == "resource_exhausted" or error_type == "MemoryError" or (
+        error_type == "OSError" and response.get("errno") == errno.ENOMEM
+    ):
+        raise ResourceExhaustedExtractionError(message, stage=stage)
+    if fatal_code == "paddle_ocr_unavailable":
+        raise PaddleOcrUnavailable(message, stage=stage)
+    if fatal_code == "required_runtime_unavailable":
+        raise RequiredRuntimeUnavailableError(message, stage=stage)
+    if response.get("fatal"):
+        raise FatalExtractionError(message, stage=stage)
+    raise RuntimeError(message)
+
+
 def _has_torch_conflict() -> bool:
     """True when torch is findable in this venv on Windows (DLL conflict with paddle)."""
     if sys.platform != "win32":
@@ -106,8 +132,11 @@ def _has_torch_conflict() -> bool:
 class PaddleOCRBackend:
     """OCRBackend implementation backed by PaddleOcrEngine.
 
-    Thin wrapper: all ``recognize_page`` / ``recognize_region`` calls are
-    forwarded unchanged so the existing pipeline output is preserved exactly.
+    Delegates ``recognize_page`` and ``recognize_region`` to the underlying
+    PaddleOcrEngine after applying CF-4 subprocess routing when needed (see
+    module docstring).  ``recognize_region`` adds page-bbox crop logic to map
+    region coordinates correctly before forwarding.  The ``recognize`` method
+    provides the canonical OCRResult contract for the benchmarking layer.
     """
 
     def __init__(self, config: ExtractorConfig) -> None:
@@ -137,10 +166,10 @@ class PaddleOCRBackend:
 
         # Resolve cache_home once at construction time, mirroring PaddleOcrEngine's
         # own resolution, so healthcheck() checks the same directory the engine uses.
-        self._cache_home: str = os.environ.get(
+        self._cache_home: str = str(getattr(config, "ocr_cache_home", None) or os.environ.get(
             "PADDLE_PDX_CACHE_HOME",
             str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
-        )
+        ))
         self._artifact_hashes = self._resolve_artifact_hashes()
 
         if _has_torch_conflict():
@@ -156,6 +185,7 @@ class PaddleOCRBackend:
                 "quality_thresholds": dataclasses.asdict(config.ocr_quality_thresholds),
                 "mkldnn": _enable_mkldnn,
                 "disable_pir_api": self._runtime_policy.disable_pir_api,
+                "cache_home": self._cache_home,
             }
             self._engine = None
         else:
@@ -171,6 +201,7 @@ class PaddleOCRBackend:
                 quality_policy=effective_ocr_quality_policy(config).value,
                 quality_thresholds=config.ocr_quality_thresholds,
                 enable_mkldnn=_enable_mkldnn,
+                cache_home=self._cache_home,
             )
 
     # ------------------------------------------------------------------
@@ -213,7 +244,7 @@ class PaddleOCRBackend:
             bufsize=0,  # unbuffered binary I/O — flush() is explicit in _raw_send
         )
         # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
-        init_req = {"protocol_version": 3, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
+        init_req = {"protocol_version": 4, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
         try:
             response = self._raw_send(init_req, timeout=_worker_init_timeout())
         except Exception:
@@ -221,9 +252,7 @@ class PaddleOCRBackend:
             raise
         if response.get("status") != "ok":
             self._discard_worker()
-            raise RuntimeError(
-                f"Paddle worker init failed: {response.get('error')}"
-            )
+            _raise_worker_failure(response, "Paddle worker init failed")
 
     def _raw_send(self, request: dict, timeout: float | None = None) -> dict:
         """Write one request and read one response on the raw pipe.
@@ -290,7 +319,7 @@ class PaddleOCRBackend:
 
             self._worker_req_seq += 1
             req_id = self._worker_req_seq
-            request = {**request, "protocol_version": 3, "request_id": req_id}
+            request = {**request, "protocol_version": 4, "request_id": req_id}
             try:
                 response = self._raw_send(request)
             except Exception:
@@ -316,6 +345,7 @@ class PaddleOCRBackend:
         quality_policy: str | None = None,
         page_bbox: BBox | None = None,
         quality_variants: bool | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         """Write a temporary PNG path, send it to the worker, and decode tokens."""
         from PIL import Image
@@ -338,6 +368,8 @@ class PaddleOCRBackend:
                 req["page_bbox"] = [page_bbox.x0, page_bbox.y0, page_bbox.x1, page_bbox.y1]
             if quality_variants is not None:
                 req["quality_variants"] = quality_variants
+            if method == "recognize_page":
+                req["page_rotation"] = page_rotation
             if region_bbox is not None:
                 req["region_bbox"] = [region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1]
 
@@ -349,7 +381,7 @@ class PaddleOCRBackend:
                 pass
 
         if response.get("status") != "ok":
-            raise RuntimeError(response.get("error", "unknown subprocess error"))
+            _raise_worker_failure(response, "Paddle worker request failed")
 
         tokens: list[OcrToken] = []
         for item in response.get("tokens", []):
@@ -381,6 +413,7 @@ class PaddleOCRBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
+        """Return engine identity including package versions, artifact hashes, and runtime mode."""
         return OCRBackendIdentity(
             engine="paddle",
             runtime="paddle_subprocess" if self._subprocess_config else "paddle_static",
@@ -433,6 +466,7 @@ class PaddleOCRBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
+        """Return static capability flags for this backend."""
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -440,6 +474,8 @@ class PaddleOCRBackend:
             page_orientation=True,
             quadrilateral_boxes=True,
             per_token_confidence=True,
+            polygons=True,
+            native_confidence=True,
         )
 
     # ------------------------------------------------------------------
@@ -447,6 +483,7 @@ class PaddleOCRBackend:
     # ------------------------------------------------------------------
 
     def recognize(self, request: OCRRequest) -> OCRResult:
+        """Run PaddleOCR inference (in-process or via subprocess) and return a canonical OCRResult."""
         t0 = time.perf_counter()
 
         if self._closed:
@@ -516,13 +553,16 @@ class PaddleOCRBackend:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
+        """Run OCR on a full page image, routing through the subprocess worker when needed."""
         if self._closed:
             raise RuntimeError("PaddleOCR backend is closed")
         if self._subprocess_config is not None:
             return self._call_subprocess(
                 "recognize_page", page_image, page_index, page_bbox=page_bbox,
-                quality_variants=quality_variants, quality_policy=quality_policy
+                quality_variants=quality_variants, quality_policy=quality_policy,
+                page_rotation=page_rotation
             )
         return self._engine.recognize_page(  # type: ignore[union-attr]
             page_image,
@@ -530,12 +570,14 @@ class PaddleOCRBackend:
             page_bbox,
             quality_variants=quality_variants,
             quality_policy=quality_policy,
+            page_rotation=page_rotation,
         )
 
     def recognize_region(
         self, page_image: object, page_index: int, region_bbox: BBox,
         *, page_bbox: BBox | None = None,
     ) -> list[OcrToken]:
+        """Crop and recognize a region; applies raster-crop logic when page_bbox is provided."""
         if self._closed:
             raise RuntimeError("PaddleOCR backend is closed")
         if page_bbox is not None:
@@ -561,6 +603,7 @@ class PaddleOCRBackend:
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        """Return 'ready', 'missing', or 'unknown' after validating local model files and the subprocess."""
         from structured_pdf_text.ocr.paddle import validate_local_ocr_models
 
         try:
@@ -584,17 +627,32 @@ class PaddleOCRBackend:
         return "ready"
 
     def close(self) -> None:
+        """Gracefully shut down the subprocess worker (if active) and release the engine."""
         if self._closed:
             return
         with self._worker_lock:
             if self._worker_proc is not None:
+                process = self._worker_proc
                 try:
-                    self._worker_proc.stdin.write(b"QUIT\n")  # type: ignore[union-attr]
-                    self._worker_proc.stdin.flush()  # type: ignore[union-attr]
-                    self._worker_proc.wait(timeout=10)
+                    if process.stdin is not None:
+                        process.stdin.write(b"QUIT\n")
+                        process.stdin.flush()
+                    process.wait(timeout=10)
                 except Exception:
-                    self._worker_proc.kill()
+                    try:
+                        process.kill()
+                    finally:
+                        try:
+                            process.wait(timeout=5)
+                        except Exception:
+                            pass
                 finally:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
                     self._worker_proc = None
         engine = self._engine
         close = getattr(engine, "close", None)

@@ -224,7 +224,7 @@ def assess_ocr_coverage(
     try:
         from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
 
-        line_count = len(reconstruct_ocr_lines(values, 0, page_bbox))
+        line_count = len(reconstruct_ocr_lines(values, 0, page_bbox, dehyphenate=False))
     except (ImportError, TypeError, ValueError):
         line_count = 0
     boxes = [token.bbox for token in values]
@@ -314,6 +314,23 @@ def is_suspicious_token(token: OcrToken) -> bool:
         or (repeated > 0.82 and len(chars) >= 5 and alnum == 0)
         or (len(chars) == 1 and token.bbox.area > 2500 and _confidence(token) < 0.70)
     )
+
+
+def _is_token_orientation_plausible(token: OcrToken) -> bool:
+    """Return True when the token's bbox aspect ratio is consistent with its rotation.
+
+    Horizontal tokens (rotation 0 or 180) should be wider than tall.
+    Vertical tokens (rotation 90 or 270) should be taller than wide.
+    Single-character tokens are always considered plausible because their bbox
+    geometry does not reliably encode orientation.
+    """
+    text = token.text.strip()
+    if len(text) <= 1:
+        return True
+    rotation = (getattr(token, "rotation", 0) or 0) % 360
+    if rotation in (90, 270):
+        return token.bbox.height >= token.bbox.width * 1.15
+    return token.bbox.width >= token.bbox.height * 1.15
 
 
 def assess_ocr_quality(
@@ -431,7 +448,13 @@ def assess_ocr_quality(
         for char in item
     ) / total_chars
     suspicious = sum(is_suspicious_token(token) for token in metric_values) / max(1, token_count)
-    horizontal = sum(token.bbox.width >= token.bbox.height * 1.15 for token in metric_values) / max(1, token_count)
+    # R70: orientation plausibility must be evaluated relative to the token's
+    # own rotation, not as absolute horizontalness.  A rot90/rot270 token
+    # is expected to have a tall/narrow bbox; penalising it as "non-horizontal"
+    # causes the quality gate to trigger on correctly-oriented vertical text.
+    # Single-character tokens are excluded because their bbox geometry does not
+    # reliably indicate orientation.
+    horizontal = sum(_is_token_orientation_plausible(token) for token in metric_values) / max(1, token_count)
     metrics = raw_metrics or PaddleRawMetrics()
     reasons: list[str] = []
     if not metric_values:

@@ -5,7 +5,7 @@ and parses the TSV output directly. Requires:
   - tesseract 5.x in PATH
   - por.traineddata in tessdata directory (for Portuguese)
 
-Language mapping: config.language "pt" → Tesseract "-l por"
+Language mapping: config.language "pt-BR" (or "pt") → Tesseract "-l por" via backend_language()
 PSM 3 (auto page segmentation) and OEM 1 (LSTM only) are the defaults.
 
 Environment variables
@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING
 
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.backends._parser_utils import safe_crop_array, sha256_file
+from structured_pdf_text.ocr.backends._parser_utils import sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -462,6 +462,7 @@ class TesseractBackend:
 
     @property
     def identity(self) -> OCRBackendIdentity:
+        """Return engine identity including version, tessdata path, and active settings."""
         tessdata_dir_env = os.environ.get("TESSERACT_TESSDATA_DIR", "")
         effective_language = "+".join(
             "pt-BR" if item == "por" else "en" if item == "eng" else item
@@ -500,6 +501,7 @@ class TesseractBackend:
 
     @property
     def capabilities(self) -> OCRCapabilities:
+        """Return static capability flags; page_orientation is True only when TESSERACT_OSD=1."""
         return OCRCapabilities(
             detection=True,
             recognition=True,
@@ -507,6 +509,9 @@ class TesseractBackend:
             page_orientation=self._osd_enabled,  # True only when TESSERACT_OSD=1
             quadrilateral_boxes=False,  # axis-aligned only
             per_token_confidence=True,
+            direct_recognition=True,
+            orientation_search=self._osd_enabled,
+            native_confidence=True,
         )
 
     # ------------------------------------------------------------------
@@ -514,14 +519,31 @@ class TesseractBackend:
     # ------------------------------------------------------------------
 
     def recognize(self, request: OCRRequest) -> OCRResult:
+        """Run Tesseract via subprocess and return a canonical OCRResult."""
         t0 = time.perf_counter()
         # Use DPI from request when available (benchmark sets it explicitly).
         dpi = request.dpi if request.dpi else self._dpi
         try:
-            tsv, _rotation, _width, _height = self._run_effective_tesseract(request.image, dpi)
+            tsv, rotation, original_width, original_height = self._run_effective_tesseract(request.image, dpi)
             rows = _parse_tsv(tsv)
             rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
-            tokens = tuple(_tsv_to_ocr_tokens(rows, "tesseract", self._conf_min, offset_x=rx0, offset_y=ry0))
+            parsed = _tsv_to_ocr_tokens(rows, "tesseract", self._conf_min)
+            if rotation:
+                parsed = _map_rotated_tokens_to_original(parsed, rotation, original_width, original_height)
+            if request.region_bbox:
+                from dataclasses import replace
+                parsed = [
+                    replace(
+                        token,
+                        bbox_px=(
+                            token.bbox_px[0] + rx0, token.bbox_px[1] + ry0,
+                            token.bbox_px[2] + rx0, token.bbox_px[3] + ry0,
+                        ),
+                        polygon_px=tuple((x + rx0, y + ry0) for x, y in token.polygon_px),
+                    )
+                    for token in parsed
+                ]
+            tokens = tuple(parsed)
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
         except FileNotFoundError:
@@ -571,7 +593,9 @@ class TesseractBackend:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
+        """Run OCR on a full page image; applies OSD rotation when TESSERACT_OSD=1."""
         tsv, osd_rotation, original_width, original_height = self._run_effective_tesseract(
             page_image, self._dpi
         )
@@ -582,7 +606,7 @@ class TesseractBackend:
         if osd_rotation:
             tokens = _map_rotated_tokens_to_original(tokens, osd_rotation, original_width, original_height)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
-        return map_tokens_to_page(tokens, page_bbox, original_width, original_height)
+        return map_tokens_to_page(tokens, page_bbox, original_width, original_height, page_rotation)
 
     def recognize_region(
         self,
@@ -592,6 +616,7 @@ class TesseractBackend:
         *,
         page_bbox: "BBox | None" = None,
     ) -> list[OcrToken]:
+        """Crop region_bbox from page_image and run Tesseract, returning pipeline-format tokens."""
         import numpy as np
         from PIL import Image
 
@@ -619,11 +644,36 @@ class TesseractBackend:
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)
 
+    def recognize_direct(
+        self, image: object, page_index: int, page_bbox: "BBox | None" = None,
+        *, quality_policy: str | None = None,
+    ) -> list[OcrToken]:
+        """Recognize a known crop as one text line (Tesseract PSM 7)."""
+        import numpy as np
+        from PIL import Image
+        pil = _to_pil(image)
+        width, height = pil.size
+        if width <= 0 or height <= 0:
+            return []
+        tsv = _run_tesseract_tsv(
+            pil, self._tess_lang, 7, self._oem,
+            dpi=self._dpi, extra_flags=self._extra_flags,
+            executable=self._tesseract_cmd, profile=self._profile,
+            num_threads=self._config.num_threads,
+        )
+        tokens = _tsv_to_pipeline_tokens(
+            _parse_tsv(tsv), page_index, self._language,
+            conf_min=self._conf_min, source=SourceKind.OCR_REGION,
+        )
+        from structured_pdf_text.ocr.coordinates import map_tokens_to_page
+        return map_tokens_to_page(tokens, page_bbox, width, height)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def healthcheck(self) -> str:
+        """Return 'ready', 'missing', or 'unknown' based on tesseract --list-langs output."""
         try:
             result = subprocess.run(
                 [self._tesseract_cmd, *self._extra_flags, "--list-langs"],
@@ -646,26 +696,61 @@ class TesseractBackend:
             return "unknown"
 
     def close(self) -> None:
+        """No-op: Tesseract runs as a subprocess per call; no persistent state to release."""
         pass
 
 
 def _map_rotated_tokens_to_original(
-    tokens: list[OcrToken], clockwise_rotation: int, original_width: int, original_height: int
-) -> list[OcrToken]:
-    """Map boxes from Tesseract's OSD-corrected raster back to input pixels."""
-    mapped: list[OcrToken] = []
-    for token in tokens:
-        box = token.bbox
+    tokens: list[OCRToken] | list[OcrToken],
+    clockwise_rotation: int,
+    original_width: int,
+    original_height: int,
+) -> list[OCRToken] | list[OcrToken]:
+    """Map canonical or pipeline tokens from OSD pixels back to input pixels.
+
+    The benchmark contract stores pixel tuples (``bbox_px``/``polygon_px``),
+    while the page pipeline stores ``BBox``/``Point`` values (``bbox`` and
+    ``polygon``). Both interfaces share this geometric transform and retain
+    their own token type and all non-geometric metadata.
+    """
+    from dataclasses import replace
+
+    def map_point(x: float, y: float) -> tuple[float, float]:
         if clockwise_rotation == 90:
-            bbox = BBox(box.y0, original_height - box.x1, box.y1, original_height - box.x0)
-        elif clockwise_rotation == 180:
-            bbox = BBox(original_width - box.x1, original_height - box.y1,
-                        original_width - box.x0, original_height - box.y0)
-        elif clockwise_rotation == 270:
-            bbox = BBox(original_width - box.y1, box.x0, original_width - box.y0, box.x1)
+            return y, original_height - x
+        if clockwise_rotation == 180:
+            return original_width - x, original_height - y
+        if clockwise_rotation == 270:
+            return original_width - y, x
+        return x, y
+
+    mapped: list[OCRToken] = []
+    for token in tokens:
+        canonical_pixels = hasattr(token, "bbox_px")
+        bbox_attr = "bbox_px" if canonical_pixels else "bbox"
+        polygon_attr = "polygon_px" if canonical_pixels else "polygon"
+        raw_bbox = getattr(token, bbox_attr)
+        if isinstance(raw_bbox, BBox):
+            x0, y0, x1, y1 = raw_bbox.x0, raw_bbox.y0, raw_bbox.x1, raw_bbox.y1
         else:
-            bbox = box
-        mapped.append(OcrToken(text=token.text, bbox=bbox, confidence=token.confidence,
-                               language=token.language, source=token.source,
-                               rotation=token.rotation, provenance=token.provenance))
+            x0, y0, x1, y1 = raw_bbox
+        corners = [
+            map_point(x0, y0), map_point(x1, y0),
+            map_point(x1, y1), map_point(x0, y1),
+        ]
+        xs = [point[0] for point in corners]
+        ys = [point[1] for point in corners]
+        mapped_bbox = (min(xs), min(ys), max(xs), max(ys))
+        if isinstance(raw_bbox, BBox):
+            mapped_bbox = BBox(*mapped_bbox)
+        raw_polygon = getattr(token, polygon_attr, None)
+        mapped_polygon = None
+        if raw_polygon is not None:
+            points = []
+            for point in raw_polygon:
+                x, y = (point.x, point.y) if hasattr(point, "x") else point
+                mapped_point = map_point(x, y)
+                points.append(type(point)(*mapped_point) if hasattr(point, "x") else mapped_point)
+            mapped_polygon = tuple(points)
+        mapped.append(replace(token, **{bbox_attr: mapped_bbox, polygon_attr: mapped_polygon}))
     return mapped

@@ -405,30 +405,13 @@ def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
             text_override=None,
             merged_source_line_ids=(*target.merged_source_line_ids, candidate_id),
         )
-        output[output.index(target)] = merged
-        output.remove(candidate)
+        output[next(i for i, item in enumerate(output) if item is target)] = merged
+        del output[next(i for i, item in enumerate(output) if item is candidate)]
     return sorted(output, key=lambda line: (line.bbox.y0, line.bbox.x0))
 
 
 def _compact(text: str) -> str:
     return "".join(character.casefold() for character in text if character.isalnum())
-
-
-def _needs_textpage_spacing_recovery(text: str, candidate: str | None = None) -> bool:
-    compact = text.strip()
-    if not compact:
-        return False
-    spaces = sum(character.isspace() for character in compact)
-    if spaces / max(len(compact), 1) >= 0.18:
-        return True
-    if candidate is not None:
-        candidate_spaces = sum(character.isspace() for character in candidate.strip())
-        if candidate_spaces > spaces:
-            return True
-    return any(
-        previous.islower() and current.isupper()
-        for previous, current in zip(compact, compact[1:])
-    )
 
 
 def _is_visible_text_char(char: NativeCharacter) -> bool:
@@ -904,19 +887,6 @@ def _line_from_chars(
     )
 
 
-def _chars_to_text_tokens(
-    characters: list[NativeCharacter],
-    direction: WritingDirection = WritingDirection.LEFT_TO_RIGHT,
-    reverse_axis: bool = False,
-) -> list[TextToken]:
-    tokens, _ = _chars_to_text_tokens_with_diagnostics(
-        characters,
-        direction,
-        reverse_axis=reverse_axis,
-    )
-    return tokens
-
-
 def _chars_to_text_tokens_with_diagnostics(
     characters: list[NativeCharacter],
     direction: WritingDirection = WritingDirection.LEFT_TO_RIGHT,
@@ -1073,18 +1043,6 @@ def _native_sequence_is_plausible(characters: list[NativeCharacter]) -> bool:
     indices = [char.char_index for char in native]
     compactness = sum((current - previous) <= 4 for previous, current in zip(indices, indices[1:])) / max(1, len(indices) - 1)
     return consistency >= 0.85 and compactness >= 0.70
-
-
-def _infer_gap_threshold(
-    characters: list[NativeCharacter],
-    direction: WritingDirection,
-    median_advance: float,
-) -> float:
-    return _infer_gap_threshold_with_diagnostics(
-        characters,
-        direction,
-        median_advance,
-    )[0]
 
 
 def _infer_gap_threshold_with_diagnostics(

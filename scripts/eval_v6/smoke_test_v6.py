@@ -38,14 +38,11 @@ def _add_src() -> None:
 
 def check_models(cache_home: str, profile: str) -> bool:
     _add_src()
-    from structured_pdf_text.ocr.models import get_profile
+    from structured_pdf_text.ocr.models import get_profile, required_model_directories, model_directory_is_ready
 
     p = get_profile(profile)
     root = Path(cache_home) / "official_models"
-    missing = [
-        name for name in [p.doc_orientation, p.textline_orientation, p.detection, p.recognition]
-        if not (root / name).exists()
-    ]
+    missing = [name for name in required_model_directories(p).values() if not model_directory_is_ready(root / name)]
     if missing:
         print("[FAIL] Modelos ausentes:")
         for m in missing:
@@ -58,7 +55,7 @@ def check_models(cache_home: str, profile: str) -> bool:
 def test_image(cache_home: str, profile: str) -> bool:
     """Load PaddleOCR directly and run inference on a synthetic image."""
     _add_src()
-    from structured_pdf_text.ocr.models import get_profile
+    from structured_pdf_text.ocr.models import UV_DOC_MODEL, get_profile
     from structured_pdf_text.ocr.runtime_policy import resolve_paddle_runtime_policy
 
     import numpy as np
@@ -67,6 +64,8 @@ def test_image(cache_home: str, profile: str) -> bool:
     p = get_profile(profile)
     root = Path(cache_home) / "official_models"
     kwargs = {
+        "doc_unwarping_model_dir": str(root / UV_DOC_MODEL),
+        "doc_unwarping_model_name": UV_DOC_MODEL,
         "doc_orientation_classify_model_dir": str(root / p.doc_orientation),
         "doc_orientation_classify_model_name": p.doc_orientation,
         "textline_orientation_model_dir": str(root / p.textline_orientation),
@@ -101,8 +100,12 @@ def test_pdf(pdf: Path, cache_home: str, profile: str) -> bool:
     from structured_pdf_text.config import ExtractorConfig, ExtractionMode
 
     t0 = time.perf_counter()
-    # language=profile is the Python-API equivalent of CLI --ocr-model-profile
-    doc = PdfTextExtractor(ExtractorConfig(mode=ExtractionMode.BALANCED, language=profile)).extract(pdf)
+    config = ExtractorConfig(
+        mode=ExtractionMode.BALANCED, language="pt-BR", ocr_engine="paddle",
+        paddle_model_profile=profile, ocr_cache_home=cache_home,
+    )
+    with PdfTextExtractor(config) as extractor:
+        doc = extractor.extract(pdf)
     elapsed = time.perf_counter() - t0
     chars = sum(len(p.reading_text or "") for p in doc.pages)
     print(f"[OK] {len(doc.pages)} páginas | {chars:,} chars | {elapsed:.1f}s | {doc.diagnostics.status.value}")

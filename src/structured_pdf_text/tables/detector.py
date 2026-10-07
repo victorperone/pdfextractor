@@ -54,7 +54,11 @@ from structured_pdf_text.document import (
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.tables.headers import infer_header_rows
-from structured_pdf_text.tables.text_join import join_table_tokens, recover_cell_text
+from structured_pdf_text.tables.text_join import (
+    join_native_cell_tokens,
+    join_table_tokens,
+    recover_cell_text,
+)
 from structured_pdf_text.tables.cells import tokens_in_cell
 from structured_pdf_text.tables.relaxed import detect_relaxed_table
 from structured_pdf_text.tables.text_tracks import detect_borderless_table
@@ -453,7 +457,38 @@ def _cell_text_preserving_vertical_lines(
         if narrow_column and vertically_spaced and len(single_glyphs) >= len(visible) * 0.7:
             ordered = sorted(single_glyphs, key=lambda token: (token.bbox.cy, token.bbox.cx))
             return "<br>".join(token.text.strip() for token in ordered)
-    return join_table_tokens(tokens)
+    token_ids = {id(token) for token in tokens}
+    if not token_ids:
+        return ""
+    fragments: list[str] = []
+    assigned_ids: set[int] = set()
+    for line in sorted(lines, key=lambda item: (item.bbox.y0, item.bbox.x0)):
+        line_tokens = [token for token in line.tokens if id(token) in token_ids]
+        if not line_tokens:
+            continue
+        assigned_ids.update(id(token) for token in line_tokens)
+        visible_line_ids = {id(token) for token in line.tokens if token.text.strip()}
+        selected_visible_ids = {id(token) for token in line_tokens if token.text.strip()}
+        if visible_line_ids and visible_line_ids.issubset(selected_visible_ids):
+            # PDFium's line assembly already preserves punctuation placement,
+            # baseline offsets and intra-word spacing. Keep that source text
+            # when the cell owns the complete line.
+            fragment = line.text.strip()
+        else:
+            ordered_line_tokens = sorted(line_tokens, key=lambda token: token.bbox.x0)
+            if all(len(token.text.strip()) <= 1 for token in ordered_line_tokens):
+                # Character glyphs on one native baseline belong together;
+                # their natural advance can exceed the tiny gap threshold used
+                # for word-token OCR, and punctuation often has a lower top.
+                fragment = join_native_cell_tokens(ordered_line_tokens)
+            else:
+                fragment = join_table_tokens(ordered_line_tokens)
+        if fragment:
+            fragments.append(fragment)
+    unassigned = [token for token in tokens if id(token) not in assigned_ids]
+    if unassigned:
+        fragments.append(join_table_tokens(unassigned))
+    return " ".join(fragment for fragment in fragments if fragment).strip()
 
 
 def _segment_exists_at_x(

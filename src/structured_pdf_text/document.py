@@ -1,3 +1,8 @@
+"""Domain model: token types, page/document structures, and content blocks.
+
+All public types in this module are the canonical pipeline representation used
+by layout, OCR, table extraction, reading order, and rendering stages.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -227,8 +232,18 @@ class NativePageEvidence:
 class OcrToken:
     """One OCR recognition result in canonical PDF page coordinates.
 
-    Immutable; produced by PaddleOcrEngine and region refinement and consumed
-    by the fusion layer.
+    Immutable; produced by OCR backends and consumed by the fusion layer.
+
+    ``level`` distinguishes what the detector returned: EasyOCR and most
+    backends return one entry per text *line* (possibly spanning multiple
+    words), so the default is ``"line"``.  Word-level backends may set
+    ``"word"``.  Callers must not split by whitespace to derive word geometry
+    without independent alignment data.
+
+    ``polygon`` carries the raw quadrilateral from the detector (e.g. EasyOCR
+    CRAFT four-corner box) after coordinate transform.  It is ``None`` for
+    backends that only return axis-aligned boxes.  Downstream code must always
+    fall back to ``bbox`` when ``polygon`` is absent.
     """
 
     text: str
@@ -238,6 +253,23 @@ class OcrToken:
     source: SourceKind
     rotation: int = 0
     provenance: str | None = None
+    polygon: "tuple[Point, ...] | None" = None
+    level: str = "line"
+    ocr_provenance: "OcrProvenance | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class OcrProvenance:
+    engine: str
+    candidate_id: str | None = None
+    detector: str | None = None
+    recognizer: str | None = None
+    decoder: str | None = None
+    preprocessing: tuple[str, ...] = ()
+    scale: float | None = None
+    rotation: float | None = None
+    tile_id: str | None = None
+    refinement_kind: str | None = None
 
 
 @dataclass(slots=True)
@@ -263,6 +295,7 @@ class TextToken:
     text_render_mode: int | str | None = None
     provenance: str | None = None
     rotation: int = 0
+    ocr_provenance: "OcrProvenance | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,6 +533,7 @@ class StructuredPage:
     reading_text: str
     diagnostics: PageDiagnostics
     native_evidence: NativePageEvidence | None = None
+    page_rotation: int = 0
     content_blocks: list[PageContentBlock] = field(default_factory=list)
 
 

@@ -368,6 +368,7 @@ class PaddleOcrEngine:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         with self._lock:
             try:
@@ -377,6 +378,7 @@ class PaddleOcrEngine:
                     page_bbox,
                     quality_variants=quality_variants,
                     quality_policy=quality_policy,
+                    page_rotation=page_rotation,
                 )
             except FatalExtractionError:
                 raise
@@ -396,6 +398,7 @@ class PaddleOcrEngine:
         *,
         quality_variants: bool | None = None,
         quality_policy: str | None = None,
+        page_rotation: int = 0,
     ) -> list[OcrToken]:
         if quality_variants is None:
             quality_variants = self.quality_variants
@@ -415,6 +418,7 @@ class PaddleOcrEngine:
             page_image,
             page_bbox,
             provenance="baseline",
+            page_rotation=page_rotation,
         )
         # F25: when the first pass returns nothing, try all four orientations
         # before giving up. A sideways or upside-down scan would otherwise
@@ -470,6 +474,7 @@ class PaddleOcrEngine:
                 box_transform=transform,
                 rotation=angle,
                 provenance="orientation_recovery",
+                page_rotation=page_rotation,
             )
             orientation_name = f"rotation-{angle}"
             orientation_candidates.append(
@@ -567,6 +572,7 @@ class PaddleOcrEngine:
                         box_transform=orientation_context.box_transform,
                         rotation=orientation_context.angle,
                         provenance=f"quality_variant:{variant.name}",
+                        page_rotation=page_rotation,
                     )
                     candidate = _make_candidate(
                         variant.name,
@@ -1037,6 +1043,7 @@ def _tokens_from_result(
     box_transform: Callable[[float, float, float, float, int, int], tuple[float, float, float, float]] | None = None,
     rotation: int = 0,
     provenance: str | None = None,
+    page_rotation: int = 0,
 ) -> list[OcrToken]:
     width, height = _image_size(image)
     coordinate_width, coordinate_height = coordinate_size or (width, height)
@@ -1060,12 +1067,22 @@ def _tokens_from_result(
                 x0, y0, x1, y1 = box_transform(
                     x0, y0, x1, y1, coordinate_width, coordinate_height,
                 )
-            coordinates = (
-                target.x0 + x0 * scale_x,
-                target.y0 + y0 * scale_y,
-                target.x0 + x1 * scale_x,
-                target.y0 + y1 * scale_y,
-            )
+            if page_rotation % 360 == 90:
+                coordinates = (target.x0 + y0 * target.width / max(coordinate_height, 1),
+                               target.y1 - x1 * target.height / max(coordinate_width, 1),
+                               target.x0 + y1 * target.width / max(coordinate_height, 1),
+                               target.y1 - x0 * target.height / max(coordinate_width, 1))
+            elif page_rotation % 360 == 180:
+                coordinates = (target.x1 - x1 * scale_x, target.y1 - y1 * scale_y,
+                               target.x1 - x0 * scale_x, target.y1 - y0 * scale_y)
+            elif page_rotation % 360 == 270:
+                coordinates = (target.x1 - y1 * target.width / max(coordinate_height, 1),
+                               target.y0 + x0 * target.height / max(coordinate_width, 1),
+                               target.x1 - y0 * target.width / max(coordinate_height, 1),
+                               target.y0 + x1 * target.height / max(coordinate_width, 1))
+            else:
+                coordinates = (target.x0 + x0 * scale_x, target.y0 + y0 * scale_y,
+                               target.x0 + x1 * scale_x, target.y0 + y1 * scale_y)
             if not all(math.isfinite(value) for value in coordinates):
                 continue
             bbox = BBox(*coordinates)

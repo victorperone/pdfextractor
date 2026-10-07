@@ -13,7 +13,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Protocol
@@ -67,9 +67,10 @@ class StructuredPdfTextAdapter:
     same comparison run.
     """
 
-    def __init__(self, mode: ExtractionMode | str = ExtractionMode.NATIVE, language: str = "pt") -> None:
+    def __init__(self, mode: ExtractionMode | str = ExtractionMode.NATIVE, language: str = "pt", config: ExtractorConfig | None = None) -> None:
         self.mode = ExtractionMode(mode)
         self.language = language
+        self.config = replace(config, mode=self.mode) if config is not None else ExtractorConfig(mode=self.mode, language=language)
         self.name = f"structured-{self.mode.value}"
 
     def available(self) -> bool:
@@ -77,9 +78,8 @@ class StructuredPdfTextAdapter:
 
     def extract(self, path: str | Path) -> ComparisonExtraction:
         started = time.perf_counter()
-        document = PdfTextExtractor(
-            ExtractorConfig(mode=self.mode, language=self.language)
-        ).extract(path)
+        with PdfTextExtractor(self.config) as extractor:
+            document = extractor.extract(path)
         return ComparisonExtraction(
             adapter=self.name,
             status=document.diagnostics.status.value,
@@ -172,11 +172,11 @@ class PyMuPdfAdapter:
             )
 
 
-def comparison_adapters(language: str = "pt") -> dict[str, ComparisonAdapter]:
+def comparison_adapters(language: str = "pt", config: ExtractorConfig | None = None) -> dict[str, ComparisonAdapter]:
     """Return built-in adapters without importing optional runtimes eagerly."""
     adapters: list[ComparisonAdapter] = [
-        StructuredPdfTextAdapter(ExtractionMode.NATIVE, language),
-        StructuredPdfTextAdapter(ExtractionMode.BALANCED, language),
+        StructuredPdfTextAdapter(ExtractionMode.NATIVE, language, config),
+        StructuredPdfTextAdapter(ExtractionMode.BALANCED, language, config),
         PdfiumRawAdapter(),
         PyMuPdfAdapter(),
     ]
@@ -189,6 +189,7 @@ def compare_extractors(
     *,
     reference: str = "pymupdf",
     language: str = "pt",
+    config: ExtractorConfig | None = None,
     include_text: bool = False,
 ) -> dict[str, Any]:
     """Run local adapters and report separate fidelity signals.
@@ -197,7 +198,7 @@ def compare_extractors(
     observational and only become accuracy metrics when the chosen reference
     is manually verified ground truth.
     """
-    registry = comparison_adapters(language)
+    registry = comparison_adapters(language, config)
     requested = tuple(dict.fromkeys(adapter_names))
     unknown = [name for name in requested if name not in registry]
     if unknown:

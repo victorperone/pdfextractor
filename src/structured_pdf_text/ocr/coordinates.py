@@ -51,15 +51,100 @@ class PageTransform:
         )
 
 
-def map_tokens_to_page(tokens: list[OcrToken], page_bbox: BBox | None, width_px: int, height_px: int) -> list[OcrToken]:
-    """Convert backend raster-space token boxes to canonical PDF point boxes."""
+def map_tokens_to_page(
+    tokens: list[OcrToken],
+    page_bbox: BBox | None,
+    width_px: int,
+    height_px: int,
+    page_rotation: int = 0,
+) -> list[OcrToken]:
+    """Convert backend raster-space token boxes to canonical PDF point boxes.
+
+    The rendered image is always in visual orientation (PDFium applies /Rotate
+    before producing pixels). For rotated pages the axes are swapped relative
+    to canonical PDF space, so a plain linear scale would misplace every token.
+    ``page_rotation`` is the page's /Rotate value (0, 90, 180, or 270) and is
+    used to apply the correct inverse transform.
+    """
     if page_bbox is None:
         return tokens
-    transform = PageTransform(page_bbox, RasterGeometry(width_px, height_px))
+    rotation = page_rotation % 360
+    if rotation == 0:
+        transform = PageTransform(page_bbox, RasterGeometry(width_px, height_px))
+
+        def _to_bbox(b: BBox) -> BBox:
+            return transform.raster_bbox_to_page(b)
+
+        def _to_point(p: Point) -> Point:
+            return transform.raster_point_to_page(p)
+
+    elif rotation == 90:
+        # Visual dims: width_px = canonical_height * scale, height_px = canonical_width * scale.
+        # Inverse of rotate_to_visual(90): canonical_x ← raster_y, canonical_y ← flipped raster_x.
+        pw, ph = page_bbox.width, page_bbox.height
+
+        def _to_bbox(b: BBox) -> BBox:
+            cx0 = page_bbox.x0 + b.y0 * pw / height_px
+            cy0 = page_bbox.y1 - b.x1 * ph / width_px
+            cx1 = page_bbox.x0 + b.y1 * pw / height_px
+            cy1 = page_bbox.y1 - b.x0 * ph / width_px
+            return BBox(min(cx0, cx1), min(cy0, cy1), max(cx0, cx1), max(cy0, cy1))
+
+        def _to_point(p: Point) -> Point:
+            return Point(
+                page_bbox.x0 + p.y * pw / height_px,
+                page_bbox.y1 - p.x * ph / width_px,
+            )
+
+    elif rotation == 180:
+        # Visual dims same as canonical; both axes are flipped.
+        # Inverse of rotate_to_visual(180): canonical_x ← flipped raster_x, canonical_y ← flipped raster_y.
+        pw, ph = page_bbox.width, page_bbox.height
+
+        def _to_bbox(b: BBox) -> BBox:
+            cx0 = page_bbox.x1 - b.x1 * pw / width_px
+            cy0 = page_bbox.y1 - b.y1 * ph / height_px
+            cx1 = page_bbox.x1 - b.x0 * pw / width_px
+            cy1 = page_bbox.y1 - b.y0 * ph / height_px
+            return BBox(min(cx0, cx1), min(cy0, cy1), max(cx0, cx1), max(cy0, cy1))
+
+        def _to_point(p: Point) -> Point:
+            return Point(
+                page_bbox.x1 - p.x * pw / width_px,
+                page_bbox.y1 - p.y * ph / height_px,
+            )
+
+    else:  # 270
+        # Visual dims: width_px = canonical_height * scale, height_px = canonical_width * scale.
+        # Inverse of rotate_to_visual(270): canonical_y ← raster_x, canonical_x ← flipped raster_y.
+        pw, ph = page_bbox.width, page_bbox.height
+
+        def _to_bbox(b: BBox) -> BBox:
+            cx0 = page_bbox.x1 - b.y1 * pw / height_px
+            cy0 = page_bbox.y0 + b.x0 * ph / width_px
+            cx1 = page_bbox.x1 - b.y0 * pw / height_px
+            cy1 = page_bbox.y0 + b.x1 * ph / width_px
+            return BBox(min(cx0, cx1), min(cy0, cy1), max(cx0, cx1), max(cy0, cy1))
+
+        def _to_point(p: Point) -> Point:
+            return Point(
+                page_bbox.x1 - p.y * pw / height_px,
+                page_bbox.y0 + p.x * ph / width_px,
+            )
+
     return [
-        OcrToken(text=t.text, bbox=transform.raster_bbox_to_page(t.bbox),
-                 confidence=t.confidence, language=t.language, source=t.source,
-                 rotation=t.rotation, provenance=t.provenance)
+        OcrToken(
+            text=t.text,
+            bbox=_to_bbox(t.bbox),
+            confidence=t.confidence,
+            language=t.language,
+            source=t.source,
+            rotation=t.rotation,
+            provenance=t.provenance,
+            polygon=tuple(_to_point(p) for p in t.polygon) if t.polygon else None,
+            level=t.level,
+            ocr_provenance=t.ocr_provenance,
+        )
         for t in tokens
     ]
 
@@ -69,9 +154,17 @@ def offset_tokens(tokens: list[OcrToken], x: float, y: float) -> list[OcrToken]:
     if not x and not y:
         return tokens
     return [
-        OcrToken(text=t.text, bbox=BBox(t.bbox.x0 + x, t.bbox.y0 + y,
-                                      t.bbox.x1 + x, t.bbox.y1 + y),
-                 confidence=t.confidence, language=t.language, source=t.source,
-                 rotation=t.rotation, provenance=t.provenance)
+        OcrToken(
+            text=t.text,
+            bbox=BBox(t.bbox.x0 + x, t.bbox.y0 + y, t.bbox.x1 + x, t.bbox.y1 + y),
+            confidence=t.confidence,
+            language=t.language,
+            source=t.source,
+            rotation=t.rotation,
+            provenance=t.provenance,
+            polygon=tuple(Point(p.x + x, p.y + y) for p in t.polygon) if t.polygon else None,
+            level=t.level,
+            ocr_provenance=t.ocr_provenance,
+        )
         for t in tokens
     ]

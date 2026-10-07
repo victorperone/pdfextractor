@@ -1,3 +1,8 @@
 # PowerShell scripts must keep CRLF on all platforms - PS 5.1 on Windows
 # fails to parse LF-only files (missing brace / unterminated string errors).
 *.ps1 text eol=crlf
+
+# Native-text stress corpus hashes are byte-exact.
+# Do not rewrite LF to CRLF on Windows checkouts.
+tests/corpus/native_text_stress/Document_Text_Stress_V1.reference.jsonl -text
+tests/corpus/native_text_stress/Document_Text_Stress_V1.reference.json -text

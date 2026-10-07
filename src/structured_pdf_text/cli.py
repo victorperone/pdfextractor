@@ -1,3 +1,15 @@
+"""CLI entry point for the structured-pdf-text extractor (``pdftext`` command).
+
+Subcommands:
+  extract           — extract text or structured Markdown from a PDF
+  inspect           — inspect a single page (native evidence, raw JSON)
+  overlay           — render a page with character/token bounding boxes
+  report            — batch extraction report over a corpus directory
+  compare           — compare extractor outputs against reference adapters
+  setup-paddle-models   — download PaddleOCR model weights
+  paddle-models-status  — check PaddleOCR weight readiness
+  setup-easyocr-models  — download EasyOCR model weights (incl. optional DBNet18)
+"""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +27,7 @@ from .config import (
     OcrQualityPolicy,
     best_extraction_config,
     effective_ocr_quality_policy,
+    max_quality_extraction_config,
 )
 from .diagnostics.overlay import render_overlay
 from .diagnostics.report import document_report
@@ -70,7 +83,12 @@ def main(argv: list[str] | None = None) -> int:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pdftext",
-        description="PDF text extraction. CPU OCR defaults to oneDNN disabled; set PADDLE_ENABLE_MKLDNN=1 to opt in.",
+        description=(
+            "PDF text extraction. "
+            "Default OCR engine is EasyOCR (PyTorch CPU). "
+            "When using PaddleOCR, MKL-DNN/oneDNN is disabled by default on CPU; "
+            "set PADDLE_ENABLE_MKLDNN=1 to opt in."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -127,6 +145,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "cross-page merging, headers removed, quality OCR variants. "
             "Overrides --mode and other flags."
         ),
+    )
+    extract_parser.add_argument(
+        "--max-quality",
+        action="store_true",
+        help="Use exhaustive OCR, multi-scale tiling, regional recovery, table-cell and critical-data refinement.",
     )
     extract_parser.add_argument(
         "--output-file",
@@ -302,10 +325,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
         choices=("structured-native", "structured-balanced", "pdfium-raw", "pymupdf"),
         default="pymupdf",
     )
-    compare_parser.add_argument("--language", default=None, help="Explicit OCR profile when an OCR adapter is selected")
+    compare_parser.add_argument("--language", default=None, help="OCR language for the selected adapter (default: pt-BR)")
+    compare_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr", help="OCR backend family (default: easyocr)")
+    compare_parser.add_argument("--cache-home", default=None, metavar="DIR")
     compare_parser.add_argument(
         "--ocr-model-profile", default=None, metavar="PROFILE",
-        help="Explicit OCR profile required when structured-balanced is selected",
+        help="Paddle model profile; valid only with --ocr-engine paddle",
     )
     compare_parser.add_argument(
         "--include-text",
@@ -336,6 +361,17 @@ def _main_impl(argv: list[str] | None = None) -> int:
         help="Override the OCR model cache directory",
     )
 
+    setup_easyocr_parser = subparsers.add_parser(
+        "setup-easyocr-models",
+        help="Download EasyOCR CRAFT, Portuguese recognizer and optional DBNet18 weights.",
+    )
+    setup_easyocr_parser.add_argument("--language", default="pt-BR")
+    setup_easyocr_parser.add_argument("--cache-home", default=None, metavar="DIR")
+    setup_easyocr_parser.add_argument(
+        "--include-dbnet", action="store_true",
+        help="Also download the DBNet18 detector required for maximum-quality mode.",
+    )
+
     models_status_parser = subparsers.add_parser(
         "paddle-models-status", aliases=["models-status"],
         help="Check PaddleOCR model readiness without loading models or accessing the network.",
@@ -357,6 +393,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "extract":
+        if args.max_quality and args.best:
+            print("--max-quality and --best select different extraction profiles; choose one", file=sys.stderr)
+            return 2
         if args.ocr_batch_size < 1:
             print("--ocr-batch-size must be at least 1", file=sys.stderr)
             return 2
@@ -364,17 +403,23 @@ def _main_impl(argv: list[str] | None = None) -> int:
         profile_name = args.paddle_model_profile or "pt"
         # Resolve effective engine: explicit --ocr-engine wins; default is "easyocr".
         effective_engine: str = args.ocr_engine or "easyocr"
-        if args.best:
+        if args.max_quality:
+            config = max_quality_extraction_config(language=language)
+            from dataclasses import replace as _replace
+            config = _replace(config, num_threads=args.threads,
+                              ocr_engine=args.ocr_engine or config.ocr_engine,
+                              ocr_provider=args.ocr_provider,
+                              paddle_model_profile=profile_name,
+                              ocr_cache_home=args.cache_home)
+        elif args.best:
             config = best_extraction_config(language=language)
             # F05: --best must not silently ignore an explicit --ocr-engine.
-            if args.ocr_engine is not None or args.ocr_provider is not None:
-                from dataclasses import replace as _replace
-                config = _replace(
-                    config,
-                    ocr_engine=args.ocr_engine or config.ocr_engine,
-                    ocr_provider=args.ocr_provider,
-                    paddle_model_profile=profile_name,
-                )
+            from dataclasses import replace as _replace
+            config = _replace(config, num_threads=args.threads,
+                              ocr_engine=args.ocr_engine or config.ocr_engine,
+                              ocr_provider=args.ocr_provider,
+                              paddle_model_profile=profile_name,
+                              ocr_cache_home=args.cache_home)
         else:
             config = ExtractorConfig(
                 mode=args.mode,
@@ -388,12 +433,21 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 ocr_engine=effective_engine,
                 ocr_provider=args.ocr_provider,
                 paddle_model_profile=profile_name,
+                ocr_cache_home=args.cache_home,
             )
+        if args.cache_home:
+            from dataclasses import replace as _replace
+            config = _replace(config, ocr_cache_home=args.cache_home)
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         # F04: Paddle model preflight only runs when the selected engine is Paddle.
         if _mode_requires_ocr(config.mode):
             readiness = probe_static(config, cache_home=args.cache_home)
-            if readiness.status.value != "ready":
+            if readiness.status.value == "degraded":
+                print(
+                    f"OCR backend is available in degraded mode: {readiness.reason_code}: {readiness.details}",
+                    file=sys.stderr,
+                )
+            elif readiness.status.value != "ready":
                 print(
                     f"OCR backend is not ready before extraction: {readiness.status.value} "
                     f"({readiness.reason_code or 'unknown'}): {readiness.details}",
@@ -408,7 +462,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 return 1
 
         def _progress(current: int, total: int) -> None:
-            print(f"\rExtraindo página {current}/{total}...", end="", file=sys.stderr, flush=True)
+            print(f"\rExtracting page {current}/{total}...", end="", file=sys.stderr, flush=True)
 
         callback = _progress if args.progress else None
         password = None
@@ -469,6 +523,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             page_indices=(args.page - 1,) if args.page is not None else None,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            ocr_cache_home=args.cache_home,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if _mode_requires_ocr(config.mode):
@@ -526,6 +581,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             paddle_model_profile=profile_name,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            ocr_cache_home=args.cache_home,
             page_indices=(index,),
         )
         if mode != ExtractionMode.NATIVE:
@@ -564,6 +620,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             num_threads=args.threads,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            ocr_cache_home=args.cache_home,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if args.workers < 1:
@@ -590,31 +647,29 @@ def _main_impl(argv: list[str] | None = None) -> int:
         ) else 0
 
     if args.command == "compare":
+        if args.ocr_model_profile and args.ocr_engine != "paddle":
+            print("--ocr-model-profile requires --ocr-engine paddle", file=sys.stderr)
+            return 2
         ocr_adapters = {"structured-balanced"}
+        comparison_config = ExtractorConfig(
+            mode=ExtractionMode.BALANCED,
+            language=args.language or "pt-BR",
+            ocr_engine=args.ocr_engine,
+            paddle_model_profile=args.ocr_model_profile or "pt",
+            ocr_cache_home=args.cache_home,
+        )
         if any(adapter in ocr_adapters for adapter in args.adapters):
-            if args.ocr_model_profile is None and args.language is None:
-                print("An explicit --ocr-model-profile or --language is required when structured-balanced is selected", file=sys.stderr)
-                return 2
-            profile_name = args.ocr_model_profile or args.language or "pt"
-            try:
-                get_profile(profile_name)
-                validate_local_ocr_models(language=profile_name)
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-            except PaddleOcrUnavailable as exc:
-                print(str(exc), file=sys.stderr)
-                print(
-                    f"Run: pdftext setup-paddle-models --paddle-model-profile {profile_name}",
-                    file=sys.stderr,
-                )
+            readiness = probe_static(comparison_config, cache_home=args.cache_home)
+            if readiness.status.value != "ready":
+                print(f"OCR backend is not ready: {readiness.status.value} ({readiness.reason_code})", file=sys.stderr)
                 return 1
         try:
             comparison = compare_extractors(
                 args.pdf,
                 args.adapters,
                 reference=args.reference,
-                language=args.ocr_model_profile or args.language or "pt",
+                language=args.language or "pt-BR",
+                config=comparison_config,
                 include_text=args.include_text,
             )
         except ValueError as exc:
@@ -627,6 +682,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         profile_name = args.paddle_model_profile or args.language or "pt"
         return _cmd_setup_models(profile_name, args.cache_home)
 
+    if args.command == "setup-easyocr-models":
+        return _cmd_setup_easyocr_models(args.language, args.cache_home, args.include_dbnet)
+
     if args.command in {"paddle-models-status", "models-status"}:
         profile_name = args.paddle_model_profile or args.language or "pt"
         return _cmd_models_status(profile_name, args.cache_home)
@@ -638,6 +696,55 @@ def _mode_requires_ocr(mode: ExtractionMode | str) -> bool:
     """Return True when the extraction mode can trigger OCR."""
     ocr_modes = {ExtractionMode.BALANCED, ExtractionMode.OCR, "balanced", "ocr"}
     return mode in ocr_modes
+
+
+def _cmd_setup_easyocr_models(language: str, cache_home: str | None, include_dbnet: bool) -> int:
+    """Provision EasyOCR weights explicitly; inference remains offline-only."""
+    try:
+        import easyocr
+        from .ocr.languages import backend_language
+        from .ocr.backends.easyocr import (
+            _dbnet18_weights_available,
+            _probe_dbnet18_runtime_uncached,
+        )
+        cache = Path(cache_home).expanduser() / "easyocr" if cache_home else Path.home() / ".cache" / "pdfextractor" / "easyocr"
+        cache.mkdir(parents=True, exist_ok=True)
+        langs = [backend_language(language, "easyocr")]
+        reader_options = {
+            "gpu": False, "model_storage_directory": str(cache), "download_enabled": True,
+        }
+        recog_network = os.environ.get("EASYOCR_RECOG_NETWORK")
+        if recog_network:
+            reader_options["recog_network"] = recog_network
+        craft_reader = easyocr.Reader(langs, **reader_options)
+        craft_reader._pdfextractor_init_options = {"lang_list": list(langs), **reader_options}
+
+        result: dict = {"status": "ready", "cache": str(cache), "dbnet18_requested": include_dbnet}
+
+        if include_dbnet:
+            easyocr.Reader(
+                langs, detect_network="dbnet18", **reader_options,
+            )
+            dbnet_weights = _dbnet18_weights_available(cache)
+            dbnet_ok, dbnet_fail = _probe_dbnet18_runtime_uncached(craft_reader, cache)
+            result["dbnet18_weights_available"] = dbnet_weights
+            result["dbnet18_runtime_available"] = dbnet_ok
+            if dbnet_fail:
+                result["reason"] = dbnet_fail
+            if not dbnet_ok:
+                result["status"] = "incomplete"
+                print(json.dumps(result, ensure_ascii=False))
+                print(
+                    f"DBNet18 runtime probe failed: {dbnet_fail}",
+                    file=sys.stderr,
+                )
+                return 1
+
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        print(f"EasyOCR model setup failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
 
 def _print_fatal_extraction_error(exc: FatalExtractionError) -> None:

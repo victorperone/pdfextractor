@@ -1,0 +1,1 @@
+Digitalização levemente inclinada.

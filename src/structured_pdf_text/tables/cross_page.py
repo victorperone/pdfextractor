@@ -123,6 +123,11 @@ def table_signature(
 
 
 def _can_continue(previous: StructuredTable, following: StructuredTable) -> bool:
+    """Compatibility wrapper for callers of the former private predicate.
+
+    Production merging uses :func:`_continuation_decision` so it can retain
+    the full evidence and page context.
+    """
     return _continuation_decision(
         previous,
         following,
@@ -445,6 +450,7 @@ def _table_bbox(table: StructuredTable, page_index: int | None = None):
 
 
 def _headers_compatible(first: TableSignature, second: TableSignature) -> bool:
+    """Compatibility wrapper; production uses the scored header evidence."""
     return _header_similarity(first, second) >= 0.60
 
 
@@ -464,6 +470,7 @@ def _header_similarity(first: TableSignature, second: TableSignature) -> float:
 
 
 def _tracks_compatible(first: tuple[float, ...], second: tuple[float, ...]) -> bool:
+    """Compatibility wrapper; production records the numeric track delta."""
     delta = _track_delta(first, second)
     return delta is None or delta <= 0.08
 
@@ -472,12 +479,6 @@ def _track_delta(first: tuple[float, ...], second: tuple[float, ...]) -> float |
     if not first or not second or len(first) != len(second):
         return None
     return mean(abs(left - right) for left, right in zip(first, second))
-
-
-def _boundary_proximity(previous: StructuredTable, following: StructuredTable) -> bool:
-    previous_signature = table_signature(previous)
-    following_signature = table_signature(following)
-    return previous_signature.touches_bottom and following_signature.touches_top
 
 
 def _continuation_marker(table: StructuredTable) -> bool:

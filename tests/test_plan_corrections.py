@@ -15,6 +15,7 @@ from structured_pdf_text.assemble.document import assemble_document
 from structured_pdf_text.config import ExtractorConfig, SecurityLimits, effective_ocr_quality_thresholds
 from structured_pdf_text.diagnostics.compare import ComparisonExtraction, compare_extractors
 from structured_pdf_text.ocr.models import PROFILES, get_profile
+from structured_pdf_text.ocr.readiness import ReadinessResult, ReadinessStatus
 
 
 def _pdf(path: Path) -> Path:
@@ -120,6 +121,29 @@ def test_confidence_thresholds_are_neutral_for_uncalibrated_families() -> None:
     assert rapid.minimum_printable_ratio == paddle.minimum_printable_ratio
 
 
+def test_easyocr_confidence_thresholds_are_calibrated() -> None:
+    easy = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="easyocr"))
+    paddle = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="paddle"))
+    rapid = effective_ocr_quality_thresholds(ExtractorConfig(ocr_engine="rapidocr"))
+
+    # EasyOCR must have active (non-zero) confidence gating
+    assert easy.strong_mean_confidence > 0.0, "EasyOCR must have active confidence gating"
+    assert easy.max_low_confidence_char_ratio < 1.0, "EasyOCR must have active low-conf ratio gate"
+    assert easy.low_confidence_threshold > 0.0, "EasyOCR must have active per-token threshold"
+
+    # EasyOCR thresholds must be below Paddle's (EasyOCR confidence is lower on clean text)
+    assert easy.strong_mean_confidence < paddle.strong_mean_confidence
+    assert easy.max_low_confidence_char_ratio > paddle.max_low_confidence_char_ratio
+
+    # EasyOCR must have stronger gates than uncalibrated engines (rapidocr)
+    assert easy.strong_mean_confidence > rapid.strong_mean_confidence
+    assert easy.max_low_confidence_char_ratio < rapid.max_low_confidence_char_ratio
+
+    # Geometry and integrity gates must be preserved (not neutralized)
+    assert easy.minimum_printable_ratio == paddle.minimum_printable_ratio
+    assert easy.minimum_orientation_ratio == paddle.minimum_orientation_ratio
+
+
 def test_extractor_close_is_idempotent_and_prevents_reuse(tmp_path: Path) -> None:
     extractor = PdfTextExtractor(ExtractorConfig(mode="native"))
     extractor.close()
@@ -148,8 +172,19 @@ def test_compare_never_substitutes_a_failed_requested_reference(monkeypatch, tmp
         "requested": Adapter("requested", ComparisonExtraction("requested", "failure", 0, "", "", 1, error="failed")),
         "other": Adapter("other", ComparisonExtraction("other", "success", 1, "text", "text", 1)),
     }
-    monkeypatch.setattr(compare_module, "comparison_adapters", lambda _language: registry)
-    result = compare_extractors(tmp_path / "unused.pdf", ("requested", "other"), reference="requested")
+    selected_config = ExtractorConfig(mode="balanced", ocr_engine="paddle")
+    received: dict[str, object] = {}
+
+    def adapter_factory(language, config=None):
+        received.update(language=language, config=config)
+        return registry
+
+    monkeypatch.setattr(compare_module, "comparison_adapters", adapter_factory)
+    result = compare_extractors(
+        tmp_path / "unused.pdf", ("requested", "other"),
+        reference="requested", config=selected_config,
+    )
+    assert received == {"language": "pt", "config": selected_config}
     assert result["status"] == "failure"
     assert result["requested_reference"] == "requested"
     assert result["effective_reference"] is None
@@ -171,7 +206,7 @@ def test_all_failed_comparison_is_a_failure_even_with_diagnostic_results(monkeyp
     monkeypatch.setattr(
         compare_module,
         "comparison_adapters",
-        lambda _language: {name: Adapter(name) for name in ("reference", "other")},
+        lambda _language, _config=None: {name: Adapter(name) for name in ("reference", "other")},
     )
     result = compare_extractors(tmp_path / "unused.pdf", ("reference", "other"), reference="reference")
     assert result["status"] == "failure"
@@ -189,10 +224,14 @@ def test_cli_overlay_native_does_not_validate_ocr(monkeypatch, tmp_path: Path) -
     assert code == 0
 
 
-def test_cli_overlay_ocr_mode_does_not_require_model_profile(capsys, tmp_path: Path) -> None:
+def test_cli_overlay_ocr_mode_does_not_require_model_profile(monkeypatch, capsys, tmp_path: Path) -> None:
     # Verify that --ocr-model-profile is never required, even in balanced OCR mode.
-    # Uses paddle explicitly so the test fails on the missing PDF (exit 2) rather
-    # than on EasyOCR package availability in the test environment.
+    # Isolate argument validation from optional OCR package/model availability.
+    monkeypatch.setattr(
+        cli_module,
+        "probe_static",
+        lambda *_args, **_kwargs: ReadinessResult(ReadinessStatus.READY),
+    )
     code = cli_module.main([
         "overlay", str(tmp_path / "not-opened.pdf"), "--page", "1", "--out", str(tmp_path / "out.png"),
         "--mode", "balanced", "--ocr-engine", "paddle",
@@ -215,10 +254,16 @@ def test_cli_all_failed_comparison_saves_diagnostic_and_returns_nonzero(monkeypa
             return ComparisonExtraction(self.name, "failure", 0, "", "", 1, error="injected failure")
 
     names = ("structured-native", "pdfium-raw", "pymupdf")
+    received: dict[str, object] = {}
+
+    def adapter_factory(language, config=None):
+        received.update(language=language, config=config)
+        return {name: Adapter(name) for name in names}
+
     monkeypatch.setattr(
         compare_module,
         "comparison_adapters",
-        lambda _language: {name: Adapter(name) for name in names},
+        adapter_factory,
     )
     code = cli_module.main(["compare", str(tmp_path / "unused.pdf")])
     output = json.loads(capsys.readouterr().out)
@@ -226,6 +271,9 @@ def test_cli_all_failed_comparison_saves_diagnostic_and_returns_nonzero(monkeypa
     assert output["status"] == "failure"
     assert output["valid"] is False
     assert output["results"]
+    assert received["language"] == "pt-BR"
+    assert isinstance(received["config"], ExtractorConfig)
+    assert received["config"].ocr_engine == "easyocr"
 
 
 def test_cli_partial_extraction_keeps_output_and_returns_nonzero(monkeypatch, tmp_path: Path) -> None:
@@ -313,7 +361,7 @@ def test_models_status_requires_uvdoc_when_unwarping_is_enabled(tmp_path, capsys
             continue
         model_dir = tmp_path / "official_models" / model_name
         model_dir.mkdir(parents=True)
-        (model_dir / "model.pdparams").write_text("fixture", encoding="utf-8")
+        (model_dir / "model.pdparams").write_text("x" * 2048, encoding="utf-8")
 
     assert _cmd_models_status("pt", str(tmp_path)) == 1
     output = capsys.readouterr().out
@@ -322,7 +370,7 @@ def test_models_status_requires_uvdoc_when_unwarping_is_enabled(tmp_path, capsys
 
     uvdoc_dir = tmp_path / "official_models" / "UVDoc"
     uvdoc_dir.mkdir()
-    (uvdoc_dir / "model.pdparams").write_text("fixture", encoding="utf-8")
+    (uvdoc_dir / "model.pdparams").write_text("x" * 2048, encoding="utf-8")
     assert _cmd_models_status("pt", str(tmp_path)) == 0
     output = capsys.readouterr().out
     assert "[ok] UVDoc" in output
@@ -339,7 +387,30 @@ def test_paddle_direct_and_subprocess_modes_share_the_resolved_policy(monkeypatc
     monkeypatch.setattr(paddle_backend, "_has_torch_conflict", lambda: True)
     subprocess_backend = paddle_backend.PaddleOCRBackend(config)
     assert subprocess_backend._subprocess_config["mkldnn"] is False
-    assert subprocess_backend._subprocess_config["disable_pir_api"] is False
+    assert (
+        subprocess_backend._subprocess_config["disable_pir_api"]
+        is subprocess_backend._runtime_policy.disable_pir_api
+    )
+
+def test_paddle_cpu_runtime_policy_disables_pir_api_on_windows(monkeypatch) -> None:
+    import structured_pdf_text.ocr.backends.paddle as paddle_backend
+    import structured_pdf_text.ocr.paddle as paddle_engine
+    from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
+    config = ExtractorConfig(language="pt")
+    monkeypatch.setenv("PADDLE_ENABLE_MKLDNN", "0")
+    monkeypatch.setattr(paddle_backend, "_has_torch_conflict", lambda: True)
+    subprocess_backend = PaddleOCRBackend(config)
+    from structured_pdf_text.ocr.runtime_policy import (
+        resolve_paddle_runtime_policy,
+    )
+
+    policy = resolve_paddle_runtime_policy(
+        env={"PADDLE_ENABLE_MKLDNN": "0"},
+        system="Windows",
+    )
+
+    assert policy.enable_mkldnn is False
+    assert policy.disable_pir_api is True
 
     direct_options = {}
 
@@ -387,3 +458,54 @@ def test_page_ocr_exception_and_successful_empty_result_have_distinct_diagnostic
     empty_page = empty.pages[0]
     assert "page_ocr_unavailable" not in empty_page.diagnostics.facts["partial_reasons"]
     assert any("OCR completed successfully but produced no usable tokens" in warning for warning in empty_page.diagnostics.warnings)
+
+
+# ---------------------------------------------------------------------------
+# §50 — max_quality_extraction_config
+# ---------------------------------------------------------------------------
+
+def test_max_quality_extraction_config_is_importable() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    assert callable(max_quality_extraction_config)
+
+
+def test_max_quality_config_sets_exhaustive_policy() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    from structured_pdf_text.config import OcrQualityPolicy
+    config = max_quality_extraction_config()
+    assert config.ocr_quality_policy == OcrQualityPolicy.EXHAUSTIVE
+
+
+def test_max_quality_config_enables_quality_variants() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config()
+    assert config.ocr_quality_variants is True
+
+
+def test_max_quality_config_uses_easyocr_by_default() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config()
+    assert config.ocr_engine == "easyocr"
+
+
+def test_max_quality_config_enables_tables() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config()
+    assert config.enable_tables is True
+    assert config.merge_cross_page_tables is True
+
+
+def test_max_quality_config_language_override() -> None:
+    from structured_pdf_text import max_quality_extraction_config
+    config = max_quality_extraction_config(language="en")
+    assert config.language == "en"
+
+
+def test_max_quality_config_is_stricter_than_best_extraction_config() -> None:
+    """max_quality must use EXHAUSTIVE while best_extraction uses ADAPTIVE or less."""
+    from structured_pdf_text import best_extraction_config, max_quality_extraction_config
+    from structured_pdf_text.config import OcrQualityPolicy
+    best = best_extraction_config()
+    maxq = max_quality_extraction_config()
+    assert maxq.ocr_quality_policy == OcrQualityPolicy.EXHAUSTIVE
+    assert best.ocr_quality_policy != OcrQualityPolicy.EXHAUSTIVE

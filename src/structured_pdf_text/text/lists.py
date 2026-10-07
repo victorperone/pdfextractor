@@ -134,10 +134,11 @@ def segment_list_lines(lines: list[TextLine], *, allow_single: bool = False) -> 
             continue
         marker, text = parsed
         item_index += 1
+        parent_order_index = item_index
         current_level = level(line.bbox.x0)
         item_lines = [line]
         list_positions.add(position)
-        assignments[position] = ListLineAssignment(line, "item", item_index, current_level, "observed_marker")
+        assignments[position] = ListLineAssignment(line, "item", parent_order_index, current_level, "observed_marker")
         next_marker = marker_positions[marker_number + 1] if marker_number + 1 < len(marker_positions) else len(all_lines)
         for extra_position in range(position + 1, next_marker):
             extra = all_lines[extra_position]
@@ -146,7 +147,7 @@ def segment_list_lines(lines: list[TextLine], *, allow_single: bool = False) -> 
             if _is_inferred_nested_item(line, extra, median_height, indent_tolerance):
                 item_index += 1
                 inferred_text = extra.text.strip()
-                inferred_level = level(extra.bbox.x0)
+                inferred_level = max(current_level + 1, level(extra.bbox.x0))
                 item_records[extra_position] = StructuredListItem(
                     marker="•",
                     text=inferred_text,
@@ -171,6 +172,7 @@ def segment_list_lines(lines: list[TextLine], *, allow_single: bool = False) -> 
                 assignments[extra_position] = ListLineAssignment(
                     extra, "text", None, None, "not_safe_continuation"
                 )
+                break
         item_records[position] = StructuredListItem(
             marker=marker,
             text=" ".join(
@@ -178,7 +180,7 @@ def segment_list_lines(lines: list[TextLine], *, allow_single: bool = False) -> 
             ),
             level=current_level,
             bbox=BBox.union_all([item_line.bbox for item_line in item_lines]),
-            order_index=item_index,
+            order_index=parent_order_index,
             confidence=_line_confidence(line),
         )
 

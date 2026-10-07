@@ -45,6 +45,11 @@ class OCRCapabilities:
     """Capabilities declared by a backend.
 
     Use these flags instead of ``if engine == "tesseract"`` branches.
+
+    ``multiple_detectors`` is True only when the backend can run more than one
+    text detector algorithm in the same session and all of them are confirmed
+    functional at runtime (weights present AND inference probe passed).  A backend
+    that knows about a second detector but cannot execute it must leave this False.
     """
 
     detection: bool
@@ -53,6 +58,14 @@ class OCRCapabilities:
     page_orientation: bool
     quadrilateral_boxes: bool
     per_token_confidence: bool
+    polygons: bool = False
+    direct_recognition: bool = False
+    detector_profiles: bool = False
+    decoder_profiles: bool = False
+    orientation_search: bool = False
+    multiple_detectors: bool = False
+    word_beam_search: bool = False
+    native_confidence: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +191,8 @@ class OCRBackend(Protocol):
 
         Use ``ocr.readiness.probe_static`` for checks that must not construct a
         model, and ``probe_deep`` for an explicit inference smoke test. Returned
-        values follow: ready, missing, incomplete, corrupt, unknown.
+        values follow: "ready", "missing", "unknown".  Backends may also return
+        "incomplete" when models are partially installed.
         """
         ...
 

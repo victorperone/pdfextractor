@@ -97,6 +97,8 @@ def _sha256_file(path: Path) -> str:
 def _parse_page_sections(md_text: str) -> dict[int, str]:
     """Split markdown into per-page sections.
 
+    Kept as a script-level parsing helper for evaluation integrations and tests.
+
     Handles both formats:
       '## Página 1'          (extractor output)
       '## Página 001 | Title' (reference format)
@@ -119,6 +121,7 @@ def _parse_page_sections(md_text: str) -> dict[int, str]:
 
 
 def _page_body(content: str) -> str:
+    """Return the page body; retained for report consumers and tests."""
     return re.sub(r"^##\s+P[áa]gina\s+[^\n]*\n?", "", content, count=1, flags=re.I).strip()
 
 

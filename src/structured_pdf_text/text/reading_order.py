@@ -146,25 +146,64 @@ def order_lines_in_region(
     Returns (ordered_lines, column_groups_detected).
     The caller is responsible for handling rotated lines and deduplication
     when combining lines from multiple regions.
+
+    §33: When a prose/list/title region has no native_lines but has ocr_lines
+    (OCR-only page path), the full column-detection algorithm is applied to
+    the OCR lines so multi-column scanned pages are ordered correctly.
     """
-    if not region.native_lines:
-        if region.kind == RegionKind.FIGURE and region.ocr_lines:
-            return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
-        return [], 0
-    if region.kind == RegionKind.TABLE:
-        return _order_table_lines(region.native_lines), 0
-    if region.kind in {
+    # §33: merge native + OCR lines for prose regions so the full multi-column
+    # detection algorithm (gutter + lane scoring) operates on OCR pages.
+    _prose_kinds = {
         RegionKind.TEXT,
         RegionKind.TITLE,
         RegionKind.LIST,
         RegionKind.CAPTION,
         RegionKind.UNKNOWN,
-    } or (
+    }
+    if (
+        region.quality.decision.value == "ocr_region"
+        and region.ocr_lines
+        and region.kind in _prose_kinds
+    ):
+        lines, groups = _order_prose_lines(
+            region.ocr_lines,
+            region.bbox.width,
+            flow_lines=flow_lines,
+        )
+        return lines, groups
+    if not region.native_lines:
+        if region.kind == RegionKind.FIGURE and region.ocr_lines:
+            return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
+        if region.ocr_lines and region.kind in {
+            RegionKind.HEADER, RegionKind.FOOTER, RegionKind.FOOTNOTE, RegionKind.MARGINALIA,
+        }:
+            return sorted(region.ocr_lines, key=lambda line: (line.bbox.y0, line.bbox.x0)), 0
+        if region.kind in _prose_kinds and region.ocr_lines:
+            # Apply the same column-detection path used for native prose lines.
+            lines, groups = _order_prose_lines(
+                region.ocr_lines,
+                region.bbox.width,
+                flow_lines=flow_lines,
+            )
+            return lines, groups
+        return [], 0
+    if region.kind == RegionKind.TABLE:
+        return _order_table_lines(region.native_lines), 0
+    if region.kind in _prose_kinds or (
         region.kind == RegionKind.DECORATIVE
         and not (region.semantic_role or "").startswith("decorative_watermark:")
     ):
+        # When OCR lines supplement native lines in a prose region, merge them
+        # before column detection so gutter evidence from OCR is not lost.
+        candidate_lines = list(region.native_lines)
+        if region.ocr_lines:
+            ocr_added = [
+                line for line in region.ocr_lines
+                if not any(line.bbox.iou(existing.bbox) >= 0.20 for existing in candidate_lines)
+            ]
+            candidate_lines.extend(ocr_added)
         lines, groups = _order_prose_lines(
-            region.native_lines,
+            candidate_lines,
             region.bbox.width,
             flow_lines=flow_lines,
         )
@@ -189,6 +228,13 @@ def order_region_lines(
     Compatibility wrapper around order_regions() + order_lines_in_region().
     Existing callers continue to work unchanged.
     """
+    _prose_kinds_set = {
+        RegionKind.TEXT,
+        RegionKind.TITLE,
+        RegionKind.LIST,
+        RegionKind.CAPTION,
+        RegionKind.UNKNOWN,
+    }
     consistency = _native_order_consistency(regions)
     ordered_regions, region_edges = _order_region_graph(regions, consistency)
     output: list[TextLine] = []
@@ -197,25 +243,34 @@ def order_region_lines(
     table_regions = 0
     prose_decisions: list[ProseFlowDecision] = []
     for region in ordered_regions:
-        if region.kind in {
-            RegionKind.TEXT,
-            RegionKind.TITLE,
-            RegionKind.LIST,
-            RegionKind.CAPTION,
-            RegionKind.UNKNOWN,
-        } or (
+        if region.kind in _prose_kinds_set or (
             region.kind == RegionKind.DECORATIVE
             and not (region.semantic_role or "").startswith("decorative_watermark:")
         ):
+            # §33: merge OCR lines with native lines so column-detection scores
+            # include geometry from scanned/OCR pages (fixes Reading Order on V4).
+            candidate_lines = list(region.native_lines)
+            if region.ocr_lines:
+                ocr_added = [
+                    line for line in region.ocr_lines
+                    if not any(line.bbox.iou(existing.bbox) >= 0.20 for existing in candidate_lines)
+                ]
+                candidate_lines.extend(ocr_added)
             prose_result = _order_prose_lines_with_decision(
-                region.native_lines,
+                candidate_lines,
                 region.bbox.x0,
                 region.bbox.width,
                 region.bbox,
                 flow_lines=(
                     None
                     if flow_lines_by_region is None
-                    else flow_lines_by_region.get(region.region_id, [])
+                    # D11: preserve [] (explicitly computed, no prose lines) vs None
+                    # (region not in dict → all lines participate in hypothesis).
+                    else (
+                        flow_lines_by_region[region.region_id]
+                        if region.region_id in flow_lines_by_region
+                        else None
+                    )
                 ),
             )
             lines, groups = list(prose_result.lines), prose_result.column_groups
@@ -230,7 +285,8 @@ def order_region_lines(
         rotated_lines += sum(1 for line in lines if line.direction != WritingDirection.LEFT_TO_RIGHT)
         output.extend(lines)
     ordered_line_set_preserved = _preserves_flat_line_set(
-        [line for region in regions for line in region.native_lines], output
+        [line for region in regions
+         for line in (region.native_lines + region.ocr_lines)], output
     )
     output, deduplicated_lines = _deduplicate_adjacent_region_lines(output)
     (
@@ -1250,6 +1306,7 @@ def _split_line_by_lanes(
 
 
 def _split_columns(lines: list[TextLine], region_width: float) -> list[list[TextLine]]:
+    """Compatibility/test helper; production uses :func:`order_lines_in_region`."""
     # Keep this compatibility helper on the same geometry-first path as the
     # main flow decision. In particular, do not use x0 alone for assignment.
     if lines and region_width > 0:
@@ -1273,41 +1330,10 @@ def _split_columns(lines: list[TextLine], region_width: float) -> list[list[Text
 
 
 def _preserves_line_set(lines: list[TextLine], columns: list[list[TextLine]]) -> bool:
-    """Verify that a column split neither loses nor duplicates line objects."""
+    """Compatibility/test helper verifying that a split preserves all lines."""
     input_ids = [id(line) for line in lines]
     output_ids = [id(line) for column in columns for line in column]
     return len(output_ids) == len(input_ids) and sorted(output_ids) == sorted(input_ids)
-
-
-def _spans_lanes(line: TextLine, lines: list[TextLine], region_width: float) -> bool:
-    if len(lines) < 6:
-        return False
-    narrow = [candidate for candidate in lines if candidate is not line and candidate.bbox.width < region_width * 0.55]
-    if len(narrow) < 4:
-        return False
-    starts = sorted(candidate.bbox.x0 for candidate in narrow)
-    if len(starts) < 4:
-        return False
-    midpoint = (starts[0] + starts[-1]) / 2
-    has_left = any(start < midpoint - region_width * 0.08 for start in starts)
-    has_right = any(start > midpoint + region_width * 0.08 for start in starts)
-    return has_left and has_right and line.bbox.width >= region_width * 0.45
-
-
-def _looks_like_form(lines: list[TextLine]) -> bool:
-    if len(lines) < 4:
-        return False
-    starts: dict[int, int] = {}
-    for line in lines:
-        key = round(line.bbox.x0 / 8.0)
-        starts[key] = starts.get(key, 0) + 1
-    tracks = sorted(starts.values(), reverse=True)
-    paired = sum(
-        1 for left, right in zip(lines, lines[1:])
-        if abs(left.bbox.cy - right.bbox.cy) <= max(left.bbox.height, right.bbox.height) * 0.8
-        and left.bbox.x0 < right.bbox.x0
-    )
-    return len([value for value in tracks if value >= 2]) >= 2 and paired >= 2
 
 
 def _order_form_rows(lines: list[TextLine]) -> list[TextLine]:

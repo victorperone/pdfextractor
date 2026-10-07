@@ -54,8 +54,15 @@ def detect_visual_table(
     table_id: str | None = None,
     tokens: list[TextToken] | None = None,
     structure_engine: Any | None = None,
+    page_rotation: int | None = None,
 ) -> StructuredTable | None:
     """Recover a strong raster grid without inventing cell text."""
+    if page_rotation is None:
+        page_rotation = page.objects.rotation
+    if page_rotation % 360:
+        from structured_pdf_text.ocr.image_views import canonicalize_page_image
+
+        image = canonicalize_page_image(image, page_rotation)
     if structure_engine is None:
         from .visual_engine import OpenCvTableStructureEngine
 
@@ -317,8 +324,11 @@ def _separator_strength(image: Any, page_bbox: BBox, box: BBox, *, vertical: boo
             return 0.0
         dark = sample < 225
         if vertical:
-            return float(dark.mean(axis=1).max())
-        return float(dark.mean(axis=0).max())
+            # A vertical line must persist down the strip; one horizontal
+            # crossing is not sufficient evidence of a column boundary.
+            return float(dark.mean(axis=0).max())
+        # A horizontal line must persist across the strip.
+        return float(dark.mean(axis=1).max())
     except (ImportError, AttributeError, TypeError, ValueError):
         return 1.0
 

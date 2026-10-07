@@ -277,9 +277,7 @@ def _page_continuation_titles(page: StructuredPage) -> tuple[str, ...]:
     coordinates. For pages with a PDF /Rotate attribute the canonical axes are
     mapped to the visual axes before the threshold is computed.
     """
-    rotation = 0
-    if page.native_evidence is not None:
-        rotation = page.native_evidence.objects.rotation % 360
+    rotation = page.page_rotation % 360
 
     candidates: list[str] = []
     for region in page.regions:

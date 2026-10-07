@@ -169,6 +169,7 @@ Offline OCR readiness: READY
 ```bash
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
+  --ocr-engine paddle \
   --paddle-model-profile pt \
   --output markdown \
   -o documento.md
@@ -194,6 +195,7 @@ python -m structured_pdf_text.cli paddle-models-status
 
 python -m structured_pdf_text.cli extract documento.pdf \
   --mode balanced \
+  --ocr-engine paddle \
   --paddle-model-profile pt \
   --output markdown \
   -o documento.md
@@ -277,6 +279,31 @@ Scripts involved:
 | `scripts/run_benchmark.ps1` | Orchestrates the three steps sequentially on Windows |
 | `scripts/setup_ocr_benchmark.sh` | Installs the required runtimes and models on WSL |
 | `scripts/run_benchmark.sh` | Orchestrates the three steps sequentially on Linux/WSL |
+
+## Maximum quality OCR
+
+Accuracy-first extraction keeps native text selection and enables exhaustive
+OCR candidates, overlapping page tiles, regional refinement, table-cell OCR,
+and contextual critical-data refinement.
+
+```bash
+pdftext extract arquivo.pdf --max-quality --ocr-engine easyocr -o saida.md
+pdftext setup-easyocr-models --language pt-BR --include-dbnet
+```
+
+DBNet18 is used as an additional candidate (N) in the exhaustive pipeline when
+both its weights *and* runtime are functional.  Having the weights on disk is
+not sufficient — on Windows, DBNet18 also requires compiled native extensions
+(deformable convolution via MSVC Build Tools).  Two distinct failure modes are
+reported separately:
+
+- `dbnet18_weights_missing` — weights file absent; run `setup-easyocr-models --include-dbnet`
+- `dbnet18_runtime_unavailable` — weights present but inference failed (install MSVC Build Tools)
+
+Run `scripts/preflight_ocr_backends.py --deep-smoke --max-quality` to verify
+full max-quality readiness.  When CRAFT and the exhaustive planner pass but
+DBNet18 is unavailable, the result is reported as `INCOMPLETE` (not broken) and
+extraction continues with the remaining candidate set (DBNet18 is skipped; all other candidates still run).
 
 ## CLI examples
 
@@ -383,6 +410,30 @@ count is configured; its effective intra-op/inter-op values are recorded in the
 engine identity. Callers sharing Torch with other components should use a
 dedicated OCR process or leave the thread count at automatic.
 
+EasyOCR CPU recognition defaults to zero DataLoader workers: upstream creates
+a loader for each detected box, so additional processes add startup overhead
+for individual crops. `--threads` controls Torch inference independently.
+`EASYOCR_WORKERS` remains an explicit override; if using
+`EASYOCR_MAX_QUALITY_THREADS=1`, also set `EASYOCR_WORKERS=0` for CPU recognition.
+Exhaustive OCR reuses alternate Readers across pages and regions, and shares
+detection between candidates only when pixels and detector parameters match.
+All recognition candidates still run. Cached Readers stay in memory until the
+extractor closes. Page diagnostics expose
+`easyocr_exhaustive_detection_calls` (cache misses in exhaustive variants),
+`easyocr_exhaustive_detection_cache_hits`, and
+`timings_ms.ocr_footnote_refinement_ms` when footnote refinement is requested.
+Readtext fallback detections are excluded from these cache counters; their
+use remains reported by `easyocr_fallback_count`.
+Alternate Readers inherit the saved constructor settings, including languages
+and recognition network. DBNet18 uses a short-side canvas, while CRAFT uses a
+long-side canvas; the availability probe uses a small canvas explicitly.
+
+Exhaustive policy applies to higher-scale regional recovery and footnote
+rereads too. A document can therefore execute many more inference calls than
+the number of variants in its initial page pass. Measure `easyocr_calls`,
+`timings_ms.ocr_ms`, `timings_ms.ocr_targeted_refinement_ms`, and the footnote
+timing separately before estimating total runtime.
+
 Rasterization preserves the requested scale when the resulting dimensions are
 within `max_render_pixels`. It reduces scale only when PDFium's rounded pixel
 dimensions would exceed that limit; reductions are recorded in page
@@ -415,10 +466,18 @@ and pairwise normalized coverage. It reports a non-zero exit status when the
 requested reference is unavailable, fewer than two valid results exist, or any
 requested adapter fails. It never substitutes another adapter as reference;
 diagnostic results may still be printed. The reference is observational, not
-ground truth; use `--include-text` for manual review. To compare explicit OCR
-profiles, run `pdftext compare documento.pdf --adapters structured-balanced
-pdfium-raw pymupdf --ocr-model-profile pt` and repeat with
-`--ocr-model-profile pt-v5`. Neither invocation changes profiles silently.
+ground truth; use `--include-text` for manual review. To compare explicit
+Paddle OCR profiles, select the backend family and model profile separately:
+
+```bash
+pdftext compare documento.pdf --adapters structured-balanced pdfium-raw pymupdf \
+  --ocr-engine paddle --language pt-BR --ocr-model-profile pt
+pdftext compare documento.pdf --adapters structured-balanced pdfium-raw pymupdf \
+  --ocr-engine paddle --language pt-BR --ocr-model-profile pt-v5
+```
+
+The language selects the recognition language, `--ocr-engine` selects the
+backend family, and `--ocr-model-profile` selects a Paddle model set.
 
 The raw native page dump preserves PDFium character index, Unicode, geometry,
 origin, angle, font metadata, fill/stroke RGBA, text render mode, generated/

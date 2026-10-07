@@ -74,7 +74,9 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
     explicit_ids: set[int] = set()
 
     for region in page.regions:
-        lines = region.native_lines
+        # Scanned pages have no native line stream.  Their OCR line evidence
+        # must participate in the same cross-page furniture check.
+        lines = region.native_lines or region.ocr_lines
         all_lines.extend(lines)
         if region.kind == RegionKind.HEADER or region.edge_role == "top_candidate":
             for line in lines:
@@ -89,7 +91,7 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
         return candidates
 
     page_height = max(page.bbox.height, 1.0)
-    edge_band = max(48.0, page_height * 0.05)
+    edge_band = max(24.0, page_height * 0.06)
     top = page.bbox.y0 + edge_band
     bottom = page.bbox.y1 - edge_band
 
@@ -148,11 +150,18 @@ def _normalize_signature(text: str) -> str:
 def _stable_edge_position(
     values: list[tuple[str, TextLine, StructuredPage]],
 ) -> bool:
-    normalized = [
-        line.bbox.cy / max(page.bbox.height, 1.0)
-        for _, line, page in values
-    ]
-    if not normalized:
+    normalized = []
+    edge_distances = []
+    for _, line, page in values:
+        box = line.bbox
+        if page.page_rotation % 360:
+            box = box.rotate_to_visual(page.page_rotation, page.bbox.width, page.bbox.height)
+            page_height = page.bbox.width if page.page_rotation % 180 else page.bbox.height
+        else:
+            page_height = page.bbox.height
+        normalized.append(box.cy / max(page_height, 1.0))
+        edge_distances.append(min(box.y0, page_height - box.y1) / max(page_height, 1.0))
+    if not normalized or max(edge_distances) > 0.08:
         return False
     return max(normalized) - min(normalized) <= 0.035
 

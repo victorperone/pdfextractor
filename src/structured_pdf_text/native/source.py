@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from structured_pdf_text.config import DocumentContext
 from structured_pdf_text.document import NativePageEvidence
+from structured_pdf_text.geometry import BBox
 
 
 class NativeEvidenceSource(Protocol):
@@ -30,6 +31,12 @@ class NativeEvidenceSource(Protocol):
 
     def render_page(self, page_index: int, scale: float = 0.5) -> Any:
         """Render a page for deterministic visual diagnostics, without OCR."""
+
+    def render_region(self, page_index: int, bbox: BBox, scale: float, page_bbox: BBox | None = None) -> Any:
+        """Render a PDF-coordinate region directly from page vectors/images."""
+
+    def extract_embedded_image(self, page_index: int, object_index: int) -> tuple[Any, BBox] | None:
+        """Return an image object's original-resolution bitmap and page bounds."""
 
     def close(self) -> None:
         """Release native resources."""

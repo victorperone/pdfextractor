@@ -57,6 +57,23 @@ def join_table_tokens(tokens: Iterable[TextToken]) -> str:
     return "".join(output).strip()
 
 
+def join_native_cell_tokens(tokens: Iterable[TextToken]) -> str:
+    """Join tokens already assigned to one native cell/line.
+
+    PDF text extraction can return each glyph as a separate token and give
+    punctuation a slightly different vertical box. Within a word span those
+    boxes still belong to one baseline, so use their horizontal order and do
+    not infer spaces from ordinary glyph advances. Explicit whitespace is
+    honored when present; multi-character tokens use the general joiner.
+    """
+    source = [token for token in tokens if token.text]
+    visible = [token for token in source if token.text.strip()]
+    if visible and all(len(token.text.strip()) == 1 for token in visible):
+        ordered = sorted(source, key=lambda token: (token.bbox.x0, token.bbox.y0))
+        return "".join(token.text for token in ordered).strip()
+    return join_table_tokens(source)
+
+
 def recover_cell_text(text: str, extracted_text: str) -> str:
     """Restore semantic punctuation/spaces from the page text stream.
 
@@ -76,8 +93,7 @@ def recover_cell_text(text: str, extracted_text: str) -> str:
             compact += _compact(words[end])
             if compact == target:
                 candidate = " ".join(words[start : end + 1]).strip()
-                punctuation = sum(not character.isalnum() and not character.isspace() for character in candidate)
-                matches.append((punctuation, end - start, candidate))
+                matches.append((0, end - start, candidate))
             if len(compact) > len(target):
                 break
     if matches:
@@ -86,7 +102,9 @@ def recover_cell_text(text: str, extracted_text: str) -> str:
 
 
 def _compact(value: str) -> str:
-    return "".join(character.casefold() for character in value if character.isalnum())
+    # Ignore whitespace and case only. Punctuation carries meaning in decimal
+    # values, signs and identifiers and must not be normalized away.
+    return "".join(value.casefold().split())
 
 
 def _join_character_tokens(tokens: list[TextToken]) -> str:

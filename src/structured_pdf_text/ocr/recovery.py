@@ -9,9 +9,18 @@ recognised token back to the original page coordinate system.
 **RGB budget gate** — to prevent ``STATUS_ACCESS_VIOLATION`` in Paddle's C++
 inference runtime when upscaled variants produce very large images,
 :func:`plan_ocr_scales` partitions the requested scale factors into *allowed*
-and *blocked* groups before any image is created.  The limit is controlled by
-the ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB`` environment variable (default 8 MiB).
-See ``docs/ocr-rgb-budget-crash-fix.md`` for the full incident analysis.
+and *blocked* groups before any image is created.
+
+The budget is engine-specific:
+
+- **Paddle**: default 8 MiB, controlled by ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB``.
+  This limit is a hard operational guard against the Paddle runtime crash
+  documented in ``docs/ocr-rgb-budget-crash-fix.md``.
+- **EasyOCR / other engines**: no limit by default (``math.inf``), controlled
+  by ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR``.  EasyOCR does not suffer
+  from the Paddle crash and benefits from processing larger crops without
+  artificial truncation.  Set the env var to a positive number (e.g. ``32``)
+  if you need to constrain memory on low-RAM machines.
 
 **Debug log** — when ``PDFEXTRACTOR_OCR_DEBUG_LOG`` is set to a writable path,
 this module writes ``REGION_SELECTED``, ``OCR_SCALE_PLAN``,
@@ -25,7 +34,7 @@ from __future__ import annotations
 import inspect
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import isfinite
 from typing import Any
@@ -35,7 +44,7 @@ from structured_pdf_text.errors import (
     FatalExtractionError,
     raise_if_resource_exhausted,
 )
-from structured_pdf_text.geometry import BBox
+from structured_pdf_text.geometry import BBox, Point
 
 # ---------------------------------------------------------------------------
 # OCR RGB budget — configurable upper bound on the estimated uncompressed size
@@ -49,6 +58,30 @@ _MIB = 1024 * 1024
 def _ocr_rgb_budget_mib() -> float:
     from structured_pdf_text.ocr.env import env_float
     return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", 8.0, minimum=0.01)
+
+
+def _ocr_rgb_budget_for_engine(engine_name: str) -> float:
+    """Return the RGB budget (in MiB) appropriate for the given engine.
+
+    Paddle uses a conservative 8 MiB default to prevent STATUS_ACCESS_VIOLATION
+    in its C++ runtime.  EasyOCR and other engines have no such crash risk and
+    default to unlimited (math.inf).
+
+    Override per-engine via environment variables:
+      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB          — Paddle (and legacy default)
+      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR  — EasyOCR (default: unlimited)
+    """
+    if engine_name == "paddle":
+        return _ocr_rgb_budget_mib()
+    if engine_name == "easyocr":
+        raw = os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR")
+        if raw is not None:
+            from structured_pdf_text.ocr.env import env_float
+            return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", math.inf, minimum=0.01)
+        return math.inf
+    # All other engines: use the shared Paddle-era limit as a safe default
+    # until they are individually characterised.
+    return _ocr_rgb_budget_mib()
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,13 +422,24 @@ class OcrRegionRefiner:
             f" quality_reasons=[{reasons_str}]"
         )
 
-        rgb_budget_mib = _ocr_rgb_budget_mib()
+        # Resolve engine-specific budget (EasyOCR: unlimited by default)
+        _engine_name: str = ""
+        try:
+            _engine_name = str(getattr(getattr(self.engine, "identity", None), "engine", ""))
+        except Exception:
+            pass
+        rgb_budget_mib = _ocr_rgb_budget_for_engine(_engine_name)
+        # plan_ocr_scales requires a finite positive limit; translate math.inf
+        # to a very large but finite sentinel so the function's type contract is met.
+        budget_for_plan = 1e12 if not math.isfinite(rgb_budget_mib) else rgb_budget_mib
         allowed_plans, blocked_plans = plan_ocr_scales(
-            crop_w, crop_h, scales_raw, rgb_budget_mib
+            crop_w, crop_h, scales_raw, budget_for_plan
         )
+        _budget_label = "unlimited" if not math.isfinite(rgb_budget_mib) else f"{rgb_budget_mib:.1f}"
         _recovery_debug(
             f"OCR_SCALE_PLAN page={page_index}"
-            f" limit_rgb_mib={rgb_budget_mib:.1f}"
+            f" engine={_engine_name or 'unknown'}"
+            f" limit_rgb_mib={_budget_label}"
             f" allowed_scales={','.join(str(p.scale) for p in allowed_plans) or 'none'}"
             f" blocked_scales={','.join(str(p.scale) for p in blocked_plans) or 'none'}"
         )
@@ -468,6 +512,8 @@ class OcrRegionRefiner:
                             inverse,
                             scaled_size,
                             region_bbox,
+                            page_bbox=page_bbox,
+                            page_rotation=request.page_rotation,
                         )
                         for token in tokens
                     ]
@@ -635,10 +681,12 @@ def resize_image(image: Any, factor: float) -> Any:
         max(width + 1, round(width * factor)),
         max(height + 1, round(height * factor)),
     )
-    if hasattr(image, "resize"):
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+    if Image is not None and isinstance(image, Image.Image):
         try:
-            from PIL import Image
-
             return image.resize(size, Image.Resampling.LANCZOS)
         except (ImportError, AttributeError, TypeError, ValueError):
             return image.resize(size)
@@ -737,6 +785,9 @@ def _map_token_to_page(
     inverse: tuple[float, float, float, float, float, float],
     source_size: tuple[int, int],
     region_bbox: BBox,
+    *,
+    page_bbox: BBox | None = None,
+    page_rotation: int = 0,
 ) -> OcrToken:
     """Map an OCR token from the rotated/scaled variant back to page coordinates.
 
@@ -760,21 +811,43 @@ def _map_token_to_page(
     xs = [min(max(x, 0.0), float(width)) for x, _ in mapped]
     ys = [min(max(y, 0.0), float(height)) for _, y in mapped]
     local = BBox(min(xs), min(ys), max(xs), max(ys))
-    bbox = BBox(
-        region_bbox.x0 + local.x0 * region_bbox.width / max(width, 1),
-        region_bbox.y0 + local.y0 * region_bbox.height / max(height, 1),
-        region_bbox.x0 + local.x1 * region_bbox.width / max(width, 1),
-        region_bbox.y0 + local.y1 * region_bbox.height / max(height, 1),
+    visual_region = region_bbox.rotate_to_visual(
+        page_rotation, page_bbox.width, page_bbox.height
+    ) if page_bbox is not None else region_bbox
+    visual_box = BBox(
+        visual_region.x0 + local.x0 * visual_region.width / max(width, 1),
+        visual_region.y0 + local.y0 * visual_region.height / max(height, 1),
+        visual_region.x0 + local.x1 * visual_region.width / max(width, 1),
+        visual_region.y0 + local.y1 * visual_region.height / max(height, 1),
     )
-    return OcrToken(
-        text=token.text,
-        bbox=bbox,
-        confidence=token.confidence,
-        language=token.language,
-        source=SourceKind.OCR_REGION,
-        rotation=0,
-        provenance="targeted_region_recovery",
-    )
+    rotation = page_rotation % 360
+    if page_bbox is not None and rotation == 90:
+        bbox = BBox(visual_box.y0, page_bbox.height - visual_box.x1, visual_box.y1, page_bbox.height - visual_box.x0)
+    elif page_bbox is not None and rotation == 180:
+        bbox = BBox(page_bbox.width - visual_box.x1, page_bbox.height - visual_box.y1, page_bbox.width - visual_box.x0, page_bbox.height - visual_box.y0)
+    elif page_bbox is not None and rotation == 270:
+        bbox = BBox(page_bbox.width - visual_box.y1, visual_box.x0, page_bbox.width - visual_box.y0, visual_box.x1)
+    else:
+        bbox = visual_box
+    mapped_polygon = None
+    if token.polygon:
+        points = []
+        for point in token.polygon:
+            px, py = a * point.x + b * point.y + c, d * point.x + e * point.y + f
+            px = min(max(px, 0.0), float(width))
+            py = min(max(py, 0.0), float(height))
+            vx = visual_region.x0 + px * visual_region.width / max(width, 1)
+            vy = visual_region.y0 + py * visual_region.height / max(height, 1)
+            if page_bbox is not None and rotation == 90:
+                points.append(Point(vy, page_bbox.height - vx))
+            elif page_bbox is not None and rotation == 180:
+                points.append(Point(page_bbox.width - vx, page_bbox.height - vy))
+            elif page_bbox is not None and rotation == 270:
+                points.append(Point(page_bbox.width - vy, vx))
+            else:
+                points.append(Point(vx, vy))
+        mapped_polygon = tuple(points)
+    return replace(token, bbox=bbox, polygon=mapped_polygon, source=SourceKind.OCR_REGION, provenance="targeted_region_recovery")
 
 
 def _filter_tokens(

@@ -31,7 +31,7 @@ def _make_model_dirs(root: Path, names: list[str] | None = None) -> None:
     for name in names:
         model_dir = root / "official_models" / name
         model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / "model.pdparams").write_text("fake", encoding="utf-8")
+        (model_dir / "model.pdparams").write_text("x" * 2048, encoding="utf-8")
 
 
 class FakePaddleOCR:

@@ -22,3 +22,7 @@ class TokenConflict:
     chosen: str
     alternatives: list[str]
     reason: str
+    chosen_source: str | None = None
+    alternative_sources: list[str] | None = None
+    chosen_score: float | None = None
+    alternative_scores: list[float] | None = None
