@@ -810,9 +810,7 @@ class PdfTextExtractor:
                 use_ocr_as_primary = _should_use_page_ocr_as_primary(
                     native_lines=native_lines,
                     ocr_lines=ocr_lines,
-                    complexity=complexity,
                     page_ocr_requested=page_ocr_requested,
-                    raster_primary=raster_primary,
                     mode=mode,
                 )
                 if use_ocr_as_primary:
@@ -2254,9 +2252,7 @@ def _should_use_page_ocr_as_primary(
     *,
     native_lines: list[Any],
     ocr_lines: list[Any],
-    complexity: Any,
     page_ocr_requested: bool,
-    raster_primary: bool,
     mode: Any,
 ) -> bool:
     """Return True only when OCR should replace native text as the primary source.

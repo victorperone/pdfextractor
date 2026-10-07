@@ -59,6 +59,7 @@ class OcrCandidateFusionEngine:
                         ),
                         preprocessing=(candidate.candidate_id,) if candidate.candidate_id not in {"default", "full-page"} else (),
                         tile_id=candidate.candidate_id.removeprefix("tile:") if candidate.candidate_id.startswith("tile:") else None,
+                        rotation=float(raw_token.rotation) or None,
                     ),
                 )
                 overlaps = [

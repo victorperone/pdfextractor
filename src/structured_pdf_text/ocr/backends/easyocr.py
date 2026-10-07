@@ -865,7 +865,14 @@ def _candidate_metrics(tokens: "list[OcrToken]") -> "dict[str, float]":
             "suspicious_insertion_ratio": 1.0,
         }
 
-    confidences = [t.confidence for t in tokens if t.confidence is not None]
+    # Exclude tokens with degenerate bboxes from confidence statistics so a
+    # 0×0 high-confidence detection cannot inflate the candidate score (B4).
+    confidences = [
+        t.confidence for t in tokens
+        if t.confidence is not None
+        and t.bbox.area > 0
+        and all(_math.isfinite(v) for v in (t.bbox.x0, t.bbox.y0, t.bbox.x1, t.bbox.y1))
+    ]
     mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
     low_conf = sum(1 for c in confidences if c < 0.60) / max(len(confidences), 1)
     sorted_confidences = sorted(confidences)
@@ -1346,7 +1353,7 @@ def _image_preprocessing_candidates(img: "Any", *, adaptive: bool) -> list[tuple
             a = np.asarray(variant)
             return f"{a.shape}:{a.dtype}:{hashlib.md5(a.tobytes()).hexdigest()}"
 
-        seen: set[str] = set()
+        seen: set[str] = {_fp(arr)}  # skip variants identical to the input image (P1)
         deduped: list[tuple[str, Any]] = []
         for label, variant in candidates:
             fp = _fp(variant)

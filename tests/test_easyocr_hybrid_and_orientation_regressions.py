@@ -56,11 +56,6 @@ class _FakeLine:
         self.bbox = BBox(0, 0, 100, 15)
 
 
-class _FakeComplexity:
-    def __init__(self, reasons=()):
-        self.reasons = set(reasons)
-
-
 class _FakeMode:
     """Distinguishes ExtractionMode values for H1 gate tests."""
     def __init__(self, name: str):
@@ -91,14 +86,10 @@ class TestH1HybridPageKeepsNative:
         """Page with >= 20 native non-WS chars must keep native as primary."""
         native = [_FakeLine("Texto nativo: etapa digital da extração.")]
         ocr = self._fake_ocr_lines()
-        complexity = _FakeComplexity()
-
         result = _should_use_page_ocr_as_primary(
             native_lines=native,
             ocr_lines=ocr,
-            complexity=complexity,
             page_ocr_requested=True,
-            raster_primary=True,
             mode=_FakeMode("hybrid"),
         )
 
@@ -107,14 +98,11 @@ class TestH1HybridPageKeepsNative:
     def test_no_native_allows_ocr_to_become_primary(self):
         """Page with no native lines must allow OCR as primary."""
         ocr = self._fake_ocr_lines()
-        complexity = _FakeComplexity()
 
         result = _should_use_page_ocr_as_primary(
             native_lines=[],
             ocr_lines=ocr,
-            complexity=complexity,
             page_ocr_requested=True,
-            raster_primary=True,
             mode=_FakeMode("hybrid"),
         )
 
@@ -124,14 +112,11 @@ class TestH1HybridPageKeepsNative:
         """ExtractionMode.OCR must always give OCR ownership."""
         native = [_FakeLine("Texto nativo longo com muito conteúdo válido.")]
         ocr = self._fake_ocr_lines()
-        complexity = _FakeComplexity()
 
         result = _should_use_page_ocr_as_primary(
             native_lines=native,
             ocr_lines=ocr,
-            complexity=complexity,
             page_ocr_requested=True,
-            raster_primary=False,
             mode=_OCR_MODE,
         )
 
@@ -141,14 +126,11 @@ class TestH1HybridPageKeepsNative:
         """When page_ocr_requested is False, OCR must not be primary."""
         native = [_FakeLine("A")]  # trivial native
         ocr = self._fake_ocr_lines()
-        complexity = _FakeComplexity()
 
         result = _should_use_page_ocr_as_primary(
             native_lines=native,
             ocr_lines=ocr,
-            complexity=complexity,
             page_ocr_requested=False,
-            raster_primary=False,
             mode=_FakeMode("auto"),
         )
 
@@ -157,14 +139,11 @@ class TestH1HybridPageKeepsNative:
     def test_no_ocr_lines_never_makes_ocr_primary(self):
         """When OCR produced nothing, it cannot be primary."""
         native = [_FakeLine("A")]
-        complexity = _FakeComplexity()
 
         result = _should_use_page_ocr_as_primary(
             native_lines=native,
             ocr_lines=[],
-            complexity=complexity,
             page_ocr_requested=True,
-            raster_primary=True,
             mode=_FakeMode("auto"),
         )
 
@@ -174,14 +153,11 @@ class TestH1HybridPageKeepsNative:
         """Fewer than 20 non-WS native chars: OCR may become primary."""
         native = [_FakeLine("AB")]  # 2 non-WS chars — negligible
         ocr = self._fake_ocr_lines()
-        complexity = _FakeComplexity()
 
         result = _should_use_page_ocr_as_primary(
             native_lines=native,
             ocr_lines=ocr,
-            complexity=complexity,
             page_ocr_requested=True,
-            raster_primary=True,
             mode=_FakeMode("auto"),
         )
 
@@ -191,14 +167,11 @@ class TestH1HybridPageKeepsNative:
         """Exactly 20 non-WS native chars must keep native primary."""
         native = [_FakeLine("A" * 20)]
         ocr = self._fake_ocr_lines()
-        complexity = _FakeComplexity()
 
         result = _should_use_page_ocr_as_primary(
             native_lines=native,
             ocr_lines=ocr,
-            complexity=complexity,
             page_ocr_requested=True,
-            raster_primary=True,
             mode=_FakeMode("auto"),
         )
 

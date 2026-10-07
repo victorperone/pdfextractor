@@ -11,13 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import sys
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from audit_cli_execution import save
 from structured_pdf_text.api import (
     _recover_selected_regions, _recover_weak_ocr_regions, _refine_small_footnote_tokens,
-    _figures_need_ocr, _refine_figure_ocr,
+    _figures_requiring_ocr, _refine_figure_ocr,
 )
 from structured_pdf_text.config import OcrQualityThresholds
 from structured_pdf_text.document import OcrToken, RegionKind, SourceKind
@@ -194,23 +193,23 @@ def main():
             return SimpleNamespace(tokens=[token("FIGURA", (request.bbox.x0, request.bbox.y0,
                                                            request.bbox.x1, request.bbox.y1), 1)],
                                    status="ok", ocr_passes=1, ocr_batches=1)
-    figure_needed = _figures_need_ocr(figure_page, selected)
+    images_pending = _figures_requiring_ocr(figure_page, selected)
     with patch("structured_pdf_text.api.OcrRegionRefiner", FigureRefiner):
-        figure_results = _refine_figure_ocr(object(), Image.new("RGB", (600, 300), "white"),
-                                          figure_page, 0, [])
+        figure_results = _refine_figure_ocr(object(), np.full((300, 600, 3), 255, dtype=np.uint8),
+                                          figure_page, 0, [], images=images_pending)
     partial_region = SimpleNamespace(bbox=BBox(10, 100, 20, 110))
     one_figure = SimpleNamespace(bbox=figure_page.bbox, objects=SimpleNamespace(
         images=[SimpleNamespace(bbox=image_one)]))
     figures = {
         "already_covered_image_reread": {
-            "figure_ocr_requested": figure_needed, "selected_bbox": str(image_one),
+            "figure_ocr_requested": bool(images_pending), "selected_bbox": str(image_one),
             "ocr_requests": [str(box) for box in figure_requests], "refinements": len(figure_results),
         },
         "partial_region_suppresses_whole_image": {
             "image_bbox": str(image_one), "selected_bbox": str(partial_region.bbox),
             "image_fraction_covered": image_one.overlap_ratio(partial_region.bbox),
             "selected_fraction_inside_image": partial_region.bbox.overlap_ratio(image_one),
-            "figure_ocr_requested": _figures_need_ocr(one_figure, [partial_region]),
+            "figure_ocr_requested": bool(_figures_requiring_ocr(one_figure, [partial_region])),
         },
     }
     save(args.output_dir / "figure_recovery_reproductions.json", figures)
