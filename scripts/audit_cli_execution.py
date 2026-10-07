@@ -174,11 +174,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pdf", type=Path, default=Path("corpus/V3/Document_AI_V3.pdf"))
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--policies", nargs="+", default=["exhaustive", "baseline", "adaptive"])
+    parser.add_argument("--policies", nargs="+", choices=["exhaustive", "baseline", "adaptive"],
+                        default=["exhaustive", "baseline", "adaptive"])
     parser.add_argument("--exhaustive-output", type=Path,
                         default=Path("output/06-10-2026/Document_AI_V3.md"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    if len(args.policies) != len(set(args.policies)):
+        parser.error("each policy must occur only once")
+    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+        parser.error("--output-dir must be empty or new; existing evidence will not be overwritten")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
     packages = {}
@@ -189,6 +194,7 @@ def main():
             packages[name] = None
     save(args.output_dir / "manifest.json", {
         "started_unix": time.time(), "python": sys.executable, "platform": platform.platform(),
+        "audit_driver_sha256": digest(Path(__file__)),
         "pdf": str(args.pdf.resolve()), "pdf_sha256": digest(args.pdf), "packages": packages,
         "source_sha256": {str(p.relative_to(root)): digest(p) for p in sorted((root / "src").rglob("*.py"))},
         "cpu_count": os.cpu_count(), "clock_ticks": os.sysconf("SC_CLK_TCK"),
@@ -200,6 +206,7 @@ def main():
     observer.mkdir(exist_ok=True)
     (observer / "sitecustomize.py").write_text(
         "from audit_cli_execution import install_observer\ninstall_observer()\n")
+    failures = {}
     for policy in args.policies:
         directory = args.output_dir.resolve() / policy
         directory.mkdir(exist_ok=True)
@@ -228,7 +235,7 @@ def main():
                     time.sleep(2)
             status.update(state="finished", exit_code=process.returncode,
                           wall_s=time.monotonic() - started, finished_unix=time.time())
-            if output.exists():
+            if process.returncode == 0 and output.exists():
                 status["output_sha256"] = digest(output)
                 status["output_bytes"] = output.stat().st_size
                 if output.resolve() != (directory / "output.md").resolve():
@@ -236,8 +243,12 @@ def main():
             save(directory / "run.json", status)
             save(args.output_dir / "status.json", status)
             print(json.dumps(status), flush=True)
-    save(args.output_dir / "status.json", {"state": "complete", "finished_unix": time.time()})
+            if process.returncode != 0:
+                failures[policy] = process.returncode
+    save(args.output_dir / "status.json", {"state": "complete", "finished_unix": time.time(),
+                                          "failed_policies": failures})
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

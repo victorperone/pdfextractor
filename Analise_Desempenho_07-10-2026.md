@@ -1,5 +1,7 @@
 # Análise de execução e desempenho — 07/10/2026
 
+**Atualização após a avaliação integral:** este documento preserva os ensaios e correções anteriores. A comparação final está em [Revisao_06-10-2026.md](Revisao_06-10-2026.md#resultado-integral-e-recursos): baseline concluiu em 16 min 42 s, adaptive em 1 h 59 min 47 s; exhaustive foi morto por OOM na página 96 após 3 h 39 min 53 s, sem Markdown final. Os ganhos dos ensaios isolados abaixo não representam ganho medido no documento completo. Foram documentadas novas pendências de qualidade, orientação, recursos e desempenho; GPU continua condicionada à resolução delas.
+
 ## Caso informado
 
 ```bash

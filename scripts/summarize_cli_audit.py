@@ -33,6 +33,39 @@ def kb(value):
     return int(str(value or "0").split()[0])
 
 
+CRITICAL_PATTERNS = {
+    "currency_value": re.compile(r"R\$\s*([+-]?\s*\d(?:[\d.,]*\d)?)"),
+    "signed_percentage": re.compile(r"(?<![\w.,])[+-]?\d+(?:[.,]\d+)?\s*%"),
+    "quantity_field": re.compile(r"\bquantidade\s*:\s*(\d+)(?![\w]|[.,]\d)", re.IGNORECASE),
+    "ocr_identifier": re.compile(r"(?<![\w-])OCR-VALIDAÇÃO-\d{4}-\d+(?![\w-])"),
+}
+
+
+def critical_counts(hypothesis, reference):
+    """Match per-page multisets, preserving signs, zeroes and identifier case."""
+    result = {}
+    for name, pattern in CRITICAL_PATTERNS.items():
+        # Whitespace in a currency/percentage spelling is not a changed value.
+        expected = Counter(re.sub(r"\s+", "", value) for value in pattern.findall(reference))
+        actual = Counter(re.sub(r"\s+", "", value) for value in pattern.findall(hypothesis))
+        matched = sum((expected & actual).values())
+        result[name] = {"tp": matched, "fn": sum(expected.values()) - matched,
+                        "fp": sum(actual.values()) - matched}
+    return result
+
+
+def critical_rates(counts):
+    result = {}
+    for name, values in counts.items():
+        true, false, missing = (values[key] for key in ("tp", "fp", "fn"))
+        result[name] = {**values,
+                       "precision": true / (true + false) if true + false else None,
+                       "recall": true / (true + missing) if true + missing else None,
+                       "f1": 2 * true / (2 * true + false + missing)
+                             if 2 * true + false + missing else None}
+    return result
+
+
 def summarize(directory):
     events = lines(directory / "events.jsonl")
     samples = lines(directory / "resources.jsonl")
@@ -75,8 +108,9 @@ def summarize(directory):
 
 
 def quality(directory, reference_pages, page_modes, expected_controls):
+    run = json.loads((directory / "run.json").read_text())
     doc_path = directory / "document.json"
-    if not doc_path.exists():
+    if run.get("state") != "finished" or run.get("exit_code") != 0 or not doc_path.exists():
         return None
     document = json.loads(doc_path.read_text())
     hypothesis = (directory / "diagnostic.md").read_text()
@@ -87,6 +121,7 @@ def quality(directory, reference_pages, page_modes, expected_controls):
     entries = []
     totals = defaultdict(Counter)
     critical_by_group = defaultdict(list)
+    literal_by_group = defaultdict(lambda: defaultdict(Counter))
     for number, reference in reference_pages.items():
         hyp = hyp_pages.get(number, "")
         ref = _strip_page_header(reference)
@@ -96,6 +131,7 @@ def quality(directory, reference_pages, page_modes, expected_controls):
         word_edits = _lev_distance(hyp_words, ref_words)
         reference_control = f"QA-P{number:03}"
         critical = compute_critical_data_metrics(text_hyp, text_ref)
+        literals = critical_counts(text_hyp, text_ref)
         controls = hyp.count(reference_control)
         expected_control = expected_controls.get(number, True)
         entries.append({"page": number, "mode": page_modes.get(number),
@@ -106,6 +142,7 @@ def quality(directory, reference_pages, page_modes, expected_controls):
                         "control_expected": expected_control,
                         "control_occurrences": controls,
                         "critical_data": critical,
+                        "critical_literal_counts": literals,
                         "hypothesis_sha256": hashlib.sha256(hyp.encode()).hexdigest()})
         for group in ("all", page_modes.get(number, "unknown")):
             totals[group].update(char_edits=edits, reference_chars=len(text_ref),
@@ -114,6 +151,8 @@ def quality(directory, reference_pages, page_modes, expected_controls):
                                  control_pages_present=int(expected_control and controls > 0),
                                  control_pages_duplicated=int(expected_control and controls > 1))
             critical_by_group[group].append(critical)
+            for name, counts in literals.items():
+                literal_by_group[group][name].update(counts)
     aggregated = {group: {**values, "cer_text_only": values["char_edits"] / max(1, values["reference_chars"]),
                           "wer": values["word_edits"] / max(1, values["reference_words"])}
                   for group, values in totals.items()}
@@ -122,7 +161,8 @@ def quality(directory, reference_pages, page_modes, expected_controls):
             key: sum(record[key] for record in records) / len(records)
             for key in records[0]
         }
-    return {"normalization": "Existing compute_metrics._strip_md and _normalize; decorative furniture retained as requested; page delimiters removed; no ground-truth-specific text corrections. Critical metrics use existing multiset regex matching per page, then macro averaging (including its perfect-score convention when a reference category is absent). Controls count exact literal substrings; only manifest-expected controls enter coverage. These metrics do not isolate OCR from title/furniture/configuration differences.",
+        aggregated[group]["critical_literals_micro"] = critical_rates(literal_by_group[group])
+    return {"normalization": "Existing compute_metrics._strip_md and _normalize; decorative furniture retained as requested; page delimiters removed; no ground-truth-specific text corrections. Existing critical metrics use per-page multiset regex matching and macro averaging, including their perfect-score convention when a reference category is absent. Additional critical_literals_micro matches per-page multisets of currency values, signed percentages, quantity fields and the synthetic OCR-VALIDAÇÃO identifiers; signs, zeroes and identifier case are preserved, whitespace inside numeric spellings is ignored. False positives on pages without reference values are counted; undefined rates are null. Controls count exact literal substrings; only manifest-expected controls enter coverage. These metrics do not isolate OCR from title/furniture/configuration differences, and the provided reference includes prose annotations for the blank page.",
             "aggregate": aggregated, "pages": entries,
             "document_status": document["diagnostics"]["status"]}
 
