@@ -10,8 +10,10 @@ import inspect
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -1930,18 +1932,82 @@ def _refine_table_cells_ocr(
     return refinements
 
 
+# ---------------------------------------------------------------------------
+# B2/R67 — semantic conservation helpers
+# ---------------------------------------------------------------------------
+
+# Strict patterns for critical data values in Brazilian Portuguese documents.
+# Each pattern must match only well-formed values so OCR noise (e.g. "9.87G,54")
+# is not extracted and therefore cannot create a false conflict with the cleaned
+# version ("9.876,54").
+_CRITICAL_PATTERNS = [
+    # CPF: 000.000.000-00 (11 digits, various separators)
+    re.compile(r"\b\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}\b"),
+    # CNPJ: 00.000.000/0000-00 (14 digits)
+    re.compile(r"\b\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}\b"),
+    # Monetary BRL: R$ 1.234,56 (strict format: "." thousands, "," cents)
+    re.compile(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}"),
+    # Dates: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (4-digit year only)
+    re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b"),
+    # Percentages: 12,5% or 12%
+    re.compile(r"\b\d{1,3}[,.]?\d{0,2}\s*%"),
+    # CNJ process number: 0000000-00.0000.0.00.0000
+    re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4}\b"),
+]
+
+
+def _similarity_key(text: str) -> str:
+    """Collapse text to a whitespace-free key for SequenceMatcher comparison.
+
+    Removing all whitespace before comparison prevents spacing differences
+    (e.g. "A B C" vs "ABC") from artificially lowering similarity scores,
+    while keeping character-level differences (e.g. "G" vs "6") detectable.
+    """
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return re.sub(r"\s", "", text)
+
+
+def _extract_critical_values(text: str) -> set[str]:
+    """Extract normalized critical data tokens for conflict detection.
+
+    Returned values have separators stripped so ``529.982.247-25`` and
+    ``52998224725`` compare equal.  Only well-formed patterns are extracted;
+    OCR noise that partially resembles a critical value is silently ignored.
+    """
+    values: set[str] = set()
+    lower = text.lower()
+    for pattern in _CRITICAL_PATTERNS:
+        for m in pattern.finditer(lower):
+            key = re.sub(r"[\s.,\-/]", "", m.group())
+            if key:
+                values.add(key)
+    return values
+
+
 def _refinement_conserves_content(
     old_tokens: list[OcrToken],
     new_tokens: list[OcrToken],
     *,
     min_coverage: float = 0.60,
+    min_similarity: float = 0.60,
 ) -> bool:
-    """Return True when new_tokens retains enough non-whitespace content.
+    """Return True when new_tokens retains sufficient content from old_tokens.
 
-    A refinement that drops more than (1 - min_coverage) of the prior
-    non-whitespace character count is considered destructive and should be
-    rejected regardless of quality score improvement. The guard does not
-    apply when old_tokens has <= 4 non-whitespace characters (trivially short).
+    Three independent checks must all pass (B2/R67):
+
+    1. Character coverage — new must have >= (min_coverage) of old's
+       non-whitespace characters.  Trivially short old content (<= 4 chars)
+       is always accepted.
+
+    2. Text similarity — even same-length but completely unrelated text is
+       rejected; SequenceMatcher ratio must be >= min_similarity.  Skipped
+       when old is trivially short.  Whitespace is stripped before comparison
+       so spacing differences never lower the score.
+
+    3. Critical data preservation — if old contains a well-formed CPF, CNPJ,
+       monetary value, date, percentage, or process number, and new replaces
+       it with a *different* value of the same type, the refinement is
+       rejected even when similarity is high.
     """
     old_text = " ".join(t.text.strip() for t in old_tokens if t.text.strip())
     new_text = " ".join(t.text.strip() for t in new_tokens if t.text.strip())
@@ -1949,7 +2015,23 @@ def _refinement_conserves_content(
     new_chars = len(re.sub(r"\s+", "", new_text))
     if old_chars <= 4:
         return True
-    return new_chars >= old_chars * min_coverage
+    # Check 1: character coverage
+    if new_chars < old_chars * min_coverage:
+        return False
+    # Check 2: text similarity (same-length unrelated replacement)
+    old_key = _similarity_key(old_text)
+    new_key = _similarity_key(new_text)
+    if SequenceMatcher(None, old_key, new_key).ratio() < min_similarity:
+        return False
+    # Check 3: critical data conflict
+    old_critical = _extract_critical_values(old_text)
+    if old_critical:
+        new_critical = _extract_critical_values(new_text)
+        missing = old_critical - new_critical
+        novel = new_critical - old_critical
+        if missing and novel:
+            return False
+    return True
 
 
 def _recover_weak_ocr_regions(

@@ -1,7 +1,8 @@
-"""Regression tests for refinement conservation gates — Etapa 1.
+"""Regression tests for refinement conservation gates — Etapa 1 / B2/R67.
 
 Covers R67 (weak-region refinement conservation) and the shared
-_refinement_conserves_content helper.
+_refinement_conserves_content helper, including the B2 semantic checks:
+text similarity and critical data preservation (CPF, CNPJ, R$, dates).
 """
 from __future__ import annotations
 
@@ -168,3 +169,72 @@ class TestR67WeakRegionConservation:
         new = [_tok("CPF", 0, 0, 30, 15, conf=0.98)]  # far less content
 
         assert not _refinement_conserves_content(old, new)
+
+
+# ---------------------------------------------------------------------------
+# B2/R67 — semantic conservation: similarity + critical data (new checks)
+# ---------------------------------------------------------------------------
+
+class TestB2SemanticConservation:
+    """The conservation helper must reject replacements with different critical
+    data even when character counts are similar (B2/R67)."""
+
+    def test_rejects_same_length_unrelated_text(self):
+        """Text of the same length but totally different content must be rejected."""
+        old = [_tok("CONTEUDO IMPORTANTE", 0, 0, 150, 15)]
+        new = [_tok("TOTALMENTE DIFERENTE", 0, 0, 150, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new)
+
+    def test_rejects_changed_cpf(self):
+        """Changing the last CPF digit must be rejected even with high similarity."""
+        old = [_tok("CPF: 529.982.247-25", 0, 0, 150, 15)]
+        new = [_tok("CPF: 529.982.247-26", 0, 0, 150, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new)
+
+    def test_rejects_changed_cnpj(self):
+        """Changing one CNPJ digit must be rejected."""
+        old = [_tok("CNPJ: 12.345.678/0001-90", 0, 0, 180, 15)]
+        new = [_tok("CNPJ: 12.345.678/0001-91", 0, 0, 180, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new)
+
+    def test_rejects_changed_monetary_value(self):
+        """Replacing one R$ value with a different amount must be rejected."""
+        old = [_tok("R$ 1.234,56", 0, 0, 80, 15)]
+        new = [_tok("R$ 5.678,90", 0, 0, 80, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new)
+
+    def test_rejects_changed_date(self):
+        """Changing a date field (e.g. month) must be rejected."""
+        old = [_tok("data: 01/01/2024", 0, 0, 120, 15)]
+        new = [_tok("data: 01/02/2024", 0, 0, 120, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new)
+
+    def test_rejects_changed_percentage(self):
+        """Replacing one percentage with another must be rejected."""
+        old = [_tok("desconto de 2,75%", 0, 0, 130, 15)]
+        new = [_tok("desconto de 5,00%", 0, 0, 130, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new)
+
+    def test_accepts_minor_ocr_correction_preserving_content(self):
+        """OCR correction (e.g. 'G' → '6', accent fix) must be accepted."""
+        old = [_tok("Valôr: R$ 9.87G,54; desc0nto: -2,75%", 0, 0, 300, 15, conf=0.65)]
+        new = [_tok("Valor: R$ 9.876,54; desconto: -2,75%", 0, 0, 300, 15, conf=0.90)]
+        assert _refinement_conserves_content(old, new)
+
+    def test_accepts_true_content_extension(self):
+        """A refinement that adds more content must be accepted."""
+        old = [_tok("NOTA 1: ver artigo", 0, 0, 150, 15, conf=0.70)]
+        new = [_tok("NOTA 1: ver artigo 5.º parágrafo único", 0, 0, 300, 15, conf=0.88)]
+        assert _refinement_conserves_content(old, new)
+
+    def test_accepts_whitespace_only_differences(self):
+        """Whitespace normalization differences must not cause rejection."""
+        old = [_tok("texto  com   espaços extras", 0, 0, 200, 15)]
+        new = [_tok("texto com espaços extras", 0, 0, 180, 15, conf=0.95)]
+        assert _refinement_conserves_content(old, new)
+
+    def test_accepts_cpf_when_unchanged(self):
+        """Same CPF in old and new must be accepted."""
+        old = [_tok("CPF: 529.982.247-25 confirmado", 0, 0, 200, 15)]
+        new = [_tok("CPF: 529.982.247-25 confirmado.", 0, 0, 200, 15, conf=0.95)]
+        assert _refinement_conserves_content(old, new)
