@@ -1981,6 +1981,35 @@ def _extract_critical_values(text: str) -> set[str]:
                 values.add(key)
     return values
 
+_SIGNED_MONEY_PATTERN = re.compile(
+    r"r\$\s*([+-]?)\s*(\d{1,3}(?:\.\d{3})*,\d{2})",
+    re.IGNORECASE,
+)
+
+_SIGNED_PERCENTAGE_PATTERN = re.compile(
+    r"(?<![\w\d])([+-]?)\s*(\d{1,3}(?:[,.]\d{1,2})?)\s*%"
+)
+
+def _extract_signed_critical_values(text: str) -> set[str]:
+    """Extract sign-sensitive monetary and percentage values.
+
+    Missing sign and explicit '+' are both normalized as positive.
+    The negative sign is preserved because changing it changes the
+    semantic value of financial and percentage data.
+    """
+    values: set[str] = set()
+
+    for match in _SIGNED_MONEY_PATTERN.finditer(text):
+        sign = "-" if match.group(1) == "-" else "+"
+        number = re.sub(r"[.,\s]", "", match.group(2))
+        values.add(f"money:{sign}:{number}")
+
+    for match in _SIGNED_PERCENTAGE_PATTERN.finditer(text):
+        sign = "-" if match.group(1) == "-" else "+"
+        number = re.sub(r"[.,\s]", "", match.group(2))
+        values.add(f"percentage:{sign}:{number}")
+
+    return values
 
 def _refinement_conserves_content(
     old_tokens: list[OcrToken],
@@ -2018,6 +2047,11 @@ def _refinement_conserves_content(
     if old_critical:
         new_critical = _extract_critical_values(new_text)
         if old_critical - new_critical:
+            return False
+    old_signed_critical = _extract_signed_critical_values(old_text)
+    if old_signed_critical:
+        new_signed_critical = _extract_signed_critical_values(new_text)
+        if old_signed_critical - new_signed_critical:
             return False
     if old_chars <= 4:
         return True

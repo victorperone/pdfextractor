@@ -155,34 +155,91 @@ def main():
             "output": [t.text for t in result], "stats": stats}
     save(args.output_dir / "weak_region_truncation_reproduction.json", weak)
     # Keep the rotated backend path real; substitute only the heavy candidates.
-    raw_rotated = [
-        ([[10, 10], [90, 10], [90, 20], [10, 20]], "LINHA UM", 1),
-        ([[10, 40], [90, 40], [90, 50], [10, 50]], "LINHA DOIS", 1),
+    # Exercise the real exhaustive orientation-selection path without loading
+    # EasyOCR models.  Upright is deliberately weak; rot90 is the winning probe.
+    raw_upright = [
+        (
+            [[10, 10], [30, 10], [30, 20], [10, 20]],
+            "x",
+            0.10,
+        ),
     ]
-    remapped = easyocr._remap_raw_for_rotation(raw_rotated, 90, 200, 100)
-    # B1: exhaustive now goes through _exhaustive_with_orientation_selection —
-    # patch that function directly and provide already-converted OcrToken lists.
-    pipeline_tokens = list(easyocr._result_to_pipeline_tokens(remapped, 0, "pt", token_rotation=90))
-    _mock_orient_diag = {"selected_angle": 90, "attempts": [
-        {"angle": 0, "score": 0.10, "token_count": 0},
-        {"angle": 90, "score": 0.92, "token_count": 2},
-    ]}
-    backend._quantize, backend._auxiliary_readers = True, {}
-    backend._ensure_dbnet18_runtime = lambda: False
+
+    raw_rotated = [
+        (
+            [[10, 10], [90, 10], [90, 20], [10, 20]],
+            "LINHA UM",
+            0.99,
+        ),
+        (
+            [[10, 40], [90, 40], [90, 50], [10, 50]],
+            "LINHA DOIS",
+            0.99,
+        ),
+    ]
+
+    probe_results = iter([
+        raw_upright,   # 0°
+        raw_rotated,   # 90°
+        [],            # 180°
+        [],            # 270°
+    ])
+
+
+    def orientation_probe(reader, image, **kwargs):
+        return next(probe_results, []), None
+
+
+    def exhaustive_selected_orientation(
+        reader,
+        image,
+        base_kwargs,
+        *,
+        _include_rotations=True,
+        **kwargs,
+    ):
+        assert _include_rotations is False
+        return [("default", raw_rotated)]
+
+
+    backend._quantize = True
+    backend._auxiliary_readers = {}
+    backend._ensure_dbnet18_runtime = lambda: (False, "model_free_reproduction")
+
     orientation_box = BBox(0, 0, 200, 100)
-    with patch.object(easyocr, "_exhaustive_with_orientation_selection",
-                      return_value=([("rot90", pipeline_tokens)], _mock_orient_diag)):
-        current_tokens = backend.recognize_page(np.zeros((100, 200, 3), dtype=np.uint8),
-                                                0, orientation_box, quality_policy="exhaustive")
-    # This illustrates the reconstruction contract, not an implemented fix.
-    oriented_tokens = [replace(t, rotation=270) for t in current_tokens]
+
+    with (
+        patch.object(easyocr, "_run_easyocr", orientation_probe),
+        patch.object(
+            easyocr,
+            "_exhaustive_candidates",
+            side_effect=exhaustive_selected_orientation,
+        ),
+    ):
+        current_tokens = backend.recognize_page(
+            np.zeros((100, 200, 3), dtype=np.uint8),
+            0,
+            orientation_box,
+            quality_policy="exhaustive",
+        )
     orientation = {
         "candidate": "rot90", "applied_clockwise_correction": 90,
         "tokens": [{"text": t.text, "rotation": t.rotation, "bbox": str(t.bbox)}
                    for t in current_tokens],
         "current_lines": [line.text for line in reconstruct_ocr_lines(current_tokens, 0, orientation_box)],
-        "orientation_preserved_lines": [line.text for line in reconstruct_ocr_lines(oriented_tokens, 0, orientation_box)],
-        "assessment_with_correct_orientation": asdict(assess_ocr_quality(oriented_tokens)),
+        "selected_angle": backend._last_orientation_decision.get("selected_angle"),
+        "reconstructed_lines": [
+            line.text
+            for line in reconstruct_ocr_lines(
+                current_tokens,
+                0,
+                orientation_box,
+            )
+        ],
+        "expected_lines": [
+            "LINHA UM",
+            "LINHA DOIS",
+        ],
         "assessment_single_horizontal_digit": asdict(assess_ocr_quality([
             token("1", (10, 10, 15, 30), 1),
         ])),

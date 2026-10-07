@@ -186,10 +186,10 @@ class TestExhaustiveOrientationIsolation:
         assert any(t in all_texts for t in ("BOM", "TEXTO", "AQUI")), (
             "rot90 good text must be present"
         )
-        # All tokens must carry rotation=90
+        # A 90° clockwise raster correction maps back to token orientation 270°
         for _, toks in candidates:
             for tok in toks:
-                assert tok.rotation == 90, f"token rotation must be 90, got {tok.rotation}"
+                assert tok.rotation == 270, f"token rotation must be 90, got {tok.rotation}"
 
     # ------------------------------------------------------------------
     # Test 3 — rot180 selected
@@ -283,7 +283,54 @@ class TestExhaustiveOrientationIsolation:
         )
         for _, toks in candidates:
             for tok in toks:
-                assert tok.rotation == 270, f"expected rotation=270, got {tok.rotation}"
+                assert tok.rotation == 90, f"expected rotation=270, got {tok.rotation}"
+
+    def test_rot90_selected_tokens_reconstruct_in_original_reading_order(self):
+    from structured_pdf_text.geometry import BBox
+    from structured_pdf_text.ocr.backends.easyocr import (
+        _remap_raw_for_rotation,
+        _result_to_pipeline_tokens,
+        _token_rotation_from_applied_correction,
+    )
+    from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+
+    raw_rotated = [
+        (
+            [[10, 10], [90, 10], [90, 20], [10, 20]],
+            "LINHA UM",
+            0.99,
+        ),
+        (
+            [[10, 40], [90, 40], [90, 50], [10, 50]],
+            "LINHA DOIS",
+            0.99,
+        ),
+    ]
+
+    remapped = _remap_raw_for_rotation(
+        raw_rotated,
+        90,
+        200,
+        100,
+    )
+
+    tokens = _result_to_pipeline_tokens(
+        remapped,
+        0,
+        "pt",
+        token_rotation=_token_rotation_from_applied_correction(90),
+    )
+
+    lines = reconstruct_ocr_lines(
+        tokens,
+        0,
+        BBox(0, 0, 200, 100),
+    )
+
+    assert [line.text for line in lines] == [
+        "LINHA UM",
+        "LINHA DOIS",
+    ]
 
 
     # ------------------------------------------------------------------

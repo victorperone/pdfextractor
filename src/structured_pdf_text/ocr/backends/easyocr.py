@@ -777,6 +777,21 @@ def _label_to_token_rotation(label: str) -> int:
     """
     return {"rot90": 90, "rot180": 180, "rot270": 270}.get(label, 0)
 
+def _token_rotation_from_applied_correction(angle: int) -> int:
+    """Convert the clockwise raster correction into token orientation.
+
+    ``angle`` is the clockwise rotation applied to the raster so EasyOCR can
+    read it upright.  After OCR polygons are remapped back to the original
+    page coordinate system, the token orientation is the inverse rotation.
+
+    Examples:
+        applied correction   token orientation
+        0                    0
+        90                   270
+        180                  180
+        270                  90
+    """
+    return (-int(angle)) % 360
 
 def _result_to_pipeline_tokens(
     raw: list[Any], page_index: int, language: str,
@@ -1275,7 +1290,10 @@ def _adaptive_with_orientation_selection(
                     if _raw_rot:
                         _remapped = _remap_raw_for_rotation(_raw_rot, _angle, _rot_h, _rot_w)
                         _rot_tokens = _result_to_pipeline_tokens(
-                            _remapped, page_index, language, token_rotation=_angle
+                            _remapped,
+                            page_index,
+                            language,
+                            token_rotation=_token_rotation_from_applied_correction(_angle),
                         )
                         _rot_score = _orientation_quality_score(_rot_tokens)
                         attempts.append({
@@ -1918,7 +1936,10 @@ def _exhaustive_with_orientation_selection(
                 if _raw_rot:
                     _remapped = _remap_raw_for_rotation(_raw_rot, _angle, _rot_h, _rot_w)
                     _rot_tokens = _result_to_pipeline_tokens(
-                        _remapped, page_index, language, token_rotation=_angle
+                        _remapped,
+                        page_index,
+                        language,
+                        token_rotation=_token_rotation_from_applied_correction(_angle),
                     )
                     _rot_score = _orientation_quality_score(_rot_tokens)
                     attempts.append({
@@ -1961,7 +1982,10 @@ def _exhaustive_with_orientation_selection(
         # For selected_angle==0, _remap_raw_for_rotation returns raw unchanged.
         remapped = _remap_raw_for_rotation(raw, selected_angle, sel_h, sel_w)
         pl_tokens = _result_to_pipeline_tokens(
-            remapped, page_index, language, token_rotation=selected_angle
+            remapped,
+            page_index,
+            language,
+            token_rotation=_token_rotation_from_applied_correction(selected_angle),
         )
         pipeline_candidates.append((label, pl_tokens))
 

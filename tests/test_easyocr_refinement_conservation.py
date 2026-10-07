@@ -335,3 +335,30 @@ class TestB2CriticalDataDisappearance:
         assert _refinement_conserves_content(old, new), (
             "extension without critical data must be accepted"
         )
+
+def test_conservation_rejects_currency_sign_flip(self):
+    old = [_tok("Diferença: R$ -350,00", 0, 0, 200, 15)]
+    new = [_tok("Diferença: R$ +350,00", 0, 0, 200, 15, conf=0.99)]
+
+    assert not _refinement_conserves_content(old, new)
+
+
+def test_conservation_rejects_percentage_sign_flip(self):
+    old = [_tok("Desconto: -2,75%", 0, 0, 200, 15)]
+    new = [_tok("Desconto: +2,75%", 0, 0, 200, 15, conf=0.99)]
+
+    assert not _refinement_conserves_content(old, new)
+
+
+def test_conservation_accepts_explicit_positive_sign(self):
+    old = [_tok("Valor: R$ 350,00", 0, 0, 200, 15)]
+    new = [_tok("Valor: R$ +350,00", 0, 0, 200, 15, conf=0.99)]
+
+    assert _refinement_conserves_content(old, new)
+
+
+def test_conservation_accepts_same_negative_value(self):
+    old = [_tok("Desconto: -2,75%", 0, 0, 200, 15)]
+    new = [_tok("Desconto corrigido: -2,75%", 0, 0, 220, 15, conf=0.99)]
+
+    assert _refinement_conserves_content(old, new)
