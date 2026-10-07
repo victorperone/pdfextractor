@@ -1111,8 +1111,10 @@ def _candidate_family(label: str) -> str:
     return "craft_greedy"
 
 
-_ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD = 5
-"""Below this many total tokens across all adaptive candidates, try rotation recovery (R73)."""
+_ORIENTATION_MIN_TOKENS = 3
+_ORIENTATION_MIN_CHARS = 8
+_ORIENTATION_MIN_MEAN_CONFIDENCE = 0.40
+_ORIENTATION_MAX_LOW_CONF_RATIO = 0.75
 
 
 def _adaptive_candidates(
@@ -1122,18 +1124,17 @@ def _adaptive_candidates(
     *,
     record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
-    """Run EasyOCR candidates for the adaptive quality policy.
+    """Run EasyOCR upright candidates for the adaptive quality policy.
 
     Always runs at least two candidates: default (A) and high-recall (B).
     When the image is detected as low-contrast or dark-background,
     additional preprocessing variants are appended by
     :func:`_image_preprocessing_candidates` with ``adaptive=True``.
 
-    R73: when the combined result from A+B is very sparse (fewer than
-    :data:`_ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD` tokens), a conditional
-    orientation recovery pass tests 90/180/270° rotations.  This lets
-    adaptive mode recover physically rotated pages (e.g. /Rotate=0 but
-    raster content is sideways) without requiring exhaustive quality policy.
+    Returns only upright (0°) candidates. Orientation selection — including
+    conditional 90/180/270° probes when upright quality is insufficient — is
+    handled by :func:`_adaptive_with_orientation_selection`, which calls this
+    function internally and decides which orientation's candidates enter fusion.
 
     The total number of candidates is therefore dynamic (image-dependent).
     Every call to :func:`_run_easyocr` is reported to ``record_call`` when
@@ -1161,16 +1162,103 @@ def _adaptive_candidates(
         if record_call is not None:
             record_call(_fb)
         results.append((label, raw))
-    # R73: conditional orientation recovery.  When the upright candidates
-    # produced very few tokens, the page raster may be physically rotated.
-    # Test 90/180/270° and keep any rotation that yields results.  The
-    # candidate-fusion scorer will prefer the correct orientation.
-    total_tokens = sum(len(raw) for _, raw in results)
-    if total_tokens < _ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD:
+    return results
+
+
+def _orientation_quality_score(tokens: "list[OcrToken]") -> float:
+    """Scalar quality score for orientation comparison (higher = better, max ~1.1).
+
+    Combines confidence, content volume, and hallucination penalties so that
+    a page with many low-confidence tokens scores worse than one with few
+    high-confidence tokens — preventing token-count bias in orientation selection.
+    """
+    if not tokens:
+        return 0.0
+    m = _candidate_metrics(tokens)
+    return (
+        m["mean_confidence"] * 0.40
+        + m["lower_quartile_confidence"] * 0.25
+        + (1.0 - m["low_conf_ratio"]) * 0.15
+        + (1.0 - min(m["invalid_geometry_ratio"], 1.0)) * 0.10
+        + min(m["char_count"], 300) / 3000
+        - m["replacement_char_ratio"] * 0.20
+        - m["suspicious_insertion_ratio"] * 0.15
+    )
+
+
+def _orientation_quality_sufficient(tokens: "list[OcrToken]") -> bool:
+    """Return True when upright orientation quality is good enough to skip rotation probes.
+
+    Uses multi-dimensional quality metrics rather than token count alone, so pages
+    that produce many low-confidence tokens (false detections at wrong orientation)
+    still trigger rotation search even when the raw token count exceeds a naive
+    threshold.
+    """
+    if not tokens:
+        return False
+    m = _candidate_metrics(tokens)
+    return (
+        m["token_count"] >= _ORIENTATION_MIN_TOKENS
+        and m["char_count"] >= _ORIENTATION_MIN_CHARS
+        and m["mean_confidence"] >= _ORIENTATION_MIN_MEAN_CONFIDENCE
+        and m["low_conf_ratio"] <= _ORIENTATION_MAX_LOW_CONF_RATIO
+    )
+
+
+def _adaptive_with_orientation_selection(
+    reader: "Any",
+    img: "Any",
+    base_kwargs: "dict[str, Any]",
+    page_index: int,
+    language: str,
+    *,
+    record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
+) -> "tuple[list[tuple[str, list[OcrToken]]], dict[str, Any]]":
+    """Adaptive candidates with global orientation selection (B1/R73).
+
+    Runs upright candidates first via :func:`_adaptive_candidates`, evaluates
+    their combined quality using confidence and content metrics (not token count
+    alone), then probes 90/180/270° only when upright quality is insufficient.
+    Exactly one orientation is selected; tokens from losing orientations never
+    enter :func:`_best_candidate` / candidate fusion.
+
+    Returns:
+        pipeline_candidates: OcrToken-level candidates for :func:`_best_candidate`.
+        orientation_diag:    dict with ``selected_angle`` (int, clockwise degrees)
+                             and ``attempts`` (list of per-angle quality snapshots).
+    """
+    # 1. Upright candidates (default + high_recall + preprocessing variants)
+    upright_raw = _adaptive_candidates(reader, img, base_kwargs, record_call=record_call)
+
+    # 2. Convert to pipeline tokens (all upright → rotation=0)
+    upright_pipeline: list[tuple[str, list[OcrToken]]] = [
+        (label, _result_to_pipeline_tokens(raw, page_index, language, token_rotation=0))
+        for label, raw in upright_raw
+    ]
+
+    # 3. Assess upright quality across all upright candidates combined
+    upright_tokens = [t for _, tokens in upright_pipeline for t in tokens]
+    upright_score = _orientation_quality_score(upright_tokens)
+    attempts: list[dict[str, Any]] = [
+        {
+            "angle": 0,
+            "score": round(upright_score, 4),
+            "token_count": len(upright_tokens),
+            "sufficient": _orientation_quality_sufficient(upright_tokens),
+        }
+    ]
+    selected_pipeline = upright_pipeline
+    selected_angle = 0
+
+    if not _orientation_quality_sufficient(upright_tokens):
+        # 4. Probe rotations — one pass per angle with base_kwargs
         try:
             import numpy as _np
             _arr_base = _np.asarray(img)
-            for _angle, _label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
+            best_rot_score = upright_score
+            best_rot_result: "tuple[str, list[OcrToken]] | None" = None
+
+            for _angle, _rot_label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
                 try:
                     _rot_img = _rotate_image(_arr_base, _angle)
                     _rot_h, _rot_w = _rot_img.shape[:2]
@@ -1178,13 +1266,37 @@ def _adaptive_candidates(
                     if record_call is not None:
                         record_call(_fb_rot)
                     if _raw_rot:
-                        _raw_remapped = _remap_raw_for_rotation(_raw_rot, _angle, _rot_h, _rot_w)
-                        results.append((_label, _raw_remapped))
-                except Exception as _optional_exc:
-                    _propagate_fatal_error(_optional_exc)
-        except Exception as _optional_exc:
-            _propagate_fatal_error(_optional_exc)
-    return results
+                        _remapped = _remap_raw_for_rotation(_raw_rot, _angle, _rot_h, _rot_w)
+                        _rot_tokens = _result_to_pipeline_tokens(
+                            _remapped, page_index, language, token_rotation=_angle
+                        )
+                        _rot_score = _orientation_quality_score(_rot_tokens)
+                        attempts.append({
+                            "angle": _angle,
+                            "score": round(_rot_score, 4),
+                            "token_count": len(_rot_tokens),
+                        })
+                        if _rot_score > best_rot_score:
+                            best_rot_score = _rot_score
+                            best_rot_result = (_rot_label, _rot_tokens)
+                    else:
+                        attempts.append({"angle": _angle, "score": 0.0, "token_count": 0})
+                except Exception as _exc:
+                    _propagate_fatal_error(_exc)
+        except Exception as _exc:
+            _propagate_fatal_error(_exc)
+
+        # 5. If a rotation beats upright quality, use ONLY that rotation's tokens
+        if best_rot_result is not None:
+            _rot_label, _rot_tokens_list = best_rot_result
+            selected_pipeline = [(_rot_label, _rot_tokens_list)]
+            selected_angle = {"rot90": 90, "rot180": 180, "rot270": 270}[_rot_label]
+
+    orientation_diag: dict[str, Any] = {
+        "selected_angle": selected_angle,
+        "attempts": attempts,
+    }
+    return selected_pipeline, orientation_diag
 
 
 def _image_preprocessing_candidates(img: "Any", *, adaptive: bool) -> list[tuple[str, Any]]:
@@ -1704,14 +1816,15 @@ def _exhaustive_candidates(
     # regardless of whether that count exceeds the default — token count is
     # not a reliable quality proxy, and the scorer already has full context
     # to prefer the better candidate.
-    # Track labels already present (may include rot* from adaptive recovery pass, R73).
+    # Track labels already present to avoid adding duplicate rotation candidates.
+    # (Adaptive no longer injects rotations into its raw output; this guard is
+    #  kept as a belt-and-suspenders safety net for future callers.)
     _existing_labels = {label for label, _ in results}
     try:
         import numpy as _np
         _arr_base = _np.asarray(img)
 
         for _angle, _label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
-            # Skip if adaptive already contributed this rotation candidate (R73).
             if _label in _existing_labels:
                 continue
             try:
@@ -1994,6 +2107,7 @@ class EasyOCRBackend:
         self.last_easyocr_fallback_used = False
         self.last_easyocr_fallback_reason: str | None = None
         self._last_candidate_diagnostics: list[dict[str, Any]] = []
+        self._last_orientation_decision: dict[str, Any] = {}
         self._last_dbnet_diag: list[dict[str, Any]] = []
         self._detection_stats = {
             "easyocr_exhaustive_detection_calls": 0,
@@ -2275,23 +2389,30 @@ class EasyOCRBackend:
                 ):
                     self._dbnet_runtime_state = False
                     self._dbnet_failure_reason = self._last_dbnet_diag[-1].get("failure_reason")
+                # R69: propagate candidate rotation to OcrToken.rotation so that
+                # downstream orientation-aware code (quality gate, reading order) can
+                # treat rotated tokens correctly without relying on bbox geometry alone.
+                pipeline_candidates: list[tuple[str, list[OcrToken]]] = []
+                for label, raw in raw_candidates:
+                    token_rotation = _label_to_token_rotation(label)
+                    pl_tokens = _result_to_pipeline_tokens(
+                        raw, page_index, self._language, token_rotation=token_rotation
+                    )
+                    pipeline_candidates.append((label, pl_tokens))
+                tokens, cand_diag = _best_candidate(pipeline_candidates)
+                self._last_candidate_diagnostics = cand_diag
             else:
-                raw_candidates = _adaptive_candidates(
-                    self._reader, img, base_kwargs, record_call=self._record_call
+                # B1/R73: adaptive with global orientation selection before fusion.
+                # Upright quality (confidence + content) drives the orientation probe;
+                # only the winning orientation's candidates enter _best_candidate —
+                # losing orientation tokens are excluded entirely.
+                pipeline_candidates, _orient_diag = _adaptive_with_orientation_selection(
+                    self._reader, img, base_kwargs, page_index, self._language,
+                    record_call=self._record_call,
                 )
-            # Convert each candidate's raw result to pipeline tokens, pick best.
-            # R69: propagate candidate rotation to OcrToken.rotation so that
-            # downstream orientation-aware code (quality gate, reading order) can
-            # treat rotated tokens correctly without relying on bbox geometry alone.
-            pipeline_candidates: list[tuple[str, list[OcrToken]]] = []
-            for label, raw in raw_candidates:
-                token_rotation = _label_to_token_rotation(label)
-                pl_tokens = _result_to_pipeline_tokens(
-                    raw, page_index, self._language, token_rotation=token_rotation
-                )
-                pipeline_candidates.append((label, pl_tokens))
-            tokens, cand_diag = _best_candidate(pipeline_candidates)
-            self._last_candidate_diagnostics = cand_diag
+                self._last_orientation_decision = _orient_diag
+                tokens, cand_diag = _best_candidate(pipeline_candidates)
+                self._last_candidate_diagnostics = cand_diag
             # _easyocr_calls is incremented per-call inside _record_call; no aggregate here
         else:
             raw, fallback = _run_easyocr(self._reader, img, **self._run_kwargs())

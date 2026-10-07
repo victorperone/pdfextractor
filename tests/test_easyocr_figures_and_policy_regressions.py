@@ -1,9 +1,9 @@
-"""Regression tests for figure OCR, reading-order, preprocessing — Etapa 3.
+"""Regression tests for figure OCR, reading-order, preprocessing — Etapa 3/4.
 
 Covers:
   R71 — figure OCR processes only uncovered images
   R72 — image coverage uses union(intersections) / image_bbox.area
-  R73 — adaptive candidates trigger orientation recovery when baseline is sparse
+  R73/B1 — adaptive orientation selection: quality-based probe before candidate fusion
   D11 — {} vs None preserved in reading-order flow_lines
   P1  — visually identical preprocessing images are deduplicated
 """
@@ -20,10 +20,11 @@ from structured_pdf_text.document import (
     LayoutRegion,
     NativeObjectEvidence,
     NativePageEvidence,
+    OcrToken,
     RegionDecision,
     RegionKind,
     RegionQuality,
-    StructureTreeEvidence,
+    SourceKind,
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.api import _image_union_coverage, _figures_requiring_ocr
@@ -238,135 +239,240 @@ class TestD11FlowLinesNoneVsEmpty:
 
 
 # ---------------------------------------------------------------------------
-# R73 — adaptive candidates trigger orientation recovery when sparse
+# R73/B1 — adaptive orientation selection: quality-based probe before fusion
 # ---------------------------------------------------------------------------
 
 class TestR73AdaptiveOrientationRecovery:
-    """_adaptive_candidates must add rotation candidates when baseline is empty."""
+    """Orientation selection via _adaptive_with_orientation_selection (B1/R73).
 
-    def _fake_run(self, return_map: dict[str, list]) -> Any:
-        """Build a mock that returns different raw results for each image argument."""
-        calls = []
+    Only the winning orientation's candidates enter candidate fusion —
+    tokens from losing orientations are excluded entirely.
+    """
 
-        def fake_run_easyocr(reader, img, **kwargs):
-            result = return_map.get(id(img), [])
-            calls.append(id(img))
-            return (result, None)
+    _BASE_KWARGS: dict[str, Any] = {
+        "text_threshold": 0.7,
+        "low_text": 0.4,
+        "link_threshold": 0.4,
+        "min_size": 10,
+        "width_ths": 0.5,
+        "add_margin": 0.1,
+    }
 
-        return fake_run_easyocr, calls
+    def _run_selection(self, fake_run_side_effect: Any) -> tuple[Any, Any]:
+        """Run _adaptive_with_orientation_selection with mocked OCR engine."""
+        import numpy as np
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+        from structured_pdf_text.ocr.backends.easyocr import _adaptive_with_orientation_selection
+        with patch("structured_pdf_text.ocr.backends.easyocr._run_easyocr", side_effect=fake_run_side_effect), \
+             patch("structured_pdf_text.ocr.backends.easyocr._image_preprocessing_candidates", return_value=[]), \
+             patch("structured_pdf_text.ocr.backends.easyocr._remap_raw_for_rotation", side_effect=lambda r, a, h, w: r):
+            return _adaptive_with_orientation_selection(object(), img, self._BASE_KWARGS, 0, "en")
 
     def test_sparse_upright_triggers_rotation_attempts(self):
-        """When A+B produce 0 tokens, a rotation that finds text must enter results."""
-        from structured_pdf_text.ocr.backends.easyocr import _adaptive_candidates
-
-        # Simulates: upright passes produce nothing, rot90 finds text.
-        _dummy_token = ([[0, 0], [10, 0], [10, 10], [0, 10]], "word", 0.9)
+        """When A+B produce 0 tokens, rotation probes are attempted and rot90 wins."""
+        _good = ([[0, 0], [50, 0], [50, 10], [0, 10]], "hello world text here", 0.90)
         call_count = {"n": 0}
 
         def fake_run(reader, img, **kwargs):
             call_count["n"] += 1
-            # A=empty, B=empty, then rot90 returns a token (rot180/270 still empty)
-            if call_count["n"] <= 2:
+            if call_count["n"] <= 2:   # A and B: empty
                 return [], None
-            if call_count["n"] == 3:  # rot90
-                return [_dummy_token], None
+            if call_count["n"] == 3:   # rot90 probe: good tokens
+                return [_good] * 4, None
             return [], None
 
-        import numpy as np
-        img = np.zeros((100, 100, 3), dtype=np.uint8)
-        base_kwargs = {
-            "text_threshold": 0.7,
-            "low_text": 0.4,
-            "link_threshold": 0.4,
-            "min_size": 10,
-            "width_ths": 0.5,
-            "add_margin": 0.1,
-        }
+        pipeline, diag = self._run_selection(fake_run)
+        labels = [label for label, _ in pipeline]
+        assert "rot90" in labels, f"rot90 must be selected; pipeline labels: {labels}"
+        assert diag["selected_angle"] == 90
 
-        with patch(
-            "structured_pdf_text.ocr.backends.easyocr._run_easyocr",
-            side_effect=fake_run,
-        ), patch(
-            "structured_pdf_text.ocr.backends.easyocr._image_preprocessing_candidates",
-            return_value=[],
-        ), patch(
-            "structured_pdf_text.ocr.backends.easyocr._remap_raw_for_rotation",
-            side_effect=lambda raw, angle, h, w: raw,
-        ):
-            results = _adaptive_candidates(object(), img, base_kwargs)
-
-        labels = [label for label, _ in results]
-        # rot90 must appear because it produced tokens
-        assert "rot90" in labels, f"rot90 not found in {labels}"
-
-    def test_sufficient_upright_skips_rotation_attempts(self):
-        """When A+B produce >= threshold tokens, no rotation candidates are added."""
-        from structured_pdf_text.ocr.backends.easyocr import (
-            _adaptive_candidates,
-            _ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD,
-        )
-
-        _dummy_token = ([[0, 0], [10, 0], [10, 10], [0, 10]], "word", 0.9)
+    def test_adaptive_orientation_search_uses_quality_not_token_count(self):
+        """Many low-confidence upright tokens still trigger rotation search (quality gate)."""
+        _bad = ([[0, 0], [5, 0], [5, 5], [0, 5]], "x", 0.05)
+        _good = ([[0, 0], [50, 0], [50, 10], [0, 10]], "texto correto aqui", 0.92)
+        call_count = {"n": 0}
 
         def fake_run(reader, img, **kwargs):
-            # Return enough tokens to exceed threshold
-            return [_dummy_token] * _ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD, None
+            call_count["n"] += 1
+            if call_count["n"] <= 2:   # A and B: many tokens but very low confidence
+                return [_bad] * 10, None
+            if call_count["n"] == 3:   # rot90: high-quality result
+                return [_good] * 5, None
+            return [], None
 
-        import numpy as np
-        img = np.zeros((100, 100, 3), dtype=np.uint8)
-        base_kwargs = {
-            "text_threshold": 0.7,
-            "low_text": 0.4,
-            "link_threshold": 0.4,
-            "min_size": 10,
-            "width_ths": 0.5,
-            "add_margin": 0.1,
-        }
+        pipeline, diag = self._run_selection(fake_run)
+        # Rotation must have been probed despite upright having >=5 tokens
+        assert call_count["n"] >= 3, "rotation probe must happen even with many bad upright tokens"
+        labels = [label for label, _ in pipeline]
+        assert "rot90" in labels, f"rot90 must win over low-quality upright; got {labels}"
+        assert diag["selected_angle"] == 90
 
-        with patch(
-            "structured_pdf_text.ocr.backends.easyocr._run_easyocr",
-            side_effect=fake_run,
-        ), patch(
-            "structured_pdf_text.ocr.backends.easyocr._image_preprocessing_candidates",
-            return_value=[],
-        ):
-            results = _adaptive_candidates(object(), img, base_kwargs)
+    def test_orientation_loser_cannot_contribute_to_fusion(self):
+        """Tokens from the losing orientation must not appear in the output."""
+        _bad_upright = ([[0, 0], [5, 0], [5, 5], [0, 5]], "LOSING_UPRIGHT", 0.05)
+        _good_rot = ([[0, 0], [50, 0], [50, 10], [0, 10]], "WINNER_ROT90", 0.92)
+        call_count = {"n": 0}
 
-        labels = [label for label, _ in results]
-        rotation_labels = [l for l in labels if l in ("rot90", "rot180", "rot270")]
-        assert not rotation_labels, f"Rotation candidates should not appear on strong upright; got: {rotation_labels}"
+        def fake_run(reader, img, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:   # upright: bad quality
+                return [_bad_upright] * 3, None
+            if call_count["n"] == 3:   # rot90: good quality
+                return [_good_rot] * 5, None
+            return [], None
+
+        pipeline, diag = self._run_selection(fake_run)
+        all_texts = [t.text for _, tokens in pipeline for t in tokens]
+        assert "LOSING_UPRIGHT" not in all_texts, \
+            f"Losing orientation token must not appear; texts: {all_texts}"
+        assert any("WINNER_ROT90" in t for t in all_texts), \
+            f"Winning rotation token must be present; texts: {all_texts}"
+        assert diag["selected_angle"] == 90
+
+    def test_adaptive_selects_rot90_as_global_orientation(self):
+        """rot90 is chosen when it yields the best quality result."""
+        _good = ([[0, 0], [50, 0], [50, 10], [0, 10]], "conteudo correto", 0.91)
+        call_count = {"n": 0}
+
+        def fake_run(reader, img, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:   # upright: empty
+                return [], None
+            if call_count["n"] == 3:   # rot90: good
+                return [_good] * 4, None
+            return [], None
+
+        _, diag = self._run_selection(fake_run)
+        assert diag["selected_angle"] == 90
+
+    def test_adaptive_selects_rot180_as_global_orientation(self):
+        """rot180 is chosen when rot90 is empty and rot180 yields good quality."""
+        _good = ([[0, 0], [50, 0], [50, 10], [0, 10]], "texto certo", 0.88)
+        call_count = {"n": 0}
+
+        def fake_run(reader, img, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] in (1, 2, 3):   # A, B, rot90: empty
+                return [], None
+            if call_count["n"] == 4:            # rot180: good
+                return [_good] * 4, None
+            return [], None
+
+        _, diag = self._run_selection(fake_run)
+        assert diag["selected_angle"] == 180
+
+    def test_adaptive_selects_rot270_as_global_orientation(self):
+        """rot270 is chosen when rot90 and rot180 are empty and rot270 is good."""
+        _good = ([[0, 0], [50, 0], [50, 10], [0, 10]], "documento girado", 0.89)
+        call_count = {"n": 0}
+
+        def fake_run(reader, img, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 4:    # A, B, rot90, rot180: empty
+                return [], None
+            if call_count["n"] == 5:    # rot270: good
+                return [_good] * 4, None
+            return [], None
+
+        _, diag = self._run_selection(fake_run)
+        assert diag["selected_angle"] == 270
+
+    def test_strong_upright_page_does_not_probe_rotations(self):
+        """When upright quality is sufficient, no rotation OCR calls are made."""
+        _good = ([[0, 0], [50, 0], [50, 10], [0, 10]], "palavra longa", 0.88)
+        calls: list[int] = []
+
+        def fake_run(reader, img, **kwargs):
+            calls.append(1)
+            return [_good] * 5, None
+
+        _, diag = self._run_selection(fake_run)
+        # Only A + B = 2 calls; no rotation probes
+        assert len(calls) == 2, f"Expected 2 OCR calls (A+B only); got {len(calls)}"
+        assert diag["selected_angle"] == 0
+        assert len(diag["attempts"]) == 1
+        assert diag["attempts"][0]["sufficient"] is True
+
+    def test_orientation_diagnostics_record_selected_angle_and_attempts(self):
+        """orientation_diag must contain selected_angle and per-angle attempt records."""
+        _bad = ([[0, 0], [5, 0], [5, 5], [0, 5]], "x", 0.05)
+        _good = ([[0, 0], [50, 0], [50, 10], [0, 10]], "texto", 0.90)
+        call_count = {"n": 0}
+
+        def fake_run(reader, img, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                return [_bad] * 2, None
+            if call_count["n"] == 3:   # rot90
+                return [_good] * 3, None
+            return [], None
+
+        _, diag = self._run_selection(fake_run)
+        assert "selected_angle" in diag
+        assert "attempts" in diag
+        angles = [a["angle"] for a in diag["attempts"]]
+        assert 0 in angles, "upright angle 0 must be recorded"
+        assert 90 in angles, "rot90 attempt must be recorded"
+        assert diag["selected_angle"] == 90
 
     def test_rotation_candidate_omitted_when_it_produces_no_tokens(self):
-        """A rotation that yields no tokens should not be added to results."""
-        from structured_pdf_text.ocr.backends.easyocr import _adaptive_candidates
+        """When all rotations are empty, upright is kept even if quality is low."""
+        call_count = {"n": 0}
 
         def fake_run(reader, img, **kwargs):
-            # upright empty, rotations empty too
-            return [], None
+            call_count["n"] += 1
+            return [], None   # everything empty
 
-        import numpy as np
-        img = np.zeros((100, 100, 3), dtype=np.uint8)
-        base_kwargs = {
-            "text_threshold": 0.7,
-            "low_text": 0.4,
-            "link_threshold": 0.4,
-            "min_size": 10,
-            "width_ths": 0.5,
-            "add_margin": 0.1,
-        }
-
-        with patch(
-            "structured_pdf_text.ocr.backends.easyocr._run_easyocr",
-            side_effect=fake_run,
-        ), patch(
-            "structured_pdf_text.ocr.backends.easyocr._image_preprocessing_candidates",
-            return_value=[],
-        ):
-            results = _adaptive_candidates(object(), img, base_kwargs)
-
-        labels = [label for label, _ in results]
+        pipeline, diag = self._run_selection(fake_run)
+        labels = [label for label, _ in pipeline]
         rotation_labels = [l for l in labels if l in ("rot90", "rot180", "rot270")]
-        assert not rotation_labels, "Empty rotation candidates must not enter results"
+        assert not rotation_labels, f"Empty rotation results must not appear; got: {rotation_labels}"
+        # Upright is kept (even empty) as the fallback
+        assert diag["selected_angle"] == 0
+
+
+class TestOrientationQualityFunctions:
+    """Unit tests for _orientation_quality_score and _orientation_quality_sufficient (B1/R73)."""
+
+    def _make_token(
+        self,
+        text: str = "word",
+        confidence: float = 0.85,
+        x0: float = 0, y0: float = 0, x1: float = 50, y1: float = 10,
+    ) -> OcrToken:
+        return OcrToken(
+            text=text,
+            bbox=BBox(x0, y0, x1, y1),
+            confidence=confidence,
+            language="en",
+            source=SourceKind.OCR_PAGE,
+        )
+
+    def test_empty_tokens_score_zero(self):
+        from structured_pdf_text.ocr.backends.easyocr import _orientation_quality_score
+        assert _orientation_quality_score([]) == 0.0
+
+    def test_empty_tokens_not_sufficient(self):
+        from structured_pdf_text.ocr.backends.easyocr import _orientation_quality_sufficient
+        assert not _orientation_quality_sufficient([])
+
+    def test_good_tokens_are_sufficient(self):
+        from structured_pdf_text.ocr.backends.easyocr import _orientation_quality_sufficient
+        tokens = [self._make_token("hello world", 0.85) for _ in range(5)]
+        assert _orientation_quality_sufficient(tokens)
+
+    def test_many_low_confidence_tokens_not_sufficient(self):
+        """Many tokens with very low confidence → not sufficient (quality gate, not count gate)."""
+        from structured_pdf_text.ocr.backends.easyocr import _orientation_quality_sufficient
+        # mean_confidence=0.05 < _ORIENTATION_MIN_MEAN_CONFIDENCE=0.40
+        tokens = [self._make_token("x", 0.05) for _ in range(20)]
+        assert not _orientation_quality_sufficient(tokens)
+
+    def test_high_quality_scores_higher_than_low_quality(self):
+        from structured_pdf_text.ocr.backends.easyocr import _orientation_quality_score
+        good = [self._make_token("hello world text", 0.90) for _ in range(5)]
+        bad = [self._make_token("x", 0.05) for _ in range(20)]
+        assert _orientation_quality_score(good) > _orientation_quality_score(bad)
 
 
 # ---------------------------------------------------------------------------
