@@ -1135,8 +1135,8 @@ class PdfTextExtractor:
                         "ocr_fusion_duplicate_clusters": getattr(ocr_diag_engine, "last_fusion_duplicate_clusters", 0),
                         "ocr_consensus_replacements": getattr(ocr_diag_engine, "last_consensus_replacements", 0),
                         "ocr_consensus_insertions": getattr(ocr_diag_engine, "last_consensus_insertions", 0),
-                        "ocr_orientation_selected": getattr(ocr_diag_engine, "last_orientation_selected", None),
-                        "ocr_orientation_attempts": list(getattr(ocr_diag_engine, "last_orientation_attempts", [])),
+                        "ocr_orientation_selected": easyocr_page_diagnostics.get("orientation_selected"),
+                        "ocr_orientation_attempts": list(easyocr_page_diagnostics.get("orientation_attempts") or []),
                         "ocr_enhancement_orientation": getattr(ocr_diag_engine, "last_enhancement_orientation", None),
                         "ocr_targeted_refinement_regions": [
                             region_id for region_id, stat in {
@@ -2015,6 +2015,12 @@ def _refinement_conserves_content(
     new_text = " ".join(t.text.strip() for t in new_tokens if t.text.strip())
     old_chars = len(re.sub(r"\s+", "", old_text))
     new_chars = len(re.sub(r"\s+", "", new_text))
+    # Check 0: critical data must not disappear or be substituted (before short-text bypass)
+    old_critical = _extract_critical_values(old_text)
+    if old_critical:
+        new_critical = _extract_critical_values(new_text)
+        if old_critical - new_critical:
+            return False
     if old_chars <= 4:
         return True
     # Check 1: character coverage
@@ -2026,14 +2032,6 @@ def _refinement_conserves_content(
         old_key = _similarity_key(old_text)
         new_key = _similarity_key(new_text)
         if SequenceMatcher(None, old_key, new_key).ratio() < min_similarity:
-            return False
-    # Check 3: critical data conflict
-    old_critical = _extract_critical_values(old_text)
-    if old_critical:
-        new_critical = _extract_critical_values(new_text)
-        missing = old_critical - new_critical
-        novel = new_critical - old_critical
-        if missing and novel:
             return False
     return True
 

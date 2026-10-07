@@ -2240,6 +2240,7 @@ class EasyOCRBackend:
         """
         dbnet_diag = list(getattr(self, "_last_dbnet_diag", []))
         dbnet_entry = dbnet_diag[0] if dbnet_diag else {}
+        orient_decision = dict(getattr(self, "_last_orientation_decision", {}))
         result = {
             "easyocr_calls": self._easyocr_calls,
             **self._detection_stats,
@@ -2256,6 +2257,8 @@ class EasyOCRBackend:
             "dbnet_weights_available": dbnet_entry.get("weights_available"),
             "dbnet_runtime_available": dbnet_entry.get("runtime_available"),
             "dbnet_failure_reason": dbnet_entry.get("failure_reason"),
+            "orientation_selected": orient_decision.get("selected_angle"),
+            "orientation_attempts": list(orient_decision.get("attempts", [])),
         }
         self.reset_page_diagnostics()
         return result

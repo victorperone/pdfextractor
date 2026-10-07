@@ -238,3 +238,100 @@ class TestB2SemanticConservation:
         old = [_tok("CPF: 529.982.247-25 confirmado", 0, 0, 200, 15)]
         new = [_tok("CPF: 529.982.247-25 confirmado.", 0, 0, 200, 15, conf=0.95)]
         assert _refinement_conserves_content(old, new)
+
+
+# ---------------------------------------------------------------------------
+# B2 — Critical data disappearance must be rejected
+# ---------------------------------------------------------------------------
+
+class TestB2CriticalDataDisappearance:
+    """B2: _refinement_conserves_content must reject disappearing critical values.
+
+    On commit 41b0515 the gate rejects REPLACEMENT (missing AND novel) but NOT
+    DISAPPEARANCE (missing, no novel) — these tests all FAIL before the fix.
+    """
+
+    def test_conservation_rejects_removed_cpf(self):
+        """CPF present in old but absent in new must be rejected."""
+        old = [_tok("CPF: 529.982.247-25 cadastrado.", 0, 0, 200, 15)]
+        new = [_tok("cadastrado e processado agora.", 0, 0, 200, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new), (
+            "CPF disappearance must be rejected"
+        )
+
+    def test_conservation_rejects_removed_cnpj(self):
+        """CNPJ present in old but absent in new must be rejected."""
+        old = [_tok("CNPJ 12.345.678/0001-99 registrado.", 0, 0, 250, 15)]
+        new = [_tok("registrado e confirmado agora.", 0, 0, 250, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new), (
+            "CNPJ disappearance must be rejected"
+        )
+
+    def test_conservation_rejects_removed_process_number(self):
+        """CNJ process number present in old but absent in new must be rejected."""
+        old = [_tok("Processo 1234567-89.2024.1.00.0001 julgado.", 0, 0, 300, 15)]
+        new  = [_tok("julgado e encerrado finalmente.", 0, 0, 300, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new), (
+            "process number disappearance must be rejected"
+        )
+
+    def test_conservation_rejects_removed_currency(self):
+        """Monetary value present in old but absent in new must be rejected."""
+        old = [_tok("Total: R$ 1.234,56 aprovado.", 0, 0, 200, 15)]
+        new = [_tok("aprovado e assinado conforme.", 0, 0, 200, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new), (
+            "currency disappearance must be rejected"
+        )
+
+    def test_conservation_rejects_removed_date(self):
+        """Date present in old but absent in new must be rejected."""
+        old = [_tok("Emitido em 01/01/2024 pelo sistema.", 0, 0, 250, 15)]
+        new = [_tok("emitido pelo sistema nesta data.", 0, 0, 250, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new), (
+            "date disappearance must be rejected"
+        )
+
+    def test_conservation_rejects_removed_percentage(self):
+        """Percentage present in old but absent in new must be rejected."""
+        old = [_tok("Taxa de juros: 12,5% ao mês.", 0, 0, 200, 15)]
+        new = [_tok("taxa de juros ao mês calculada.", 0, 0, 200, 15, conf=0.95)]
+        assert not _refinement_conserves_content(old, new), (
+            "percentage disappearance must be rejected"
+        )
+
+    def test_short_critical_value_does_not_bypass_conservation(self):
+        """A short text that contains a critical value must NOT bypass the gate.
+
+        '25%' has only 3 non-whitespace chars — below the old_chars <= 4 bypass.
+        Before fix: bypass triggered → True returned.
+        After fix:  critical data check runs first → False returned.
+        """
+        old = [_tok("25%", 0, 0, 30, 15)]
+        new = [_tok("abcde", 0, 0, 30, 15, conf=0.99)]
+        assert not _refinement_conserves_content(old, new), (
+            "short text containing a percentage must not bypass conservation"
+        )
+
+    def test_short_currency_does_not_bypass_conservation(self):
+        """R$ 5,00 (6 non-WS chars) containing a monetary value must not bypass."""
+        old = [_tok("R$ 5,00", 0, 0, 60, 15)]
+        new = [_tok("abcdefg", 0, 0, 60, 15, conf=0.99)]
+        assert not _refinement_conserves_content(old, new), (
+            "short text containing R$ value must not bypass conservation"
+        )
+
+    def test_conservation_keeps_same_critical_value_with_minor_text_fix(self):
+        """A minor OCR correction that keeps the same CPF must be accepted."""
+        old = [_tok("CPF: 529.982.247-25 conflrmado.", 0, 0, 200, 15)]  # 'l' instead of 'i'
+        new = [_tok("CPF: 529.982.247-25 confirmado.", 0, 0, 200, 15, conf=0.95)]
+        assert _refinement_conserves_content(old, new), (
+            "minor correction that preserves the CPF must be accepted"
+        )
+
+    def test_conservation_allows_content_extension_without_critical_data(self):
+        """Extending text without any critical data must still be accepted."""
+        old = [_tok("Texto original simples.", 0, 0, 160, 15)]
+        new = [_tok("Texto original simples e completo aqui.", 0, 0, 280, 15, conf=0.95)]
+        assert _refinement_conserves_content(old, new), (
+            "extension without critical data must be accepted"
+        )
