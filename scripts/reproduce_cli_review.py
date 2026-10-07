@@ -160,10 +160,18 @@ def main():
         ([[10, 40], [90, 40], [90, 50], [10, 50]], "LINHA DOIS", 1),
     ]
     remapped = easyocr._remap_raw_for_rotation(raw_rotated, 90, 200, 100)
+    # B1: exhaustive now goes through _exhaustive_with_orientation_selection —
+    # patch that function directly and provide already-converted OcrToken lists.
+    pipeline_tokens = list(easyocr._result_to_pipeline_tokens(remapped, 0, "pt", token_rotation=90))
+    _mock_orient_diag = {"selected_angle": 90, "attempts": [
+        {"angle": 0, "score": 0.10, "token_count": 0},
+        {"angle": 90, "score": 0.92, "token_count": 2},
+    ]}
     backend._quantize, backend._auxiliary_readers = True, {}
     backend._ensure_dbnet18_runtime = lambda: False
     orientation_box = BBox(0, 0, 200, 100)
-    with patch.object(easyocr, "_exhaustive_candidates", return_value=[("rot90", remapped)]):
+    with patch.object(easyocr, "_exhaustive_with_orientation_selection",
+                      return_value=([("rot90", pipeline_tokens)], _mock_orient_diag)):
         current_tokens = backend.recognize_page(np.zeros((100, 200, 3), dtype=np.uint8),
                                                 0, orientation_box, quality_policy="exhaustive")
     # This illustrates the reconstruction contract, not an implemented fix.

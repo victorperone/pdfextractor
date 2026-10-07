@@ -2681,3 +2681,44 @@ class TestB6PreprocessingBaselineDedup:
         assert len(fingerprints) == len(set(fingerprints)), (
             "duplicate preprocessing variants must be deduplicated"
         )
+
+
+# ---------------------------------------------------------------------------
+# T1 — reproduce_cli_review.py must import without error (smoke)
+# ---------------------------------------------------------------------------
+
+class TestReproduceCliReviewImports:
+    """The diagnostic script must be importable without errors.
+
+    Verifies that T1 (removal of _figures_need_ocr) and T2 (images= parameter)
+    are consistent with the current api.py exports.
+    """
+
+    def test_reproduce_cli_review_imports_cleanly(self):
+        """Importing the api symbols used by reproduce_cli_review must not raise."""
+        from structured_pdf_text.api import (
+            _recover_selected_regions,
+            _recover_weak_ocr_regions,
+            _refine_small_footnote_tokens,
+            _figures_requiring_ocr,
+            _refine_figure_ocr,
+        )
+        assert callable(_figures_requiring_ocr), "_figures_requiring_ocr must be callable"
+        assert callable(_refine_figure_ocr), "_refine_figure_ocr must be callable"
+
+    def test_figures_need_ocr_is_not_exported(self):
+        """The removed _figures_need_ocr must not be importable from api."""
+        import structured_pdf_text.api as api_mod
+        assert not hasattr(api_mod, "_figures_need_ocr"), (
+            "_figures_need_ocr was removed (R71) and must not be in api — "
+            "use _figures_requiring_ocr instead"
+        )
+
+    def test_refine_figure_ocr_accepts_images_kwarg(self):
+        """_refine_figure_ocr must accept an images= keyword argument (T2)."""
+        import inspect
+        from structured_pdf_text.api import _refine_figure_ocr
+        params = inspect.signature(_refine_figure_ocr).parameters
+        assert "images" in params, (
+            "_refine_figure_ocr must have an 'images' parameter (added for R71)"
+        )
