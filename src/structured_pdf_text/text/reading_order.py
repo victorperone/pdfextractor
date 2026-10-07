@@ -264,7 +264,13 @@ def order_region_lines(
                 flow_lines=(
                     None
                     if flow_lines_by_region is None
-                    else (flow_lines_by_region.get(region.region_id) or None)
+                    # D11: preserve [] (explicitly computed, no prose lines) vs None
+                    # (region not in dict → all lines participate in hypothesis).
+                    else (
+                        flow_lines_by_region[region.region_id]
+                        if region.region_id in flow_lines_by_region
+                        else None
+                    )
                 ),
             )
             lines, groups = list(prose_result.lines), prose_result.column_groups

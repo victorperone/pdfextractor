@@ -1111,6 +1111,10 @@ def _candidate_family(label: str) -> str:
     return "craft_greedy"
 
 
+_ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD = 5
+"""Below this many total tokens across all adaptive candidates, try rotation recovery (R73)."""
+
+
 def _adaptive_candidates(
     reader: "Any",
     img: "Any",
@@ -1124,6 +1128,12 @@ def _adaptive_candidates(
     When the image is detected as low-contrast or dark-background,
     additional preprocessing variants are appended by
     :func:`_image_preprocessing_candidates` with ``adaptive=True``.
+
+    R73: when the combined result from A+B is very sparse (fewer than
+    :data:`_ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD` tokens), a conditional
+    orientation recovery pass tests 90/180/270° rotations.  This lets
+    adaptive mode recover physically rotated pages (e.g. /Rotate=0 but
+    raster content is sideways) without requiring exhaustive quality policy.
 
     The total number of candidates is therefore dynamic (image-dependent).
     Every call to :func:`_run_easyocr` is reported to ``record_call`` when
@@ -1151,12 +1161,41 @@ def _adaptive_candidates(
         if record_call is not None:
             record_call(_fb)
         results.append((label, raw))
+    # R73: conditional orientation recovery.  When the upright candidates
+    # produced very few tokens, the page raster may be physically rotated.
+    # Test 90/180/270° and keep any rotation that yields results.  The
+    # candidate-fusion scorer will prefer the correct orientation.
+    total_tokens = sum(len(raw) for _, raw in results)
+    if total_tokens < _ADAPTIVE_ORIENTATION_TOKEN_THRESHOLD:
+        try:
+            import numpy as _np
+            _arr_base = _np.asarray(img)
+            for _angle, _label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
+                try:
+                    _rot_img = _rotate_image(_arr_base, _angle)
+                    _rot_h, _rot_w = _rot_img.shape[:2]
+                    _raw_rot, _fb_rot = _run_easyocr(reader, _rot_img, **base_kwargs)
+                    if record_call is not None:
+                        record_call(_fb_rot)
+                    if _raw_rot:
+                        _raw_remapped = _remap_raw_for_rotation(_raw_rot, _angle, _rot_h, _rot_w)
+                        results.append((_label, _raw_remapped))
+                except Exception as _optional_exc:
+                    _propagate_fatal_error(_optional_exc)
+        except Exception as _optional_exc:
+            _propagate_fatal_error(_optional_exc)
     return results
 
 
 def _image_preprocessing_candidates(img: "Any", *, adaptive: bool) -> list[tuple[str, Any]]:
-    """Build optional grayscale/contrast/denoise/threshold image hypotheses."""
+    """Build optional grayscale/contrast/denoise/threshold image hypotheses.
+
+    P1: visually identical images are deduplicated by content fingerprint so
+    clean pages do not trigger redundant OCR inference passes.
+    """
     try:
+        import hashlib
+
         import cv2
         import numpy as np
         from PIL import Image, ImageOps
@@ -1189,7 +1228,20 @@ def _image_preprocessing_candidates(img: "Any", *, adaptive: bool) -> list[tuple
                 (label, cv2.cvtColor(variant, cv2.COLOR_GRAY2RGB) if variant.ndim == 2 else variant)
                 for label, variant in candidates
             ]
-        return candidates
+        # P1: deduplicate identical image arrays before returning to avoid
+        # running separate OCR inference passes on the same pixel content.
+        def _fp(variant: Any) -> str:
+            a = np.asarray(variant)
+            return f"{a.shape}:{a.dtype}:{hashlib.md5(a.tobytes()).hexdigest()}"
+
+        seen: set[str] = set()
+        deduped: list[tuple[str, Any]] = []
+        for label, variant in candidates:
+            fp = _fp(variant)
+            if fp not in seen:
+                seen.add(fp)
+                deduped.append((label, variant))
+        return deduped
     except Exception as _optional_exc:
         _propagate_fatal_error(_optional_exc)
         return []
@@ -1652,11 +1704,16 @@ def _exhaustive_candidates(
     # regardless of whether that count exceeds the default — token count is
     # not a reliable quality proxy, and the scorer already has full context
     # to prefer the better candidate.
+    # Track labels already present (may include rot* from adaptive recovery pass, R73).
+    _existing_labels = {label for label, _ in results}
     try:
         import numpy as _np
         _arr_base = _np.asarray(img)
 
         for _angle, _label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
+            # Skip if adaptive already contributed this rotation candidate (R73).
+            if _label in _existing_labels:
+                continue
             try:
                 _rot_img = _rotate_image(_arr_base, _angle)
                 _rot_h, _rot_w = _rot_img.shape[:2]
@@ -1668,6 +1725,7 @@ def _exhaustive_candidates(
                         _raw_rot, _angle, _rot_h, _rot_w
                     )
                     results.append((_label, _raw_remapped))
+                    _existing_labels.add(_label)
             except Exception as _optional_exc:
                 _propagate_fatal_error(_optional_exc)
                 pass

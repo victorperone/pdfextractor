@@ -386,12 +386,14 @@ class PdfTextExtractor:
                     ocr_available_by_mode and selected_regions and not page_ocr_requested
                 )
                 ocr_requested = page_ocr_requested or region_ocr_requested
-                figure_ocr_requested = bool(
-                    ocr_available_by_mode
-                    and native_page.objects.images
-                    and not page_ocr_requested
-                    and _figures_need_ocr(native_page, selected_regions)
+                # R71: compute the exact list of unresolved images up-front so
+                # the decision and execution paths cannot diverge.
+                _figures_pending_ocr = (
+                    _figures_requiring_ocr(native_page, selected_regions)
+                    if ocr_available_by_mode and native_page.objects.images and not page_ocr_requested
+                    else []
                 )
+                figure_ocr_requested = bool(_figures_pending_ocr)
                 if ocr_requested or figure_ocr_requested:
                     try:
                         self._ensure_ocr_engine()
@@ -594,6 +596,7 @@ class PdfTextExtractor:
                         quality_policy=effective_ocr_quality_policy(self.config).value,
                         page_rotation=native_page.objects.rotation,
                         warnings=warnings,
+                        images=_figures_pending_ocr,
                     )
                     if any(item.startswith("figure_ocr_failed:") for item in warnings):
                         partial_reasons.append("figure_ocr_unavailable")
@@ -2349,22 +2352,53 @@ def _bind_figure_ocr_to_regions(
     region.ocr_tokens = list(figure_tokens)
 
 
-def _figures_need_ocr(
+def _image_union_coverage(image_bbox: BBox, regions: list[LayoutRegion]) -> float:
+    """Fraction of image_bbox covered by the union of all region intersections.
+
+    Uses coordinate-compression sweep to avoid double-counting overlapping regions.
+    """
+    if image_bbox.area <= 0:
+        return 1.0
+    intersections: list[BBox] = []
+    for region in regions:
+        inter = region.bbox.intersection(image_bbox)
+        if inter is not None and inter.area > 0:
+            intersections.append(inter)
+    if not intersections:
+        return 0.0
+    # Coordinate-compression sweep over the intersection rectangles.
+    xs = sorted({r.x0 for r in intersections} | {r.x1 for r in intersections})
+    ys = sorted({r.y0 for r in intersections} | {r.y1 for r in intersections})
+    union_area = 0.0
+    for i in range(len(xs) - 1):
+        for j in range(len(ys) - 1):
+            cx = (xs[i] + xs[i + 1]) / 2
+            cy = (ys[j] + ys[j + 1]) / 2
+            if any(r.x0 <= cx <= r.x1 and r.y0 <= cy <= r.y1 for r in intersections):
+                union_area += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j])
+    return union_area / image_bbox.area
+
+
+def _figures_requiring_ocr(
     page: NativePageEvidence,
     selected_regions: list[LayoutRegion],
-) -> bool:
-    image_boxes = [image.bbox for image in page.objects.images if image.bbox is not None]
-    if not image_boxes:
-        return False
-    for image_bbox in image_boxes:
-        covered = any(
-            region.bbox.overlap_ratio(image_bbox) >= 0.80
-            or image_bbox.overlap_ratio(region.bbox) >= 0.80
-            for region in selected_regions
-        )
-        if not covered:
-            return True
-    return False
+) -> list[Any]:
+    """Return image objects whose content is not yet covered by selected regions.
+
+    R71: returns the exact list that _refine_figure_ocr should process, so the
+    decision and execution paths cannot diverge.
+    R72: coverage uses union(intersections) / image_bbox.area to avoid false
+    positives from tiny regions sitting wholly inside a large image.
+    """
+    result = []
+    for image in page.objects.images:
+        image_bbox = image.bbox
+        if image_bbox is None:
+            continue
+        # R72: use union coverage (image as denominator)
+        if _image_union_coverage(image_bbox, selected_regions) < 0.80:
+            result.append(image)
+    return result
 
 
 def _validate_detected_tables(
@@ -2738,6 +2772,7 @@ def _refine_figure_ocr(
     quality_policy: str = "baseline",
     page_rotation: int = 0,
     warnings: list[str] | None = None,
+    images: list[Any] | None = None,
 ) -> list[
     tuple[
         BBox,
@@ -2759,6 +2794,10 @@ def _refine_figure_ocr(
     expose them via ``PageDiagnostics`` without surfacing PIL/image internals.
     An invalid figure is skipped; other figures on the same page are still
     processed.
+
+    R71: when ``images`` is provided, only those image objects are processed —
+    the decision (which images need OCR) and execution (which images are OCRed)
+    cannot diverge.  When ``None``, falls back to all images on the page.
     """
     import math
 
@@ -2774,7 +2813,8 @@ def _refine_figure_ocr(
         ]
     ] = []
     refiner = OcrRegionRefiner(engine)
-    for image in page.objects.images:
+    images_to_process = images if images is not None else page.objects.images
+    for image in images_to_process:
         figure_bbox = image.bbox
         if figure_bbox is None or figure_bbox.height <= 0 or figure_bbox.width <= 0:
             if warnings is not None and figure_bbox is not None:
