@@ -799,7 +799,17 @@ class PdfTextExtractor:
                         time.perf_counter() - fusion_start
                     ) * 1000
 
-                use_ocr_as_primary = bool(ocr_lines) and page_ocr_requested
+                # H1: page-level OCR must not replace strong native text.
+                # On hybrid pages (native + raster image), the unmatched OCR
+                # tokens are incorporated by the hybrid assembly path instead.
+                use_ocr_as_primary = _should_use_page_ocr_as_primary(
+                    native_lines=native_lines,
+                    ocr_lines=ocr_lines,
+                    complexity=complexity,
+                    page_ocr_requested=page_ocr_requested,
+                    raster_primary=raster_primary,
+                    mode=mode,
+                )
                 if use_ocr_as_primary:
                     ocr_region = full_page_text_region(
                         page_index,
@@ -1522,14 +1532,21 @@ def _recover_selected_regions(
         attempt counts, errors and selected scale/rotation for diagnostics.
     """
     refiner = OcrRegionRefiner(engine)
+    # R66: resolve the scale and variant profile before building requests so
+    # that the declared quality_policy is actually respected.  Baseline must
+    # not silently expand into multi-scale / quality-variant work regardless
+    # of how the caller configured ocr_quality_variants.
+    _is_baseline_policy = str(quality_policy or "").lower() == "baseline"
     requests = [
         RegionRefinementRequest(
             bbox=region.bbox,
-            scale_factors=(1.0, 1.5, 2.0) if any(
-                marker in " ".join(region.quality.reasons).lower()
-                for marker in ("small", "sparse", "missing", "damaged")
-            ) else (1.0,),
-            quality_variants=quality_variants,
+            scale_factors=(1.0,) if _is_baseline_policy else (
+                (1.0, 1.5, 2.0) if any(
+                    marker in " ".join(region.quality.reasons).lower()
+                    for marker in ("small", "sparse", "missing", "damaged")
+                ) else (1.0,)
+            ),
+            quality_variants=False if _is_baseline_policy else quality_variants,
             quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
             page_rotation=page_rotation,
@@ -1577,6 +1594,38 @@ def _recover_selected_regions(
     return _deduplicate_region_ocr_tokens(tokens), passes, batches, stats
 
 
+def _deduplicate_refinement_tokens(tokens: list[OcrToken]) -> list[OcrToken]:
+    """Remove spatially and textually duplicate tokens from a reread result.
+
+    When EasyOCR rerenders at high scale it can return the same text span
+    twice (e.g. "NOTA ABC" and "NOTA ABC" at nearly the same position).
+    Only the higher-confidence copy of each duplicate group is retained.
+    """
+    if len(tokens) <= 1:
+        return tokens
+    from unicodedata import normalize
+    def _norm(text: str) -> str:
+        return " ".join(normalize("NFKC", text).casefold().split())
+    kept: list[OcrToken] = []
+    for token in tokens:
+        norm = _norm(token.text)
+        replaced = False
+        duplicate = False
+        for idx, existing in enumerate(kept):
+            if _norm(existing.text) != norm:
+                continue
+            if token.bbox.iou(existing.bbox) < 0.50:
+                continue
+            duplicate = True
+            if (token.confidence or 0.0) > (existing.confidence or 0.0):
+                kept[idx] = token
+                replaced = True
+            break
+        if not duplicate:
+            kept.append(token)
+    return kept
+
+
 def _refine_small_footnote_tokens(
     *, engine: Any, page_index: int, page_bbox: BBox, tokens: list[OcrToken],
     quality_policy: str, region_renderer: Any, base_scale: float,
@@ -1618,6 +1667,10 @@ def _refine_small_footnote_tokens(
         reread = [token for token in reread if token.text.strip()]
         if not reread:
             continue
+        # R65: deduplicate the reread result before evaluating it.
+        # High-scale renders can return the same span twice (e.g. "NOTA ABC"
+        # twice), which inflates char count and bypasses conservation checks.
+        reread = _deduplicate_refinement_tokens(reread)
         old_indices = [
             index for index, token in enumerate(output)
             if box.x0 <= token.bbox.cx <= box.x1 and box.y0 <= token.bbox.cy <= box.y1
@@ -1627,15 +1680,15 @@ def _refine_small_footnote_tokens(
         new_text = " ".join(token.text.strip() for token in reread)
         old_score = _ocr_token_score(old_tokens)
         new_score = _ocr_token_score(reread)
-        # A rerender can win on better confidence or recover at least 20% more
-        # non-whitespace characters without a confidence drop over 0.10.
         old_chars = len(re.sub(r"\s+", "", old_text))
         new_chars = len(re.sub(r"\s+", "", new_text))
-        # R65: reject refinements that truncate meaningful content. A rerender
-        # must not drop more than 30% of non-whitespace characters even when
-        # its confidence is higher, unless the original was nearly empty.
-        if old_chars > 4 and new_chars < old_chars * 0.70:
+        # R65: use the shared conservation gate (≥60% char retention) so that
+        # the same rule applies to both footnote refinements and weak-region
+        # recovery. This replaces the previous hard-coded 70% check.
+        if not _refinement_conserves_content(old_tokens, reread):
             continue
+        # A rerender can win on better confidence or recover at least 20% more
+        # non-whitespace characters without a confidence drop over 0.10.
         if not (
             new_score > old_score + 0.05
             or (new_chars >= old_chars * 1.2 and new_score >= old_score - 0.10)
@@ -2108,6 +2161,48 @@ def _selected_page_indices(page_indices: tuple[int, ...] | None, page_count: int
             f"page_indices must be zero-based values within [0, {page_count}); got {page_indices}"
         )
     return selected
+
+
+def _should_use_page_ocr_as_primary(
+    *,
+    native_lines: list[Any],
+    ocr_lines: list[Any],
+    complexity: Any,
+    page_ocr_requested: bool,
+    raster_primary: bool,
+    mode: Any,
+) -> bool:
+    """Return True only when OCR should replace native text as the primary source.
+
+    OCR taking ownership of the whole page discards all native regions.  This is
+    correct for pure-raster pages (no useful native text) and for forced OCR
+    mode, but it is *wrong* for hybrid pages where native text is strong.
+
+    On a hybrid page the correct policy is:
+      - native regions stay as primary;
+      - unmatched OCR tokens (from the image/raster portion) are appended as
+        supplemental coverage by the hybrid assembly path (line ~980).
+
+    Criteria for OCR becoming primary:
+    1. Forced OCR mode (user explicitly chose OCR as source) — always True.
+    2. No native lines at all — OCR must be primary.
+    3. Native is negligible (<20 non-WS chars) — OCR can take over.
+
+    In all other cases native is considered "strong" and stays primary.
+    """
+    from structured_pdf_text.config import ExtractionMode
+    if not page_ocr_requested or not ocr_lines:
+        return False
+    if mode == ExtractionMode.OCR:
+        return True
+    if not native_lines:
+        return True
+    native_chars = sum(
+        len(re.sub(r"\s+", "", line.text)) for line in native_lines
+    )
+    if native_chars >= 20:
+        return False
+    return True
 
 
 def _is_raster_primary_candidate(complexity: Any) -> bool:

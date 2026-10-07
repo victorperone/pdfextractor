@@ -767,10 +767,22 @@ def _result_to_ocr_tokens(
     return tokens
 
 
+def _label_to_token_rotation(label: str) -> int:
+    """Return the clockwise rotation angle encoded in a candidate label.
+
+    Rotation candidates (rot90/rot180/rot270) remap polygon coordinates back to
+    the original image space via ``_remap_raw_for_rotation``, but the OcrToken
+    still needs to carry the angle so that downstream orientation-aware code
+    (quality gate, reading order) can treat the token correctly.
+    """
+    return {"rot90": 90, "rot180": 180, "rot270": 270}.get(label, 0)
+
+
 def _result_to_pipeline_tokens(
     raw: list[Any], page_index: int, language: str,
     offset_x: float = 0.0, offset_y: float = 0.0,
     source: "SourceKind" = SourceKind.OCR_PAGE,
+    token_rotation: int = 0,
 ) -> list[OcrToken]:
     """Convert EasyOCR raw result tuples to pipeline OcrToken instances.
 
@@ -817,6 +829,7 @@ def _result_to_pipeline_tokens(
             text=str(text), bbox=bbox,
             confidence=max(0.0, min(1.0, confidence if confidence is not None else 0.0)),
             language=language, source=source,
+            rotation=token_rotation,
             polygon=pipeline_polygon,
         ))
     return tokens
@@ -2208,10 +2221,16 @@ class EasyOCRBackend:
                 raw_candidates = _adaptive_candidates(
                     self._reader, img, base_kwargs, record_call=self._record_call
                 )
-            # Convert each candidate's raw result to pipeline tokens, pick best
+            # Convert each candidate's raw result to pipeline tokens, pick best.
+            # R69: propagate candidate rotation to OcrToken.rotation so that
+            # downstream orientation-aware code (quality gate, reading order) can
+            # treat rotated tokens correctly without relying on bbox geometry alone.
             pipeline_candidates: list[tuple[str, list[OcrToken]]] = []
             for label, raw in raw_candidates:
-                pl_tokens = _result_to_pipeline_tokens(raw, page_index, self._language)
+                token_rotation = _label_to_token_rotation(label)
+                pl_tokens = _result_to_pipeline_tokens(
+                    raw, page_index, self._language, token_rotation=token_rotation
+                )
                 pipeline_candidates.append((label, pl_tokens))
             tokens, cand_diag = _best_candidate(pipeline_candidates)
             self._last_candidate_diagnostics = cand_diag
