@@ -171,8 +171,19 @@ def test_compare_never_substitutes_a_failed_requested_reference(monkeypatch, tmp
         "requested": Adapter("requested", ComparisonExtraction("requested", "failure", 0, "", "", 1, error="failed")),
         "other": Adapter("other", ComparisonExtraction("other", "success", 1, "text", "text", 1)),
     }
-    monkeypatch.setattr(compare_module, "comparison_adapters", lambda _language: registry)
-    result = compare_extractors(tmp_path / "unused.pdf", ("requested", "other"), reference="requested")
+    selected_config = ExtractorConfig(mode="balanced", ocr_engine="paddle")
+    received: dict[str, object] = {}
+
+    def adapter_factory(language, config=None):
+        received.update(language=language, config=config)
+        return registry
+
+    monkeypatch.setattr(compare_module, "comparison_adapters", adapter_factory)
+    result = compare_extractors(
+        tmp_path / "unused.pdf", ("requested", "other"),
+        reference="requested", config=selected_config,
+    )
+    assert received == {"language": "pt", "config": selected_config}
     assert result["status"] == "failure"
     assert result["requested_reference"] == "requested"
     assert result["effective_reference"] is None
@@ -194,7 +205,7 @@ def test_all_failed_comparison_is_a_failure_even_with_diagnostic_results(monkeyp
     monkeypatch.setattr(
         compare_module,
         "comparison_adapters",
-        lambda _language: {name: Adapter(name) for name in ("reference", "other")},
+        lambda _language, _config=None: {name: Adapter(name) for name in ("reference", "other")},
     )
     result = compare_extractors(tmp_path / "unused.pdf", ("reference", "other"), reference="reference")
     assert result["status"] == "failure"
@@ -238,10 +249,16 @@ def test_cli_all_failed_comparison_saves_diagnostic_and_returns_nonzero(monkeypa
             return ComparisonExtraction(self.name, "failure", 0, "", "", 1, error="injected failure")
 
     names = ("structured-native", "pdfium-raw", "pymupdf")
+    received: dict[str, object] = {}
+
+    def adapter_factory(language, config=None):
+        received.update(language=language, config=config)
+        return {name: Adapter(name) for name in names}
+
     monkeypatch.setattr(
         compare_module,
         "comparison_adapters",
-        lambda _language: {name: Adapter(name) for name in names},
+        adapter_factory,
     )
     code = cli_module.main(["compare", str(tmp_path / "unused.pdf")])
     output = json.loads(capsys.readouterr().out)
@@ -249,6 +266,9 @@ def test_cli_all_failed_comparison_saves_diagnostic_and_returns_nonzero(monkeypa
     assert output["status"] == "failure"
     assert output["valid"] is False
     assert output["results"]
+    assert received["language"] == "pt-BR"
+    assert isinstance(received["config"], ExtractorConfig)
+    assert received["config"].ocr_engine == "easyocr"
 
 
 def test_cli_partial_extraction_keeps_output_and_returns_nonzero(monkeypatch, tmp_path: Path) -> None:

@@ -55,7 +55,7 @@ def check_models(cache_home: str, profile: str) -> bool:
 def test_image(cache_home: str, profile: str) -> bool:
     """Load PaddleOCR directly and run inference on a synthetic image."""
     _add_src()
-    from structured_pdf_text.ocr.models import get_profile
+    from structured_pdf_text.ocr.models import UV_DOC_MODEL, get_profile
     from structured_pdf_text.ocr.runtime_policy import resolve_paddle_runtime_policy
 
     import numpy as np
@@ -64,6 +64,8 @@ def test_image(cache_home: str, profile: str) -> bool:
     p = get_profile(profile)
     root = Path(cache_home) / "official_models"
     kwargs = {
+        "doc_unwarping_model_dir": str(root / UV_DOC_MODEL),
+        "doc_unwarping_model_name": UV_DOC_MODEL,
         "doc_orientation_classify_model_dir": str(root / p.doc_orientation),
         "doc_orientation_classify_model_name": p.doc_orientation,
         "textline_orientation_model_dir": str(root / p.textline_orientation),

@@ -325,12 +325,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
         choices=("structured-native", "structured-balanced", "pdfium-raw", "pymupdf"),
         default="pymupdf",
     )
-    compare_parser.add_argument("--language", default=None, help="Explicit OCR profile when an OCR adapter is selected")
-    compare_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
+    compare_parser.add_argument("--language", default=None, help="OCR language for the selected adapter (default: pt-BR)")
+    compare_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr", help="OCR backend family (default: easyocr)")
     compare_parser.add_argument("--cache-home", default=None, metavar="DIR")
     compare_parser.add_argument(
         "--ocr-model-profile", default=None, metavar="PROFILE",
-        help="Explicit OCR profile required when structured-balanced is selected",
+        help="Paddle model profile; valid only with --ocr-engine paddle",
     )
     compare_parser.add_argument(
         "--include-text",
@@ -647,6 +647,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         ) else 0
 
     if args.command == "compare":
+        if args.ocr_model_profile and args.ocr_engine != "paddle":
+            print("--ocr-model-profile requires --ocr-engine paddle", file=sys.stderr)
+            return 2
         ocr_adapters = {"structured-balanced"}
         comparison_config = ExtractorConfig(
             mode=ExtractionMode.BALANCED,
@@ -707,14 +710,20 @@ def _cmd_setup_easyocr_models(language: str, cache_home: str | None, include_dbn
         cache = Path(cache_home).expanduser() / "easyocr" if cache_home else Path.home() / ".cache" / "pdfextractor" / "easyocr"
         cache.mkdir(parents=True, exist_ok=True)
         langs = [backend_language(language, "easyocr")]
-        craft_reader = easyocr.Reader(langs, gpu=False, model_storage_directory=str(cache), download_enabled=True)
+        reader_options = {
+            "gpu": False, "model_storage_directory": str(cache), "download_enabled": True,
+        }
+        recog_network = os.environ.get("EASYOCR_RECOG_NETWORK")
+        if recog_network:
+            reader_options["recog_network"] = recog_network
+        craft_reader = easyocr.Reader(langs, **reader_options)
+        craft_reader._pdfextractor_init_options = {"lang_list": list(langs), **reader_options}
 
         result: dict = {"status": "ready", "cache": str(cache), "dbnet18_requested": include_dbnet}
 
         if include_dbnet:
             easyocr.Reader(
-                langs, gpu=False, detect_network="dbnet18",
-                model_storage_directory=str(cache), download_enabled=True,
+                langs, detect_network="dbnet18", **reader_options,
             )
             dbnet_weights = _dbnet18_weights_available(cache)
             dbnet_ok, dbnet_fail = _probe_dbnet18_runtime_uncached(craft_reader, cache)

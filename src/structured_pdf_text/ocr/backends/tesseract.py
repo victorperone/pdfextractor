@@ -532,7 +532,17 @@ class TesseractBackend:
                 parsed = _map_rotated_tokens_to_original(parsed, rotation, original_width, original_height)
             if request.region_bbox:
                 from dataclasses import replace
-                parsed = [replace(token, bbox=BBox(token.bbox.x0 + rx0, token.bbox.y0 + ry0, token.bbox.x1 + rx0, token.bbox.y1 + ry0)) for token in parsed]
+                parsed = [
+                    replace(
+                        token,
+                        bbox_px=(
+                            token.bbox_px[0] + rx0, token.bbox_px[1] + ry0,
+                            token.bbox_px[2] + rx0, token.bbox_px[3] + ry0,
+                        ),
+                        polygon_px=tuple((x + rx0, y + ry0) for x, y in token.polygon_px),
+                    )
+                    for token in parsed
+                ]
             tokens = tuple(parsed)
             text = " ".join(t.text for t in tokens)
             status = "ok" if tokens else "no_text"
@@ -691,21 +701,56 @@ class TesseractBackend:
 
 
 def _map_rotated_tokens_to_original(
-    tokens: list[OcrToken], clockwise_rotation: int, original_width: int, original_height: int
-) -> list[OcrToken]:
-    """Map boxes from Tesseract's OSD-corrected raster back to input pixels."""
-    mapped: list[OcrToken] = []
-    for token in tokens:
-        box = token.bbox
+    tokens: list[OCRToken] | list[OcrToken],
+    clockwise_rotation: int,
+    original_width: int,
+    original_height: int,
+) -> list[OCRToken] | list[OcrToken]:
+    """Map canonical or pipeline tokens from OSD pixels back to input pixels.
+
+    The benchmark contract stores pixel tuples (``bbox_px``/``polygon_px``),
+    while the page pipeline stores ``BBox``/``Point`` values (``bbox`` and
+    ``polygon``). Both interfaces share this geometric transform and retain
+    their own token type and all non-geometric metadata.
+    """
+    from dataclasses import replace
+
+    def map_point(x: float, y: float) -> tuple[float, float]:
         if clockwise_rotation == 90:
-            bbox = BBox(box.y0, original_height - box.x1, box.y1, original_height - box.x0)
-        elif clockwise_rotation == 180:
-            bbox = BBox(original_width - box.x1, original_height - box.y1,
-                        original_width - box.x0, original_height - box.y0)
-        elif clockwise_rotation == 270:
-            bbox = BBox(original_width - box.y1, box.x0, original_width - box.y0, box.x1)
+            return y, original_height - x
+        if clockwise_rotation == 180:
+            return original_width - x, original_height - y
+        if clockwise_rotation == 270:
+            return original_width - y, x
+        return x, y
+
+    mapped: list[OCRToken] = []
+    for token in tokens:
+        canonical_pixels = hasattr(token, "bbox_px")
+        bbox_attr = "bbox_px" if canonical_pixels else "bbox"
+        polygon_attr = "polygon_px" if canonical_pixels else "polygon"
+        raw_bbox = getattr(token, bbox_attr)
+        if isinstance(raw_bbox, BBox):
+            x0, y0, x1, y1 = raw_bbox.x0, raw_bbox.y0, raw_bbox.x1, raw_bbox.y1
         else:
-            bbox = box
-        from dataclasses import replace
-        mapped.append(replace(token, bbox=bbox))
+            x0, y0, x1, y1 = raw_bbox
+        corners = [
+            map_point(x0, y0), map_point(x1, y0),
+            map_point(x1, y1), map_point(x0, y1),
+        ]
+        xs = [point[0] for point in corners]
+        ys = [point[1] for point in corners]
+        mapped_bbox = (min(xs), min(ys), max(xs), max(ys))
+        if isinstance(raw_bbox, BBox):
+            mapped_bbox = BBox(*mapped_bbox)
+        raw_polygon = getattr(token, polygon_attr, None)
+        mapped_polygon = None
+        if raw_polygon is not None:
+            points = []
+            for point in raw_polygon:
+                x, y = (point.x, point.y) if hasattr(point, "x") else point
+                mapped_point = map_point(x, y)
+                points.append(type(point)(*mapped_point) if hasattr(point, "x") else mapped_point)
+            mapped_polygon = tuple(points)
+        mapped.append(replace(token, **{bbox_attr: mapped_bbox, polygon_attr: mapped_polygon}))
     return mapped

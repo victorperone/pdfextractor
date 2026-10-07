@@ -747,6 +747,7 @@ class PdfTextExtractor:
                     and ocr_image is not None
                     and self.ocr_engine is not None
                 ):
+                    footnote_start = time.perf_counter()
                     ocr_tokens, footnote_refinements = _refine_small_footnote_tokens(
                         engine=self.ocr_engine,
                         page_index=page_index,
@@ -759,6 +760,9 @@ class PdfTextExtractor:
                         base_scale=ocr_render_scale,
                         page_rotation=native_page.objects.rotation,
                     )
+                    timings["ocr_footnote_refinement_ms"] = (
+                        time.perf_counter() - footnote_start
+                    ) * 1000
 
                 # Recompute alignment after refinements so diagnostics and
                 # supplemental text describe the final OCR evidence.
@@ -1680,8 +1684,11 @@ def _refine_critical_data_tokens(
         if callable(region_renderer):
             try:
                 region_image = region_renderer(box, base_scale * 1.75)
+                from structured_pdf_text.ocr.image_views import canonicalize_page_image
+                region_image = canonicalize_page_image(region_image, page_rotation)
                 hypotheses.append(_call_page_recognition(
-                    engine.recognize_page, region_image, page_index, box, quality_policy
+                    engine.recognize_page, region_image, page_index, box, quality_policy,
+                    page_rotation=0,
                 ))
                 if _backend_supports(engine, "direct_recognition") and callable(getattr(engine, "recognize_direct", None)):
                     hypotheses.append(engine.recognize_direct(
@@ -1743,6 +1750,7 @@ def _refine_table_cells_ocr(
     from PIL import Image
     from .tables.cell_ocr import crop_cell_image
     from .tables.text_join import join_table_tokens
+    from structured_pdf_text.ocr.image_views import canonicalize_page_image
 
     refiner = CriticalDataRefiner()
     page_array = np.asarray(page_image)
@@ -1755,7 +1763,10 @@ def _refine_table_cells_ocr(
         for cell in table.cells:
             if cell.bbox is None or (cell.text.strip() and cell.confidence >= 0.70):
                 continue
-            crop = crop_cell_image(page_array, cell.bbox, page_bbox, pad_px=3)
+            crop = crop_cell_image(
+                page_array, cell.bbox, page_bbox, pad_px=3,
+                page_rotation=page_rotation,
+            )
             if crop is None or not crop.size:
                 continue
             if callable(region_renderer):
@@ -1766,6 +1777,7 @@ def _refine_table_cells_ocr(
                 except Exception as exc:
                     raise_if_resource_exhausted(exc, page_index=page_index, stage="table_cell_render")
                     pass
+            crop = canonicalize_page_image(crop, page_rotation)
             cell_header = next((
                 item.text for item in table.cells
                 if item.col == cell.col and item.row in header_rows and item.text.strip()
@@ -1775,7 +1787,7 @@ def _refine_table_cells_ocr(
             try:
                 candidates.append(_call_page_recognition(
                     engine.recognize_page, crop, page_index, cell.bbox, quality_policy,
-                    page_rotation=page_rotation,
+                    page_rotation=0,
                 ))
             except FatalExtractionError:
                 raise
@@ -1796,7 +1808,7 @@ def _refine_table_cells_ocr(
                 enlarged = Image.fromarray(crop).resize((crop.shape[1] * 2, crop.shape[0] * 2), Image.Resampling.LANCZOS)
                 candidates.append(_call_page_recognition(
                     engine.recognize_page, enlarged, page_index, cell.bbox, quality_policy,
-                    page_rotation=page_rotation,
+                    page_rotation=0,
                 ))
             except FatalExtractionError:
                 raise

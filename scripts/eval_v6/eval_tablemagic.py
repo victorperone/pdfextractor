@@ -298,17 +298,18 @@ def _pdf_page_to_image(pdf_path: Path, page_number: int, bbox: tuple[float, floa
     import pypdfium2 as pdfium
 
     pdf = pdfium.PdfDocument(str(pdf_path))
-    if page_number < 1 or page_number > len(pdf):
-        raise ValueError(f"page {page_number} is outside the PDF ({len(pdf)} pages)")
-    page = pdf[page_number - 1]
-    page_width, page_height = page.get_size()
-    x0, y0, x1, y1 = bbox
-    if x0 < 0 or y0 < 0 or x1 > page_width or y1 > page_height:
-        raise ValueError(
-            f"bbox {bbox} is outside page {page_number} bounds "
-            f"(0, 0, {page_width:.2f}, {page_height:.2f})"
-        )
+    page = None
     try:
+        if page_number < 1 or page_number > len(pdf):
+            raise ValueError(f"page {page_number} is outside the PDF ({len(pdf)} pages)")
+        page = pdf[page_number - 1]
+        page_width, page_height = page.get_size()
+        x0, y0, x1, y1 = bbox
+        if x0 < 0 or y0 < 0 or x1 > page_width or y1 > page_height:
+            raise ValueError(
+                f"bbox {bbox} is outside page {page_number} bounds "
+                f"(0, 0, {page_width:.2f}, {page_height:.2f})"
+            )
         bitmap = page.render(scale=scale)
         try:
             image = bitmap.to_pil()
@@ -320,8 +321,11 @@ def _pdf_page_to_image(pdf_path: Path, page_number: int, bbox: tuple[float, floa
         finally:
             bitmap.close()
     finally:
-        page.close()
-        pdf.close()
+        try:
+            if page is not None:
+                page.close()
+        finally:
+            pdf.close()
 
 
 def _image_input(image_path: Path, output_dir: Path) -> tuple[Path, dict[str, Any]]:

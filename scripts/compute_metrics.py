@@ -228,7 +228,7 @@ def _wer(hyp: str, ref: str) -> float:
 
 
 def compute_text_metrics(hyp: str, ref: str) -> dict:
-    """Compute all Group 1 text-quality metrics.
+    """Compute all Group 1 text-quality metrics for script/report consumers.
 
     Returns a dict with cer_raw, cer_normalized, cer_text_only, wer, word_accuracy,
     substitution_rate, deletion_rate, insertion_rate, omission_rate.
@@ -979,7 +979,7 @@ def _mean(vals: list[float]) -> float:
 
 
 def aggregate_page_metrics(per_page: list[dict]) -> dict:
-    """Compute mean, median, and worst value for each numeric metric across all per-page results."""
+    """Aggregate per-page metrics for evaluation reports and downstream scripts."""
     if not per_page:
         return {}
 

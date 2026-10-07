@@ -61,14 +61,25 @@ def rasterize_pdf(source: Path, output: Path, manifest: Path, scale: float = 2.0
         raise FileNotFoundError(source)
 
     document = pdfium.PdfDocument(str(source))
-    output.parent.mkdir(parents=True, exist_ok=True)
+    source_page_facts: list[dict[str, Any]] = []
     try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        source_page_count = len(document)
         with TemporaryDirectory(prefix="pdfextractor-raster-"):
             canvas_pdf = None
-            for index in range(len(document)):
+            for index in range(source_page_count):
                 page = document[index]
                 try:
                     width, height = page.get_size()
+                    textpage = page.get_textpage()
+                    try:
+                        source_text_chars = len(textpage.get_text_range() or "")
+                    finally:
+                        textpage.close()
+                    source_page_facts.append({
+                        "source_size_pt": [width, height],
+                        "source_text_chars": source_text_chars,
+                    })
                     bitmap = page.render(scale=scale)
                     try:
                         image = bitmap.to_pil().convert("RGB")
@@ -100,19 +111,26 @@ def rasterize_pdf(source: Path, output: Path, manifest: Path, scale: float = 2.0
 
     entries = []
     output_document = pdfium.PdfDocument(str(output))
-    for index in range(len(document)):
-        page = document[index]
-        out_page = output_document[index]
-        entries.append(
-            {
-                "page": index + 1,
-                "source_page": index + 1,
-                "source_size_pt": list(page.get_size()),
-                "output_size_pt": list(out_page.get_size()),
-                "source_text_chars": len(page.get_textpage().get_text_range() or ""),
-                "output_text_chars": len(out_page.get_textpage().get_text_range() or ""),
-            }
-        )
+    try:
+        for index in range(source_page_count):
+            out_page = output_document[index]
+            try:
+                output_textpage = out_page.get_textpage()
+                try:
+                    output_text_chars = len(output_textpage.get_text_range() or "")
+                finally:
+                    output_textpage.close()
+                entries.append({
+                    "page": index + 1,
+                    "source_page": index + 1,
+                    **source_page_facts[index],
+                    "output_size_pt": list(out_page.get_size()),
+                    "output_text_chars": output_text_chars,
+                })
+            finally:
+                out_page.close()
+    finally:
+        output_document.close()
     result = {
         "schema": "structured-pdf-text.raster-evaluation-input.v1",
         "source_pdf": str(source),

@@ -51,6 +51,7 @@ def crop_cell_image(
     page_bbox: "BBox",
     *,
     pad_px: int = _CELL_CROP_PAD_PX,
+    page_rotation: int = 0,
 ) -> "Any | None":
     """Crop a table cell from the page raster, adding ``pad_px`` border on each side.
 
@@ -66,23 +67,30 @@ def crop_cell_image(
     """
     try:
         import numpy as np
+        from structured_pdf_text.geometry import BBox
 
         arr = np.asarray(page_array)
         ph, pw = arr.shape[:2]
         if ph == 0 or pw == 0:
             return None
 
-        # Both canonical page boxes and raster arrays use a top-left origin.
         page_w = page_bbox.width or pw
         page_h = page_bbox.height or ph
-        x_scale = pw / page_w if page_w > 0 else 1.0
-        y_scale = ph / page_h if page_h > 0 else 1.0
+        rotation = page_rotation % 360
+        visual_page_w = page_h if rotation in (90, 270) else page_w
+        visual_page_h = page_w if rotation in (90, 270) else page_h
+        local_cell = BBox(
+            cell_bbox.x0 - page_bbox.x0, cell_bbox.y0 - page_bbox.y0,
+            cell_bbox.x1 - page_bbox.x0, cell_bbox.y1 - page_bbox.y0,
+        ).rotate_to_visual(rotation, page_w, page_h)
+        x_scale = pw / visual_page_w if visual_page_w > 0 else 1.0
+        y_scale = ph / visual_page_h if visual_page_h > 0 else 1.0
 
-        # Convert canonical page coordinates directly to raster coordinates.
-        rx0 = int((cell_bbox.x0 - page_bbox.x0) * x_scale) - pad_px
-        ry0 = int((cell_bbox.y0 - page_bbox.y0) * y_scale) - pad_px
-        rx1 = int((cell_bbox.x1 - page_bbox.x0) * x_scale) + pad_px
-        ry1 = int((cell_bbox.y1 - page_bbox.y0) * y_scale) + pad_px
+        # Raster pixels from PDFium follow visual /Rotate coordinates.
+        rx0 = int(local_cell.x0 * x_scale) - pad_px
+        ry0 = int(local_cell.y0 * y_scale) - pad_px
+        rx1 = int(local_cell.x1 * x_scale) + pad_px
+        ry1 = int(local_cell.y1 * y_scale) + pad_px
 
         rx0 = max(0, rx0)
         ry0 = max(0, ry0)
@@ -114,6 +122,7 @@ def ocr_table_cells(
     *,
     confidence_threshold: float = _REFINE_CONFIDENCE_THRESHOLD,
     max_cells: int = 200,
+    page_rotation: int = 0,
 ) -> "StructuredTable":
     """Run targeted OCR on low-confidence table cells and return an updated table.
 
@@ -146,7 +155,7 @@ def ocr_table_cells(
             refined_cells.append(cell)
             continue
 
-        crop = crop_cell_image(page_array, cell.bbox, page_bbox)
+        crop = crop_cell_image(page_array, cell.bbox, page_bbox, page_rotation=page_rotation)
         if crop is None:
             refined_cells.append(cell)
             continue

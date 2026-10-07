@@ -26,12 +26,11 @@ EASYOCR_DECODER            CTC decoder: 'greedy', 'beamsearch', or 'wordbeamsear
                            beamsearch.
 EASYOCR_BEAMWIDTH          Beam width for beamsearch decoder (default: 5, min: 1).
                            Only used when EASYOCR_DECODER=beamsearch.
-EASYOCR_WORKERS            DataLoader workers for recognition.
-                           Priority: env var > config.num_threads > platform auto.
-                           Platform auto: 0 on Windows (spawn safety), half of
-                           cpu_count() capped at 4 on Linux/macOS.
-                           When config.num_threads > 0, workers = min(4, threads // 2).
-                           Set to 0 explicitly for the controlled benchmark track.
+EASYOCR_WORKERS            DataLoader workers for recognition (default: 0).
+                           CPU recognition creates a loader for each detected box;
+                           process startup costs more than loading that one crop.
+                           num_threads controls Torch inference, not crop loading.
+                           Explicit env overrides are honoured outside Windows.
 EASYOCR_ADJUST_CONTRAST    EasyOCR internal contrast multiplier for recognition crops.
                            Default: 0.5 (EasyOCR default).  Range: 0.0–1.0.
                            Higher values help very low-contrast scans but degrade
@@ -107,8 +106,9 @@ EASYOCR_MAX_QUALITY_THREADS
                            inference (intra-op threads) and up to 16 DataLoader
                            workers for recognition.  Intended for dedicated
                            benchmark machines where the process has exclusive
-                           access to the CPU.  Default: '0' (conservative — half
-                           of cpu_count, capped at 4 workers).
+                           access to the CPU. Default: '0' (zero loader workers).
+                           When enabling this legacy opt-in, set EASYOCR_WORKERS=0
+                           to avoid per-box multiprocessing overhead on CPU.
 
 Optimization notes
 ------------------
@@ -119,9 +119,10 @@ Optimization notes
   image, matching the upstream contract.
   Falls back to readtext() on any failure, but marks the result as degraded
   so the benchmark can flag the run as partial.
-- canvas_size: set to int(mag_ratio * max(h, w)) so the canvas is always large
+- canvas_size: CRAFT uses int(mag_ratio * max(h, w)) so the canvas is always large
   enough for the magnified image.  Using max(h, w) would clamp target_size back
   to max(h, w) inside resize_aspect_ratio(), neutralising mag_ratio entirely.
+  DBNet18 instead sets its short side to canvas_size, so it uses min(h, w).
 - decoder: defaults to 'greedy' (upstream default). Use EASYOCR_DECODER=beamsearch
   to enable beam search after validating there is a measurable quality gain.
 """
@@ -129,9 +130,12 @@ from __future__ import annotations
 
 import os
 import time
+from copy import deepcopy
+from hashlib import blake2b
 from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
+from structured_pdf_text.errors import FatalExtractionError, raise_if_resource_exhausted
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, sha256_file
 from structured_pdf_text.ocr.contracts import (
@@ -198,9 +202,10 @@ def _default_workers(env_probe: "dict[str, Any] | None" = None) -> int:
     On Windows, PyTorch uses 'spawn' for multiprocessing, which requires
     the __main__ guard and causes deadlocks in subprocess contexts like
     our paddle_subprocess worker.  Zero is the only safe default there.
-    On Linux/macOS, 'fork' is used and workers parallelize data loading.
-    Default behaviour (conservative): half of cpu_count, capped at 4.
-    Max-quality mode: up to cpu_count (no artificial cap).
+    CPU EasyOCR recognizes one box at a time, constructing a DataLoader for
+    each box (and another for low-contrast retries). Multiple workers spawn
+    processes repeatedly for datasets of length one. Keep the default at zero;
+    the legacy max-quality environment opt-in remains an explicit override.
     """
     probe = env_probe or _probe_environment()
     if probe["is_windows"]:
@@ -210,7 +215,7 @@ def _default_workers(env_probe: "dict[str, Any] | None" = None) -> int:
         # All logical CPUs available, capped only by a generous safety ceiling
         # so a 128-core server does not spawn 128 DataLoader processes.
         return min(logical, 16)
-    return min(4, max(1, logical // 2))
+    return 0
 
 
 def _resolve_workers(config_num_threads: int, env_probe: "dict[str, Any] | None" = None) -> int:
@@ -218,8 +223,8 @@ def _resolve_workers(config_num_threads: int, env_probe: "dict[str, Any] | None"
 
     Priority (highest to lowest):
       1. EASYOCR_WORKERS env var — explicit override, any value.
-      2. config.num_threads > 0 — derive workers proportionally.
-         Conservative mode: half of threads, capped at 4.
+      2. config.num_threads > 0 — inference threads are separate from loading.
+         Conservative mode: zero loader workers.
          Max-quality mode (EASYOCR_MAX_QUALITY_THREADS=1): uses full count.
       3. Platform auto-detect via _default_workers().
 
@@ -241,7 +246,7 @@ def _resolve_workers(config_num_threads: int, env_probe: "dict[str, Any] | None"
     if config_num_threads > 0:
         if probe["max_quality_env"]:
             return min(config_num_threads, 16)
-        return min(4, max(0, config_num_threads // 2))
+        return 0
 
     return _default_workers(probe)
 
@@ -373,8 +378,11 @@ def _probe_dbnet18_runtime_uncached(reader: "Any", cache_dir: "Path | None" = No
         if dbnet_reader is None:
             return False, "reader_construction_failed"
         probe_img = _np.full((96, 320, 3), 255, dtype=_np.uint8)
-        dbnet_reader.detect(probe_img)
+        # DBNet interprets canvas_size as the SHORT side. The Reader default
+        # (2560) expands this tiny probe to 2560 x 8544 pixels on CPU.
+        dbnet_reader.detect(probe_img, canvas_size=96)
     except Exception as exc:
+        _propagate_fatal_error(exc)
         return False, f"runtime_probe_failed: {type(exc).__name__}: {exc}"
 
     return True, None
@@ -438,6 +446,51 @@ def _to_numpy(image: object) -> "Any":
 
 
 
+def _propagate_fatal_error(exc: BaseException) -> None:
+    """Optional OCR variants may degrade, but resource failures must abort."""
+    if isinstance(exc, FatalExtractionError):
+        raise exc
+    raise_if_resource_exhausted(exc, stage="easyocr")
+
+
+class _DetectionCachingReader:
+    """Reuse detection only for identical pixels and detector parameters.
+
+    One proxy lives for one exhaustive invocation, bounding the cache to that
+    image's variants. Decoders and contrast retries still run independently.
+    Copies prevent recognition from mutating another candidate's geometry.
+    """
+
+    def __init__(self, reader: Any, stats: dict[str, int]) -> None:
+        self._wrapped = reader
+        self._stats = stats
+        self._detections: dict[tuple[Any, ...], Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+    def detect(self, image: Any, **kwargs: Any) -> Any:
+        import numpy as np
+        arr = np.ascontiguousarray(image)
+        key = (
+            arr.shape, arr.dtype.str, blake2b(memoryview(arr), digest_size=32).digest(),
+            tuple(sorted(kwargs.items())),
+        )
+        if key in self._detections:
+            self._stats["easyocr_exhaustive_detection_cache_hits"] += 1
+            return deepcopy(self._detections[key])
+        self._stats["easyocr_exhaustive_detection_calls"] += 1
+        result = self._wrapped.detect(image, **kwargs)
+        self._detections[key] = deepcopy(result)
+        return result
+
+
+def _detector_canvas_size(reader: Any, height: int, width: int, mag_ratio: float) -> int:
+    """CRAFT caps the long side; DBNet sets the short side to canvas_size."""
+    side = min(height, width) if getattr(reader, "detect_network", None) == "dbnet18" else max(height, width)
+    return max(1, int(mag_ratio * side))
+
+
 def _run_easyocr(
     reader: "Any",
     img: "Any",
@@ -491,7 +544,8 @@ def _run_easyocr(
     try:
         from easyocr.utils import reformat_input  # type: ignore
         img_color, img_gray = reformat_input(arr)
-    except Exception:
+    except Exception as exc:
+        _propagate_fatal_error(exc)
         return _fallback_readtext(
             reader, arr,
             decoder=decoder, beamwidth=beamwidth,
@@ -508,10 +562,10 @@ def _run_easyocr(
         )
 
     h, w = img_color.shape[:2]
-    # canvas_size must be at least mag_ratio * max(h, w); otherwise
+    # CRAFT canvas_size must be at least mag_ratio * max(h, w); otherwise
     # resize_aspect_ratio() clamps target_size back to max(h, w) and
-    # the magnification has no effect.
-    canvas_size = int(mag_ratio * max(h, w))
+    # the magnification has no effect. DBNet uses the short-side contract.
+    canvas_size = _detector_canvas_size(reader, h, w, mag_ratio)
 
     # --- Stage 1: text detection (CRAFT) ---
     try:
@@ -535,6 +589,7 @@ def _run_easyocr(
         horizontal_list = horizontal_agg[0]
         free_list = free_agg[0]
     except Exception as exc:
+        _propagate_fatal_error(exc)
         return _fallback_readtext(
             reader, arr,
             decoder=decoder, beamwidth=beamwidth,
@@ -571,6 +626,7 @@ def _run_easyocr(
         )
         return result, None  # nominal path — no fallback
     except Exception as exc:
+        _propagate_fatal_error(exc)
         return _fallback_readtext(
             reader, arr,
             decoder=decoder, beamwidth=beamwidth,
@@ -625,7 +681,7 @@ def _fallback_readtext(
         from structured_pdf_text.ocr.env import env_float
         mag_ratio = env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
     h, w = arr.shape[:2]
-    canvas_size = int(mag_ratio * max(h, w))
+    canvas_size = _detector_canvas_size(reader, h, w, mag_ratio)
 
     fallback_info: "dict[str, Any]" = {
         "fallback_used": True,
@@ -666,6 +722,7 @@ def _fallback_readtext(
         )
         return result, fallback_info
     except Exception as exc2:
+        _propagate_fatal_error(exc2)
         raise RuntimeError(
             f"EasyOCR: readtext() also failed after primary failure ({reason}): {exc2}"
         ) from exc2
@@ -1114,7 +1171,8 @@ def _image_preprocessing_candidates(img: "Any", *, adaptive: bool) -> list[tuple
                 for label, variant in candidates
             ]
         return candidates
-    except Exception:
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         return []
 
 
@@ -1144,12 +1202,19 @@ def _apply_clahe(img: "Any") -> "Any":
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             return clahe.apply(arr)
         return arr
-    except Exception:
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         return img
 
 
 def _apply_deskew(img: "Any") -> "Any":
-    """Estimate and correct small rotation angles in a page image.
+    """Compatibility wrapper returning only the deskewed image.
+
+    Production candidates use :func:`_apply_deskew_with_inverse` so token
+    polygons can be mapped back to the original raster. The image-only helper
+    remains for callers that used the former private test utility.
+
+    Estimate and correct small rotation angles in a page image.
 
     Uses a combination of Hough-line angle estimation and the projection-profile
     method on a binarised copy of the image.  Only corrects angles in the range
@@ -1215,7 +1280,8 @@ def _apply_deskew_with_inverse(img: "Any") -> tuple["Any", "Any"]:
                                      borderMode=cv2.BORDER_REPLICATE)
         affine = np.vstack((M, [0.0, 0.0, 1.0]))
         return rotated, np.linalg.inv(affine)
-    except Exception:
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         return img, identity
 
 
@@ -1233,7 +1299,8 @@ def _remap_raw_affine(raw: "list[Any]", inverse: "Any") -> "list[Any]":
                 value = inverse @ np.array([float(point[0]), float(point[1]), 1.0])
                 mapped.append([float(value[0]), float(value[1])])
             remapped.append((mapped, text, confidence))
-        except Exception:
+        except Exception as exc:
+            _propagate_fatal_error(exc)
             remapped.append(item)
     return remapped
 
@@ -1314,6 +1381,8 @@ def _exhaustive_candidates(
     _dbnet_diag: "list[dict[str, Any]] | None" = None,
     _dbnet_precomputed: "tuple[bool, str | None] | None" = None,
     record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
+    _reader_cache: "dict[str, Any] | None" = None,
+    _detection_stats: "dict[str, int] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
     """Run the exhaustive candidate set for maximum-quality OCR.
 
@@ -1345,6 +1414,21 @@ def _exhaustive_candidates(
     ``failure_reason`` so the caller can surface the DBNet18 runtime state in
     page diagnostics without changing this function's return type.
     """
+    stats = _detection_stats if _detection_stats is not None else {}
+    stats.setdefault("easyocr_exhaustive_detection_calls", 0)
+    stats.setdefault("easyocr_exhaustive_detection_cache_hits", 0)
+    original_reader = reader
+    reader = _DetectionCachingReader(reader, stats)
+
+    def auxiliary_reader(label: str, factory: Callable[[Any], Any]) -> Any:
+        if _reader_cache is None:
+            built = factory(original_reader)
+        else:
+            if label not in _reader_cache:
+                _reader_cache[label] = factory(original_reader)
+            built = _reader_cache[label]
+        return _DetectionCachingReader(built, stats) if built is not None else None
+
     results = _adaptive_candidates(reader, img, base_kwargs, record_call=record_call)
 
     # Candidate C: beamsearch decoder (if not already)
@@ -1411,7 +1495,8 @@ def _exhaustive_candidates(
             if record_call is not None:
                 record_call(_fb_g)
             results.append(("wordbeamsearch", raw_g))
-        except Exception:
+        except Exception as _optional_exc:
+            _propagate_fatal_error(_optional_exc)
             pass
 
     # Candidate H: no_quantize (§10) — run with quantize=False via a separate
@@ -1422,13 +1507,14 @@ def _exhaustive_candidates(
     # silently skipped rather than raising.
     if quantize:
         try:
-            nq_reader = _rebuild_reader_no_quantize(reader)
+            nq_reader = auxiliary_reader("no_quantize", _rebuild_reader_no_quantize)
             if nq_reader is not None:
                 raw_h, _fb_h = _run_easyocr(nq_reader, img, **base_kwargs)
                 if record_call is not None:
                     record_call(_fb_h)
                 results.append(("no_quantize", raw_h))
-        except Exception:
+        except Exception as _optional_exc:
+            _propagate_fatal_error(_optional_exc)
             pass
 
     # Candidate I: deskew (§15) — estimate and correct small scan rotation before
@@ -1442,7 +1528,8 @@ def _exhaustive_candidates(
         _arr_deskew = np.asarray(deskew_img)
         _changed = (_arr_orig.shape == _arr_deskew.shape and
                     not bool((_arr_orig == _arr_deskew).all()))
-    except Exception:
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         _changed = True
     if _changed:
         raw_i, _fb_i = _run_easyocr(reader, deskew_img, **base_kwargs)
@@ -1460,7 +1547,8 @@ def _exhaustive_candidates(
         from structured_pdf_text.ocr.env import env_float as _env_float
         _base_mag = _env_float("EASYOCR_MAG_RATIO", 1.2, minimum=0.01)
         _high_mag = min(_base_mag * 1.5, 2.5)
-    except Exception:
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         _base_mag = 1.2
         _high_mag = 1.8
     if _high_mag > _base_mag + 0.1:
@@ -1469,7 +1557,8 @@ def _exhaustive_candidates(
             if record_call is not None:
                 record_call(_fb_j)
             results.append(("high_mag", raw_j))
-        except Exception:
+        except Exception as _optional_exc:
+            _propagate_fatal_error(_optional_exc)
             pass
 
     # Candidate N: DBNet18 detector ensemble (§11) — runs the second EasyOCR detector
@@ -1514,7 +1603,7 @@ def _exhaustive_candidates(
         })
     if _dbnet_runtime_ok:
         try:
-            _dbnet_reader = _build_dbnet18_reader(reader)
+            _dbnet_reader = auxiliary_reader("dbnet18", _build_dbnet18_reader)
             if _dbnet_reader is not None:
                 raw_n, _fb_n = _run_easyocr(_dbnet_reader, img, **base_kwargs)
                 if record_call is not None:
@@ -1528,6 +1617,7 @@ def _exhaustive_candidates(
                     _dbnet_diag[-1]["runtime_available"] = False
                     _dbnet_diag[-1]["failure_reason"] = "reader_construction_failed"
         except Exception as _dbnet_exc:
+            _propagate_fatal_error(_dbnet_exc)
             if _dbnet_diag is not None and _dbnet_diag:
                 _dbnet_diag[-1]["runtime_available"] = False
                 _dbnet_diag[-1]["failure_reason"] = (
@@ -1559,12 +1649,42 @@ def _exhaustive_candidates(
                         _raw_rot, _angle, _rot_h, _rot_w
                     )
                     results.append((_label, _raw_remapped))
-            except Exception:
+            except Exception as _optional_exc:
+                _propagate_fatal_error(_optional_exc)
                 pass
-    except Exception:
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         pass
 
     return results
+
+
+def _reader_init_options(reader: Any) -> dict[str, Any] | None:
+    """Recover constructor inputs; upstream Reader does not retain languages.
+
+    Backend-created Readers carry an explicit snapshot. Attribute fallback is
+    retained for integrations that supply their own annotated Reader.
+    """
+    captured = getattr(reader, "_pdfextractor_init_options", None)
+    if isinstance(captured, dict):
+        return deepcopy(captured)
+    languages = getattr(reader, "lang_list", None)
+    if not languages:
+        return None
+    device = getattr(reader, "device", "cpu")
+    quantize = getattr(reader, "quantize", True)
+    # EasyOCR 1.7.2 stores this as a one-element tuple (including False).
+    if isinstance(quantize, tuple) and len(quantize) == 1:
+        quantize = quantize[0]
+    options = {
+        "lang_list": list(languages), "gpu": False if device == "cpu" else device,
+        "quantize": bool(quantize),
+    }
+    for name in ("model_storage_directory", "user_network_directory", "recog_network"):
+        value = getattr(reader, name, None)
+        if value:
+            options[name] = value
+    return options
 
 
 def _build_dbnet18_reader_strict(reader: "Any") -> "Any":
@@ -1577,29 +1697,13 @@ def _build_dbnet18_reader_strict(reader: "Any") -> "Any":
     The normal pipeline helper :func:`_build_dbnet18_reader` wraps this with a
     ``try/except`` so that a runtime failure never aborts the CRAFT-based extraction.
     """
-    lang = getattr(reader, "lang_list", None)
-    if not lang:
+    options = _reader_init_options(reader)
+    if options is None:
         return None
-    gpu = getattr(reader, "device", "cpu") != "cpu"
-    model_dir = getattr(reader, "model_storage_directory", None)
-    user_net_dir = getattr(reader, "user_network_directory", None)
-    recog = getattr(reader, "recog_network", None)
-    quantize = getattr(reader, "quantize", True)
-
+    lang = options.pop("lang_list")
     import easyocr as _easyocr  # type: ignore
-    kwargs: dict[str, object] = {
-        "gpu": gpu,
-        "detect_network": "dbnet18",
-        "quantize": quantize,
-        "download_enabled": False,
-    }
-    if model_dir:
-        kwargs["model_storage_directory"] = model_dir
-    if user_net_dir:
-        kwargs["user_network_directory"] = user_net_dir
-    if recog:
-        kwargs["recog_network"] = recog
-    return _easyocr.Reader(lang, **kwargs)
+    options.update(detect_network="dbnet18", download_enabled=False, verbose=False)
+    return _easyocr.Reader(lang, **options)
 
 
 def _build_dbnet18_reader(reader: "Any") -> "Any":
@@ -1623,7 +1727,8 @@ def _build_dbnet18_reader(reader: "Any") -> "Any":
     """
     try:
         return _build_dbnet18_reader_strict(reader)
-    except Exception:
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         return None
 
 
@@ -1640,28 +1745,15 @@ def _rebuild_reader_no_quantize(reader: "Any") -> "Any":
     caller can skip the no_quantize candidate gracefully.
     """
     try:
-        lang = getattr(reader, "lang_list", None)
-        if not lang:
+        options = _reader_init_options(reader)
+        if options is None:
             return None
-        gpu = getattr(reader, "device", "cpu") != "cpu"
-        model_dir = getattr(reader, "model_storage_directory", None)
-        user_net_dir = getattr(reader, "user_network_directory", None)
-        recog = getattr(reader, "recog_network", None)
-
+        lang = options.pop("lang_list")
         import easyocr as _easyocr  # type: ignore
-        kwargs: dict[str, object] = {
-            "gpu": gpu,
-            "quantize": False,
-            "download_enabled": False,
-        }
-        if model_dir:
-            kwargs["model_storage_directory"] = model_dir
-        if user_net_dir:
-            kwargs["user_network_directory"] = user_net_dir
-        if recog:
-            kwargs["recog_network"] = recog
-        return _easyocr.Reader(lang, **kwargs)
-    except Exception:
+        options.update(quantize=False, download_enabled=False, verbose=False)
+        return _easyocr.Reader(lang, **options)
+    except Exception as _optional_exc:
+        _propagate_fatal_error(_optional_exc)
         return None
 
 
@@ -1694,7 +1786,7 @@ class EasyOCRBackend:
         self._config = config
         self._closed = False
         from structured_pdf_text.ocr.env import env_bool, env_float, env_int
-        from structured_pdf_text.ocr.languages import backend_language, canonical_language
+        from structured_pdf_text.ocr.languages import backend_language, canonical_language, easyocr_recognition_model
         self._language = canonical_language(config.language)
         self._langs = [backend_language(config.language, "easyocr")]
 
@@ -1750,7 +1842,7 @@ class EasyOCRBackend:
         # --- reader init ---
         easyocr_mod = _import_easyocr()
         recog_network = os.environ.get("EASYOCR_RECOG_NETWORK", "")
-        self._recog_network = recog_network or "latin_g2"
+        self._recog_network = easyocr_recognition_model(config.language, recog_network)
         # Always resolve from _model_cache_dir() so the Reader and the readiness
         # probe check the same directory regardless of EASYOCR_MODULE_PATH being set.
         configured_cache = getattr(config, "ocr_cache_home", None)
@@ -1777,11 +1869,16 @@ class EasyOCRBackend:
             kwargs["recog_network"] = recog_network
 
         self._reader = easyocr_mod.Reader(self._langs, **kwargs)
+        self._reader._pdfextractor_init_options = {
+            "lang_list": list(self._langs), **kwargs,
+        }
 
         # DBNet18 runtime state cached per instance.  None = not yet probed.
         # Populated lazily by _ensure_dbnet18_runtime(); never reset between pages.
         self._dbnet_runtime_state: bool | None = None
         self._dbnet_failure_reason: str | None = None
+        # Alternate networks are loaded once, including unsuccessful builds.
+        self._auxiliary_readers: dict[str, Any] = {}
 
         self.reset_page_diagnostics()
 
@@ -1801,6 +1898,8 @@ class EasyOCRBackend:
         preflight, setup command).
         """
         if self._dbnet_runtime_state is None or force:
+            if force:
+                getattr(self, "_auxiliary_readers", {}).pop("dbnet18", None)
             ok, reason = _probe_dbnet18_runtime_uncached(
                 self._reader, self._model_cache_dir
             )
@@ -1811,12 +1910,18 @@ class EasyOCRBackend:
     def reset_page_diagnostics(self) -> None:
         """Start a fresh per-page diagnostic accumulator for the extraction pipeline."""
         self._easyocr_calls = 0
+        self.last_pass_count = 0
+        self.last_batch_count = 0
         self._easyocr_fallback_count = 0
         self._easyocr_fallback_reasons: list[str] = []
         self.last_easyocr_fallback_used = False
         self.last_easyocr_fallback_reason: str | None = None
         self._last_candidate_diagnostics: list[dict[str, Any]] = []
         self._last_dbnet_diag: list[dict[str, Any]] = []
+        self._detection_stats = {
+            "easyocr_exhaustive_detection_calls": 0,
+            "easyocr_exhaustive_detection_cache_hits": 0,
+        }
 
     def consume_page_diagnostics(self) -> dict[str, Any]:
         """Return and reset accumulated diagnostics for one page.
@@ -1834,6 +1939,7 @@ class EasyOCRBackend:
         dbnet_entry = dbnet_diag[0] if dbnet_diag else {}
         result = {
             "easyocr_calls": self._easyocr_calls,
+            **self._detection_stats,
             "easyocr_fallback_count": self._easyocr_fallback_count,
             "easyocr_fallback_rate": (
                 self._easyocr_fallback_count / self._easyocr_calls
@@ -1853,6 +1959,10 @@ class EasyOCRBackend:
 
     def _record_call(self, fallback: dict[str, Any] | None) -> None:
         self._easyocr_calls += 1
+        # One completed image call per variant; upstream's per-box CRNN
+        # batches are separate. Regional orchestration reads these counters.
+        self.last_pass_count = getattr(self, "last_pass_count", 0) + 1
+        self.last_batch_count = self.last_pass_count
         if fallback is not None:
             self._easyocr_fallback_count += 1
             reason = str(fallback.get("primary_error", "unknown"))
@@ -1990,6 +2100,7 @@ class EasyOCRBackend:
         when the backend has been closed.
         """
         t0 = time.perf_counter()
+        self.last_pass_count = self.last_batch_count = 0
         if self._closed:
             return OCRResult(
                 status="runtime_error", tokens=(), text="", engine_identity=self.identity,
@@ -2057,6 +2168,7 @@ class EasyOCRBackend:
         """
         if self._closed:
             raise RuntimeError("EasyOCR backend is closed")
+        self.last_pass_count = self.last_batch_count = 0
         img = _to_numpy(page_image)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
 
@@ -2066,6 +2178,8 @@ class EasyOCRBackend:
         if use_variants:
             base_kwargs = self._run_kwargs()
             if policy == "exhaustive":
+                if not hasattr(self, "_auxiliary_readers"):
+                    self._auxiliary_readers = {}
                 self._last_dbnet_diag = []
                 dbnet_state = self._ensure_dbnet18_runtime()
                 raw_candidates = _exhaustive_candidates(
@@ -2074,6 +2188,8 @@ class EasyOCRBackend:
                     _dbnet_diag=self._last_dbnet_diag,
                     _dbnet_precomputed=dbnet_state,
                     record_call=self._record_call,
+                    _reader_cache=self._auxiliary_readers,
+                    _detection_stats=self._detection_stats,
                 )
                 if (
                     self._last_dbnet_diag
@@ -2117,6 +2233,7 @@ class EasyOCRBackend:
         """
         if self._closed:
             raise RuntimeError("EasyOCR backend is closed")
+        self.last_pass_count = self.last_batch_count = 0
         img = _to_numpy(page_image)
         from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
         crop, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(img, region_bbox, page_bbox)
@@ -2142,6 +2259,7 @@ class EasyOCRBackend:
         recognition interface. Direct recognition is a single recognizer pass,
         so candidate quality policies do not alter this path.
         """
+        self.last_pass_count = self.last_batch_count = 0
         if self._closed:
             return []
         import numpy as np
@@ -2199,4 +2317,5 @@ class EasyOCRBackend:
         if self._closed:
             return
         self._reader = None
+        getattr(self, "_auxiliary_readers", {}).clear()
         self._closed = True

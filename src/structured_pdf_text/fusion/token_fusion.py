@@ -15,7 +15,6 @@ from structured_pdf_text.document import OcrToken, TextLine, TextToken
 from structured_pdf_text.text.normalize import normalize_text
 
 from .conflicts import TokenConflict
-from .align import find_native_candidates
 
 
 @dataclass(frozen=True, slots=True)

@@ -46,7 +46,10 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
             return ReadinessResult(ReadinessStatus.MISSING, "package_missing", {"packages": missing})
 
         try:
-            validate_local_ocr_models(language=config.paddle_model_profile, cache_home=cache_home)
+            validate_local_ocr_models(
+                language=config.paddle_model_profile,
+                cache_home=cache_home or config.ocr_cache_home,
+            )
             return ReadinessResult(ReadinessStatus.READY, details={"profile": config.paddle_model_profile})
         except PaddleOcrUnavailable as exc:
             return ReadinessResult(ReadinessStatus.INCOMPLETE, "model_missing", {"message": str(exc)})
@@ -90,7 +93,12 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
         if importlib.util.find_spec(provider_module) is None:
             return ReadinessResult(ReadinessStatus.MISSING, "provider_missing", {"provider": provider_module})
         det = os.environ.get("RAPIDOCR_DET_MODEL")
-        cache = Path(cache_home).expanduser() / "rapidocr" if cache_home else Path.home() / ".cache" / "pdfextractor" / "rapidocr"
+        configured_cache = cache_home or config.ocr_cache_home
+        cache = (
+            Path(configured_cache).expanduser() / "rapidocr"
+            if configured_cache
+            else Path.home() / ".cache" / "pdfextractor" / "rapidocr"
+        )
         configured_rec = os.environ.get("RAPIDOCR_REC_MODEL")
         configured_keys = os.environ.get("RAPIDOCR_REC_KEYS")
         if configured_rec or configured_keys:
@@ -128,7 +136,8 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
         )
         cache = Path(configured_cache or Path.home() / ".cache" / "pdfextractor" / "easyocr").expanduser()
         craft_ok = (cache / "craft_mlt_25k.pth").is_file()
-        recog_name = os.environ.get("EASYOCR_RECOG_NETWORK", "latin_g2")
+        from structured_pdf_text.ocr.languages import easyocr_recognition_model
+        recog_name = easyocr_recognition_model(config.language, os.environ.get("EASYOCR_RECOG_NETWORK"))
         recog_ok = (cache / f"{recog_name}.pth").is_file()
         dbnet_name: str | None = None
         dbnet_ok = False

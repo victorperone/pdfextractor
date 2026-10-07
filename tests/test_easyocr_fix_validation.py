@@ -767,16 +767,17 @@ class TestQualityCandidatePolicies:
         """quality_policy='exhaustive' must produce more candidates than 'adaptive'."""
         backend_a, counts_a = self._make_backend_with_counting_reader(monkeypatch)
         backend_a.recognize_page(_make_image(), 0, quality_policy="adaptive")
-        adaptive_detect = counts_a["detect"]
+        adaptive_recognize = counts_a["recognize"]
 
         # Reset and test exhaustive
         backend_e, counts_e = self._make_backend_with_counting_reader(monkeypatch)
         backend_e.recognize_page(_make_image(), 0, quality_policy="exhaustive")
-        exhaustive_detect = counts_e["detect"]
+        exhaustive_recognize = counts_e["recognize"]
 
-        assert exhaustive_detect > adaptive_detect, (
-            f"exhaustive ({exhaustive_detect}) must run more candidates than "
-            f"adaptive ({adaptive_detect})"
+        # Decoder/contrast variants share detection but retain recognition.
+        assert exhaustive_recognize > adaptive_recognize, (
+            f"exhaustive ({exhaustive_recognize}) must run more candidates than "
+            f"adaptive ({adaptive_recognize})"
         )
 
     def test_candidate_selection_returns_non_empty_when_any_candidate_has_tokens(self, monkeypatch):

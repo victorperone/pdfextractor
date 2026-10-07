@@ -1300,6 +1300,7 @@ def _split_line_by_lanes(
 
 
 def _split_columns(lines: list[TextLine], region_width: float) -> list[list[TextLine]]:
+    """Compatibility/test helper; production uses :func:`order_lines_in_region`."""
     # Keep this compatibility helper on the same geometry-first path as the
     # main flow decision. In particular, do not use x0 alone for assignment.
     if lines and region_width > 0:
@@ -1323,7 +1324,7 @@ def _split_columns(lines: list[TextLine], region_width: float) -> list[list[Text
 
 
 def _preserves_line_set(lines: list[TextLine], columns: list[list[TextLine]]) -> bool:
-    """Verify that a column split neither loses nor duplicates line objects."""
+    """Compatibility/test helper verifying that a split preserves all lines."""
     input_ids = [id(line) for line in lines]
     output_ids = [id(line) for column in columns for line in column]
     return len(output_ids) == len(input_ids) and sorted(output_ids) == sorted(input_ids)

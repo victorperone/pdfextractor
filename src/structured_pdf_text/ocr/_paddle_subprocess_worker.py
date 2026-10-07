@@ -136,7 +136,7 @@ def main() -> None:
 
         try:
             protocol_version = req.get("protocol_version")
-            if protocol_version != 3:
+            if protocol_version != 4:
                 raise ValueError(f"unsupported protocol_version: {protocol_version!r}")
             if method == "init":
                 init_config = req
@@ -182,11 +182,14 @@ def main() -> None:
 
         except Exception as exc:
             import errno
+            from structured_pdf_text.errors import FatalExtractionError
+            fatal = isinstance(exc, FatalExtractionError)
             _reply({
                 "status": "error", "tokens": [], "error": str(exc),
                 "error_type": type(exc).__name__,
                 "errno": exc.errno if isinstance(exc, OSError) else None,
-                "fatal": isinstance(exc, MemoryError) or (isinstance(exc, OSError) and exc.errno == errno.ENOMEM),
+                "fatal": fatal or isinstance(exc, MemoryError) or (isinstance(exc, OSError) and exc.errno == errno.ENOMEM),
+                "fatal_code": getattr(exc, "code", None) if fatal else None,
                 "stage": method,
             }, req_id)
 

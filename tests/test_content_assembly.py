@@ -15,10 +15,12 @@ from structured_pdf_text.assemble.content import (
     assemble_page_content,
     prose_flow_lines_by_region,
 )
+from structured_pdf_text.assemble.document import assemble_document
 from structured_pdf_text.assemble.page import assemble_page
 from structured_pdf_text.document import (
     ComplexityReason,
     ContentKind,
+    DocumentMetadata,
     LayoutRegion,
     PageDiagnostics,
     PageStrategy,
@@ -36,6 +38,7 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.renderers.markdown import render_markdown
 from structured_pdf_text.text.reading_order import order_region_lines
 
 
@@ -157,6 +160,221 @@ def test_cells_all_blank_not_renderable() -> None:
 def test_one_non_blank_cell_renderable() -> None:
     table = _table("t1", 0, _bbox(), cells=[_cell(0, 0, "A"), _cell(0, 1, "")])
     assert _table_has_renderable_content(table)
+
+
+def test_one_line_can_be_consumed_by_two_tables_without_prose_duplicates() -> None:
+    left = _token("ESQUERDA", _bbox(10, 10, 40, 20))
+    right = _token("DIREITA", _bbox(150, 10, 190, 20))
+    line = TextLine(
+        [left, right], _bbox(10, 10, 190, 20), None,
+        WritingDirection.LEFT_TO_RIGHT, 0, 1,
+        line_id="native:0:0:1",
+    )
+    region = _region(RegionKind.TEXT, _bbox(0, 0, 220, 50), [line])
+    left_table = _table(
+        "left", 0, _bbox(0, 0, 100, 30),
+        [TableCell(0, 0, 1, 1, _bbox(0, 0, 100, 30), "ESQUERDA", [left], 1.0)],
+        col_count=1,
+    )
+    right_table = _table(
+        "right", 0, _bbox(130, 0, 210, 30),
+        [TableCell(0, 0, 1, 1, _bbox(130, 0, 210, 30), "DIREITA", [right], 1.0)],
+        col_count=1,
+    )
+
+    result = assemble_page_content(_page([region], [left_table, right_table]))
+
+    assert result.reading_text.count("ESQUERDA") == 1
+    assert result.reading_text.count("DIREITA") == 1
+    assert result.reading_text.index("ESQUERDA") < result.reading_text.index("DIREITA")
+
+
+def test_partial_table_line_without_line_id_keeps_one_conserved_identity() -> None:
+    inside = _token("DENTRO", _bbox(10, 10, 50, 20))
+    outside = _token("FORA", _bbox(130, 10, 160, 20))
+    line = TextLine(
+        [inside, _token(" ", _bbox(50, 10, 55, 20)), outside],
+        _bbox(10, 10, 160, 20), None,
+        WritingDirection.LEFT_TO_RIGHT, None, None,
+    )
+    region = _region(RegionKind.TEXT, _bbox(0, 0, 180, 40), [line])
+    table = _table(
+        "inside", 0, _bbox(0, 0, 80, 30),
+        [TableCell(0, 0, 1, 1, _bbox(0, 0, 80, 30), "DENTRO", [inside], 1.0)],
+        col_count=1,
+    )
+
+    result = assemble_page_content(_page([region], [table]))
+
+    assert result.reading_text.count("DENTRO") == 1
+    assert result.reading_text.count("FORA") == 1
+    assert result.reading_text.index("DENTRO") < result.reading_text.index("FORA")
+    assert "DENTROFORA" not in result.reading_text
+
+
+@pytest.mark.parametrize("evidence", ["tokens", "geometry"])
+@pytest.mark.parametrize("line_id", [None, "native:0:1:3"])
+def test_emitted_table_still_consumes_partial_tokens_in_later_region(
+    evidence: str,
+    line_id: str | None,
+) -> None:
+    header = _token("CABECALHO", _bbox(10, 10, 70, 20))
+    inside = _token("DENTRO", _bbox(10, 50, 70, 60))
+    space = _token(" ", _bbox(70, 50, 150, 60))
+    outside = _token("FORA", _bbox(150, 50, 190, 60))
+    table = _table(
+        "one", 0, _bbox(0, 0, 100, 80),
+        [
+            TableCell(
+                0, 0, 1, 1, _bbox(0, 0, 100, 30), "CABECALHO",
+                [header] if evidence == "tokens" else [], 1.0,
+            ),
+            TableCell(
+                1, 0, 1, 1, _bbox(0, 40, 100, 80), "DENTRO",
+                [inside] if evidence == "tokens" else [], 1.0,
+            ),
+        ],
+        col_count=1,
+        row_count=2,
+    )
+    header_region = _region(
+        RegionKind.TEXT, _bbox(0, 0, 100, 30),
+        [replace(_line("CABECALHO", header.bbox), tokens=[header], line_id="native:0:0:0")],
+        region_id="header",
+    )
+    body_line = TextLine(
+        [inside, space, outside], _bbox(10, 50, 190, 60), None,
+        WritingDirection.LEFT_TO_RIGHT, 1, 3,
+        line_id=line_id,
+    )
+    body_region = _region(
+        RegionKind.TEXT, _bbox(0, 40, 220, 80), [body_line], region_id="body"
+    )
+    page = _page([header_region, body_region], [table])
+    page.bbox = _bbox(0, 0, 250, 150)
+    document = assemble_document([page], DocumentMetadata("r04", 1, None))
+    markdown = render_markdown(document)
+
+    for text in ("CABECALHO", "DENTRO", "FORA"):
+        assert document.reading_text.count(text) == 1
+        assert markdown.count(text) == 1
+    assert document.reading_text.index("DENTRO") < document.reading_text.index("FORA")
+    facts = document.pages[0].diagnostics.facts
+    assert facts["content_unaccounted_lines"] == 0
+    assert facts["content_duplicate_assignment_count"] == 0
+
+
+@pytest.mark.parametrize("line_id", [None, "native:0:2:4"])
+@pytest.mark.parametrize("include_outside", [False, True])
+@pytest.mark.parametrize("evidence", ["tokens", "geometry", "mixed", "fragment"])
+def test_two_emitted_tables_consume_later_line_once(
+    line_id: str | None,
+    include_outside: bool,
+    evidence: str,
+) -> None:
+    header_left = _token("TABELA-A", _bbox(10, 10, 70, 20))
+    header_right = _token("TABELA-B", _bbox(140, 10, 200, 20))
+    inside_left = _token("CELULA-A", _bbox(10, 50, 70, 60))
+    gap = _token(" ", _bbox(70, 50, 140, 60))
+    inside_right = _token("CELULA-B", _bbox(140, 50, 200, 60))
+    gap2 = _token(" ", _bbox(200, 50, 230, 60))
+    outside = _token("FORA", _bbox(230, 50, 260, 60))
+
+    def one_column(table_id, header, body, x0, x1, *, keep_token_refs, cell_geometry):
+        header_bbox = _bbox(x0, 0, x1, 30) if cell_geometry else None
+        body_bbox = _bbox(x0, 40, x1, 80) if cell_geometry else None
+        return _table(
+            table_id, 0, _bbox(x0, 0, x1, 80),
+            [
+                TableCell(
+                    0, 0, 1, 1, header_bbox, header.text,
+                    [header] if keep_token_refs else [], 1.0,
+                ),
+                TableCell(
+                    1, 0, 1, 1, body_bbox, body.text,
+                    [body] if keep_token_refs else [], 1.0,
+                ),
+            ],
+            col_count=1,
+            row_count=2,
+        )
+
+    header_lines = [
+        replace(_line(header_left.text, header_left.bbox), tokens=[header_left], line_id="header-a"),
+        replace(_line(header_right.text, header_right.bbox), tokens=[header_right], line_id="header-b"),
+    ]
+    header_region = _region(RegionKind.TEXT, _bbox(0, 0, 230, 30), header_lines, "headers")
+    body_tokens = [inside_left, gap, inside_right]
+    body_x1 = 200
+    if include_outside:
+        body_tokens.extend([gap2, outside])
+        body_x1 = 260
+    body_line = TextLine(
+        body_tokens,
+        _bbox(10, 50, body_x1, 60), None,
+        WritingDirection.LEFT_TO_RIGHT, None, None,
+        line_id=line_id,
+    )
+    body_region = _region(RegionKind.TEXT, _bbox(0, 40, 250, 80), [body_line], "body")
+    page = _page(
+        [header_region, body_region],
+        [
+            one_column(
+                "table-a", header_left, inside_left, 0, 100,
+                keep_token_refs=evidence in {"tokens", "mixed"},
+                cell_geometry=evidence != "fragment",
+            ),
+            one_column(
+                "table-b", header_right, inside_right, 120, 220,
+                keep_token_refs=evidence == "tokens",
+                cell_geometry=evidence != "fragment",
+            ),
+        ],
+    )
+    page.bbox = _bbox(0, 0, 260, 100)
+
+    document = assemble_document([page], DocumentMetadata("r04-two", 1, None))
+    markdown = render_markdown(document)
+
+    expected = ["TABELA-A", "CELULA-A", "TABELA-B", "CELULA-B"]
+    if include_outside:
+        expected.append("FORA")
+    for text in expected:
+        assert document.reading_text.count(text) == 1
+        assert markdown.count(text) == 1
+    assert document.pages[0].diagnostics.facts["content_fallback_lines"] == 0
+
+
+def test_partial_table_residual_keeps_spaces_across_removed_cell_tokens() -> None:
+    before = _token("ANTES", _bbox(10, 10, 50, 20))
+    before_space = _token(" ", _bbox(50, 10, 100, 20))
+    inside = _token("CELULA", _bbox(100, 10, 150, 20))
+    after_space = _token(" ", _bbox(150, 10, 220, 20))
+    after = _token("DEPOIS", _bbox(220, 10, 270, 20))
+    source_line = TextLine(
+        [before, before_space, inside, after_space, after],
+        _bbox(10, 10, 270, 20), None,
+        WritingDirection.LEFT_TO_RIGHT, 0, 4,
+        line_id="partial:0",
+    )
+    region = _region(RegionKind.TEXT, _bbox(0, 0, 300, 40), [source_line])
+    cell_box = _bbox(90, 0, 170, 30)
+    table = _table(
+        "middle", 0, cell_box,
+        [TableCell(0, 0, 1, 1, cell_box, "CELULA", [inside], 1.0)],
+        col_count=1,
+    )
+    page = _page([region], [table])
+
+    document = assemble_document([page], DocumentMetadata("r04-residual", 1, None))
+    markdown = render_markdown(document)
+
+    assert document.reading_text.count("CELULA") == markdown.count("CELULA") == 1
+    assert "ANTES DEPOIS" in document.reading_text
+    assert "ANTES DEPOIS" in markdown
+    assert "ANTESDEPOIS" not in document.reading_text
+    assert "ANTESDEPOIS" not in markdown
+    assert document.pages[0].diagnostics.facts["content_fallback_lines"] == 0
 
 
 # ---------------------------------------------------------------------------

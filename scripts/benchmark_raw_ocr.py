@@ -167,19 +167,27 @@ def run_benchmark(
             Path(cache_home).expanduser().resolve()
         )
 
-    config = ExtractorConfig(language=language, ocr_engine=engine_name)
-    backend = build_ocr_backend(config)
-    doc = pdfium.PdfDocument(str(pdf_path))
+    config = ExtractorConfig(
+        language=language,
+        ocr_engine=engine_name,
+        ocr_cache_home=cache_home,
+    )
+    backend = None
+    doc = None
     try:
+        backend = build_ocr_backend(config)
+        doc = pdfium.PdfDocument(str(pdf_path))
         return _run_benchmark_impl(
             pdf_path, engine_name, language, render_scale, output_dir, run_id,
             page_range, ref_pages, manifesto, verbose, backend, doc,
         )
     finally:
         try:
-            backend.close()
+            if backend is not None:
+                backend.close()
         finally:
-            doc.close()
+            if doc is not None:
+                doc.close()
 
 
 def _run_benchmark_impl(

@@ -629,7 +629,8 @@ def _get_page_box(page: Any, method_name: str) -> tuple[float, float, float, flo
         return None
     try:
         values = tuple(float(value) for value in method())
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
     if len(values) != 4 or values[2] <= values[0] or values[3] <= values[1]:
         return None
@@ -656,15 +657,25 @@ def _canonical_page_box(
     return BBox(x0 - origin_x, page_top - y1, x0 - origin_x + width, page_top - y1 + height)
 
 
+def _rethrow_native_fatal(exc: BaseException) -> None:
+    from structured_pdf_text.errors import FatalExtractionError, raise_if_resource_exhausted
+
+    if isinstance(exc, FatalExtractionError):
+        raise exc
+    raise_if_resource_exhausted(exc, stage="native_evidence")
+
+
 def _get_char_text(textpage: Any, index: int) -> str:
     try:
         return textpage.get_text_range(index, 1, errors="ignore") or ""
     except TypeError:
         try:
             return textpage.get_text_range(index, 1) or ""
-        except Exception:
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
             return ""
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return ""
 
 
@@ -676,9 +687,11 @@ def _get_full_text(textpage: Any) -> str:
     except TypeError:
         try:
             return textpage.get_text_range(0, -1) or ""
-        except Exception:
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
             return ""
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return ""
 
 
@@ -700,7 +713,8 @@ def _get_char_bbox(
             origin_x=origin_x,
             origin_y=origin_y,
         )
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return BBox(0.0, 0.0, 0.0, 0.0)
 
 
@@ -723,7 +737,8 @@ def _get_char_origin(
         if ok is False or ok == 0:
             return None
         return Point(float(x.value) - origin_x, origin_y + page_height - float(y.value))
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -744,7 +759,8 @@ def _get_object_bbox(
             origin_x=origin_x,
             origin_y=origin_y,
         )
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -762,7 +778,8 @@ def _get_object_matrix(raw_object: Any) -> tuple[float, float, float, float, flo
             float(getattr(matrix, name))
             for name in ("a", "b", "c", "d", "e", "f")
         )  # type: ignore[return-value]
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -775,7 +792,8 @@ def _get_marked_content_id(raw_object: Any) -> int | None:
     try:
         value = int(function(raw_object))
         return value if value >= 0 else None
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -784,7 +802,8 @@ def _get_unicode(textpage: Any, index: int, fallback_text: str) -> int | None:
         try:
             value = int(pdfium_c.FPDFText_GetUnicode(textpage.raw, index))
             return value if value >= 0 else None
-        except Exception:
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
             pass
     return ord(fallback_text[0]) if fallback_text else None
 
@@ -793,7 +812,8 @@ def _get_char_angle(textpage: Any, index: int) -> float | None:
     if pdfium_c is not None and hasattr(pdfium_c, "FPDFText_GetCharAngle"):
         try:
             return float(pdfium_c.FPDFText_GetCharAngle(textpage.raw, index))
-        except Exception:
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
             return None
     return None
 
@@ -807,7 +827,8 @@ def _get_bool_feature(function_name: str, textpage: Any, index: int) -> bool | N
         if result == -1:
             return None
         return bool(result)
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -829,7 +850,8 @@ def _get_character_color(
         if not function(textpage.raw, index, red, green, blue, alpha):
             return None
         return red.value, green.value, blue.value, alpha.value
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -853,7 +875,8 @@ def _get_character_style(
         return None, None, None, None, None
     try:
         textobj = get_textobj(index)
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None, None, None, None, None
     if textobj is None:
         return None, None, None, None, None
@@ -878,7 +901,8 @@ def _get_character_style(
     marked_content_id: int | None = None
     try:
         font_size = float(textobj.get_font_size())
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         pass
     try:
         font = textobj.get_font()
@@ -891,7 +915,8 @@ def _get_character_style(
         get_weight = getattr(font, "get_weight", None)
         if callable(get_weight):
             font_weight = int(get_weight())
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         pass
     if pdfium_c is not None and raw is not None:
         render_function = getattr(pdfium_c, "FPDFTextObj_GetTextRenderMode", None)
@@ -899,7 +924,8 @@ def _get_character_style(
             try:
                 render_value = int(render_function(raw))
                 text_render_mode = render_value if render_value >= 0 else None
-            except Exception:
+            except Exception as exc:
+                _rethrow_native_fatal(exc)
                 pass
         marked_content_id = _get_marked_content_id(raw)
     value = (
@@ -923,9 +949,11 @@ def _get_page_objects(page: Any, textpage: Any) -> list[Any]:
     except TypeError:
         try:
             return list(get_objects())
-        except Exception:
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
             return []
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return []
 
 
@@ -941,8 +969,8 @@ def _get_image_metadata(
     try:
         width, height = obj.get_px_size()
         pixel_width, pixel_height = int(width), int(height)
-    except Exception:
-        pass
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
     try:
         metadata = obj.get_metadata()
         for target, names in (
@@ -963,8 +991,8 @@ def _get_image_metadata(
                     else:
                         dpi_y = _safe_float(value)
                     break
-    except Exception:
-        pass
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
     return pixel_width, pixel_height, dpi_x, dpi_y, bits_per_pixel, color_space
 
 
@@ -992,7 +1020,8 @@ def _extract_annotations(
         return []
     try:
         count = max(0, int(count_function(page.raw)))
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return []
     annotations: list[AnnotationEvidence] = []
     for index in range(count):
@@ -1014,11 +1043,12 @@ def _extract_annotations(
                         origin_x=origin_x,
                         origin_y=origin_y,
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                _rethrow_native_fatal(exc)
             try:
                 subtype = _annotation_subtype_name(subtype_function(annot))
-            except Exception:
+            except Exception as exc:
+                _rethrow_native_fatal(exc)
                 subtype = None
             contents = _get_annotation_contents(annot)
             annotations.append(
@@ -1032,14 +1062,15 @@ def _extract_annotations(
                     object_count=_get_annotation_object_count(annot),
                 )
             )
-        except Exception:
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
             continue
         finally:
             if annot:
                 try:
                     close_function(annot)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _rethrow_native_fatal(exc)
     return annotations
 
 
@@ -1084,7 +1115,8 @@ def _get_annotation_contents(annot: Any) -> str | None:
         if len(raw) % 2:
             raw = raw[:-1]
         return raw.decode("utf-16-le", errors="replace").rstrip("\x00")
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -1114,7 +1146,8 @@ def _get_annotation_appearance_streams(annot: Any) -> dict[str, str]:
             ).rstrip("\x00")
             if value:
                 streams[name] = value
-        except Exception:
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
             continue
     return streams
 
@@ -1128,7 +1161,8 @@ def _get_annotation_object_count(annot: Any) -> int | None:
     try:
         count = int(function(annot))
         return count if count >= 0 else None
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 
@@ -1166,14 +1200,15 @@ def _extract_structure_tree(page: Any) -> StructureTreeEvidence:
             node_count=_count_structure_nodes(elements),
             raw_summary={"root_count": root_count, "elements": elements},
         )
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return StructureTreeEvidence(available=False)
     finally:
         if tree:
             try:
                 close_tree(tree)
-            except Exception:
-                pass
+            except Exception as exc:
+                _rethrow_native_fatal(exc)
 
 
 def _structure_element_summary(
@@ -1189,8 +1224,8 @@ def _structure_element_summary(
     if marked_content is not None:
         try:
             result["marked_content_id"] = int(marked_content(element))
-        except Exception:
-            pass
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
     children: list[dict[str, Any]] = []
     if count_children is not None and get_child is not None:
         try:
@@ -1199,8 +1234,8 @@ def _structure_element_summary(
                 child = get_child(element, index)
                 if child:
                     children.append(_structure_element_summary(child, count_children, get_child, get_type))
-        except Exception:
-            pass
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
     if children:
         result["children"] = children
     return result
@@ -1214,7 +1249,8 @@ def _read_pdfium_wide_string(function: Any, handle: Any) -> str | None:
         buffer = ctypes.create_string_buffer(size)
         function(handle, buffer, size)
         return bytes(buffer.raw[:size]).decode("utf-16-le", errors="replace").rstrip("\x00")
-    except Exception:
+    except Exception as exc:
+        _rethrow_native_fatal(exc)
         return None
 
 

@@ -284,7 +284,7 @@ def _line_claimed_by_table(
     if cell_bboxes:
         return all(
             not token.text.strip()
-            or any(cell_bbox.overlap_ratio(token.bbox) >= 0.25 for cell_bbox in cell_bboxes)
+            or any(token.bbox.overlap_ratio(cell_bbox) >= 0.25 for cell_bbox in cell_bboxes)
             for token in line.tokens
         )
 
@@ -296,6 +296,77 @@ def _line_claimed_by_table(
         )
 
     return False
+
+
+def _table_claims_token(
+    token: object,
+    table: StructuredTable,
+    page_index: int,
+) -> bool:
+    """Return whether one visible token belongs to a table cell."""
+    return _table_token_claim_strength(token, table, page_index) > 0
+
+
+def _table_token_claim_strength(
+    token: object,
+    table: StructuredTable,
+    page_index: int,
+) -> int:
+    """Return 2 for exact token ownership, 1 for geometry, and 0 otherwise."""
+    cell_token_ids = {id(item) for cell in table.cells for item in cell.tokens}
+    if cell_token_ids:
+        # Detectors preserve the source token objects in each cell. When that
+        # ownership evidence exists, it is stricter than the cell rectangle:
+        # a nearby outside word can overlap a large cell bbox without being a
+        # table value.
+        return 2 if id(token) in cell_token_ids else 0
+    bbox = getattr(token, "bbox", None)
+    if bbox is None:
+        return 0
+    cell_bboxes = [cell.bbox for cell in table.cells if cell.bbox is not None]
+    if cell_bboxes:
+        return 1 if any(bbox.overlap_ratio(cell_bbox) >= 0.25 for cell_bbox in cell_bboxes) else 0
+    fragment = _table_fragment_bbox(table, page_index)
+    return 1 if (
+        fragment is not None
+        and fragment.x0 <= bbox.cx <= fragment.x1
+        and fragment.y0 <= bbox.cy <= fragment.y1
+    ) else 0
+
+
+def _tokens_with_residual_whitespace(
+    tokens: list,
+    residual_visible_ids: set[int],
+) -> list:
+    """Keep only whitespace separating two residual prose tokens."""
+    if not residual_visible_ids:
+        return []
+    visible_positions = [
+        index for index, token in enumerate(tokens)
+        if token.text.strip()
+    ]
+    residual_positions = [
+        index for index in visible_positions
+        if id(tokens[index]) in residual_visible_ids
+    ]
+    first_residual = min(residual_positions)
+    last_residual = max(residual_positions)
+    residual: list = []
+    for index, token in enumerate(tokens):
+        if token.text.strip():
+            if id(token) in residual_visible_ids:
+                residual.append(token)
+            continue
+        if not token.text.isspace():
+            continue
+        # Preserve source separators between retained words even when a table
+        # token sits between them. The removed table token should not collapse
+        # two independent prose words into one.
+        if first_residual < index < last_residual:
+            if residual and residual[-1].text.isspace():
+                continue
+            residual.append(token)
+    return residual
 
 
 _REGION_TO_CONTENT_KIND: dict[RegionKind, ContentKind] = {
@@ -353,11 +424,12 @@ def _build_region_blocks(
         ordered_lines, _ = order_lines_in_region(region)
     kind = _content_kind_from_region(region.kind)
 
-    # Find tables that intersect this region (can be >1 — INV-41).
+    # Find every table that intersects this region, even when its block was
+    # emitted in an earlier region. Previously emitted tables still own their
+    # cell tokens here; only the table-block emission below is deduplicated.
     candidate_tables = [
         t for t in tables
         if _table_intersects_region(t, region, page_index)
-        and t.table_id not in emitted_table_ids
     ]
     # Sort candidate tables by their fragment position inside the region.
     candidate_tables.sort(
@@ -408,48 +480,62 @@ def _build_region_blocks(
     table_blocks: dict[str, PageContentBlock] = {}
 
     for line in ordered_lines:
-        owner = next((t for t in usable_tables if _line_claimed_by_table(line, t, page_index)), None)
-        partial_owner = None
+        visible_tokens = [token for token in line.tokens if token.text.strip()]
+        token_owners: dict[int, StructuredTable] = {}
+        for token in visible_tokens:
+            owners = [
+                (strength, table)
+                for table in usable_tables
+                if (strength := _table_token_claim_strength(token, table, page_index)) > 0
+            ]
+            if owners:
+                # Prefer explicit cell-token ownership over geometric overlap;
+                # ties follow the stable visual order of usable_tables.
+                token_owners[id(token)] = max(owners, key=lambda item: item[0])[1]
+
+        line_tables = list({table.table_id: table for table in token_owners.values()}.values())
+        line_tables.sort(key=lambda table: _table_fragment_sort_key(table, page_index))
+        if not line_tables:
+            pending_prose.append(line)
+            continue
+
+        claimed_count += 1
+        residual_visible_ids = {
+            id(token) for token in visible_tokens if id(token) not in token_owners
+        }
+        residual_tokens = _tokens_with_residual_whitespace(line.tokens, residual_visible_ids)
         residual_line = None
-        if owner is None:
-            for candidate in usable_tables:
-                cell_token_ids = {id(token) for cell in candidate.cells for token in cell.tokens}
-                claimed_tokens = [token for token in line.tokens if token.text.strip() and id(token) in cell_token_ids]
-                residual_tokens = [token for token in line.tokens if token.text.strip() and id(token) not in cell_token_ids]
-                if claimed_tokens and residual_tokens:
-                    partial_owner = candidate
-                    residual_line = replace(
-                        line,
-                        tokens=residual_tokens,
-                        bbox=BBox.union_all([token.bbox for token in residual_tokens]),
-                        line_id=f"{line_identity(line)}:unclaimed",
-                        text_override=None,
-                    )
-                    break
-        if owner is None:
-            if partial_owner is None:
-                pending_prose.append(line)
-                continue
-            owner = partial_owner
-            pending_prose.append(residual_line)
-        else:
-            claimed_count += 1
-        # A partially consumed source line keeps its remaining tokens as prose.
-        partial = residual_line is not None
-        if partial:
-            claimed_count += 1
-        # Emit any accumulated prose before this table.
+        if residual_visible_ids:
+            residual_line = replace(
+                line,
+                tokens=residual_tokens,
+                bbox=BBox.union_all([token.bbox for token in residual_tokens if token.text.strip()]),
+                line_id=line_identity(line),
+                text_override=None,
+            )
+
+        # Preserve reading order for prose that preceded this table row, then
+        # emit every table that owns tokens from the line. A line may span
+        # multiple distinct tables, so selecting only the first owner loses
+        # ownership information and leaks the other table's text into prose.
         flush_prose(pending_prose)
         pending_prose = []
-
-        if owner.table_id not in emitted_table_ids and owner.table_id not in emitted_in_pass:
-            emitted_in_pass.add(owner.table_id)
-            table_block = _emit_table_block(owner, page_index, region)
-            table_blocks[owner.table_id] = table_block
+        for table in line_tables:
+            if table.table_id in emitted_table_ids or table.table_id in emitted_in_pass:
+                continue
+            emitted_in_pass.add(table.table_id)
+            table_block = _emit_table_block(table, page_index, region)
+            table_blocks[table.table_id] = table_block
             blocks.append(table_block)
-        if owner.table_id in table_blocks:
-            if not partial:
-                table_blocks[owner.table_id].line_ids.append(line_identity(line))
+
+        # The source identity is conserved exactly once. A residual prose line
+        # carries it when present; otherwise the first owning table block does.
+        if residual_line is not None:
+            pending_prose.append(residual_line)
+        elif line_tables:
+            owner_block = table_blocks.get(line_tables[0].table_id)
+            if owner_block is not None:
+                owner_block.line_ids.append(line_identity(line))
 
     # Emit remaining prose after the last table.
     flush_prose(pending_prose)
@@ -494,28 +580,55 @@ def _attach_table_source_line_claims(
     not render that occurrence again as an orphan or figure line.
     """
     tables_by_id = {table.table_id: table for table in tables}
+    table_sources: list[tuple[PageContentBlock, StructuredTable]] = []
     for block in blocks:
         if block.kind != ContentKind.TABLE or block.table_id is None:
             continue
         table = tables_by_id.get(block.table_id)
         if table is None:
             continue
-        cell_token_ids = {
-            id(token)
-            for cell in table.cells
-            for token in cell.tokens
-        }
-        if not cell_token_ids:
-            continue
-        claimed = set(block.line_ids)
-        for region in regions:
-            for line in [*region.native_lines, *region.ocr_lines]:
-                visible_ids = {id(token) for token in line.tokens if token.text.strip()}
-                if visible_ids and visible_ids.issubset(cell_token_ids):
-                    line_id = line_identity(line)
-                    if line_id not in claimed:
-                        block.line_ids.append(line_id)
-                        claimed.add(line_id)
+        table_sources.append((block, table))
+
+    if not table_sources:
+        return
+
+    # A source line can be consumed by several physical tables. Treat their
+    # cell-token sets as one ownership union, then record the line identity on
+    # exactly one existing table block. This is needed when those blocks were
+    # emitted in an earlier region and no prose residual remains to carry the
+    # line identity into conservation.
+    claimed_line_ids = {
+        line_id
+        for block, _ in table_sources
+        for line_id in block.line_ids
+    }
+    for region in regions:
+        for line in [*region.native_lines, *region.ocr_lines]:
+            visible_tokens = [token for token in line.tokens if token.text.strip()]
+            if not visible_tokens:
+                continue
+            owners_by_token: list[PageContentBlock] = []
+            for token in visible_tokens:
+                candidates = [
+                    (strength, block)
+                    for block, table in table_sources
+                    if (strength := _table_token_claim_strength(
+                        token, table, block.page_index
+                    )) > 0
+                ]
+                if not candidates:
+                    owners_by_token = []
+                    break
+                owners_by_token.append(max(candidates, key=lambda item: item[0])[1])
+            if not owners_by_token:
+                continue
+            line_id = line_identity(line)
+            if line_id in claimed_line_ids:
+                continue
+            # Account for the source identity once, even if this line's tokens
+            # were consumed by several tables or by geometric evidence.
+            owners_by_token[0].line_ids.append(line_id)
+            claimed_line_ids.add(line_id)
 
 
 def _emit_prose_blocks(

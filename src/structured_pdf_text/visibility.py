@@ -15,9 +15,10 @@ def detect_opaque_occlusion_boxes(
 ) -> list[BBox]:
     """Find solid path/image regions that hide native text in the rendered page.
 
-    PDFium does not expose paint state consistently for paths. Candidate geometry
-    is therefore cross-checked against the rendered pixels. Dark boxes must be
-    predominantly dark, while white boxes must be nearly uniform.
+    PDFium does not expose paint state consistently for paths. Candidate
+    geometry is cross-checked against rendered pixels at both the object and
+    glyph scale, so visible text on a solid background is retained while
+    characters actually hidden by a solid fill are removed.
     """
     if rendered_image is None:
         return []
@@ -51,14 +52,39 @@ def detect_opaque_occlusion_boxes(
         if pixels is None:
             continue
         dark_ratio, mean_luma, luma_stddev = pixels
-        # A dark region can be a deliberate high-contrast text background.
-        # Pixel statistics alone cannot establish paint order, so only the
-        # near-uniform white case remains eligible for opaque-object cleanup.
-        solid_dark = False
+        # Antialiasing along a vector rectangle's edges raises its deviation
+        # slightly even when its interior is a uniform black fill.
+        solid_dark = mean_luma <= 18.0 and dark_ratio >= 0.98 and luma_stddev <= 30.0
         solid_white = mean_luma >= 248.0 and luma_stddev <= 8.0
-        if solid_dark or solid_white:
-            if not any(box.iou(previous) >= 0.85 for previous in candidates):
-                candidates.append(box)
+        if not (solid_dark or solid_white):
+            continue
+        for character in page.characters:
+            if not character.text.strip():
+                # Whitespace has no ink to redact and its degenerate/small
+                # PDFium box often samples only the surrounding fill.
+                continue
+            if character.bbox.overlap_ratio(box) < 0.35:
+                continue
+            visual_character = character.bbox.rotate_to_visual(
+                page.objects.rotation, page.bbox.width, page.bbox.height
+            )
+            glyph_pixels = _crop_pixels(
+                rendered_image, visual_character, page.bbox, width, height,
+                page.objects.rotation,
+            )
+            if glyph_pixels is None:
+                continue
+            _, glyph_luma, glyph_stddev = glyph_pixels
+            # A glyph's mean luminance is dominated by the background and
+            # antialiasing when its box is small. A nominal white fill can
+            # therefore differ greatly from the crop mean even though the
+            # white glyph is plainly visible. Only a crop that is itself as
+            # uniform as the candidate fill is evidence that the glyph was
+            # covered.
+            same_solid_fill = abs(glyph_luma - mean_luma) <= 28.0 and glyph_stddev <= 14.0
+            if same_solid_fill:
+                if not any(character.bbox.iou(previous) >= 0.85 for previous in candidates):
+                    candidates.append(character.bbox)
     return candidates
 
 

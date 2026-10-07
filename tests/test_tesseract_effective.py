@@ -53,3 +53,54 @@ def test_raw_and_pipeline_paths_share_effective_tesseract_options(monkeypatch) -
     assert options["executable"] == "configured-tesseract"
     assert options["profile"] == "tesseract-degraded-scan-v1"
     assert options["num_threads"] == 3
+
+
+def test_osd_rotation_maps_pipeline_and_canonical_tokens(monkeypatch) -> None:
+    tsv = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        "5\t1\t1\t1\t1\t1\t10\t20\t20\t10\t90\tPALAVRA\n"
+    )
+    config = ExtractorConfig(ocr_engine="tesseract")
+    backend = TesseractBackend.__new__(TesseractBackend)
+    backend._config = config
+    backend._language = "pt-BR"
+    backend._tess_lang = "por"
+    backend._profile = "default"
+    backend._version = "5.test"
+    backend._tessdata = "test-data"
+    backend._artifact_hashes = {}
+    backend._dpi = 144
+    backend._conf_min = 0.0
+    backend._psm = 3
+    backend._oem = 1
+    backend._tesseract_cmd = "tesseract"
+    backend._osd_enabled = True
+    backend._osd_conf_min = 2.0
+    backend._run_effective_tesseract = lambda image, dpi: (tsv, rotation, 200, 100)
+    image = Image.new("RGB", (200, 100))
+
+    for rotation in (0, 90, 180, 270):
+        backend._run_effective_tesseract = lambda image, dpi, rotation=rotation: (
+            tsv, rotation, 200, 100
+        )
+        pipeline_tokens = backend.recognize_page(image, 0)
+        assert len(pipeline_tokens) == 1
+        assert pipeline_tokens[0].text == "PALAVRA"
+        assert pipeline_tokens[0].bbox.width > 0
+        assert pipeline_tokens[0].bbox.height > 0
+
+        request = OCRRequest(
+            image=image,
+            image_sha256="0" * 64,
+            document_id="rotated-page",
+            page_index=0,
+            input_kind="region",
+            language="pt-BR",
+            region_bbox=(5, 7, 205, 107),
+        )
+        canonical = backend.recognize(request)
+        assert canonical.status == "ok"
+        assert len(canonical.tokens) == 1
+        assert canonical.tokens[0].bbox_px[0] >= 5
+        assert canonical.tokens[0].bbox_px[1] >= 7
+        assert canonical.tokens[0].polygon_px

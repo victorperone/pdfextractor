@@ -93,6 +93,32 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+def _raise_worker_failure(response: dict[str, Any], context: str) -> None:
+    """Rebuild the worker's stable fatal-error contract in the parent process."""
+    import errno
+    from structured_pdf_text.errors import (
+        FatalExtractionError,
+        RequiredRuntimeUnavailableError,
+        ResourceExhaustedExtractionError,
+    )
+
+    error_type = str(response.get("error_type") or "RuntimeError")
+    message = f"{context}: {response.get('error') or error_type}"
+    stage = response.get("stage")
+    fatal_code = response.get("fatal_code")
+    if fatal_code == "resource_exhausted" or error_type == "MemoryError" or (
+        error_type == "OSError" and response.get("errno") == errno.ENOMEM
+    ):
+        raise ResourceExhaustedExtractionError(message, stage=stage)
+    if fatal_code == "paddle_ocr_unavailable":
+        raise PaddleOcrUnavailable(message, stage=stage)
+    if fatal_code == "required_runtime_unavailable":
+        raise RequiredRuntimeUnavailableError(message, stage=stage)
+    if response.get("fatal"):
+        raise FatalExtractionError(message, stage=stage)
+    raise RuntimeError(message)
+
+
 def _has_torch_conflict() -> bool:
     """True when torch is findable in this venv on Windows (DLL conflict with paddle)."""
     if sys.platform != "win32":
@@ -218,7 +244,7 @@ class PaddleOCRBackend:
             bufsize=0,  # unbuffered binary I/O — flush() is explicit in _raw_send
         )
         # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
-        init_req = {"protocol_version": 3, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
+        init_req = {"protocol_version": 4, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
         try:
             response = self._raw_send(init_req, timeout=_worker_init_timeout())
         except Exception:
@@ -226,16 +252,7 @@ class PaddleOCRBackend:
             raise
         if response.get("status") != "ok":
             self._discard_worker()
-            from structured_pdf_text.errors import ResourceExhaustedExtractionError, FatalExtractionError
-            error_type = response.get("error_type", "RuntimeError")
-            message = f"Paddle worker init failed: {response.get('error') or error_type}"
-            if response.get("fatal") or error_type in {"MemoryError", "ResourceExhaustedExtractionError"}:
-                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
-            if error_type == "OSError" and response.get("errno") == 12:
-                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
-            if error_type.endswith("ExtractionError"):
-                raise FatalExtractionError(message, stage=response.get("stage"))
-            raise RuntimeError(message)
+            _raise_worker_failure(response, "Paddle worker init failed")
 
     def _raw_send(self, request: dict, timeout: float | None = None) -> dict:
         """Write one request and read one response on the raw pipe.
@@ -302,7 +319,7 @@ class PaddleOCRBackend:
 
             self._worker_req_seq += 1
             req_id = self._worker_req_seq
-            request = {**request, "protocol_version": 3, "request_id": req_id}
+            request = {**request, "protocol_version": 4, "request_id": req_id}
             try:
                 response = self._raw_send(request)
             except Exception:
@@ -364,16 +381,7 @@ class PaddleOCRBackend:
                 pass
 
         if response.get("status") != "ok":
-            from structured_pdf_text.errors import ResourceExhaustedExtractionError, FatalExtractionError
-            error_type = response.get("error_type", "RuntimeError")
-            message = response.get("error") or error_type
-            if response.get("fatal") or error_type in {"MemoryError", "ResourceExhaustedExtractionError"}:
-                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
-            if error_type == "OSError" and response.get("errno") == 12:
-                raise ResourceExhaustedExtractionError(message, stage=response.get("stage"))
-            if error_type.endswith("ExtractionError"):
-                raise FatalExtractionError(message, stage=response.get("stage"))
-            raise RuntimeError(message)
+            _raise_worker_failure(response, "Paddle worker request failed")
 
         tokens: list[OcrToken] = []
         for item in response.get("tokens", []):

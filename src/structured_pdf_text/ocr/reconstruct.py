@@ -95,7 +95,8 @@ def reconstruct_ocr_lines(
                 gap_bbox = _gap_bbox(
                     previous_virtual,
                     current_virtual,
-                    (token.rotation + page_rotation) % 360,
+                    token.rotation,
+                    page_rotation,
                     page_bbox,
                     page_width,
                     page_height,
@@ -135,7 +136,7 @@ def reconstruct_ocr_lines(
                 line_id=_ocr_line_id(page_index, bbox, ordered),
             )
         )
-    if any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
+    if page_rotation % 360 or any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
         result = lines
     else:
         result = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
@@ -262,20 +263,21 @@ def _virtual_bbox(token: OcrToken, page_bbox: BBox | None, page_width: float, pa
     y0 = token.bbox.y0 - origin_y
     x1 = token.bbox.x1 - origin_x
     y1 = token.bbox.y1 - origin_y
-    rotation = (token.rotation + page_rotation) % 360
-    if rotation == 90:
-        return BBox(y0, page_width - x1, y1, page_width - x0)
-    if rotation == 270:
-        return BBox(page_height - y1, x0, page_height - y0, x1)
-    if rotation == 180:
-        return BBox(page_width - x1, page_height - y1, page_width - x0, page_height - y0)
-    return BBox(x0, y0, x1, y1)
+    canonical = BBox(x0, y0, x1, y1)
+    page_visual = canonical.rotate_to_visual(page_rotation, page_width, page_height)
+    visual_width = page_height if page_rotation % 360 in (90, 270) else page_width
+    visual_height = page_width if page_rotation % 360 in (90, 270) else page_height
+    # ``token.rotation`` records an OCR orientation correction already mapped
+    # back into canonical page coordinates. Undo that correction in the visual
+    # frame after applying the PDF page presentation rotation.
+    return _inverse_visual_bbox(page_visual, token.rotation, visual_width, visual_height)
 
 
 def _gap_bbox(
     previous: BBox,
     current: BBox,
-    rotation: int,
+    token_rotation: int,
+    page_rotation: int,
     page_bbox: BBox | None,
     page_width: float,
     page_height: float,
@@ -315,17 +317,26 @@ def _gap_bbox(
         left = midpoint
         right = midpoint
     virtual = BBox(left, min(previous.y0, current.y0), right, max(previous.y1, current.y1))
-    if rotation % 360 == 90:
-        local = BBox(page_width - virtual.y1, virtual.x0, page_width - virtual.y0, virtual.x1)
-    elif rotation % 360 == 270:
-        local = BBox(virtual.y0, page_height - virtual.x1, virtual.y1, page_height - virtual.x0)
-    elif rotation % 360 == 180:
-        local = BBox(page_width - virtual.x1, page_height - virtual.y1, page_width - virtual.x0, page_height - virtual.y0)
-    else:
-        local = virtual
+    visual_width = page_height if page_rotation % 360 in (90, 270) else page_width
+    visual_height = page_width if page_rotation % 360 in (90, 270) else page_height
+    oriented = virtual.rotate_to_visual(token_rotation, visual_width, visual_height)
+    local = _inverse_visual_bbox(oriented, page_rotation, page_width, page_height)
     origin_x = page_bbox.x0 if page_bbox is not None else 0.0
     origin_y = page_bbox.y0 if page_bbox is not None else 0.0
     return BBox(local.x0 + origin_x, local.y0 + origin_y, local.x1 + origin_x, local.y1 + origin_y)
+
+
+def _inverse_visual_bbox(box: BBox, rotation: int, page_width: float, page_height: float) -> BBox:
+    """Invert :meth:`BBox.rotate_to_visual` for a visual-frame box."""
+    angle = rotation % 360
+    if angle == 90:
+        return BBox(box.y0, page_height - box.x1, box.y1, page_height - box.x0)
+    if angle == 180:
+        return BBox(page_width - box.x1, page_height - box.y1,
+                    page_width - box.x0, page_height - box.y0)
+    if angle == 270:
+        return BBox(page_width - box.y1, box.x0, page_width - box.y0, box.x1)
+    return box
 
 
 def _line_angle(tokens: list[OcrToken]) -> float:
