@@ -188,7 +188,11 @@ def recognize_page_with_tiles(
 def _candidate_score(tokens: list[OcrToken]) -> float:
     if not tokens:
         return float("-inf")
-    confidence = [token.confidence for token in tokens if token.confidence is not None]
+    # B4: exclude tokens with degenerate bboxes from confidence so a 0×0
+    # high-confidence token cannot inflate the score and beat a valid tile.
+    valid = [t for t in tokens if t.bbox.area > 0]
+    invalid_ratio = (len(tokens) - len(valid)) / len(tokens)
+    confidence = [token.confidence for token in valid if token.confidence is not None]
     mean_conf = sum(confidence) / len(confidence) if confidence else 0.5
     texts = [token.text.strip() for token in tokens if token.text.strip()]
     char_bonus = min(sum(len(t) for t in texts), 400) / 4000
@@ -202,7 +206,7 @@ def _candidate_score(tokens: list[OcrToken]) -> float:
     single_char_penalty = min(
         sum(1 for t in texts if len(t) == 1) / max(len(texts), 1), 0.5
     ) * 0.10
-    return mean_conf + char_bonus - repl_penalty - dup_penalty - low_conf_penalty - single_char_penalty
+    return mean_conf + char_bonus - repl_penalty - dup_penalty - low_conf_penalty - single_char_penalty - invalid_ratio * 0.40
 
 
 def _can_admit_novel_token(

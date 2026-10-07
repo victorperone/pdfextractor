@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from structured_pdf_text.document import OcrToken, SourceKind
+from structured_pdf_text.document import OcrProvenance, OcrToken, SourceKind
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.candidate_fusion import (
     OcrCandidateFusionEngine,
@@ -283,6 +283,82 @@ class TestD8TileScorerQuality:
         ]
 
         assert _candidate_score(clean) > _candidate_score(noisy)
+
+    def test_zero_area_tile_does_not_beat_valid_tile(self):
+        """B4: a tile with a 0×0 bbox must not win over a valid tile via inflated confidence."""
+        zero_area = _tok("LIXO", 10, 10, 10, 10, conf=0.99)  # area == 0
+        valid = _tok("TEXTO CORRETO", 0, 0, 100, 20, conf=0.90)
+
+        assert _candidate_score([valid]) > _candidate_score([zero_area]), (
+            "0×0 high-confidence token must not beat a valid lower-confidence token"
+        )
+
+    def test_invalid_geometry_tokens_excluded_from_mean_confidence(self):
+        """B4: confidence of degenerate tokens must not inflate the scored mean."""
+        good_only = [_tok("correto", 0, 0, 80, 15, conf=0.70)]
+        good_plus_bad = [
+            _tok("correto", 0, 0, 80, 15, conf=0.70),
+            _tok("fantasma", 5, 5, 5, 5, conf=0.99),  # 0×0 → invalid
+        ]
+        # With the fix, the bad token's 0.99 confidence must not inflate the score
+        # above the clean candidate.
+        assert _candidate_score(good_only) >= _candidate_score(good_plus_bad), (
+            "adding a 0×0 high-conf token must not raise the candidate score"
+        )
+
+
+# ---------------------------------------------------------------------------
+# B5 — OcrProvenance.rotation must match OcrToken.rotation after fusion
+# ---------------------------------------------------------------------------
+
+class TestB5ProvenanceRotation:
+    """OcrProvenance.rotation must be propagated from OcrToken.rotation during fusion."""
+
+    def test_generated_provenance_copies_token_rotation(self):
+        """When fusion creates a new OcrProvenance, it must copy the token's rotation."""
+        t = OcrToken("texto", BBox(0, 0, 100, 20), 0.90, "pt-BR", SourceKind.OCR_PAGE, rotation=90)
+        result = OcrCandidateFusionEngine().fuse([
+            OcrCandidateResult("candidate_a", "craft_greedy", (t,), 0.90),
+        ])
+        prov = result.tokens[0].ocr_provenance
+        assert prov is not None, "fusion must create an OcrProvenance"
+        assert prov.rotation == 90.0, (
+            f"provenance rotation must match token rotation=90; got {prov.rotation!r}"
+        )
+
+    def test_rot180_provenance_copies_token_rotation(self):
+        """Rotation 180° must also be propagated."""
+        t = OcrToken("texto", BBox(0, 0, 100, 20), 0.85, "pt-BR", SourceKind.OCR_PAGE, rotation=180)
+        result = OcrCandidateFusionEngine().fuse([
+            OcrCandidateResult("candidate_b", "craft_greedy", (t,), 0.85),
+        ])
+        assert result.tokens[0].ocr_provenance.rotation == 180.0
+
+    def test_existing_provenance_is_not_overwritten(self):
+        """When a token already has OcrProvenance, fusion must not replace it."""
+        existing = OcrProvenance(engine="easyocr", candidate_id="original", rotation=45.0)
+        t = OcrToken(
+            "texto", BBox(0, 0, 100, 20), 0.90, "pt-BR", SourceKind.OCR_PAGE,
+            rotation=90, ocr_provenance=existing,
+        )
+        result = OcrCandidateFusionEngine().fuse([
+            OcrCandidateResult("candidate_c", "craft_greedy", (t,), 0.90),
+        ])
+        assert result.tokens[0].ocr_provenance.rotation == 45.0, (
+            "existing provenance rotation must be preserved"
+        )
+
+    def test_upright_token_rotation_none_in_provenance(self):
+        """Upright (0°) tokens may have rotation=None in provenance (default upright)."""
+        t = OcrToken("texto", BBox(0, 0, 100, 20), 0.90, "pt-BR", SourceKind.OCR_PAGE, rotation=0)
+        result = OcrCandidateFusionEngine().fuse([
+            OcrCandidateResult("candidate_d", "craft_greedy", (t,), 0.90),
+        ])
+        prov = result.tokens[0].ocr_provenance
+        assert prov is not None
+        assert prov.rotation in (None, 0.0), (
+            "upright token may have rotation=None or 0.0 in provenance"
+        )
 
 
 # ---------------------------------------------------------------------------

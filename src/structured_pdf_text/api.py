@@ -2273,7 +2273,6 @@ def _should_use_page_ocr_as_primary(
 
     In all other cases native is considered "strong" and stays primary.
     """
-    from structured_pdf_text.config import ExtractionMode
     if not page_ocr_requested or not ocr_lines:
         return False
     if mode == ExtractionMode.OCR:

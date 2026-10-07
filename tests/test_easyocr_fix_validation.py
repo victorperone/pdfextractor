@@ -2636,3 +2636,48 @@ class TestPreflightCheckMaxQualityGuards:
         assert report["direct_recognition_reason"] == "direct_recognition_returned_no_tokens"
         # exhaustive must have passed since page_tokens was non-empty
         assert report["exhaustive_planner_ready"] is True
+
+
+# ---------------------------------------------------------------------------
+# B6 — preprocessing deduplication must compare against the input image (P1)
+# ---------------------------------------------------------------------------
+
+class TestB6PreprocessingBaselineDedup:
+    """_image_preprocessing_candidates must skip variants identical to the input."""
+
+    def test_grayscale_identical_to_rgb_input_is_skipped(self):
+        """When a preprocessing variant is pixel-identical to the input, it must be
+        excluded so that no redundant OCR pass runs on the same pixels (B6)."""
+        import hashlib
+        import numpy as np
+        from structured_pdf_text.ocr.backends.easyocr import _image_preprocessing_candidates
+
+        dark_input = np.full((50, 50, 3), 50, dtype=np.uint8)
+
+        def fp(arr):
+            a = np.asarray(arr)
+            return f"{a.shape}:{a.dtype}:{hashlib.md5(a.tobytes()).hexdigest()}"
+
+        original_fp = fp(dark_input)
+        for label, variant in _image_preprocessing_candidates(dark_input, adaptive=False):
+            assert fp(variant) != original_fp, (
+                f"variant '{label}' is pixel-identical to the input — must be skipped (B6)"
+            )
+
+    def test_preprocessing_returns_only_unique_variants(self):
+        """No two returned variants may have the same pixel fingerprint."""
+        import numpy as np
+        import hashlib
+        from structured_pdf_text.ocr.backends.easyocr import _image_preprocessing_candidates
+
+        dark = np.full((60, 60, 3), 30, dtype=np.uint8)
+        variants = _image_preprocessing_candidates(dark, adaptive=False)
+
+        def fp(arr):
+            a = np.asarray(arr)
+            return f"{a.shape}:{a.dtype}:{hashlib.md5(a.tobytes()).hexdigest()}"
+
+        fingerprints = [fp(v) for _, v in variants]
+        assert len(fingerprints) == len(set(fingerprints)), (
+            "duplicate preprocessing variants must be deduplicated"
+        )
