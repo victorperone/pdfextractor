@@ -488,6 +488,28 @@ def test_tile_grid_escalation_on_tile_oom(monkeypatch) -> None:
     ), "Tile OOM must be recorded in attempts"
 
 
+from structured_pdf_text.api import _recover_selected_regions
+from structured_pdf_text.document import (
+    LayoutRegion,
+    RegionDecision,
+    RegionKind,
+    RegionQuality,
+)
+
+
+def _make_layout_region(region_id: str, bbox: BBox) -> LayoutRegion:
+    """Minimal LayoutRegion suitable for _recover_selected_regions tests."""
+    return LayoutRegion(
+        region_id=region_id,
+        kind=RegionKind.TEXT,
+        bbox=bbox,
+        layout_confidence=1.0,
+        native_lines=[],
+        ocr_tokens=[],
+        quality=RegionQuality(RegionDecision.MERGE_OCR),
+    )
+
+
 def test_oom_all_grids_fail_gives_resource_exhausted(monkeypatch) -> None:
     """When all tile grids up to 8×8 fail with OOM → status=resource_exhausted."""
     monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
@@ -639,3 +661,175 @@ def test_tiled_recovery_token_bbox_within_page_bounds_for_all_rotations(monkeypa
         assert 0.0 <= t.bbox.y0 < t.bbox.y1 <= 100.0 + 1e-6, (
             f"Token y-range {t.bbox.y0:.2f}–{t.bbox.y1:.2f} outside page [0, 100]"
         )
+
+
+# ---------------------------------------------------------------------------
+# Correction 6 — recovered OOM must remain visible in region and page telemetry
+# ---------------------------------------------------------------------------
+
+def test_oom_recovered_region_stat_has_resource_exhausted_attempts(monkeypatch) -> None:
+    """Case A: full-raster OOM recovered via tiling → resource_exhausted_attempts >= 1.
+
+    Even though the final status is "ok" (tiling succeeded), the per-region stat
+    must report resource_exhausted_attempts >= 1 and resource_exhausted=True so
+    the event remains visible in telemetry.
+    """
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    engine = _OOMOnLargePixelsEngine()  # 100×100 raster OOMs; tiles succeed
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    region = _make_layout_region("region-test-oom-recovered", page_bbox)
+
+    _tokens, _passes, _batches, stats = _recover_selected_regions(
+        engine,
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        regions=[region],
+        quality_variants=False,
+    )
+
+    stat = stats["region-test-oom-recovered"]
+    assert stat["status"] == "ok", (
+        f"Tiled recovery must produce status=ok; got {stat['status']!r}"
+    )
+    assert stat["resource_exhausted_attempts"] >= 1, (
+        f"At least one OOM attempt must be counted; got {stat['resource_exhausted_attempts']}"
+    )
+    assert stat["resource_exhausted"] is True, (
+        "resource_exhausted flag must be True when any attempt raised OOM"
+    )
+
+
+def test_page_facts_count_recovered_oom_attempts(monkeypatch) -> None:
+    """Case A: page-level ocr_resource_exhausted_count must count all OOM attempts.
+
+    Tests the aggregation formula directly using mock stats dicts, verifying that
+    the count includes regions with status=ok (OOM recovered) — not just regions
+    with status=resource_exhausted (OOM not recovered).
+    """
+    # Simulate: one region recovered (status=ok, 2 OOM attempts), one clean (0 attempts)
+    mock_stats = {
+        "region-oom-recovered": {
+            "status": "ok",
+            "resource_exhausted_attempts": 2,
+            "resource_exhausted": True,
+        },
+        "region-clean": {
+            "status": "ok",
+            "resource_exhausted_attempts": 0,
+            "resource_exhausted": False,
+        },
+    }
+    # Apply the same formula used in api.py page facts
+    count = sum(
+        int(stat.get("resource_exhausted_attempts", 0))
+        for stat in mock_stats.values()
+    )
+    regions = [
+        region_id for region_id, stat in mock_stats.items()
+        if int(stat.get("resource_exhausted_attempts", 0)) > 0
+    ]
+    assert count == 2, f"Expected 2 total OOM attempts, got {count}"
+    assert regions == ["region-oom-recovered"], (
+        f"Expected only the recovered region in the list, got {regions}"
+    )
+
+
+def test_no_oom_region_stat_has_zero_resource_exhausted_attempts(monkeypatch) -> None:
+    """Case B: successful OCR with no OOM → resource_exhausted_attempts=0, resource_exhausted=False."""
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    engine = _EmptyResultEngine()  # always succeeds, never OOMs
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    region = _make_layout_region("region-test-no-oom", page_bbox)
+
+    _tokens, _passes, _batches, stats = _recover_selected_regions(
+        engine,
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        regions=[region],
+        quality_variants=False,
+    )
+
+    stat = stats["region-test-no-oom"]
+    assert stat["resource_exhausted_attempts"] == 0, (
+        f"Clean OCR must report 0 OOM attempts; got {stat['resource_exhausted_attempts']}"
+    )
+    assert stat["resource_exhausted"] is False, (
+        "resource_exhausted must be False when no OOM occurred"
+    )
+
+
+def test_unrecovered_oom_region_stat_has_resource_exhausted_status_and_attempts(monkeypatch) -> None:
+    """Case C: irrecoverable OOM → status=resource_exhausted AND resource_exhausted_attempts >= 1.
+
+    Both the legacy status field AND the new resource_exhausted_attempts field
+    must reflect the failure — they serve different purposes:
+    status=resource_exhausted flags complete failure; resource_exhausted_attempts
+    counts the number of OOM events even when recovery partially succeeded.
+    """
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    engine = _OOMOnOCR()  # always OOMs — no recovery possible
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    region = _make_layout_region("region-test-unrecovered-oom", page_bbox)
+
+    _tokens, _passes, _batches, stats = _recover_selected_regions(
+        engine,
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        regions=[region],
+        quality_variants=False,
+    )
+
+    stat = stats["region-test-unrecovered-oom"]
+    assert stat["status"] == "resource_exhausted", (
+        f"Irrecoverable OOM must yield status=resource_exhausted; got {stat['status']!r}"
+    )
+    assert stat["resource_exhausted_attempts"] >= 1, (
+        f"Irrecoverable OOM must have resource_exhausted_attempts >= 1; "
+        f"got {stat['resource_exhausted_attempts']}"
+    )
+    assert stat["resource_exhausted"] is True, (
+        "resource_exhausted flag must be True for irrecoverable OOM"
+    )
+
+
+def test_page_facts_formula_recovered_vs_unrecovered_oom() -> None:
+    """Page facts formula must distinguish recovered OOM from unrecovered OOM.
+
+    Both appear in ocr_resource_exhausted_regions, but only unrecovered OOM
+    has status=resource_exhausted.  The count reflects total OOM attempts,
+    not just regions with failed status.
+    """
+    mock_stats = {
+        "region-ok-with-oom": {
+            "status": "ok",
+            "resource_exhausted_attempts": 1,
+            "resource_exhausted": True,
+        },
+        "region-failed-with-oom": {
+            "status": "resource_exhausted",
+            "resource_exhausted_attempts": 3,
+            "resource_exhausted": True,
+        },
+        "region-clean": {
+            "status": "ok",
+            "resource_exhausted_attempts": 0,
+            "resource_exhausted": False,
+        },
+    }
+    count = sum(
+        int(stat.get("resource_exhausted_attempts", 0))
+        for stat in mock_stats.values()
+    )
+    regions_with_oom = [
+        rid for rid, stat in mock_stats.items()
+        if int(stat.get("resource_exhausted_attempts", 0)) > 0
+    ]
+    assert count == 4, f"Expected 1+3=4 total OOM attempts, got {count}"
+    assert set(regions_with_oom) == {"region-ok-with-oom", "region-failed-with-oom"}, (
+        f"Both recovered and unrecovered OOM regions must appear; got {regions_with_oom}"
+    )
+    # The clean region must NOT appear
+    assert "region-clean" not in regions_with_oom

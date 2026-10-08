@@ -1153,12 +1153,12 @@ class PdfTextExtractor:
                         ) + ocr_targeted_batches,
                         "ocr_targeted_refinement_stats": ocr_targeted_stats,
                         "ocr_resource_exhausted_count": sum(
-                            1 for stat in ocr_region_stats.values()
-                            if stat.get("status") == "resource_exhausted"
+                            int(stat.get("resource_exhausted_attempts", 0))
+                            for stat in ocr_region_stats.values()
                         ),
                         "ocr_resource_exhausted_regions": [
                             region_id for region_id, stat in ocr_region_stats.items()
-                            if stat.get("status") == "resource_exhausted"
+                            if int(stat.get("resource_exhausted_attempts", 0)) > 0
                         ],
                         "ocr_early_stop": bool(getattr(ocr_diag_engine, "last_early_stop", False)),
                         "page_ocr_requested": page_ocr_requested,
@@ -1598,6 +1598,14 @@ def _recover_selected_regions(
             result.status in {"budget_blocked", "invalid_region", "runtime_error", "timeout", "resource_exhausted"}
             or (ocr_empty and ocr_required)
         )
+        # Count attempts that raised ResourceExhaustedExtractionError, regardless
+        # of whether recovery via tiling ultimately succeeded.  This keeps OOM
+        # events visible in telemetry even when the final status is "ok".
+        resource_exhausted_attempts = sum(
+            1
+            for attempt in result.attempts
+            if attempt.error and "ResourceExhausted" in attempt.error
+        )
         stats[region.region_id] = {
             "kind": region.kind.value,
             "tokens": len(region_tokens),
@@ -1613,6 +1621,8 @@ def _recover_selected_regions(
             "selected_rotation": result.selected_rotation,
             "ocr_passes": result.ocr_passes,
             "ocr_batches": result.ocr_batches,
+            "resource_exhausted_attempts": resource_exhausted_attempts,
+            "resource_exhausted": resource_exhausted_attempts > 0,
         }
     return _deduplicate_region_ocr_tokens(tokens), passes, batches, stats
 
