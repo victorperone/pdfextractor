@@ -338,35 +338,20 @@ _TILE_OVERLAP_DEFAULT = 0.15
 _TILE_MAX_GRID = 8
 
 
-def _plan_tile_grid_n(
-    crop_w: int,
-    crop_h: int,
-    scale: float,
-    budget_mib: float,
-    overlap: float = _TILE_OVERLAP_DEFAULT,
-    max_dim: int = _TILE_MAX_GRID,
-) -> int:
-    """Return minimum N so an N×N grid of (crop/N)*scale tiles fits in budget.
+def _scaled_image_dimensions(width: int, height: int, scale: float) -> tuple[int, int]:
+    """Return (width, height) after scaling using the same rounding as resize_image().
 
-    Returns 0 when no grid up to *max_dim* achieves tiles small enough.
-    The overlap fraction is applied on each side of every tile, matching the
-    overlap used by :func:`_tile_bboxes_for_grid`.
+    For scale <= 1.0 returns the original dimensions unchanged.
+    For scale > 1.0 uses ``max(dim + 1, round(dim * scale))``, matching
+    :func:`resize_image` and :func:`plan_ocr_scales` exactly so the planner
+    and the executor never diverge on the estimated tile size.
     """
-    budget_bytes = int(budget_mib * _MIB)
-    for n in range(2, max_dim + 1):
-        tile_base_w = math.ceil(crop_w / n)
-        tile_base_h = math.ceil(crop_h / n)
-        overlap_px = max(1, int(min(tile_base_w, tile_base_h) * overlap))
-        tile_w = min(crop_w, tile_base_w + overlap_px)
-        tile_h = min(crop_h, tile_base_h + overlap_px)
-        if scale <= 1.0:
-            scaled_w, scaled_h = tile_w, tile_h
-        else:
-            scaled_w = max(tile_w + 1, round(tile_w * scale))
-            scaled_h = max(tile_h + 1, round(tile_h * scale))
-        if scaled_w * scaled_h * 3 <= budget_bytes:
-            return n
-    return 0
+    if scale <= 1.0:
+        return width, height
+    return (
+        max(width + 1, round(width * scale)),
+        max(height + 1, round(height * scale)),
+    )
 
 
 def _tile_bboxes_for_grid(
@@ -375,7 +360,12 @@ def _tile_bboxes_for_grid(
     grid_n: int,
     overlap: float = _TILE_OVERLAP_DEFAULT,
 ) -> list[tuple[int, int, int, int]]:
-    """Return (x0, y0, x1, y1) base-crop-pixel tiles for an N×N grid with overlap."""
+    """Return (x0, y0, x1, y1) base-crop-pixel tiles for an N×N grid with overlap.
+
+    Interior tiles receive the overlap margin on *both* sides; edge tiles are
+    clamped to the crop boundary.  The resulting bboxes are the same regions
+    that :func:`_run_tiled_regional_ocr` will actually crop and scale.
+    """
     bboxes: list[tuple[int, int, int, int]] = []
     for row in range(grid_n):
         for col in range(grid_n):
@@ -389,6 +379,38 @@ def _tile_bboxes_for_grid(
             if x1 > x0 and y1 > y0:
                 bboxes.append((x0, y0, x1, y1))
     return bboxes
+
+
+def _plan_tile_grid_n(
+    crop_w: int,
+    crop_h: int,
+    scale: float,
+    budget_mib: float,
+    overlap: float = _TILE_OVERLAP_DEFAULT,
+    max_dim: int = _TILE_MAX_GRID,
+) -> int:
+    """Return minimum N so every tile in an N×N grid fits within *budget_mib* after scaling.
+
+    Uses :func:`_tile_bboxes_for_grid` to obtain the actual tile bboxes (with
+    the overlap margin applied on both sides of interior tiles) and
+    :func:`_scaled_image_dimensions` to compute scaled pixel counts — the same
+    operations that :func:`_run_tiled_regional_ocr` will perform, so planner
+    and executor always agree on whether a tile fits the budget.
+
+    Returns 0 when no grid up to *max_dim* keeps all tiles within budget.
+    """
+    budget_bytes = int(budget_mib * _MIB)
+    for n in range(2, max_dim + 1):
+        bboxes = _tile_bboxes_for_grid(crop_w, crop_h, n, overlap=overlap)
+        all_fit = True
+        for x0, y0, x1, y1 in bboxes:
+            sw, sh = _scaled_image_dimensions(x1 - x0, y1 - y0, scale)
+            if sw * sh * 3 > budget_bytes:
+                all_fit = False
+                break
+        if all_fit:
+            return n
+    return 0
 
 
 def _run_tiled_regional_ocr(

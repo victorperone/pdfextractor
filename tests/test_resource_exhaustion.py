@@ -24,6 +24,7 @@ from structured_pdf_text.ocr.recovery import (
     OcrRegionRefiner,
     RegionRefinementRequest,
     _plan_tile_grid_n,
+    _scaled_image_dimensions,
     _tile_bboxes_for_grid,
 )
 
@@ -142,6 +143,31 @@ def test_plan_tile_grid_n_returns_1_not_allowed() -> None:
     # Grid 1 means no tiling — function should always return >= 2 or 0.
     n = _plan_tile_grid_n(100, 100, 1.0, budget_mib=100.0)
     assert n == 0 or n >= 2
+
+
+def test_tile_planner_accounts_for_overlap_on_both_sides() -> None:
+    """n=3 yields tiles up to ~34 MiB at 2× — planner must return 4, not 3.
+
+    An interior tile at grid=3 has width = ceil(4000/3) + 2*overlap ≈ 1734 px
+    base; scaled 2× → 3468 px → 3468×3468×3 ≈ 34.4 MiB > 32 MiB budget.
+    Grid=4 interior tile: ceil(4000/4) + 2*150 = 1300 px → 2600×2600×3
+    ≈ 19.3 MiB ≤ 32 MiB.
+    """
+    n = _plan_tile_grid_n(4000, 4000, 2.0, budget_mib=32.0, overlap=0.15)
+    assert n >= 4, f"Expected grid >= 4 but got {n} — planner under-estimated tile size"
+
+
+def test_tile_planner_every_tile_fits_in_budget() -> None:
+    """For the grid the planner returns, every actual tile must be within budget."""
+    budget_mib = 32.0
+    budget_bytes = int(budget_mib * 1024 * 1024)
+    n = _plan_tile_grid_n(4000, 4000, 2.0, budget_mib=budget_mib)
+    assert n > 0, "Expected a valid grid"
+    for x0, y0, x1, y1 in _tile_bboxes_for_grid(4000, 4000, n):
+        sw, sh = _scaled_image_dimensions(x1 - x0, y1 - y0, 2.0)
+        assert sw * sh * 3 <= budget_bytes, (
+            f"Tile {x1-x0}×{y1-y0} scaled to {sw}×{sh} exceeds budget {budget_bytes}"
+        )
 
 
 # ---------------------------------------------------------------------------
