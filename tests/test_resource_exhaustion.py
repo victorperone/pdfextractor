@@ -286,7 +286,7 @@ class _OOMOnOCR:
 
 
 def test_oom_in_ocr_rotation_loop_does_not_abort_refine(monkeypatch) -> None:
-    """OOM during OCR is recorded as resource_exhausted attempt; refine() does not re-raise."""
+    """OOM during OCR triggers tiled recovery; if all grids also OOM → resource_exhausted."""
     monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
     engine = _OOMOnOCR()
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
@@ -305,3 +305,118 @@ def test_oom_in_ocr_rotation_loop_does_not_abort_refine(monkeypatch) -> None:
     assert any(
         "ResourceExhausted" in (a.error or "") for a in result.attempts
     ), "OOM event should be recorded in attempts"
+
+
+# ---------------------------------------------------------------------------
+# OOM on budget-allowed scale: tiled recovery must produce tokens
+# ---------------------------------------------------------------------------
+
+class _OOMOnLargePixelsEngine:
+    """Raises OOM for images with pixel count above threshold; succeeds for smaller ones."""
+
+    identity = _FakeIdentityEasyOCR()
+    last_pass_count = 1
+    last_batch_count = 1
+    OOM_ABOVE_PIXELS = 5000  # 100×100 = 10000 > threshold; tiles ~64×64 = 4096 < threshold
+
+    def recognize_page(
+        self, image: object, page_index: object, page_bbox: object, **kwargs: object
+    ) -> list:
+        from structured_pdf_text.ocr.recovery import image_size
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox as _BBox
+
+        w, h = image_size(image)
+        if w * h > self.OOM_ABOVE_PIXELS:
+            raise ResourceExhaustedExtractionError("fake OOM for large image")
+        return [OcrToken(
+            text="TILE",
+            bbox=_BBox(0.0, 0.0, float(w) * 0.5, float(h) * 0.5),
+            confidence=0.9,
+            language=None,
+            source=SourceKind.OCR_REGION,
+        )]
+
+
+def test_oom_in_budget_allowed_scale_triggers_tiled_recovery(monkeypatch) -> None:
+    """When OCR raises OOM on a budget-allowed scale, tiled recovery must succeed."""
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")  # allow full scale
+    engine = _OOMOnLargePixelsEngine()
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    result = OcrRegionRefiner(engine).refine(
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        request=RegionRefinementRequest(
+            bbox=BBox(0.0, 0.0, 100.0, 100.0),
+            scale_factors=(1.0,),
+        ),
+    )
+    assert result.status == "ok", f"Expected tiled recovery to succeed, got: {result.status}"
+    assert len(result.tokens) > 0, "Tiled recovery should produce tokens"
+    assert any(
+        "ResourceExhausted" in (a.error or "") for a in result.attempts
+    ), "Full-raster OOM must be recorded in attempts"
+
+
+def test_tile_grid_escalation_on_tile_oom(monkeypatch) -> None:
+    """When first grid's tiles OOM, escalate to finer grid; succeed there → status=ok."""
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+
+    # OOM for images wider than 70 px; tiles from grid=2 are ~64px, grid=4 are ~33px.
+    # Threshold chosen so grid=2 tiles OOM but grid=4 tiles succeed.
+    class _OOMAbove70pxEngine:
+        identity = _FakeIdentityEasyOCR()
+        last_pass_count = 1
+        last_batch_count = 1
+        OOM_ABOVE_WIDTH = 70
+
+        def recognize_page(self, image, page_index, page_bbox, **kwargs):
+            from structured_pdf_text.ocr.recovery import image_size
+            from structured_pdf_text.document import OcrToken, SourceKind
+            from structured_pdf_text.geometry import BBox as _BBox
+            w, h = image_size(image)
+            if w > self.OOM_ABOVE_WIDTH:
+                raise ResourceExhaustedExtractionError(f"fake OOM: tile too wide {w}px")
+            return [OcrToken(
+                text="OK",
+                bbox=_BBox(0.0, 0.0, float(w) * 0.5, float(h) * 0.5),
+                confidence=0.9,
+                language=None,
+                source=SourceKind.OCR_REGION,
+            )]
+
+    engine = _OOMAbove70pxEngine()
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    result = OcrRegionRefiner(engine).refine(
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        request=RegionRefinementRequest(
+            bbox=BBox(0.0, 0.0, 100.0, 100.0),
+            scale_factors=(1.0,),
+        ),
+    )
+    assert result.status == "ok", f"Grid escalation should have found a working grid, got: {result.status}"
+    assert any(
+        "ResourceExhausted" in (a.error or "") for a in result.attempts
+    ), "Tile OOM must be recorded in attempts"
+
+
+def test_oom_all_grids_fail_gives_resource_exhausted(monkeypatch) -> None:
+    """When all tile grids up to 8×8 fail with OOM → status=resource_exhausted."""
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    engine = _OOMOnOCR()  # always OOMs
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    result = OcrRegionRefiner(engine).refine(
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        request=RegionRefinementRequest(
+            bbox=BBox(0.0, 0.0, 100.0, 100.0),
+            scale_factors=(1.0,),
+        ),
+    )
+    assert result.status == "resource_exhausted", (
+        f"All grids failing should yield resource_exhausted, got: {result.status}"
+    )
