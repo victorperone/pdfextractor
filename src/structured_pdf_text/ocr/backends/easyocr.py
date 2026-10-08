@@ -1130,21 +1130,19 @@ _ORIENTATION_MAX_LOW_CONF_RATIO = 0.75
 _ORIENTATION_MIN_HORIZONTAL_RATIO = 0.75
 
 
-def _orientation_candidate_can_replace_upright(
-    *,
-    tokens: "list[OcrToken]",
-    score: float,
-    best_score: float,
-) -> bool:
-    """Return True only when a rotated candidate has sufficient evidence and a better score.
+def _orientation_rotated_evidence_sufficient(tokens: "list[OcrToken]") -> bool:
+    """Return True when a rotated candidate has sufficient evidence to replace upright.
 
-    A rotation is chosen only when its token set independently passes the content
-    quality criteria (token count, char count, confidence, low-conf ratio).  The
-    horizontal_ratio criterion is intentionally excluded here — rotated candidates
-    have bboxes remapped back to original image space, so correct text appears
-    vertical and would always fail the horizontal test.
+    Uses the same quality criteria as :func:`_orientation_candidate_can_replace_upright`
+    but without the score comparison, so it can be evaluated independently for
+    diagnostics without requiring a comparison candidate.
+
+    The ``horizontal_ratio`` criterion is intentionally EXCLUDED — a correctly
+    rotated page remaps detected text back to the original image space, where the
+    text appears vertical and would always fail the horizontal test even when the
+    recognition quality is excellent.
     """
-    if not tokens or score <= best_score:
+    if not tokens:
         return False
     m = _candidate_metrics(tokens)
     return (
@@ -1153,6 +1151,24 @@ def _orientation_candidate_can_replace_upright(
         and m["mean_confidence"] >= _ORIENTATION_MIN_MEAN_CONFIDENCE
         and m["low_conf_ratio"] <= _ORIENTATION_MAX_LOW_CONF_RATIO
     )
+
+
+def _orientation_candidate_can_replace_upright(
+    *,
+    tokens: "list[OcrToken]",
+    score: float,
+    best_score: float,
+) -> bool:
+    """Return True only when a rotated candidate has sufficient evidence and a better score.
+
+    A rotation is chosen only when its token set independently passes
+    :func:`_orientation_rotated_evidence_sufficient` (which excludes
+    ``horizontal_ratio`` — see that function's docstring for the rationale)
+    and its quality score strictly exceeds the current best.
+    """
+    if not tokens or score <= best_score:
+        return False
+    return _orientation_rotated_evidence_sufficient(tokens)
 
 
 def _adaptive_candidates(
@@ -1317,7 +1333,7 @@ def _adaptive_with_orientation_selection(
                             "angle": _angle,
                             "score": round(_rot_score, 4),
                             "token_count": len(_rot_tokens),
-                            "sufficient": _orientation_quality_sufficient(_rot_tokens),
+                            "sufficient": _orientation_rotated_evidence_sufficient(_rot_tokens),
                         })
                         if _orientation_candidate_can_replace_upright(
                             tokens=_rot_tokens,
@@ -1968,7 +1984,7 @@ def _exhaustive_with_orientation_selection(
                         "angle": _angle,
                         "score": round(_rot_score, 4),
                         "token_count": len(_rot_tokens),
-                        "sufficient": _orientation_quality_sufficient(_rot_tokens),
+                        "sufficient": _orientation_rotated_evidence_sufficient(_rot_tokens),
                     })
                     if _orientation_candidate_can_replace_upright(
                         tokens=_rot_tokens,
