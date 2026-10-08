@@ -505,3 +505,137 @@ def test_oom_all_grids_fail_gives_resource_exhausted(monkeypatch) -> None:
     assert result.status == "resource_exhausted", (
         f"All grids failing should yield resource_exhausted, got: {result.status}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Correction 4 — request.rotations must be preserved through tiled recovery
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("rotation", [0.0, 90.0, 180.0, 270.0])
+def test_tiled_recovery_preserves_rotation(monkeypatch, rotation: float) -> None:
+    """selected_rotation in the result must match the requested rotation when tiling is used.
+
+    Forces tiling via OOM on the full raster (_OOMOnLargePixelsEngine: 100×100 = 10 000 px
+    > threshold 5 000; tiles ~50×50 = 2 500 < threshold).  Non-zero rotations require cv2
+    (rotate_image_expanded); the test is skipped if cv2 is not installed.
+    """
+    if rotation != 0.0:
+        pytest.importorskip("cv2")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    engine = _OOMOnLargePixelsEngine()
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    result = OcrRegionRefiner(engine).refine(
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        request=RegionRefinementRequest(
+            bbox=BBox(0.0, 0.0, 100.0, 100.0),
+            scale_factors=(1.0,),
+            rotations=(rotation,),
+        ),
+    )
+    assert result.status == "ok", (
+        f"Tiled recovery must succeed for rotation={rotation}, got: {result.status}"
+    )
+    assert result.selected_rotation == rotation, (
+        f"selected_rotation must equal the requested rotation {rotation}, "
+        f"got {result.selected_rotation!r} — tiled path must not hardcode 0.0"
+    )
+
+
+def test_tiled_recovery_tile_offsets_applied_to_page_coords(monkeypatch) -> None:
+    """Tile region offsets must be reflected in the final page-space token positions.
+
+    Setup: 400×100-point page, budget forces 2×2 tiling.  Engine returns a unique-text
+    token at position (0, 0, 5, 5) in each tile's pixel space.  Because each tile covers
+    a different portion of the page, the resulting page-space bboxes must be spread across
+    the page — not all stacked at the same position.
+
+    This verifies that tile_region_bbox offsets are correctly applied and that the tiled
+    path does not map every token to the origin of the full region.
+    """
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "0.05")  # ~50 KiB forces tiling on 400×100
+
+    call_index: list[int] = [0]
+
+    class _OffsetTrackingEngine:
+        identity = _FakeIdentityEasyOCR()
+        last_pass_count = 1
+        last_batch_count = 1
+
+        def recognize_page(
+            self, image: object, page_index: object, page_bbox: object, **kwargs: object
+        ) -> list:
+            from structured_pdf_text.ocr.recovery import image_size
+            from structured_pdf_text.document import OcrToken, SourceKind
+            from structured_pdf_text.geometry import BBox as _BBox
+            w, h = image_size(image)
+            call_index[0] += 1
+            return [OcrToken(
+                text=f"TILE{call_index[0]}",   # unique text → deduplication never merges
+                bbox=_BBox(0.0, 0.0, min(5.0, float(w)), min(5.0, float(h))),
+                confidence=0.9,
+                language=None,
+                source=SourceKind.OCR_REGION,
+            )]
+
+    page_bbox = BBox(0.0, 0.0, 400.0, 100.0)
+    result = OcrRegionRefiner(_OffsetTrackingEngine()).refine(
+        Image.new("RGB", (400, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        request=RegionRefinementRequest(
+            bbox=BBox(0.0, 0.0, 400.0, 100.0),
+            scale_factors=(1.0,),
+            rotations=(0.0,),
+        ),
+    )
+    assert result.tokens, "Expected tokens from tiled OCR"
+
+    # All tokens must be within page bounds.
+    for t in result.tokens:
+        assert 0.0 <= t.bbox.x0 < t.bbox.x1 <= 400.0 + 1e-6, (
+            f"Token x-range {t.bbox.x0:.1f}–{t.bbox.x1:.1f} outside page [0, 400]"
+        )
+        assert 0.0 <= t.bbox.y0 < t.bbox.y1 <= 100.0 + 1e-6, (
+            f"Token y-range {t.bbox.y0:.1f}–{t.bbox.y1:.1f} outside page [0, 100]"
+        )
+
+    # Tokens from left and right tiles must land at different x positions.  If offsets
+    # were not applied, all tokens would be mapped to x ≈ 0 (origin of the region).
+    if len(result.tokens) >= 2:
+        x_positions = sorted(t.bbox.x0 for t in result.tokens)
+        span = x_positions[-1] - x_positions[0]
+        assert span > 50.0, (
+            f"Token x0 positions {x_positions} are too close together (span={span:.1f}) — "
+            "tile offsets may not have been applied correctly"
+        )
+
+
+def test_tiled_recovery_token_bbox_within_page_bounds_for_all_rotations(monkeypatch) -> None:
+    """After rotation and inverse mapping, all token bboxes must stay within page bounds.
+
+    Uses _OOMOnLargePixelsEngine to force tiling; tests rotation=0 only (no cv2 needed)
+    while verifying the complete geometry path (resize → rotate → OCR → map → page).
+    """
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    engine = _OOMOnLargePixelsEngine()
+    page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+    result = OcrRegionRefiner(engine).refine(
+        Image.new("RGB", (100, 100), "white"),
+        page_index=0,
+        page_bbox=page_bbox,
+        request=RegionRefinementRequest(
+            bbox=BBox(0.0, 0.0, 100.0, 100.0),
+            scale_factors=(1.0,),
+            rotations=(0.0,),
+        ),
+    )
+    assert result.status == "ok", f"Expected ok, got {result.status}"
+    for t in result.tokens:
+        assert 0.0 <= t.bbox.x0 < t.bbox.x1 <= 100.0 + 1e-6, (
+            f"Token x-range {t.bbox.x0:.2f}–{t.bbox.x1:.2f} outside page [0, 100]"
+        )
+        assert 0.0 <= t.bbox.y0 < t.bbox.y1 <= 100.0 + 1e-6, (
+            f"Token y-range {t.bbox.y0:.2f}–{t.bbox.y1:.2f} outside page [0, 100]"
+        )
