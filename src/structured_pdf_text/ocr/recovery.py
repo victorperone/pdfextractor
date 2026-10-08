@@ -6,21 +6,29 @@ page crop in PDF coordinates, applies the scale factors and rotations specified
 by the caller, runs each variant through the OCR engine, and maps every
 recognised token back to the original page coordinate system.
 
-**RGB budget gate** — to prevent ``STATUS_ACCESS_VIOLATION`` in Paddle's C++
-inference runtime when upscaled variants produce very large images,
-:func:`plan_ocr_scales` partitions the requested scale factors into *allowed*
-and *blocked* groups before any image is created.
+**RGB budget gate** — to prevent OOM and runtime crashes when upscaled variants
+produce very large images, :func:`plan_ocr_scales` partitions the requested
+scale factors into *allowed* and *blocked* groups before any image is created.
 
 The budget is engine-specific:
 
 - **Paddle**: default 8 MiB, controlled by ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB``.
   This limit is a hard operational guard against the Paddle runtime crash
   documented in ``docs/ocr-rgb-budget-crash-fix.md``.
-- **EasyOCR / other engines**: no limit by default (``math.inf``), controlled
-  by ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR``.  EasyOCR does not suffer
-  from the Paddle crash and benefits from processing larger crops without
-  artificial truncation.  Set the env var to a positive number (e.g. ``32``)
-  if you need to constrain memory on low-RAM machines.
+- **EasyOCR**: default 32 MiB, controlled by
+  ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR``.  CRAFT/PyTorch intermediate
+  tensors can exceed the raw RGB estimate significantly; the 32 MiB guard
+  prevents large crops from triggering DefaultCPUAllocator OOM.  When a scale
+  variant is blocked, :class:`OcrRegionRefiner` automatically attempts regional
+  tiling at that scale so the content is not silently discarded.
+- **Other engines**: use the shared Paddle-era 8 MiB default.
+
+**Regional tiling** — when a scale variant is blocked by the budget gate,
+the refiner partitions the base crop into an N×N grid and OCRs each tile
+independently, mapping tokens back to page coordinates and deduplicating
+overlapping spans.  Tiling is also used as a fallback when a previously-allowed
+scale causes a ``ResourceExhaustedExtractionError`` at runtime (unexpected OOM
+that slipped through the estimate).
 
 **Debug log** — when ``PDFEXTRACTOR_OCR_DEBUG_LOG`` is set to a writable path,
 this module writes ``REGION_SELECTED``, ``OCR_SCALE_PLAN``,
@@ -42,6 +50,7 @@ from typing import Any
 from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.errors import (
     FatalExtractionError,
+    ResourceExhaustedExtractionError,
     raise_if_resource_exhausted,
 )
 from structured_pdf_text.geometry import BBox, Point
@@ -60,25 +69,31 @@ def _ocr_rgb_budget_mib() -> float:
     return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", 8.0, minimum=0.01)
 
 
+_EASYOCR_RGB_BUDGET_MIB_DEFAULT = 32.0
+
+
 def _ocr_rgb_budget_for_engine(engine_name: str) -> float:
     """Return the RGB budget (in MiB) appropriate for the given engine.
 
     Paddle uses a conservative 8 MiB default to prevent STATUS_ACCESS_VIOLATION
-    in its C++ runtime.  EasyOCR and other engines have no such crash risk and
-    default to unlimited (math.inf).
+    in its C++ runtime.  EasyOCR defaults to 32 MiB — CRAFT/PyTorch intermediate
+    tensors can far exceed the raw RGB estimate, so an operational guard is needed
+    to prevent DefaultCPUAllocator OOM on large crops.  When a scale is blocked,
+    the refiner automatically applies regional tiling so content is not discarded.
 
     Override per-engine via environment variables:
       PDFEXTRACTOR_OCR_RGB_BUDGET_MIB          — Paddle (and legacy default)
-      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR  — EasyOCR (default: unlimited)
+      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR  — EasyOCR (default: 32 MiB)
     """
     if engine_name == "paddle":
         return _ocr_rgb_budget_mib()
     if engine_name == "easyocr":
-        raw = os.environ.get("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR")
-        if raw is not None:
-            from structured_pdf_text.ocr.env import env_float
-            return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", math.inf, minimum=0.01)
-        return math.inf
+        from structured_pdf_text.ocr.env import env_float
+        return env_float(
+            "PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR",
+            _EASYOCR_RGB_BUDGET_MIB_DEFAULT,
+            minimum=0.01,
+        )
     # All other engines: use the shared Paddle-era limit as a safe default
     # until they are individually characterised.
     return _ocr_rgb_budget_mib()
@@ -319,6 +334,182 @@ class RegionRefinementResult:
     reason_code: str | None = None
 
 
+_TILE_OVERLAP_DEFAULT = 0.15
+_TILE_MAX_GRID = 8
+
+
+def _plan_tile_grid_n(
+    crop_w: int,
+    crop_h: int,
+    scale: float,
+    budget_mib: float,
+    overlap: float = _TILE_OVERLAP_DEFAULT,
+    max_dim: int = _TILE_MAX_GRID,
+) -> int:
+    """Return minimum N so an N×N grid of (crop/N)*scale tiles fits in budget.
+
+    Returns 0 when no grid up to *max_dim* achieves tiles small enough.
+    The overlap fraction is applied on each side of every tile, matching the
+    overlap used by :func:`_tile_bboxes_for_grid`.
+    """
+    budget_bytes = int(budget_mib * _MIB)
+    for n in range(2, max_dim + 1):
+        tile_base_w = math.ceil(crop_w / n)
+        tile_base_h = math.ceil(crop_h / n)
+        overlap_px = max(1, int(min(tile_base_w, tile_base_h) * overlap))
+        tile_w = min(crop_w, tile_base_w + overlap_px)
+        tile_h = min(crop_h, tile_base_h + overlap_px)
+        if scale <= 1.0:
+            scaled_w, scaled_h = tile_w, tile_h
+        else:
+            scaled_w = max(tile_w + 1, round(tile_w * scale))
+            scaled_h = max(tile_h + 1, round(tile_h * scale))
+        if scaled_w * scaled_h * 3 <= budget_bytes:
+            return n
+    return 0
+
+
+def _tile_bboxes_for_grid(
+    crop_w: int,
+    crop_h: int,
+    grid_n: int,
+    overlap: float = _TILE_OVERLAP_DEFAULT,
+) -> list[tuple[int, int, int, int]]:
+    """Return (x0, y0, x1, y1) base-crop-pixel tiles for an N×N grid with overlap."""
+    bboxes: list[tuple[int, int, int, int]] = []
+    for row in range(grid_n):
+        for col in range(grid_n):
+            tile_w = math.ceil(crop_w / grid_n)
+            tile_h = math.ceil(crop_h / grid_n)
+            overlap_px = max(1, int(min(tile_w, tile_h) * overlap))
+            x0 = max(0, col * tile_w - overlap_px)
+            y0 = max(0, row * tile_h - overlap_px)
+            x1 = min(crop_w, (col + 1) * tile_w + overlap_px)
+            y1 = min(crop_h, (row + 1) * tile_h + overlap_px)
+            if x1 > x0 and y1 > y0:
+                bboxes.append((x0, y0, x1, y1))
+    return bboxes
+
+
+def _run_tiled_regional_ocr(
+    engine: Any,
+    base_crop: Any,
+    scale: float,
+    budget_mib: float,
+    page_index: int,
+    request: "RegionRefinementRequest",
+    region_bbox: "BBox",
+    page_bbox: "BBox",
+) -> "tuple[list[OcrToken], list[RegionRefinementAttempt], int, int, bool]":
+    """OCR a large scale by tiling the base crop instead of creating a full enlarged image.
+
+    For each tile the base crop is sliced (no upscaling of the full crop),
+    the tile is upscaled individually, OCR'd, and tokens are mapped back to
+    page coordinates using the tile's position within the base crop.
+
+    Returns (tokens, attempts, passes, batches, any_resource_exhausted).
+    Returns empty lists when no viable grid fits in *budget_mib*.
+    """
+    crop_w, crop_h = image_size(base_crop)
+    grid_n = _plan_tile_grid_n(crop_w, crop_h, scale, budget_mib)
+    if grid_n == 0:
+        return [], [], 0, 0, False
+
+    tile_bboxes = _tile_bboxes_for_grid(crop_w, crop_h, grid_n)
+    all_tokens: list[OcrToken] = []
+    attempts: list[RegionRefinementAttempt] = []
+    total_passes = 0
+    total_batches = 0
+    any_resource_exhausted = False
+
+    for tx0, ty0, tx1, ty1 in tile_bboxes:
+        tile_base_w = tx1 - tx0
+        tile_base_h = ty1 - ty0
+
+        # Crop tile from the base (avoids materialising a full enlarged image).
+        if hasattr(base_crop, "crop"):
+            tile = base_crop.crop((tx0, ty0, tx1, ty1))
+        else:
+            import numpy as _np
+            tile = _np.asarray(base_crop)[ty0:ty1, tx0:tx1]
+
+        try:
+            scaled_tile = resize_image(tile, scale)
+        except ResourceExhaustedExtractionError:
+            any_resource_exhausted = True
+            attempts.append(RegionRefinementAttempt(
+                scale_factor=scale, rotation=0.0, token_count=0,
+                score=-math.inf, average_confidence=0.0,
+                error="ResourceExhausted: tile resize",
+            ))
+            continue
+        except Exception as exc:
+            raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_region_tile_resize")
+            continue
+
+        scaled_tile_w, scaled_tile_h = image_size(scaled_tile)
+        virtual_bbox = BBox(0.0, 0.0, float(scaled_tile_w), float(scaled_tile_h))
+
+        try:
+            tokens = _recognize(
+                engine, scaled_tile, page_index, virtual_bbox,
+                quality_variants=request.quality_variants,
+                quality_policy=request.quality_policy,
+            )
+            total_passes += getattr(engine, "last_pass_count", 0) or 0
+            total_batches += getattr(engine, "last_batch_count", 0) or 0
+        except ResourceExhaustedExtractionError:
+            any_resource_exhausted = True
+            attempts.append(RegionRefinementAttempt(
+                scale_factor=scale, rotation=0.0, token_count=0,
+                score=-math.inf, average_confidence=0.0,
+                error="ResourceExhausted: tile OCR",
+            ))
+            continue
+        except Exception as exc:
+            raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_region_tile")
+            attempts.append(RegionRefinementAttempt(
+                scale_factor=scale, rotation=0.0, token_count=0,
+                score=-math.inf, average_confidence=0.0,
+                error=f"{type(exc).__name__}: {exc}",
+            ))
+            continue
+
+        # Map tokens: scaled-tile pixels → base-crop pixels → page coordinates.
+        # Use identity inverse (no rotation) with (crop_w, crop_h) as source_size,
+        # after translating token coordinates to base-crop pixel space.
+        identity = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        for token in tokens:
+            # Translate from scaled tile pixels to base-crop pixels.
+            bx0 = tx0 + token.bbox.x0 * tile_base_w / max(scaled_tile_w, 1)
+            by0 = ty0 + token.bbox.y0 * tile_base_h / max(scaled_tile_h, 1)
+            bx1 = tx0 + token.bbox.x1 * tile_base_w / max(scaled_tile_w, 1)
+            by1 = ty0 + token.bbox.y1 * tile_base_h / max(scaled_tile_h, 1)
+            base_token = _replace_token_bbox(token, BBox(bx0, by0, bx1, by1))
+            mapped = _map_token_to_page(
+                base_token,
+                identity,
+                (crop_w, crop_h),
+                region_bbox,
+                page_bbox=page_bbox,
+                page_rotation=request.page_rotation,
+            )
+            all_tokens.append(mapped)
+
+        attempts.append(RegionRefinementAttempt(
+            scale_factor=scale, rotation=0.0,
+            token_count=len(tokens), score=0.0, average_confidence=0.0,
+        ))
+
+    return all_tokens, attempts, total_passes, total_batches, any_resource_exhausted
+
+
+def _replace_token_bbox(token: OcrToken, bbox: BBox) -> OcrToken:
+    """Return a copy of *token* with a new bounding box."""
+    from dataclasses import replace
+    return replace(token, bbox=bbox)
+
+
 class OcrRegionRefiner:
     """Run OCR variants on arbitrary page regions and preserve page geometry.
 
@@ -402,6 +593,7 @@ class OcrRegionRefiner:
         candidates: list[tuple[float, float, float, list[OcrToken]]] = []
         total_passes = 0
         total_batches = 0
+        any_resource_exhausted = False
 
         scales_raw = tuple(
             dict.fromkeys(max(1.0, float(value)) for value in request.scale_factors)
@@ -453,25 +645,50 @@ class OcrRegionRefiner:
             )
 
         if not allowed_plans:
-            # Even 1× exceeds the budget.  Do not silently drop the region —
-            # log an explicit failure so it can be investigated separately.
+            # Even 1× exceeds the budget.  Attempt tiling at 1× before giving up.
             _recovery_debug(
                 f"OCR_SCALE_ALL_BLOCKED page={page_index}"
                 f" base_width={crop_w} base_height={crop_h}"
                 f" estimated_1x_mib={crop_w * crop_h * 3 / _MIB:.3f}"
-                f" limit_rgb_mib={rgb_budget_mib:.1f}"
-                f" action=recovery_skipped"
+                f" limit_rgb_mib={_budget_label}"
+                f" action=attempting_tiled_fallback"
             )
-            return RegionRefinementResult(
-                bbox=region_bbox,
-                tokens=(),
-                attempts=tuple(attempts),
-                selected_scale_factor=None,
-                selected_rotation=None,
-                ocr_passes=0,
-                ocr_batches=0,
-                status="budget_blocked",
-                reason_code="ocr_no_scale_within_budget",
+            tile_tokens, tile_attempts, tile_passes, tile_batches, tile_oom = (
+                _run_tiled_regional_ocr(
+                    self.engine, crop, 1.0, rgb_budget_mib,
+                    page_index, request, region_bbox, page_bbox,
+                )
+            )
+            if not tile_attempts:
+                # No viable tile grid — region truly unprocessable.
+                _recovery_debug(
+                    f"OCR_SCALE_ALL_BLOCKED page={page_index}"
+                    f" action=recovery_skipped_no_tile_grid"
+                )
+                return RegionRefinementResult(
+                    bbox=region_bbox,
+                    tokens=(),
+                    attempts=(),
+                    selected_scale_factor=None,
+                    selected_rotation=None,
+                    ocr_passes=0,
+                    ocr_batches=0,
+                    status="budget_blocked",
+                    reason_code="ocr_no_scale_within_budget",
+                )
+            attempts.extend(tile_attempts)
+            total_passes += tile_passes
+            total_batches += tile_batches
+            if tile_oom:
+                any_resource_exhausted = True
+            if tile_tokens:
+                filtered = _filter_tokens(tile_tokens, request)
+                if filtered:
+                    candidates.append((_candidate_score(filtered, request.goal)[0], 1.0, 0.0, filtered))
+            # Return immediately — don't fall through to the scale/blocked loops.
+            return _build_refinement_result(
+                region_bbox, candidates, attempts, total_passes, total_batches,
+                request, any_resource_exhausted,
             )
 
         allowed_scale_set = frozenset(p.scale for p in allowed_plans)
@@ -482,6 +699,30 @@ class OcrRegionRefiner:
             try:
                 scaled = resize_image(crop, scale_factor)
                 scaled_size = image_size(scaled)
+            except ResourceExhaustedExtractionError as exc:
+                # Unexpected OOM during resize: attempt tiling at this scale.
+                any_resource_exhausted = True
+                tile_tokens, tile_attempts, tile_passes, tile_batches, _tile_oom = (
+                    _run_tiled_regional_ocr(
+                        self.engine, crop, scale_factor, rgb_budget_mib,
+                        page_index, request, region_bbox, page_bbox,
+                    )
+                )
+                attempts.extend(tile_attempts)
+                total_passes += tile_passes
+                total_batches += tile_batches
+                if tile_tokens:
+                    filtered = _filter_tokens(tile_tokens, request)
+                    score, confidence = _candidate_score(filtered, request.goal)
+                    attempts.append(RegionRefinementAttempt(
+                        scale_factor=scale_factor, rotation=0.0,
+                        token_count=len(filtered), score=score,
+                        average_confidence=confidence,
+                        error=f"tiled_after_oom: {exc}",
+                    ))
+                    if filtered:
+                        candidates.append((score, scale_factor, 0.0, filtered))
+                continue
             except FatalExtractionError:
                 raise
             except Exception as exc:
@@ -530,6 +771,19 @@ class OcrRegionRefiner:
                     )
                     if mapped:
                         candidates.append((score, scale_factor, rotation, mapped))
+                except ResourceExhaustedExtractionError:
+                    # OOM during OCR: record and continue with next scale/rotation.
+                    any_resource_exhausted = True
+                    attempts.append(
+                        RegionRefinementAttempt(
+                            scale_factor=scale_factor,
+                            rotation=rotation,
+                            token_count=0,
+                            score=-math.inf,
+                            average_confidence=0.0,
+                            error="ResourceExhausted",
+                        )
+                    )
                 except FatalExtractionError:
                     raise
                 except (AttributeError, ImportError, TypeError, ValueError, RuntimeError) as exc:
@@ -556,40 +810,28 @@ class OcrRegionRefiner:
                     )
                     raise
 
-        if not candidates:
-            errors = [attempt.error or "" for attempt in attempts if attempt.error]
-            timed_out = any("timeout" in error.casefold() for error in errors)
-            failed = bool(errors) and len(errors) == len(attempts)
-            status = "timeout" if timed_out else "runtime_error" if failed else "no_text"
-            reason_code = (
-                "ocr_timeout" if timed_out else
-                "ocr_runtime_error" if failed else
-                "ocr_returned_no_tokens"
+        # ---- tiling for budget-blocked scales --------------------------------
+        for bp in blocked_plans:
+            tile_tokens, tile_attempts, tile_passes, tile_batches, tile_oom = (
+                _run_tiled_regional_ocr(
+                    self.engine, crop, bp.scale, rgb_budget_mib,
+                    page_index, request, region_bbox, page_bbox,
+                )
             )
-            return RegionRefinementResult(
-                bbox=region_bbox,
-                tokens=(),
-                attempts=tuple(attempts),
-                selected_scale_factor=None,
-                selected_rotation=None,
-                ocr_passes=total_passes,
-                ocr_batches=total_batches,
-                status=status if attempts else "budget_blocked",
-                reason_code=reason_code if attempts else "ocr_no_scale_within_budget",
-            )
-        _, scale_factor, rotation, tokens = max(candidates, key=lambda item: item[0])
-        if request.goal == RegionRefinementGoal.NUMERIC and len(candidates) > 1:
-            tokens = _merge_numeric_candidates(candidates)
-        return RegionRefinementResult(
-            bbox=region_bbox,
-            tokens=tuple(tokens),
-            attempts=tuple(attempts),
-            selected_scale_factor=scale_factor,
-            selected_rotation=rotation,
-            ocr_passes=total_passes,
-            ocr_batches=total_batches,
-            status="ok" if tokens else "no_text",
-            reason_code=None if tokens else "ocr_returned_no_tokens",
+            if tile_oom:
+                any_resource_exhausted = True
+            attempts.extend(tile_attempts)
+            total_passes += tile_passes
+            total_batches += tile_batches
+            if tile_tokens:
+                filtered = _filter_tokens(tile_tokens, request)
+                score, confidence = _candidate_score(filtered, request.goal)
+                if filtered:
+                    candidates.append((score, bp.scale, 0.0, filtered))
+
+        return _build_refinement_result(
+            region_bbox, candidates, attempts, total_passes, total_batches,
+            request, any_resource_exhausted,
         )
 
     def refine_many(
@@ -609,6 +851,62 @@ class OcrRegionRefiner:
             self.refine(page_image, page_index, page_bbox, request)
             for request in requests
         ]
+
+
+def _build_refinement_result(
+    region_bbox: BBox,
+    candidates: list[tuple[float, float, float, list[OcrToken]]],
+    attempts: list[RegionRefinementAttempt],
+    total_passes: int,
+    total_batches: int,
+    request: RegionRefinementRequest,
+    any_resource_exhausted: bool,
+) -> RegionRefinementResult:
+    """Build the final RegionRefinementResult from collected candidates and attempts."""
+    if not candidates:
+        errors = [attempt.error or "" for attempt in attempts if attempt.error]
+        timed_out = any("timeout" in error.casefold() for error in errors)
+        resource_exhausted_only = any_resource_exhausted and all(
+            "ResourceExhausted" in (attempt.error or "") for attempt in attempts if attempt.error
+        )
+        failed = bool(errors) and len(errors) == len(attempts)
+        if any_resource_exhausted and not attempts or resource_exhausted_only:
+            status = "resource_exhausted"
+            reason_code = "ocr_region_resource_exhausted"
+        elif timed_out:
+            status = "timeout"
+            reason_code = "ocr_timeout"
+        elif failed:
+            status = "runtime_error"
+            reason_code = "ocr_runtime_error"
+        else:
+            status = "no_text"
+            reason_code = "ocr_returned_no_tokens"
+        return RegionRefinementResult(
+            bbox=region_bbox,
+            tokens=(),
+            attempts=tuple(attempts),
+            selected_scale_factor=None,
+            selected_rotation=None,
+            ocr_passes=total_passes,
+            ocr_batches=total_batches,
+            status=status if attempts else "budget_blocked",
+            reason_code=reason_code if attempts else "ocr_no_scale_within_budget",
+        )
+    _, scale_factor, rotation, tokens = max(candidates, key=lambda item: item[0])
+    if request.goal == RegionRefinementGoal.NUMERIC and len(candidates) > 1:
+        tokens = _merge_numeric_candidates(candidates)
+    return RegionRefinementResult(
+        bbox=region_bbox,
+        tokens=tuple(tokens),
+        attempts=tuple(attempts),
+        selected_scale_factor=scale_factor,
+        selected_rotation=rotation,
+        ocr_passes=total_passes,
+        ocr_batches=total_batches,
+        status="ok" if tokens else "no_text",
+        reason_code=None if tokens else "ocr_returned_no_tokens",
+    )
 
 
 def recover_ocr_tokens(

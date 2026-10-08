@@ -1152,6 +1152,14 @@ class PdfTextExtractor:
                             int(stat.get("ocr_batches", 0)) for stat in ocr_region_stats.values()
                         ) + ocr_targeted_batches,
                         "ocr_targeted_refinement_stats": ocr_targeted_stats,
+                        "ocr_resource_exhausted_count": sum(
+                            1 for stat in ocr_region_stats.values()
+                            if stat.get("status") == "resource_exhausted"
+                        ),
+                        "ocr_resource_exhausted_regions": [
+                            region_id for region_id, stat in ocr_region_stats.items()
+                            if stat.get("status") == "resource_exhausted"
+                        ],
                         "ocr_early_stop": bool(getattr(ocr_diag_engine, "last_early_stop", False)),
                         "page_ocr_requested": page_ocr_requested,
                         "region_ocr_requested": region_ocr_requested,
@@ -1579,14 +1587,24 @@ def _recover_selected_regions(
         passes += result.ocr_passes
         batches += result.ocr_batches
         all_errors = [a.error for a in result.attempts if a.error is not None]
-        ocr_failed = result.status in {"budget_blocked", "invalid_region", "runtime_error", "timeout"} or (
-            result.status == "no_text" and not region_tokens
+        is_figure = region.kind.value == "figure"
+        ocr_empty = result.status == "no_text" and not region_tokens
+        # A figure with no tokens and no errors is an optional OCR region (logo,
+        # signature, decorative element) — returning no text is a valid outcome.
+        # Only treat no_text as a failure for non-figure regions or when there
+        # were actual runtime errors alongside the empty result.
+        ocr_required = not is_figure or bool(all_errors)
+        ocr_failed = (
+            result.status in {"budget_blocked", "invalid_region", "runtime_error", "timeout", "resource_exhausted"}
+            or (ocr_empty and ocr_required)
         )
         stats[region.region_id] = {
             "kind": region.kind.value,
             "tokens": len(region_tokens),
             "attempts": len(result.attempts),
             "attempt_errors": len(all_errors),
+            "ocr_empty": ocr_empty,
+            "ocr_required": ocr_required,
             "ocr_failed": ocr_failed,
             "attempt_error_messages": all_errors if all_errors else None,
             "status": result.status,

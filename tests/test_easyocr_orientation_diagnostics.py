@@ -183,3 +183,56 @@ class TestApiOrientationDiagnosticsIntegration:
             "api.py must not use getattr(engine, 'last_orientation_attempts') — "
             "read from consume_page_diagnostics() dict instead"
         )
+
+
+# ---------------------------------------------------------------------------
+# orientation_decisions — accumulated per-call list
+# ---------------------------------------------------------------------------
+
+class TestOrientationDecisionsAccumulated:
+    """consume_page_diagnostics must expose orientation_decisions list (§12)."""
+
+    def test_orientation_decisions_empty_by_default(self) -> None:
+        backend = _make_backend_shell()
+        diag = backend.consume_page_diagnostics()
+        assert diag.get("orientation_decisions") == [], (
+            "orientation_decisions must default to an empty list"
+        )
+
+    def test_single_call_recorded(self) -> None:
+        backend = _make_backend_shell()
+        backend._last_orientation_decision = {"selected_angle": 90, "attempts": []}
+        backend._orientation_decisions.append({
+            "call_index": 1,
+            "selected_angle": 90,
+            "attempts": [],
+        })
+        diag = backend.consume_page_diagnostics()
+        decisions = diag.get("orientation_decisions", [])
+        assert len(decisions) == 1
+        assert decisions[0]["selected_angle"] == 90
+        assert decisions[0]["call_index"] == 1
+
+    def test_multiple_calls_all_recorded(self) -> None:
+        backend = _make_backend_shell()
+        for i, angle in enumerate([0, 270], start=1):
+            backend._orientation_decisions.append({
+                "call_index": i,
+                "selected_angle": angle,
+                "attempts": [],
+            })
+        backend._last_orientation_decision = {"selected_angle": 270, "attempts": []}
+        diag = backend.consume_page_diagnostics()
+        decisions = diag.get("orientation_decisions", [])
+        assert len(decisions) == 2
+        assert decisions[0]["selected_angle"] == 0
+        assert decisions[1]["selected_angle"] == 270
+
+    def test_decisions_reset_after_consume(self) -> None:
+        backend = _make_backend_shell()
+        backend._orientation_decisions.append({"call_index": 1, "selected_angle": 0, "attempts": []})
+        backend.consume_page_diagnostics()
+        diag2 = backend.consume_page_diagnostics()
+        assert diag2.get("orientation_decisions") == [], (
+            "orientation_decisions must be empty after consume resets state"
+        )
