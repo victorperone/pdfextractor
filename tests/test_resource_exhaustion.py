@@ -20,9 +20,11 @@ from structured_pdf_text.errors import (
     is_resource_exhaustion,
 )
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.ocr.recovery import (
     OcrRegionRefiner,
     RegionRefinementRequest,
+    _deduplicate_tiled_tokens,
     _plan_tile_grid_n,
     _scaled_image_dimensions,
     _tile_bboxes_for_grid,
@@ -190,6 +192,89 @@ def test_tile_bboxes_overlap_exists() -> None:
     row0 = sorted([(x0, y0, x1, y1) for x0, y0, x1, y1 in bboxes if y0 == 0 or y1 <= 110], key=lambda b: b[0])
     if len(row0) >= 2:
         assert row0[0][2] > row0[1][0], "Adjacent tiles should overlap in x"
+
+
+# ---------------------------------------------------------------------------
+# _deduplicate_tiled_tokens — unit tests
+# ---------------------------------------------------------------------------
+
+def _make_token(text: str, x0: float, y0: float, x1: float, y1: float, conf: float) -> OcrToken:
+    from structured_pdf_text.geometry import BBox as _BBox
+    return OcrToken(
+        text=text,
+        bbox=_BBox(x0, y0, x1, y1),
+        confidence=conf,
+        language=None,
+        source=SourceKind.OCR_REGION,
+    )
+
+
+def test_deduplicate_removes_exact_position_duplicate() -> None:
+    """Same text at identical position → one token."""
+    a = _make_token("PROTOCOLO", 0, 0, 10, 2, 0.80)
+    b = _make_token("PROTOCOLO", 0, 0, 10, 2, 0.80)
+    result = _deduplicate_tiled_tokens([a, b])
+    assert len(result) == 1
+
+
+def test_deduplicate_keeps_higher_confidence_copy() -> None:
+    """When text+position match, the higher-confidence token must survive."""
+    low = _make_token("PROTOCOLO", 0, 0, 10, 2, 0.62)
+    high = _make_token("PROTOCOLO", 0, 0, 10, 2, 0.91)
+    result = _deduplicate_tiled_tokens([low, high])
+    assert len(result) == 1
+    assert result[0].confidence == 0.91
+
+
+def test_deduplicate_preserves_same_text_at_distinct_positions() -> None:
+    """Same word in two non-overlapping cells must produce 2 tokens."""
+    a = _make_token("SIM", 0, 0, 5, 2, 0.90)
+    b = _make_token("SIM", 30, 0, 35, 2, 0.90)  # far apart — no spatial overlap
+    result = _deduplicate_tiled_tokens([a, b])
+    assert len(result) == 2
+
+
+def test_deduplicate_different_text_not_merged() -> None:
+    """Different text at overlapping positions must NOT be merged."""
+    a = _make_token("PROTOCOLO", 0, 0, 10, 2, 0.90)
+    b = _make_token("PROCESSO", 0, 0, 10, 2, 0.85)
+    result = _deduplicate_tiled_tokens([a, b])
+    assert len(result) == 2
+
+
+def test_deduplicate_result_sorted_by_y0_x0() -> None:
+    """Result must be in top-to-left reading order."""
+    a = _make_token("B", 5, 10, 10, 12, 0.9)
+    b = _make_token("A", 0, 5, 5, 7, 0.9)
+    result = _deduplicate_tiled_tokens([a, b])
+    assert len(result) == 2
+    assert result[0].text == "A"
+    assert result[1].text == "B"
+
+
+def test_deduplicate_case_insensitive_text_match() -> None:
+    """Normalised text comparison must be case-insensitive."""
+    a = _make_token("Protocolo", 0, 0, 10, 2, 0.80)
+    b = _make_token("PROTOCOLO", 0, 0, 10, 2, 0.85)
+    result = _deduplicate_tiled_tokens([a, b])
+    assert len(result) == 1
+    assert result[0].confidence == 0.85
+
+
+def test_deduplicate_tokens_at_same_page_position() -> None:
+    """Two tiles detecting the same word in their overlap area map to the same
+    page position and must be deduplicated to a single token.
+
+    This simulates what happens when a word sits in the overlap region between
+    tile A (page 0–46) and tile B (page 34–86): both tiles OCR it, map it
+    through different geometry, and produce bboxes that are nearly identical
+    in page coordinates.  The high-confidence copy must survive.
+    """
+    token_a = _make_token("OVERLAP", 42.0, 5.0, 45.0, 10.0, 0.80)
+    token_b = _make_token("OVERLAP", 42.5, 5.0, 45.5, 10.0, 0.91)
+    result = _deduplicate_tiled_tokens([token_a, token_b])
+    assert len(result) == 1, "Tiles in overlap must not produce duplicate tokens"
+    assert result[0].confidence == 0.91, "Higher-confidence copy must be kept"
 
 
 # ---------------------------------------------------------------------------

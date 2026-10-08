@@ -576,11 +576,12 @@ def _run_tiled_regional_ocr(
             grid_n += 1
             continue
 
-        # Grid completed without OOM — accept its results.
+        # Grid completed without OOM — deduplicate overlap tokens, then accept.
         all_attempts.extend(grid_attempts)
         total_passes += grid_passes
         total_batches += grid_batches
-        return grid_tokens, all_attempts, total_passes, total_batches, any_resource_exhausted
+        deduped = _deduplicate_tiled_tokens(grid_tokens)
+        return deduped, all_attempts, total_passes, total_batches, any_resource_exhausted
 
     # All grids up to _TILE_MAX_GRID exhausted without a complete successful grid.
     any_resource_exhausted = True
@@ -596,6 +597,54 @@ def _replace_token_bbox(token: OcrToken, bbox: BBox) -> OcrToken:
     """Return a copy of *token* with a new bounding box."""
     from dataclasses import replace
     return replace(token, bbox=bbox)
+
+
+def _deduplicate_tiled_tokens(tokens: list[OcrToken]) -> list[OcrToken]:
+    """Remove tokens duplicated by tile overlap, keeping the highest-confidence copy.
+
+    Two tokens are considered duplicates when they share the same normalised
+    text (casefold + collapsed whitespace) AND their bounding boxes overlap
+    sufficiently: IoU >= 0.20 or intersection / min-area >= 0.45.
+
+    When duplicates are found the copy with the higher confidence is kept;
+    ties favour the earlier token.  Tokens that carry the same text but
+    occupy non-overlapping positions (e.g. the same word in two table cells)
+    are preserved as distinct entries.
+
+    The result is sorted by (y0, x0) to match the top-to-left reading order
+    expected by downstream line reconstruction.
+
+    This helper must not be imported from api.py — it lives here to avoid
+    creating an upward dependency on the pipeline layer.
+    """
+    def _norm_text(t: OcrToken) -> str:
+        return " ".join(t.text.casefold().split())
+
+    def _overlaps_spatially(a: OcrToken, b: OcrToken) -> bool:
+        if a.bbox.iou(b.bbox) >= 0.20:
+            return True
+        inter = a.bbox.intersection(b.bbox)
+        if inter is None:
+            return False
+        min_area = min(a.bbox.area, b.bbox.area)
+        return inter.area / max(min_area, 1.0) >= 0.45
+
+    keep: list[OcrToken] = []
+    for token in tokens:
+        nt = _norm_text(token)
+        merged = False
+        for i, existing in enumerate(keep):
+            if _norm_text(existing) == nt and _overlaps_spatially(existing, token):
+                existing_conf = existing.confidence if existing.confidence is not None else 0.0
+                token_conf = token.confidence if token.confidence is not None else 0.0
+                if token_conf > existing_conf:
+                    keep[i] = token
+                merged = True
+                break
+        if not merged:
+            keep.append(token)
+
+    return sorted(keep, key=lambda t: (t.bbox.y0, t.bbox.x0))
 
 
 class OcrRegionRefiner:
