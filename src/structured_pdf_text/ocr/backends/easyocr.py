@@ -1127,6 +1127,7 @@ _ORIENTATION_MIN_TOKENS = 3
 _ORIENTATION_MIN_CHARS = 8
 _ORIENTATION_MIN_MEAN_CONFIDENCE = 0.40
 _ORIENTATION_MAX_LOW_CONF_RATIO = 0.75
+_ORIENTATION_MIN_HORIZONTAL_RATIO = 0.75
 
 
 def _adaptive_candidates(
@@ -1214,6 +1215,7 @@ def _orientation_quality_sufficient(tokens: "list[OcrToken]") -> bool:
         and m["char_count"] >= _ORIENTATION_MIN_CHARS
         and m["mean_confidence"] >= _ORIENTATION_MIN_MEAN_CONFIDENCE
         and m["low_conf_ratio"] <= _ORIENTATION_MAX_LOW_CONF_RATIO
+        and m["horizontal_ratio"] >= _ORIENTATION_MIN_HORIZONTAL_RATIO
     )
 
 
