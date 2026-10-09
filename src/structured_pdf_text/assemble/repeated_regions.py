@@ -106,7 +106,25 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
     return candidates
 
 
+_SEMANTIC_CONTROL_RE = re.compile(
+    # VQ-25: Lines that carry unique semantic identifiers must never be
+    # treated as repeatable furniture, even if they appear in an edge band.
+    # Patterns: protocol numbers, page-control stamps (V5-P###, PROC-####),
+    # timestamps with unique values, and similar identifiers.
+    r"controle\s+de\s+p[áa]gina"   # explicit page-control label
+    r"|v\d+-p\d+"                   # corpus-style identifier (V5-P009)
+    r"|\bproc(?:esso)?\s*[nº:]\s*\d"  # process number
+    r"|\b\d{2}/\d{2}/\d{4}\b"      # date with year (unique per document)
+    r"|\b\d{4}-\d{2}-\d{2}\b",     # ISO date
+    re.IGNORECASE,
+)
+
+
 def _signature_key(kind: str, text: str) -> str | None:
+    # VQ-25: Reject lines that carry semantic unique identifiers — they must
+    # not be suppressed as repeating furniture even if their position is stable.
+    if _SEMANTIC_CONTROL_RE.search(text):
+        return None
     signature = _normalize_signature(text)
     if len(signature) < 3:
         return None

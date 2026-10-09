@@ -305,14 +305,34 @@ def _norm(text: str) -> str:
 
 
 def _same_evidence(first: OcrToken, second: OcrToken) -> bool:
+    """Return True when two tokens represent the same visual evidence.
+
+    VQ-11: IoU alone is insufficient — two tokens with high positional
+    overlap but different text (e.g. ``R$ 120,00`` vs ``R$ 128,00``) must
+    not be considered the same evidence, as merging them silently discards
+    the distinction.
+
+    Strategy:
+    * High IoU (≥ 0.72): assume same glyph region and check text similarity.
+      Accept if texts are at least 68% similar (covers OCR variations of the
+      same characters).  Reject if texts are clearly distinct (e.g. digits
+      differ), keeping both as a conflict.
+    * Low IoU (0.28–0.72): require both spatial overlap *and* text similarity.
+    * Very low IoU (< 0.28): check containment overlap with text similarity.
+    """
     overlap = first.bbox.iou(second.bbox)
+    similarity = SequenceMatcher(None, _norm(first.text), _norm(second.text)).ratio()
+    if overlap >= 0.72:
+        # Same glyph region — must still verify text agrees enough to be
+        # considered a duplicate rather than a conflicting reading.
+        return similarity >= 0.68
     if overlap >= 0.28:
-        return True
+        # Moderate overlap — require text similarity to confirm identity.
+        return similarity >= 0.68
     intersection = first.bbox.intersection(second.bbox)
     smaller_area = min(first.bbox.area, second.bbox.area)
     if intersection is None or smaller_area <= 0:
         return False
-    similarity = SequenceMatcher(None, _norm(first.text), _norm(second.text)).ratio()
     return similarity >= 0.68 and intersection.area / smaller_area >= 0.65
 
 

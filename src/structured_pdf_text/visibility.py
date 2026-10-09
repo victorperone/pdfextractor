@@ -144,10 +144,14 @@ def _crop_pixels(
     else:
         visual_w = page_bbox.width
         visual_h = page_bbox.height
+    # VQ-21: use round() for the right/bottom edges to avoid the +1 offset
+    # that caused one extra pixel column/row from outside the region to be
+    # included in the luminance sample, potentially biasing solid-fill
+    # decisions against text that is visually clear but borders a dark element.
     left = max(0, min(width - 1, int(box.x0 / visual_w * width)))
     top = max(0, min(height - 1, int(box.y0 / visual_h * height)))
-    right = max(left + 1, min(width, int(box.x1 / visual_w * width + 1)))
-    bottom = max(top + 1, min(height, int(box.y1 / visual_h * height + 1)))
+    right = max(left + 1, min(width, round(box.x1 / visual_w * width)))
+    bottom = max(top + 1, min(height, round(box.y1 / visual_h * height)))
     try:
         pixels = image.crop((left, top, right, bottom)).convert("RGB")
         values = list(pixels.getdata())
