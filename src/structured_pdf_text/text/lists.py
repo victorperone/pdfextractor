@@ -15,9 +15,27 @@ from structured_pdf_text.geometry import BBox
 
 
 _MARKER = re.compile(
-    r"^\s*(?P<marker>[•◦▪‣*]|[-–—]|(?:\d+|[A-Za-z]|[IVXivx]+)[.)])"
+    # VQ-16: hierarchical markers (1.1., 1.2.1.) before simple ordered markers
+    # to ensure the longer alternative matches first.
+    # Guard against false positives: dates (2026.10), versions (1.0.0), UUIDs.
+    r"^\s*(?P<marker>"
+    r"[•◦▪‣*]"                             # bullet symbols
+    r"|[-–—]"                              # dash markers
+    r"|\d+(?:\.\d+)+\."                    # hierarchical: 1.1. / 1.2.1. (must end with .)
+    r"|(?:\d+|[A-Za-z]|[IVXivx]+)[.)]"   # simple: 1. / a) / iv)
+    r"|[(\[]\d+[)\]]"                      # bracketed: (1) / [2]
+    r"|☑|☒|☐"               # checkboxes: ☑ ☒ ☐
+    r")"
     r"\s+(?P<text>.+?)\s*$"
 )
+
+_HIERARCHICAL_MARKER_RE = re.compile(r"^\d+(?:\.\d+)+\.$")
+_DATE_OR_VERSION_RE = re.compile(r"^\d{4}\.\d{2}|\d+\.\d+\.\d+$")
+
+
+def _is_false_positive_marker(marker: str) -> bool:
+    """Return True when a matched marker is actually a date, version, or decimal."""
+    return bool(_DATE_OR_VERSION_RE.match(marker))
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,13 +90,19 @@ def parse_list_marker(text: str) -> tuple[str, str] | None:
     """Extract the list marker and body text from a candidate line.
 
     Returns a ``(marker, text)`` tuple when the line starts with a recognised
-    marker (bullet, dash, or ordered label), or ``None`` when the line does not
-    match.
+    marker (bullet, dash, ordered label, or hierarchical number), or ``None``
+    when the line does not match.
+
+    VQ-16: hierarchical markers like ``1.1.`` and ``1.2.1.`` are recognised.
+    False positives (dates like ``2026.10``, version strings) are rejected.
     """
     match = _MARKER.match(text)
     if match is None:
         return None
-    return match.group("marker"), match.group("text")
+    marker = match.group("marker")
+    if _is_false_positive_marker(marker):
+        return None
+    return marker, match.group("text")
 
 
 def _cluster_list_indents(lines: list[TextLine], tolerance: float | None = None) -> list[float]:

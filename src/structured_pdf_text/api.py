@@ -849,8 +849,17 @@ class PdfTextExtractor:
                     )
                     partial_reasons.append("native_table_detection_unavailable")
                 table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] = {}
+                # VQ-09: Run visual detection even when native tables exist, but only
+                # in image areas not already covered by a native table bbox.  This
+                # allows hybrid pages (e.g. V5-P019/P024) to have both a native-ruled
+                # table and a separate raster table on the same page.
+                _should_run_visual = (
+                    self.config.enable_tables
+                    and rendered_page is not None
+                    and _has_uncovered_image_area(native_page, tables)
+                )
                 visual_table = None
-                if not tables and self.config.enable_tables and rendered_page is not None:
+                if _should_run_visual:
                     try:
                         visual_table = detect_visual_table(
                             native_page,
@@ -873,6 +882,23 @@ class PdfTextExtractor:
                         )
                         if self.config.enable_tables or mode in {ExtractionMode.BALANCED, ExtractionMode.OCR}:
                             partial_reasons.append("visual_table_detection_unavailable")
+                    if visual_table is not None:
+                        # Discard if the detected visual grid overlaps substantially
+                        # with an already-accepted native table — it is the same table.
+                        visual_bbox = (
+                            visual_table.page_fragments[0].bbox
+                            if visual_table.page_fragments
+                            else None
+                        )
+                        if visual_bbox is not None:
+                            for t in tables:
+                                native_bbox = next(
+                                    (f.bbox for f in t.page_fragments if f.page_index == page_index and f.bbox),
+                                    None,
+                                )
+                                if native_bbox and visual_bbox.overlap_ratio(native_bbox) >= 0.5:
+                                    visual_table = None
+                                    break
                     if visual_table is not None:
                         try:
                             refined = _refine_visual_table_ocr(
@@ -915,7 +941,7 @@ class PdfTextExtractor:
                             ocr_table_tokens = len(refined_tokens)
                             ocr_passes_total = (ocr_passes_total or 0) + table_passes
                             ocr_batches_total = (ocr_batches_total or 0) + table_batches
-                        tables = [visual_table]
+                        tables = tables + [visual_table]
                 consumed_table_ocr = _merge_ocr_region_tokens_into_table_cells(
                     tables=tables,
                     regions=regions,
@@ -2472,6 +2498,9 @@ def _should_use_page_ocr_as_primary(
     1. Forced OCR mode (user explicitly chose OCR as source) — always True.
     2. No native lines at all — OCR must be primary.
     3. Native is negligible (<20 non-WS chars) — OCR can take over.
+    4. VQ-08: Native chars ≥ 20 but all text appears to be invalid/garbled
+       (high ratio of replacement characters U+FFFD or non-printable chars)
+       — treat as effectively empty so OCR can take over.
 
     In all other cases native is considered "strong" and stays primary.
     """
@@ -2484,9 +2513,21 @@ def _should_use_page_ocr_as_primary(
     native_chars = sum(
         len(re.sub(r"\s+", "", line.text)) for line in native_lines
     )
-    if native_chars >= 20:
-        return False
-    return True
+    if native_chars < 20:
+        return True
+    # VQ-08: Count is not enough — check for garbled/invalid native text.
+    # If the native layer consists mostly of replacement characters or
+    # private-use codepoints, it is effectively absent.
+    all_native_text = "".join(line.text for line in native_lines)
+    total_visible = len(all_native_text.replace(" ", "").replace("\n", ""))
+    if total_visible > 0:
+        garbled = sum(
+            1 for ch in all_native_text
+            if ch == "�" or (ord(ch) < 32 and ch not in "\t\n\r") or 0xe000 <= ord(ch) <= 0xf8ff
+        )
+        if garbled / total_visible >= 0.40:
+            return True
+    return False
 
 
 def _is_raster_primary_candidate(complexity: Any) -> bool:
@@ -3238,6 +3279,36 @@ def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox, page_rotati
             box = visual_box
         output.append(box)
     return output
+
+
+def _has_uncovered_image_area(native_page: Any, tables: list[Any]) -> bool:
+    """Return True when the page has at least one image bbox not substantially
+    covered by an already-detected native table.
+
+    VQ-09: Visual table detection should run even when native tables exist,
+    provided there is an image region that the native detector did not claim.
+    This enables hybrid pages (e.g. V5-P019/P024) to produce both a native-
+    ruled table and a raster table.
+    """
+    image_boxes = [
+        item.bbox for item in native_page.objects.images if item.bbox is not None
+    ]
+    if not image_boxes:
+        return False
+    if not tables:
+        return True
+    table_bboxes: list[Any] = []
+    for t in tables:
+        for frag in getattr(t, "page_fragments", []):
+            if getattr(frag, "bbox", None) is not None:
+                table_bboxes.append(frag.bbox)
+    if not table_bboxes:
+        return True
+    for img_bbox in image_boxes:
+        max_overlap = max(img_bbox.overlap_ratio(tb) for tb in table_bboxes)
+        if max_overlap < 0.5:
+            return True
+    return False
 
 
 def _replace_tokens_in_box(
