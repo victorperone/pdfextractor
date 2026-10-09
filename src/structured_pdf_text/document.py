@@ -194,6 +194,10 @@ class AnnotationEvidence:
     contents: str | None = None
     appearance_streams: dict[str, str] = field(default_factory=dict)
     object_count: int | None = None
+    # VQ-20: URI/destination extracted from LINK annotations.
+    # For external hyperlinks this is the URL string; for internal links it is None
+    # (internal page-jump destinations are not yet surfaced).
+    link_uri: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,6 +544,9 @@ class PageContentBlock:
     line_ids: list[str] = field(default_factory=list)
     suppressed: bool = False
     suppression_reason: str | None = None
+    # VQ-20: URI from a LINK annotation whose bbox overlaps this block.
+    # Populated by the assembler when native_evidence carries a LINK annotation.
+    link_uri: str | None = None
 
 
 @dataclass(slots=True)

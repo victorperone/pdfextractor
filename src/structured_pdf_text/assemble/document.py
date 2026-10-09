@@ -142,6 +142,9 @@ def assemble_document(
             blocks,
             canonical_line_order=result.canonical_line_order,
         )
+        # VQ-20: propagate link URIs from LINK annotations to overlapping blocks.
+        # Uses native_evidence annotations already extracted by pdfium_source.
+        blocks = _propagate_link_uris(blocks, page)
         old_block_ids = {id(block): block.block_id for block in blocks}
         blocks = _reindex_blocks(blocks)
         owner_id_remap = {
@@ -468,3 +471,48 @@ def _apply_repeated_suppression(
 
         block.suppressed = True
         block.suppression_reason = reason
+
+
+def _propagate_link_uris(
+    blocks: list,
+    page: StructuredPage,
+) -> list:
+    """VQ-20: assign link_uri to blocks whose bbox is covered by a LINK annotation.
+
+    Iterates annotations from ``page.native_evidence`` and, for each LINK annotation
+    that carries a ``link_uri``, finds blocks whose center falls inside the annotation
+    bbox. The first matching URI wins; only PARAGRAPH/TITLE/FIGURE/LIST blocks are
+    considered (TABLE blocks use cell-level URIs if needed in the future).
+
+    The match uses the block center rather than full bbox overlap to avoid incorrectly
+    annotating a large paragraph that merely shares part of its bbox with a small link
+    annotation covering only one word.
+    """
+    if page.native_evidence is None:
+        return blocks
+
+    link_annotations = [
+        annot
+        for annot in page.native_evidence.objects.annotations
+        if annot.subtype == "link" and annot.link_uri and annot.bbox is not None
+    ]
+    if not link_annotations:
+        return blocks
+
+    result: list = []
+    for block in blocks:
+        uri: str | None = None
+        if not block.suppressed:
+            for annot in link_annotations:
+                assert annot.bbox is not None
+                if (
+                    annot.bbox.x0 <= block.bbox.cx <= annot.bbox.x1
+                    and annot.bbox.y0 <= block.bbox.cy <= annot.bbox.y1
+                ):
+                    uri = annot.link_uri
+                    break
+        if uri is not None:
+            result.append(dataclasses.replace(block, link_uri=uri))
+        else:
+            result.append(block)
+    return result

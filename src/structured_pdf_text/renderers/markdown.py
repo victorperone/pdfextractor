@@ -102,7 +102,14 @@ def _render_content_block(
         # is not silently lost. Empty figures produce no Markdown output.
         return _escape_inline_text(block.text, context="paragraph") if block.text else ""
 
-    return _escape_inline_text(block.text, context="paragraph")
+    text = _escape_inline_text(block.text, context="paragraph")
+    # VQ-20: emit Markdown link syntax when the block carries a URI from a LINK
+    # annotation. The displayed text is preserved as-is; only the href is added.
+    link_uri = getattr(block, "link_uri", None)
+    if link_uri and text:
+        safe_uri = link_uri.replace(")", r"\)")
+        return f"[{text}]({safe_uri})"
+    return text
 
 
 # ---------------------------------------------------------------------------

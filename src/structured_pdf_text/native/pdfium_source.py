@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import functools
 import math
+import re
 import threading
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -1051,6 +1052,10 @@ def _extract_annotations(
                 _rethrow_native_fatal(exc)
                 subtype = None
             contents = _get_annotation_contents(annot)
+            # VQ-20: extract URI for LINK annotations.
+            link_uri: str | None = None
+            if subtype == "link":
+                link_uri = _get_annotation_link_uri(annot)
             annotations.append(
                 AnnotationEvidence(
                     page_index,
@@ -1060,6 +1065,7 @@ def _extract_annotations(
                     contents,
                     appearance_streams=_get_annotation_appearance_streams(annot),
                     object_count=_get_annotation_object_count(annot),
+                    link_uri=link_uri,
                 )
             )
         except Exception as exc:
@@ -1164,6 +1170,77 @@ def _get_annotation_object_count(annot: Any) -> int | None:
     except Exception as exc:
         _rethrow_native_fatal(exc)
         return None
+
+
+def _get_annotation_link_uri(annot: Any) -> str | None:
+    """Extract the URI target from a LINK annotation via PDFium.
+
+    VQ-20: tries two strategies in order:
+    1. ``FPDFAnnot_GetStringValue(annot, b"URI")`` — works when the annotation
+       action dict is flattened as a string value by the binding.
+    2. ``FPDFAnnot_GetAction`` + ``FPDFAction_GetURIPath`` — the canonical path
+       through the action object tree.
+
+    Returns None when the annotation has no URI action, is an internal link, or
+    when the required PDFium functions are unavailable in this build.
+    Only ``http://``, ``https://``, ``ftp://``, ``mailto:``, and bare-domain
+    strings are returned; internal destinations and non-URI actions are silently
+    ignored.
+    """
+    if pdfium_c is None:
+        return None
+
+    # Strategy 1: FPDFAnnot_GetStringValue with key "URI"
+    get_string = getattr(pdfium_c, "FPDFAnnot_GetStringValue", None)
+    if get_string is not None:
+        try:
+            size = int(get_string(annot, b"URI", None, 0))
+            if size > 2:
+                buffer = ctypes.create_string_buffer(size)
+                get_string(annot, b"URI", ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ushort)), size)
+                raw = bytes(buffer.raw[:size])
+                if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+                    raw = raw[2:]
+                if len(raw) % 2:
+                    raw = raw[:-1]
+                uri = raw.decode("utf-16-le", errors="replace").rstrip("\x00").strip()
+                if uri and _is_safe_uri(uri):
+                    return uri
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
+
+    # Strategy 2: FPDFAnnot_GetAction → FPDFAction_GetURIPath
+    get_action = getattr(pdfium_c, "FPDFAnnot_GetAction", None)
+    get_uri_path = getattr(pdfium_c, "FPDFAction_GetURIPath", None)
+    if get_action is not None and get_uri_path is not None:
+        try:
+            action = get_action(annot)
+            if action:
+                size = int(get_uri_path(None, action, None, 0))
+                if size > 1:
+                    buffer = ctypes.create_string_buffer(size)
+                    get_uri_path(None, action, buffer, size)
+                    uri = buffer.raw[:size].rstrip(b"\x00").decode("latin-1", errors="replace").strip()
+                    if uri and _is_safe_uri(uri):
+                        return uri
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
+
+    return None
+
+
+_SAFE_URI_RE = re.compile(
+    r"^(?:https?://|ftp://|mailto:|www\.)\S+",
+    re.IGNORECASE,
+)
+
+
+def _is_safe_uri(uri: str) -> bool:
+    """Return True only for recognised safe URI schemes.
+
+    Rejects javascript:, file:, data: and other potentially dangerous schemes.
+    """
+    return bool(_SAFE_URI_RE.match(uri))
 
 
 def _extract_structure_tree(page: Any) -> StructureTreeEvidence:

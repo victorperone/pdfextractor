@@ -858,7 +858,12 @@ class PdfTextExtractor:
                     and rendered_page is not None
                     and _has_uncovered_image_area(native_page, tables)
                 )
-                visual_table = None
+                # VQ-22: detect multiple visual tables — one attempt per uncovered
+                # image region. The full-page call is preserved as the first attempt
+                # (covers single-table pages and pages with one raster table);
+                # subsequent attempts crop the page image to each image bbox that is
+                # not already covered by a native or previously detected visual table.
+                _visual_candidates: list = []  # StructuredTable results
                 if _should_run_visual:
                     try:
                         visual_table = detect_visual_table(
@@ -867,6 +872,8 @@ class PdfTextExtractor:
                             tokens=[token for line in ocr_lines for token in line.tokens],
                             page_rotation=native_page.objects.rotation,
                         )
+                        if visual_table is not None:
+                            _visual_candidates.append(visual_table)
                     except FatalExtractionError:
                         raise
                     except Exception as exc:
@@ -876,72 +883,122 @@ class PdfTextExtractor:
                             stage="visual_table_detection",
                             details=_process_memory_snapshot(),
                         )
-                        visual_table = None
                         warnings.append(
                             f"Visual table detection unavailable: {type(exc).__name__}: {exc}"
                         )
                         if self.config.enable_tables or mode in {ExtractionMode.BALANCED, ExtractionMode.OCR}:
                             partial_reasons.append("visual_table_detection_unavailable")
-                    if visual_table is not None:
-                        # Discard if the detected visual grid overlaps substantially
-                        # with an already-accepted native table — it is the same table.
-                        visual_bbox = (
-                            visual_table.page_fragments[0].bbox
-                            if visual_table.page_fragments
-                            else None
-                        )
-                        if visual_bbox is not None:
-                            for t in tables:
-                                native_bbox = next(
-                                    (f.bbox for f in t.page_fragments if f.page_index == page_index and f.bbox),
-                                    None,
-                                )
-                                if native_bbox and visual_bbox.overlap_ratio(native_bbox) >= 0.5:
-                                    visual_table = None
-                                    break
-                    if visual_table is not None:
+
+                # VQ-22: for each image region not yet explained by any detected table,
+                # try a crop-based visual detection to find additional raster tables.
+                if _should_run_visual and rendered_page is not None:
+                    all_accepted_bboxes = [
+                        f.bbox
+                        for t in tables + _visual_candidates
+                        for f in t.page_fragments
+                        if f.page_index == page_index and f.bbox is not None
+                    ]
+                    img_w = getattr(rendered_page, "width", None) or 1
+                    img_h = getattr(rendered_page, "height", None) or 1
+                    page_w = max(native_page.bbox.width, 1.0)
+                    page_h = max(native_page.bbox.height, 1.0)
+                    for img_obj in native_page.objects.images:
+                        img_box = img_obj.bbox
+                        if img_box is None:
+                            continue
+                        # Skip if already explained by an existing table.
+                        if any(img_box.overlap_ratio(ab) >= 0.50 for ab in all_accepted_bboxes):
+                            continue
+                        # Crop the rendered page to the image region.
                         try:
-                            refined = _refine_visual_table_ocr(
-                                engine=self.ocr_engine,
-                                page_image=ocr_image,
-                                page=native_page,
-                                page_index=page_index,
-                                table=visual_table,
-                                native_lines=native_lines,
-                                quality_policy=effective_ocr_quality_policy(self.config).value,
+                            px0 = max(0, int(img_box.x0 / page_w * img_w))
+                            py0 = max(0, int(img_box.y0 / page_h * img_h))
+                            px1 = min(img_w, int(img_box.x1 / page_w * img_w))
+                            py1 = min(img_h, int(img_box.y1 / page_h * img_h))
+                            if px1 <= px0 or py1 <= py0:
+                                continue
+                            crop = rendered_page.crop((px0, py0, px1, py1))
+                            extra_id = f"page-{page_index + 1}:visual-grid-{len(_visual_candidates) + 1}"
+                            extra = detect_visual_table(
+                                native_page,
+                                crop,
+                                table_id=extra_id,
+                                tokens=[token for line in ocr_lines for token in line.tokens],
                                 page_rotation=native_page.objects.rotation,
                             )
+                            if extra is not None:
+                                _visual_candidates.append(extra)
+                                all_accepted_bboxes.append(
+                                    extra.page_fragments[0].bbox
+                                    if extra.page_fragments else None
+                                )
                         except FatalExtractionError:
                             raise
-                        except Exception as exc:
-                            raise_if_resource_exhausted(
-                                exc,
-                                page_index=page_index,
-                                stage="visual_table_ocr_refinement",
-                                details=_process_memory_snapshot(),
+                        except Exception:
+                            continue
+
+                for visual_table in _visual_candidates:
+                    # Discard if the detected visual grid overlaps substantially
+                    # with an already-accepted native table — it is the same table.
+                    visual_bbox = (
+                        visual_table.page_fragments[0].bbox
+                        if visual_table.page_fragments
+                        else None
+                    )
+                    keep = True
+                    if visual_bbox is not None:
+                        for t in tables:
+                            native_bbox = next(
+                                (f.bbox for f in t.page_fragments if f.page_index == page_index and f.bbox),
+                                None,
                             )
-                            refined = None
-                            warnings.append(
-                                f"Visual table OCR refinement unavailable: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                        if refined is not None:
-                            (
-                                visual_table,
+                            if native_bbox and visual_bbox.overlap_ratio(native_bbox) >= 0.5:
+                                keep = False
+                                break
+                    if not keep:
+                        continue
+                    try:
+                        refined = _refine_visual_table_ocr(
+                            engine=self.ocr_engine,
+                            page_image=ocr_image,
+                            page=native_page,
+                            page_index=page_index,
+                            table=visual_table,
+                            native_lines=native_lines,
+                            quality_policy=effective_ocr_quality_policy(self.config).value,
+                            page_rotation=native_page.objects.rotation,
+                        )
+                    except FatalExtractionError:
+                        raise
+                    except Exception as exc:
+                        raise_if_resource_exhausted(
+                            exc,
+                            page_index=page_index,
+                            stage="visual_table_ocr_refinement",
+                            details=_process_memory_snapshot(),
+                        )
+                        refined = None
+                        warnings.append(
+                            f"Visual table OCR refinement unavailable: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    if refined is not None:
+                        (
+                            visual_table,
+                            refined_lines,
+                            refined_tokens,
+                            table_passes,
+                            table_batches,
+                        ) = refined
+                        if refined_lines:
+                            table_ocr_overrides[visual_table.table_id] = (
                                 refined_lines,
                                 refined_tokens,
-                                table_passes,
-                                table_batches,
-                            ) = refined
-                            if refined_lines:
-                                table_ocr_overrides[visual_table.table_id] = (
-                                    refined_lines,
-                                    refined_tokens,
-                                )
-                            ocr_table_tokens = len(refined_tokens)
-                            ocr_passes_total = (ocr_passes_total or 0) + table_passes
-                            ocr_batches_total = (ocr_batches_total or 0) + table_batches
-                        tables = tables + [visual_table]
+                            )
+                        ocr_table_tokens = len(refined_tokens)
+                        ocr_passes_total = (ocr_passes_total or 0) + table_passes
+                        ocr_batches_total = (ocr_batches_total or 0) + table_batches
+                    tables = tables + [visual_table]
                 consumed_table_ocr = _merge_ocr_region_tokens_into_table_cells(
                     tables=tables,
                     regions=regions,

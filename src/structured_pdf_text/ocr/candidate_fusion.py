@@ -70,10 +70,18 @@ class OcrCandidateFusionEngine:
                 if not overlaps:
                     # R55: non-primary candidates must pass a stricter, candidate-
                     # aware gate before admitting novel (spatially unmatched) evidence.
-                    if not is_primary and not _can_admit_novel_token(
-                        token, candidate, best_score
-                    ):
-                        continue
+                    if not is_primary:
+                        # VQ-12: check whether an independent candidate (different
+                        # family) has already placed a spatially overlapping token
+                        # with the same text — that counts as independent confirmation.
+                        independent_confirmation = _has_independent_confirmation(
+                            token, selected, families_by_token, candidate.family
+                        )
+                        if not _can_admit_novel_token(
+                            token, candidate, best_score,
+                            has_independent_confirmation=independent_confirmation,
+                        ):
+                            continue
                     # R56: suppress tokens whose text is already fully explained
                     # by a larger selected span at the same location. This
                     # prevents 1:N segmentation (e.g. "ABC DEF" vs "ABC"+"DEF")
@@ -146,7 +154,10 @@ def recognize_page_with_tiles(
     method = getattr(engine, "recognize_page", None)
     if not callable(method):
         return baseline_tokens, {"tiles": 0, "tile_tokens": 0, "fusion_conflicts": 0}
-    baseline_score = _candidate_score(baseline_tokens)
+    page_area = page_bbox.width * page_bbox.height if hasattr(page_bbox, "width") else None
+    # VQ-13: score the baseline against the full-page area so its coverage
+    # denominator is consistent with tile candidates scored against their tile area.
+    baseline_score = _candidate_score(baseline_tokens, target_area=page_area)
     identity = getattr(engine, "identity", None)
     engine_name = getattr(identity, "engine", type(engine).__name__)
     candidates = [OcrCandidateResult("full-page", "full-page", tuple(baseline_tokens), baseline_score, engine_name)]
@@ -170,11 +181,14 @@ def recognize_page_with_tiles(
             raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_tile")
             continue
         total_tokens += len(tokens)
+        # VQ-13: score each tile against its own tile area so that a small
+        # high-confidence tile is not unfairly penalised relative to the page.
+        tile_area = view.source_bbox.width * view.source_bbox.height if hasattr(view.source_bbox, "width") else None
         candidates.append(OcrCandidateResult(
             candidate_id=f"tile:{view.tile_id}",
             family="tile",
             tokens=tuple(tokens),
-            score=_candidate_score(tokens),
+            score=_candidate_score(tokens, target_area=tile_area),
             engine=engine_name,
         ))
     evidence = OcrCandidateFusionEngine().fuse(candidates)
@@ -185,7 +199,17 @@ def recognize_page_with_tiles(
     }
 
 
-def _candidate_score(tokens: list[OcrToken]) -> float:
+def _candidate_score(tokens: list[OcrToken], target_area: float | None = None) -> float:
+    """Score a candidate's quality, optionally penalising low coverage of a target region.
+
+    VQ-13: When ``target_area`` is provided (e.g. the area of the full page for a
+    full-page candidate, or the tile area for a tile candidate), a coverage ratio is
+    computed and used to discount scores from candidates whose bounding envelope is
+    much smaller than the region they are meant to cover.  A crop that recognises 5
+    high-confidence characters cannot legitimately beat a full-page pass that found
+    200 characters at slightly lower average confidence — the char_bonus cap of 400
+    chars already helps, but an explicit coverage penalty is more principled.
+    """
     if not tokens:
         return float("-inf")
     # B4: exclude tokens with degenerate bboxes from confidence so a 0×0
@@ -206,20 +230,68 @@ def _candidate_score(tokens: list[OcrToken]) -> float:
     single_char_penalty = min(
         sum(1 for t in texts if len(t) == 1) / max(len(texts), 1), 0.5
     ) * 0.10
-    return mean_conf + char_bonus - repl_penalty - dup_penalty - low_conf_penalty - single_char_penalty - invalid_ratio * 0.40
+    base = mean_conf + char_bonus - repl_penalty - dup_penalty - low_conf_penalty - single_char_penalty - invalid_ratio * 0.40
+    # VQ-13: coverage penalty — if the candidate's token envelope covers much less
+    # than the target region, apply a penalty proportional to the deficit. This
+    # prevents a tiny high-confidence crop from outscoring a full-page candidate.
+    # Cap the penalty at 0.15 to avoid completely disqualifying valid partial tiles.
+    if target_area and target_area > 0 and valid:
+        xs = [t.bbox.x0 for t in valid] + [t.bbox.x1 for t in valid]
+        ys = [t.bbox.y0 for t in valid] + [t.bbox.y1 for t in valid]
+        envelope = (max(xs) - min(xs)) * (max(ys) - min(ys))
+        coverage = min(envelope / target_area, 1.0)
+        # A candidate covering < 20% of the target area incurs a penalty.
+        if coverage < 0.20:
+            base -= (0.20 - coverage) * 0.75
+    return base
+
+
+def _has_independent_confirmation(
+    token: OcrToken,
+    selected: list[OcrToken],
+    families_by_token: list[set[str]],
+    current_family: str,
+) -> bool:
+    """Return True when a spatially similar token with matching text exists in selected,
+    placed by a *different* OCR family — i.e. independent confirmation.
+
+    VQ-12: tiles from the same image are not truly independent (they share the source
+    pixels). Only a different OCR family (craft vs dbnet, full-page vs tile) counts as
+    independent evidence. Single-family consensus cannot overcome a novel-token gate.
+    """
+    norm_text = _norm(token.text)
+    if not norm_text:
+        return False
+    for i, existing in enumerate(selected):
+        # Must match text (same reading)
+        if _norm(existing.text) != norm_text:
+            continue
+        # Must have spatial overlap (same visual location)
+        intersection = token.bbox.intersection(existing.bbox)
+        if intersection is None:
+            continue
+        smaller = max(min(token.bbox.area, existing.bbox.area), 1.0)
+        if intersection.area / smaller < 0.25:
+            continue
+        # Must have been placed by a different family
+        if current_family not in families_by_token[i]:
+            return True
+    return False
 
 
 def _can_admit_novel_token(
     token: OcrToken,
     candidate: OcrCandidateResult,
     best_score: float,
+    *,
+    has_independent_confirmation: bool = False,
 ) -> bool:
     """Return True when a non-primary candidate may insert a spatially novel token.
 
-    Applies a candidate-aware gate that goes beyond the token-level score used
-    for the primary candidate. The goal is to distinguish new, reliable coverage
-    (e.g. a tile recovering a missed region) from isolated garbage from a bad
-    hypothesis.
+    VQ-12: tokens with independent confirmation from a different OCR family pass
+    at lower thresholds; tokens without confirmation require stronger evidence,
+    especially when they are single characters or the candidate score is far below
+    the best.
     """
     # Candidates with non-finite or catastrophically bad scores cannot introduce
     # novel evidence — they are likely noise or empty recognition passes.
@@ -228,16 +300,23 @@ def _can_admit_novel_token(
     norm_text = _norm(token.text)
     confidence = token.confidence if token.confidence is not None else 0.0
     score_gap = best_score - candidate.score
-    # Single-character tokens are a common hallucination pattern; require very
-    # high confidence and a modest score gap.
+    # Single-character tokens are a common hallucination pattern.
     if len(norm_text) <= 1:
+        # Independent confirmation relaxes the threshold significantly.
+        if has_independent_confirmation:
+            return confidence >= 0.55 and score_gap <= 0.35
         return confidence >= 0.70 and score_gap <= 0.20
-    # Candidates far below the best need strong individual token evidence.
+    # Candidates far below the best need strong evidence and confirmation.
     if score_gap > 0.50:
-        return False
+        # With independent confirmation, accept if the token itself is strong.
+        return has_independent_confirmation and confidence >= 0.60 and _token_score(token) >= 0.40
     if score_gap > 0.25:
+        if has_independent_confirmation:
+            return confidence >= 0.40 and _token_score(token) >= 0.20
         return confidence >= 0.50 and _token_score(token) >= 0.30
-    # Modest score gap: standard token quality sufficient.
+    # Modest score gap: independent confirmation allows relaxed per-token threshold.
+    if has_independent_confirmation:
+        return confidence >= 0.25 and _token_score(token) >= 0.10
     return confidence >= 0.30 and _token_score(token) >= 0.15
 
 
