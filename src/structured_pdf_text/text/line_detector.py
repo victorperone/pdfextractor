@@ -184,10 +184,14 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
         if best_index is not None and best_score >= 0.92:
             candidate = candidates[best_index]
             # When alphanumeric content matches exactly, PDFium's text-page
-            # line is a safe source for spacing and punctuation as well. This
-            # repairs glyphs split into overlapping native fragments (e.g.
-            # SQL operators) without changing the character sequence.
-            should_replace = candidate != line.text
+            # line is a safe source for spacing and ligature corrections.
+            # VQ-01: guard against replacing critical punctuation (decimal
+            # separators, currency symbols, signs) that _compact() strips
+            # from both sides before comparison.
+            should_replace = (
+                candidate != line.text
+                and not _replacement_changes_critical_punctuation(line.text, candidate)
+            )
             if should_replace:
                 output[line_index] = TextLine(
                     tokens=line.tokens,
@@ -412,6 +416,46 @@ def _merge_script_lines(lines: list[TextLine]) -> list[TextLine]:
 
 def _compact(text: str) -> str:
     return "".join(character.casefold() for character in text if character.isalnum())
+
+
+# VQ-01 — patterns that signal critical Brazilian financial/legal punctuation.
+# When the original text matches, we must not let the textpage candidate alter
+# the non-alphanumeric characters (decimal separators, currency, signs, etc.).
+_CRITICAL_PUNCTUATION_RE = re.compile(
+    r"R\$"                              # BRL currency symbol
+    r"|\d[.,]\d"                        # decimal separator (comma or dot)
+    r"|\d\.\d{3}[,.]"                  # thousands-separator + decimal
+    r"|[-+]\d"                          # explicit sign before digit
+    r"|\d%"                             # percentage value
+    r"|\d[-/]\d{1,2}[-/]\d{2,4}"      # dates
+    r"|\d{3}[.\s]\d{3}[.\s]\d{3}"    # CPF/CNPJ segment
+    r"|<=|>=|<>|!=|[<>=](?!\w)"       # comparison operators
+)
+
+
+def _punctuation_skeleton(text: str) -> str:
+    """Non-alphanumeric, non-whitespace characters — the punctuation signature."""
+    return "".join(c for c in text if not c.isalnum() and not c.isspace())
+
+
+def _replacement_changes_critical_punctuation(original: str, candidate: str) -> bool:
+    """Return True when replacing *original* with *candidate* alters critical punctuation.
+
+    The alphanumeric content already matches (that is what the reconciliation
+    score measures); this guard checks only the non-alphanumeric skeleton.  A
+    change is considered critical only when the original contains a pattern
+    that carries semantic weight for Brazilian financial or legal text — decimal
+    separators, currency symbols, explicit signs, date delimiters, etc.
+    """
+    if original == candidate:
+        return False
+    orig_skeleton = _punctuation_skeleton(original)
+    cand_skeleton = _punctuation_skeleton(candidate)
+    if orig_skeleton == cand_skeleton:
+        return False
+    # Punctuation differs — only block the replacement when the original
+    # text contains a recognised critical pattern.
+    return bool(_CRITICAL_PUNCTUATION_RE.search(original))
 
 
 def _is_visible_text_char(char: NativeCharacter) -> bool:

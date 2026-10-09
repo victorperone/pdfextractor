@@ -254,7 +254,16 @@ def _render_table(table: StructuredTable) -> str:
     rows = [["" for _ in range(table.column_count)] for _ in range(row_count)]
     for cell in table.cells:
         if 0 <= cell.row < row_count and 0 <= cell.col < table.column_count:
-            rows[cell.row][cell.col] = _escape_cell(cell.text)
+            new_val = _escape_cell(cell.text)
+            existing = rows[cell.row][cell.col]
+            if existing:
+                # VQ-10: two cells claim the same coordinate — never silently
+                # discard either value.  Keep the first; append the second if
+                # it carries different content.
+                if new_val and new_val != existing:
+                    rows[cell.row][cell.col] = existing + " / " + new_val
+            else:
+                rows[cell.row][cell.col] = new_val
 
     if not any(any(row) for row in rows):
         return ""

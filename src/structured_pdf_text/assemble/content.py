@@ -312,14 +312,38 @@ def _table_token_claim_strength(
     table: StructuredTable,
     page_index: int,
 ) -> int:
-    """Return 2 for exact token ownership, 1 for geometry, and 0 otherwise."""
-    cell_token_ids = {id(item) for cell in table.cells for item in cell.tokens}
-    if cell_token_ids:
-        # Detectors preserve the source token objects in each cell. When that
-        # ownership evidence exists, it is stricter than the cell rectangle:
-        # a nearby outside word can overlap a large cell bbox without being a
-        # table value.
-        return 2 if id(token) in cell_token_ids else 0
+    """Return 2 for exact token ownership, 1 for geometry, and 0 otherwise.
+
+    VQ-04: ownership is checked via ``evidence_id`` (stable across object
+    replacement) first, falling back to ``id(token)`` for tokens that pre-date
+    the provenance fields.  This prevents a cell-refinement pass that replaces
+    ``cell.tokens`` with new objects from breaking the prose/table boundary.
+    """
+    # Build evidence-id and python-id sets from all cell tokens.
+    cell_evidence_ids: set[str] = set()
+    cell_python_ids: set[int] = set()
+    for cell in table.cells:
+        for item in cell.tokens:
+            eid = getattr(item, "evidence_id", None)
+            if eid:
+                cell_evidence_ids.add(eid)
+            cell_python_ids.add(id(item))
+
+    if cell_evidence_ids or cell_python_ids:
+        token_eid = getattr(token, "evidence_id", None)
+        # Prefer stable evidence_id match; fall back to python id() for legacy tokens.
+        if token_eid and token_eid in cell_evidence_ids:
+            return 2
+        # Also check derived_from_ids so a refined cell token still claims its parent.
+        token_derived = getattr(token, "derived_from_ids", ())
+        for derived_id in token_derived:
+            if derived_id in cell_evidence_ids:
+                return 2
+        if id(token) in cell_python_ids:
+            return 2
+        if cell_evidence_ids or cell_python_ids:
+            return 0
+
     bbox = getattr(token, "bbox", None)
     if bbox is None:
         return 0

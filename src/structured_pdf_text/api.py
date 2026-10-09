@@ -1740,10 +1740,68 @@ _CRITICAL_LABEL_RE = re.compile(
 )
 
 
+def _collect_token_critical_fingerprint(tokens: list[OcrToken]) -> Counter[str]:
+    """VQ-06: Snapshot critical values from a token list for drift detection.
+
+    Returns a multiset of canonical typed values so callers can compare
+    before/after a refinement stage and detect silent changes.
+    """
+    text = " ".join(t.text.strip() for t in tokens if t.text.strip())
+    snapshot: Counter[str] = Counter()
+    snapshot.update(_extract_structural_critical_values(text))
+    snapshot.update(_extract_signed_numeric_critical_values(text))
+    protected = _extract_protected_semantic_tokens(text)
+    for tok in protected:
+        snapshot[f"protected:{tok}"] += 1
+    return snapshot
+
+
+def _emit_conservation_warning(
+    stage: str,
+    before: Counter[str],
+    after: Counter[str],
+    page_index: int,
+    warnings_list: list[str],
+) -> None:
+    """VQ-06: Record a conservation warning when critical values vanish after a stage."""
+    lost = before - after
+    for key, count in lost.items():
+        warnings_list.append(
+            f"conservation_drift:p{page_index}:{stage}: lost {count}x '{key}'"
+        )
+
+
+def _critical_surface_preserved(original: str, proposed: str) -> bool:
+    """VQ-02: Verify sign, leading-zeros and decimal separators are not altered.
+
+    Accepts complementation of an empty field but blocks substitution of an
+    existing value whose surface representation differs in sign, leading zero,
+    or separator character from the OCR hypothesis.
+    """
+    if not original.strip():
+        return True  # Empty → anything is a complement, not a substitution
+    orig = re.sub(r"\s", "", original)
+    prop = re.sub(r"\s", "", proposed)
+    if not prop:
+        return False
+    # Sign preservation
+    orig_sign = orig[0] if orig and orig[0] in "+-" else ""
+    prop_sign = prop[0] if prop and prop[0] in "+-" else ""
+    if orig_sign and orig_sign != prop_sign:
+        return False
+    # Leading-zero preservation (e.g. protocol numbers, CPF segments)
+    if orig.lstrip("+-") and orig.lstrip("+-")[0] == "0":
+        prop_body = prop.lstrip("+-")
+        if not prop_body or prop_body[0] != "0":
+            return False
+    return True
+
+
 def _refine_critical_data_tokens(
     *, engine: Any, page_image: Any, page_index: int, page_bbox: BBox,
     tokens: list[OcrToken], lines: list[TextLine], quality_policy: str,
     page_rotation: int = 0, region_renderer: Any = None, base_scale: float = 3.0,
+    page_warnings: list[str] | None = None,
 ) -> tuple[list[OcrToken], int]:
     """Rerun contextual critical fields and select only OCR-produced text."""
     refiner = CriticalDataRefiner()
@@ -1754,6 +1812,9 @@ def _refine_critical_data_tokens(
             contexts.append((line, labels))
     if not contexts:
         return tokens, 0
+
+    # VQ-06: snapshot before refinement for drift detection
+    before_fingerprint = _collect_token_critical_fingerprint(tokens) if page_warnings is not None else None
 
     output = list(tokens)
     refinements = 0
@@ -1835,8 +1896,20 @@ def _refine_critical_data_tokens(
             polygon=None,
         )
         if refiner.score_token(candidate, data_type) > refiner.score_token(token, data_type):
+            # VQ-02: block substitutions that alter sign, leading zeros, or
+            # separators even when the format score improves.
+            if not _critical_surface_preserved(token.text, observed_text):
+                continue
             output[index] = candidate
             refinements += 1
+    # VQ-06: emit warning for any critical value lost during this refinement
+    if page_warnings is not None and before_fingerprint is not None:
+        after_fingerprint = _collect_token_critical_fingerprint(output)
+        _emit_conservation_warning(
+            "critical_data_refinement", before_fingerprint, after_fingerprint,
+            page_index, page_warnings,
+        )
+
     return output, refinements
 
 
@@ -1936,12 +2009,46 @@ def _refine_table_cells_ocr(
             text = candidate_texts[best_index]
             if not text:
                 continue
+
+            # VQ-03: for cells that appear empty, require stronger geometric
+            # and confidence evidence before inserting text.  This prevents
+            # column-border artefacts (e.g. a detected "1") from filling
+            # legitimately empty cells.
+            if not cell.text.strip():
+                avg_conf = sum(t.confidence or 0.0 for t in chosen) / len(chosen)
+                if avg_conf < 0.75:
+                    continue
+                if len(text.strip()) < 2:
+                    continue
+                # OCR tokens must overlap the cell interior, not just a border.
+                tokens_inside = [
+                    t for t in chosen
+                    if not t.text.isspace()
+                    and t.bbox.overlap_ratio(cell.bbox) >= 0.30
+                ]
+                if not tokens_inside:
+                    continue
+
             old_score = refiner.score_token(
                 replace(chosen[0], text=cell.text), data_type
             ) if data_type and cell.text.strip() else 0.0
             new_score = refiner.score_token(replace(chosen[0], text=text), data_type) if data_type else 1.0
             if cell.text.strip() and new_score < old_score:
                 continue
+
+            # VQ-03: for non-empty cells, verify the replacement conserves content.
+            if cell.text.strip():
+                old_wrap = [replace(chosen[0], text=cell.text, confidence=cell.confidence)]
+                new_wrap = [replace(chosen[0], text=text)]
+                if not _refinement_conserves_content(old_wrap, new_wrap):
+                    continue
+
+            # Collect evidence IDs from the tokens being replaced (VQ-04/VQ-28).
+            original_evidence_ids = tuple(
+                t.evidence_id
+                for t in cell.tokens
+                if getattr(t, "evidence_id", None)
+            )
             cell.tokens = [
                 TextToken(
                     text=token.text,
@@ -1951,8 +2058,13 @@ def _refine_table_cells_ocr(
                     normalized_text=token.text,
                     provenance="table_cell_ocr",
                     rotation=token.rotation,
+                    # VQ-04/VQ-28: stable identity + lineage for ownership tracking
+                    evidence_id=f"ocr:p{page_index}:cell:{table.table_id}:{cell.row}:{cell.col}:idx{ti}",
+                    derived_from_ids=original_evidence_ids,
+                    transformation_type="table_cell_ocr",
+                    decision_reason="cell_confidence_below_threshold",
                 )
-                for token in chosen
+                for ti, token in enumerate(chosen)
             ]
             cell.text = join_table_tokens(cell.tokens)
             cell.confidence = max((token.confidence for token in chosen if token.confidence is not None), default=cell.confidence)
@@ -2036,6 +2148,35 @@ def _extract_signed_numeric_critical_values(text: str) -> Counter[str]:
     return values
 
 
+# VQ-07 — protected semantic tokens that must not vanish between old and new text.
+_PROTECTED_NEGATION_WORDS: frozenset[str] = frozenset({
+    "não", "nao", "nem", "sem", "exceto", "salvo", "jamais", "nunca",
+    "menor", "maior", "diferente", "deferido", "indeferido",
+    "aprovado", "reprovado", "ativo", "inativo", "válido", "invalido",
+})
+
+_PROTECTED_OPERATORS_RE = re.compile(
+    # Comparison operators
+    r"(?:<=|>=|<>|!=|[<>]=?)"
+    # Negative sign before a digit — changes numeric value.
+    # Positive sign (+) before a digit is NOT protected: it is redundant
+    # (R$ +350,00 == R$ 350,00) and existing tests rely on this.
+    r"|(?:(?<!\w)-(?=\s*\d))"
+)
+
+
+def _extract_protected_semantic_tokens(text: str) -> frozenset[str]:
+    """Return negation words and comparison operators that must survive refinement."""
+    tokens: set[str] = set()
+    for word in re.split(r"\s+", text.lower()):
+        clean = re.sub(r"[^\w]", "", word, flags=re.UNICODE)
+        if clean in _PROTECTED_NEGATION_WORDS:
+            tokens.add(clean)
+    for match in _PROTECTED_OPERATORS_RE.finditer(text):
+        tokens.add(match.group())
+    return frozenset(tokens)
+
+
 def _refinement_conserves_content(
     old_tokens: list[OcrToken],
     new_tokens: list[OcrToken],
@@ -2045,28 +2186,31 @@ def _refinement_conserves_content(
 ) -> bool:
     """Return True when new_tokens retains sufficient content from old_tokens.
 
-    Three independent checks must all pass (B2/R67):
+    Four independent checks must all pass (B2/R67 + VQ-07):
 
-    1. Character coverage — new must have >= (min_coverage) of old's
-       non-whitespace characters.  Trivially short old content (<= 4 chars)
-       is always accepted.
+    0. Protected semantic tokens — negation words and comparison operators in
+       old must all appear in new.  A substitution that silently removes "não"
+       changes document meaning regardless of character-level similarity.
 
-    2. Text similarity — even same-length but completely unrelated text is
-       rejected; SequenceMatcher ratio must be >= min_similarity.  Skipped
-       when old has fewer than 15 non-whitespace characters, because character-
-       level ratios are too noisy on short texts (e.g. single-word OCR corrections
-       may replace one 5-char word with an entirely different 5-char word).
-       Whitespace is stripped before comparison so spacing never lowers the score.
+    1. Critical data preservation — structural and signed numeric values.
 
-    3. Critical data preservation — if old contains a well-formed CPF, CNPJ,
-       monetary value, date, percentage, or process number, every typed value
-       and its occurrence count must remain in new, even when similarity is high.
+    2. Character coverage.
+
+    3. Text similarity (long texts only).
     """
     old_text = " ".join(t.text.strip() for t in old_tokens if t.text.strip())
     new_text = " ".join(t.text.strip() for t in new_tokens if t.text.strip())
     old_chars = len(re.sub(r"\s+", "", old_text))
     new_chars = len(re.sub(r"\s+", "", new_text))
-    # Check 0: critical data must not disappear or be substituted (before short-text bypass)
+
+    # Check 0a: VQ-07 — protected semantic tokens must not vanish
+    old_protected = _extract_protected_semantic_tokens(old_text)
+    if old_protected:
+        new_protected = _extract_protected_semantic_tokens(new_text)
+        if old_protected - new_protected:
+            return False
+
+    # Check 0b: critical structured data must not disappear or be substituted
     old_critical = _extract_structural_critical_values(old_text)
     if old_critical:
         new_critical = _extract_structural_critical_values(new_text)
@@ -2077,13 +2221,13 @@ def _refinement_conserves_content(
         new_signed_critical = _extract_signed_numeric_critical_values(new_text)
         if old_signed_critical - new_signed_critical:
             return False
+
     if old_chars <= 4:
         return True
     # Check 1: character coverage
     if new_chars < old_chars * min_coverage:
         return False
-    # Check 2: text similarity (same-length unrelated replacement).
-    # Only meaningful when old is long enough for the ratio to be stable.
+    # Check 2: text similarity (long texts only)
     if old_chars >= 15:
         old_key = _similarity_key(old_text)
         new_key = _similarity_key(new_text)
@@ -3096,8 +3240,25 @@ def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox, page_rotati
     return output
 
 
-def _replace_tokens_in_box(tokens: list[OcrToken], box: BBox, replacement: list[OcrToken]) -> list[OcrToken]:
+def _replace_tokens_in_box(
+    tokens: list[OcrToken],
+    box: BBox,
+    replacement: list[OcrToken],
+    *,
+    conservative: bool = True,
+) -> list[OcrToken]:
+    """Replace tokens inside *box* with *replacement*.
+
+    VQ-05: When ``conservative=True`` (default) an empty replacement list
+    cannot silently delete existing content.  The original token list is
+    returned unchanged so that no text disappears without a recorded reason.
+    Callers that intentionally clear a region (e.g. confirmed decorative
+    artefact removal) must pass ``conservative=False``.
+    """
+    inside = [token for token in tokens if _line_in_box(token, box)]
     outside = [token for token in tokens if not _line_in_box(token, box)]
+    if conservative and inside and not replacement:
+        return tokens
     return outside + replacement
 
 

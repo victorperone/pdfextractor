@@ -279,6 +279,19 @@ class TextToken:
     Aggregates one or more ``NativeCharacter`` references and carries
     normalised text, font metadata, and diagnostic flags.  Mutability allows
     the pipeline to attach flags and overrides without creating new objects.
+
+    Provenance fields (VQ-04/VQ-28):
+    - ``evidence_id``: deterministic stable identity derived from origin
+      (format: ``native:p{page}:{min_idx}:{max_idx}`` for native tokens,
+      ``ocr:p{page}:{region}:idx:{n}`` for OCR tokens, etc.).
+    - ``derived_from_ids``: evidence IDs of the tokens this token was
+      derived from (refinements, merges, splits).
+    - ``transformation_type``: short label for the operation that produced
+      this token when it differs from its source (e.g. ``table_cell_ocr``).
+    - ``decision_reason``: human-readable justification for acceptance,
+      rejection, or substitution recorded at the transformation site.
+    - ``owner_id``: block or cell ID that has claimed this token; set during
+      assembly to enable stable ownership checking across object lifetimes.
     """
 
     text: str
@@ -296,6 +309,12 @@ class TextToken:
     provenance: str | None = None
     rotation: int = 0
     ocr_provenance: "OcrProvenance | None" = None
+    # VQ-04/VQ-28 — stable evidence identity and transformation lineage
+    evidence_id: str | None = None
+    derived_from_ids: tuple[str, ...] = ()
+    transformation_type: str | None = None
+    decision_reason: str | None = None
+    owner_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -548,6 +567,48 @@ class StructuredDocument:
 
     def to_dict(self) -> dict[str, Any]:
         return to_plain_data(self)
+
+
+def make_native_token_evidence_id(page_index: int, sources: "list[EvidenceRef]") -> str | None:
+    """Build a deterministic evidence ID for a native-origin TextToken.
+
+    Uses the page index and the sorted character indices embedded in each
+    ``EvidenceRef.element_id`` (format ``char:{idx}``).  Returns ``None`` when
+    the source list is empty or contains only inferred gap refs.
+    """
+    char_indices: list[int] = []
+    for ref in sources:
+        element = ref.element_id
+        if element.startswith("char:"):
+            try:
+                char_indices.append(int(element[5:]))
+            except ValueError:
+                pass
+        elif element.startswith("gap:"):
+            parts = element.split(":")
+            for part in parts[1:]:
+                try:
+                    char_indices.append(int(part))
+                except ValueError:
+                    pass
+    if not char_indices:
+        return None
+    lo, hi = min(char_indices), max(char_indices)
+    return f"native:p{page_index}:char:{lo}-{hi}"
+
+
+def make_ocr_token_evidence_id(
+    page_index: int,
+    region_id: str,
+    candidate_id: str,
+    token_index: int,
+) -> str:
+    """Build a deterministic evidence ID for an OCR-origin TextToken.
+
+    Encodes page, region, OCR candidate/attempt identity, and per-observation
+    index so two detections of the same region always yield distinct IDs.
+    """
+    return f"ocr:p{page_index}:{region_id}:{candidate_id}:idx{token_index}"
 
 
 def to_plain_data(value: Any) -> Any:

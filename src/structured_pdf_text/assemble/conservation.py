@@ -491,7 +491,13 @@ def _block_disposition(block: PageContentBlock) -> tuple[ContentDisposition, str
     if block.kind == ContentKind.TABLE:
         return ContentDisposition.TABLE_OWNED, "table_block"
     if block.kind == ContentKind.FIGURE:
-        return ContentDisposition.FIGURE_OWNED, "figure_block"
+        # Addendum VQ-15/VQ-06: only claim FIGURE_OWNED when the block actually
+        # incorporates text from those lines.  A FIGURE block with no text has
+        # not rendered the line content — the lines remain eligible for fallback
+        # or diagnostics rather than being silently consumed.
+        if block.text.strip():
+            return ContentDisposition.FIGURE_OWNED, "figure_block"
+        return ContentDisposition.SUPPRESSED_POLICY, "figure_no_text_coverage"
     return ContentDisposition.RENDERED, "content_block"
 
 
