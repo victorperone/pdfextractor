@@ -57,6 +57,7 @@ _RESOURCE_MESSAGE_MARKERS = (
     "failed to alloc memory",
     "failed to allocate memory",
     "cannot allocate memory",
+    "not enough memory",
     "out of memory",
     "memory allocation failed",
     "std::bad_alloc",

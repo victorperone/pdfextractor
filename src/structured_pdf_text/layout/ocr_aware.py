@@ -300,6 +300,21 @@ def _order_ocr_lines_by_columns(lines: list[TextLine], page_bbox: BBox) -> list[
     vertical position.  When the geometry does not show a clear gutter, the
     original top-to-bottom order is retained.
     """
+    # The line detector has already grouped and ordered these tokens in an
+    # upright virtual frame. Their physical boxes still describe the rotated
+    # source image, so a geometry sort here would undo the orientation choice.
+    rotations = {
+        token.rotation % 360
+        for line in lines
+        for token in line.tokens
+        if token.text.strip() and token.rotation % 360
+    }
+    if len(rotations) == 1 and all(
+        any(token.text.strip() and token.rotation % 360 for token in line.tokens)
+        for line in lines
+    ):
+        return list(lines)
+
     visual_order = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
     page_width = page_bbox.width
     if page_width <= 0 or len(visual_order) < 4:

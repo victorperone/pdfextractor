@@ -1127,6 +1127,48 @@ _ORIENTATION_MIN_TOKENS = 3
 _ORIENTATION_MIN_CHARS = 8
 _ORIENTATION_MIN_MEAN_CONFIDENCE = 0.40
 _ORIENTATION_MAX_LOW_CONF_RATIO = 0.75
+_ORIENTATION_MIN_HORIZONTAL_RATIO = 0.75
+
+
+def _orientation_rotated_evidence_sufficient(tokens: "list[OcrToken]") -> bool:
+    """Return True when a rotated candidate has sufficient evidence to replace upright.
+
+    Uses the same quality criteria as :func:`_orientation_candidate_can_replace_upright`
+    but without the score comparison, so it can be evaluated independently for
+    diagnostics without requiring a comparison candidate.
+
+    The ``horizontal_ratio`` criterion is intentionally EXCLUDED — a correctly
+    rotated page remaps detected text back to the original image space, where the
+    text appears vertical and would always fail the horizontal test even when the
+    recognition quality is excellent.
+    """
+    if not tokens:
+        return False
+    m = _candidate_metrics(tokens)
+    return (
+        m["token_count"] >= _ORIENTATION_MIN_TOKENS
+        and m["char_count"] >= _ORIENTATION_MIN_CHARS
+        and m["mean_confidence"] >= _ORIENTATION_MIN_MEAN_CONFIDENCE
+        and m["low_conf_ratio"] <= _ORIENTATION_MAX_LOW_CONF_RATIO
+    )
+
+
+def _orientation_candidate_can_replace_upright(
+    *,
+    tokens: "list[OcrToken]",
+    score: float,
+    best_score: float,
+) -> bool:
+    """Return True only when a rotated candidate has sufficient evidence and a better score.
+
+    A rotation is chosen only when its token set independently passes
+    :func:`_orientation_rotated_evidence_sufficient` (which excludes
+    ``horizontal_ratio`` — see that function's docstring for the rationale)
+    and its quality score strictly exceeds the current best.
+    """
+    if not tokens or score <= best_score:
+        return False
+    return _orientation_rotated_evidence_sufficient(tokens)
 
 
 def _adaptive_candidates(
@@ -1214,6 +1256,7 @@ def _orientation_quality_sufficient(tokens: "list[OcrToken]") -> bool:
         and m["char_count"] >= _ORIENTATION_MIN_CHARS
         and m["mean_confidence"] >= _ORIENTATION_MIN_MEAN_CONFIDENCE
         and m["low_conf_ratio"] <= _ORIENTATION_MAX_LOW_CONF_RATIO
+        and m["horizontal_ratio"] >= _ORIENTATION_MIN_HORIZONTAL_RATIO
     )
 
 
@@ -1290,12 +1333,17 @@ def _adaptive_with_orientation_selection(
                             "angle": _angle,
                             "score": round(_rot_score, 4),
                             "token_count": len(_rot_tokens),
+                            "sufficient": _orientation_rotated_evidence_sufficient(_rot_tokens),
                         })
-                        if _rot_score > best_rot_score:
+                        if _orientation_candidate_can_replace_upright(
+                            tokens=_rot_tokens,
+                            score=_rot_score,
+                            best_score=best_rot_score,
+                        ):
                             best_rot_score = _rot_score
                             best_rot_result = (_rot_label, _rot_tokens)
                     else:
-                        attempts.append({"angle": _angle, "score": 0.0, "token_count": 0})
+                        attempts.append({"angle": _angle, "score": 0.0, "token_count": 0, "sufficient": False})
                 except Exception as _exc:
                     _propagate_fatal_error(_exc)
         except Exception as _exc:
@@ -1936,13 +1984,18 @@ def _exhaustive_with_orientation_selection(
                         "angle": _angle,
                         "score": round(_rot_score, 4),
                         "token_count": len(_rot_tokens),
+                        "sufficient": _orientation_rotated_evidence_sufficient(_rot_tokens),
                     })
-                    if _rot_score > best_score:
+                    if _orientation_candidate_can_replace_upright(
+                        tokens=_rot_tokens,
+                        score=_rot_score,
+                        best_score=best_score,
+                    ):
                         best_score = _rot_score
                         selected_angle = _angle
                         selected_img = _rot_img
                 else:
-                    attempts.append({"angle": _angle, "score": 0.0, "token_count": 0})
+                    attempts.append({"angle": _angle, "score": 0.0, "token_count": 0, "sufficient": False})
             except Exception as _exc:
                 _propagate_fatal_error(_exc)
 
@@ -2241,6 +2294,7 @@ class EasyOCRBackend:
         self.last_easyocr_fallback_reason: str | None = None
         self._last_candidate_diagnostics: list[dict[str, Any]] = []
         self._last_orientation_decision: dict[str, Any] = {}
+        self._orientation_decisions: list[dict[str, Any]] = []
         self._last_dbnet_diag: list[dict[str, Any]] = []
         self._detection_stats = {
             "easyocr_exhaustive_detection_calls": 0,
@@ -2262,6 +2316,7 @@ class EasyOCRBackend:
         dbnet_diag = list(getattr(self, "_last_dbnet_diag", []))
         dbnet_entry = dbnet_diag[0] if dbnet_diag else {}
         orient_decision = dict(getattr(self, "_last_orientation_decision", {}))
+        orient_decisions = list(getattr(self, "_orientation_decisions", []))
         result = {
             "easyocr_calls": self._easyocr_calls,
             **self._detection_stats,
@@ -2278,8 +2333,11 @@ class EasyOCRBackend:
             "dbnet_weights_available": dbnet_entry.get("weights_available"),
             "dbnet_runtime_available": dbnet_entry.get("runtime_available"),
             "dbnet_failure_reason": dbnet_entry.get("failure_reason"),
+            # orientation_selected / orientation_attempts: last call (backwards compat)
             "orientation_selected": orient_decision.get("selected_angle"),
             "orientation_attempts": list(orient_decision.get("attempts", [])),
+            # orientation_decisions: one entry per recognize_page call this page
+            "orientation_decisions": [dict(d) for d in orient_decisions],
         }
         self.reset_page_diagnostics()
         return result
@@ -2526,6 +2584,12 @@ class EasyOCRBackend:
                     language=self._language,
                 )
                 self._last_orientation_decision = _orient_diag
+                _call_index = len(self._orientation_decisions) + 1
+                self._orientation_decisions.append({
+                    "call_index": _call_index,
+                    "selected_angle": _orient_diag.get("selected_angle"),
+                    "attempts": list(_orient_diag.get("attempts", [])),
+                })
                 if (
                     self._last_dbnet_diag
                     and not self._last_dbnet_diag[-1].get("runtime_available", True)
@@ -2545,6 +2609,12 @@ class EasyOCRBackend:
                     record_call=self._record_call,
                 )
                 self._last_orientation_decision = _orient_diag
+                _call_index = len(self._orientation_decisions) + 1
+                self._orientation_decisions.append({
+                    "call_index": _call_index,
+                    "selected_angle": _orient_diag.get("selected_angle"),
+                    "attempts": list(_orient_diag.get("attempts", [])),
+                })
                 tokens, cand_diag = _best_candidate(pipeline_candidates)
                 self._last_candidate_diagnostics = cand_diag
             # _easyocr_calls is incremented per-call inside _record_call; no aggregate here

@@ -122,8 +122,45 @@ def order_regions(
     assembler to process each region independently — e.g. interleaving
     table blocks between prose lines — without re-running the full graph.
     """
+    # OCR line reconstruction already orders rotation-corrected tokens in an
+    # upright virtual frame. Region bboxes remain in source-page coordinates;
+    # using them to build a geometric graph would reverse the OCR's chosen
+    # reading order for physically rotated scans.
+    orientation = _shared_ocr_orientation(regions)
+    if orientation is not None:
+        return list(regions), ()
+
     consistency = _native_order_consistency(regions)
     return _order_region_graph(regions, consistency)
+
+
+def _shared_ocr_orientation(regions: list[LayoutRegion]) -> int | None:
+    orientations: set[int] = set()
+    saw_lines = False
+    for region in regions:
+        if region.kind in {RegionKind.TABLE, RegionKind.FIGURE} or region.native_lines or not region.ocr_lines:
+            return None
+        for line in region.ocr_lines:
+            token_orientations = {
+                token.rotation % 360
+                for token in line.tokens
+                if token.text.strip() and token.rotation % 360
+            }
+            if len(token_orientations) != 1:
+                return None
+            orientation = next(iter(token_orientations))
+            orientations.add(orientation)
+            saw_lines = True
+    return next(iter(orientations)) if saw_lines and len(orientations) == 1 else None
+
+
+def _line_ocr_orientation(line: TextLine) -> int | None:
+    orientations = {
+        token.rotation % 360
+        for token in line.tokens
+        if token.text.strip() and token.rotation % 360
+    }
+    return next(iter(orientations)) if len(orientations) == 1 else None
 
 
 def native_order_consistency(regions: list[LayoutRegion]) -> float | None:
@@ -160,6 +197,18 @@ def order_lines_in_region(
         RegionKind.CAPTION,
         RegionKind.UNKNOWN,
     }
+    if (
+        region.kind not in {RegionKind.TABLE, RegionKind.FIGURE}
+        and
+        not region.native_lines
+        and region.ocr_lines
+        and _line_ocr_orientation(region.ocr_lines[0]) is not None
+        and all(
+            _line_ocr_orientation(line) == _line_ocr_orientation(region.ocr_lines[0])
+            for line in region.ocr_lines
+        )
+    ):
+        return list(region.ocr_lines), 0
     if (
         region.quality.decision.value == "ocr_region"
         and region.ocr_lines
@@ -236,7 +285,10 @@ def order_region_lines(
         RegionKind.UNKNOWN,
     }
     consistency = _native_order_consistency(regions)
-    ordered_regions, region_edges = _order_region_graph(regions, consistency)
+    if _shared_ocr_orientation(regions) is not None:
+        ordered_regions, region_edges = list(regions), ()
+    else:
+        ordered_regions, region_edges = _order_region_graph(regions, consistency)
     output: list[TextLine] = []
     column_groups = 0
     rotated_lines = 0
@@ -247,6 +299,17 @@ def order_region_lines(
             region.kind == RegionKind.DECORATIVE
             and not (region.semantic_role or "").startswith("decorative_watermark:")
         ):
+            if (
+                not region.native_lines
+                and region.ocr_lines
+                and _line_ocr_orientation(region.ocr_lines[0]) is not None
+                and all(
+                    _line_ocr_orientation(line) == _line_ocr_orientation(region.ocr_lines[0])
+                    for line in region.ocr_lines
+                )
+            ):
+                output.extend(region.ocr_lines)
+                continue
             # §33: merge OCR lines with native lines so column-detection scores
             # include geometry from scanned/OCR pages (fixes Reading Order on V4).
             candidate_lines = list(region.native_lines)

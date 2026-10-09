@@ -485,3 +485,333 @@ class TestAdaptiveOrientationEdgeCases:
         assert not rotation_probes, (
             f"strong upright must not trigger rotation probes; got {probe_calls}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Orientation abstention — page 261 regression
+# All candidates weak: best score wins only when evidence is SUFFICIENT.
+# ---------------------------------------------------------------------------
+
+import numpy as np
+import structured_pdf_text.ocr.backends.easyocr as easyocr_mod
+from structured_pdf_text.ocr.backends.easyocr import (
+    _exhaustive_with_orientation_selection,
+    _adaptive_with_orientation_selection,
+    _orientation_candidate_can_replace_upright,
+    _orientation_quality_sufficient,
+    _orientation_quality_score,
+    _orientation_rotated_evidence_sufficient,
+)
+
+
+def _make_weak_raw(text: str, conf: float, n: int = 1) -> list[Any]:
+    """Build a raw result with very few, low-confidence tokens (insufficient evidence)."""
+    result = []
+    for i in range(n):
+        x = float(i * 20)
+        box = [[x, 0.0], [x + 16, 0.0], [x + 16, 10.0], [x, 10.0]]
+        result.append((box, text, conf))
+    return result
+
+
+class TestOrientationAbstention:
+    """When all orientation candidates are weak, 0° must be selected."""
+
+    def test_exhaustive_all_weak_selects_upright(self) -> None:
+        """Reproduce page 261: 0°=0.18 score, 270°=0.20 score, all insufficient."""
+        img = np.ones((200, 200, 3), dtype=np.uint8) * 200
+
+        # All angles produce just 1 low-confidence token — insufficient evidence.
+        weak_raw = _make_weak_raw("X", 0.35, n=1)
+
+        def mock_run(reader, image, **kw):
+            return weak_raw, None
+
+        with patch.object(easyocr_mod, "_run_easyocr", mock_run):
+            with patch.object(easyocr_mod, "_exhaustive_candidates", return_value=[("default", weak_raw)]):
+                _, diag = _exhaustive_with_orientation_selection(
+                    object(), img, _base_kwargs(),
+                    page_index=0, language="pt",
+                )
+
+        assert diag["selected_angle"] == 0, (
+            f"All weak candidates must keep 0° (abstain). Got {diag['selected_angle']}°. "
+            f"Attempts: {diag['attempts']}"
+        )
+
+    def test_adaptive_all_weak_selects_upright(self) -> None:
+        """Adaptive path: all angles produce few weak tokens → stay at 0°."""
+        img = np.ones((200, 200, 3), dtype=np.uint8) * 200
+        weak_raw = _make_weak_raw("Y", 0.30, n=1)
+
+        def mock_run(reader, image, **kw):
+            return weak_raw, None
+
+        with patch.object(easyocr_mod, "_run_easyocr", mock_run):
+            _, diag = _adaptive_with_orientation_selection(
+                object(), img, _base_kwargs(),
+                page_index=0, language="pt",
+            )
+
+        assert diag["selected_angle"] == 0, (
+            f"All weak candidates must keep 0°. Got {diag['selected_angle']}°. "
+            f"Attempts: {diag['attempts']}"
+        )
+
+    def test_strong_rotation_wins_over_upright(self) -> None:
+        """A rotated candidate with strong evidence should still win."""
+        # Use a non-square image so rotated dimensions differ (h != w).
+        img = np.ones((100, 300, 3), dtype=np.uint8) * 200
+
+        upright_raw = _make_weak_raw("Z", 0.30, n=1)
+        strong_rot_raw = _make_raw([
+            ("TEXTO", 0.97), ("COMPLETO", 0.95), ("AQUI", 0.94),
+        ])
+
+        def mock_run(reader, image, **kw):
+            arr = np.asarray(image)
+            h, w = arr.shape[:2]
+            # Rotated 90° image: img is 100×300 → rotated becomes 300×100 (h > w).
+            if h > w:
+                return strong_rot_raw, None
+            return upright_raw, None
+
+        with patch.object(easyocr_mod, "_run_easyocr", mock_run):
+            _, diag = _adaptive_with_orientation_selection(
+                object(), img, _base_kwargs(),
+                page_index=0, language="pt",
+            )
+
+        assert diag["selected_angle"] in {90, 180, 270}, (
+            f"Strong rotated candidate should win. Got {diag['selected_angle']}°."
+        )
+
+    def test_helper_requires_sufficiency_not_just_higher_score(self) -> None:
+        """_orientation_candidate_can_replace_upright must check sufficiency."""
+        # Use 1 token with low confidence — not sufficient (needs >= 3 tokens).
+        weak_raw = _make_weak_raw("X", 0.30, n=1)
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        weak_tokens = _result_to_pipeline_tokens(weak_raw, 0, "pt")
+        assert not _orientation_quality_sufficient(weak_tokens)
+
+        # Even if the score is higher than best_score, helper must return False.
+        result = _orientation_candidate_can_replace_upright(
+            tokens=weak_tokens,
+            score=_orientation_quality_score(weak_tokens) + 0.1,
+            best_score=_orientation_quality_score(weak_tokens),
+        )
+        assert result is False, "Insufficient candidate must not replace upright"
+
+    def test_sufficient_candidate_replaces_upright(self) -> None:
+        """Helper returns True when rotation tokens pass the sufficiency check."""
+        strong_raw = _make_raw([
+            ("BOAS", 0.97), ("PALAVRAS", 0.95), ("AQUI", 0.93),
+        ])
+        # Convert raw to pipeline tokens (use the internal converter).
+        from structured_pdf_text.ocr.backends.easyocr import _result_to_pipeline_tokens
+        strong_tokens = _result_to_pipeline_tokens(strong_raw, 0, "pt")
+        assert _orientation_quality_sufficient(strong_tokens)
+
+        score = _orientation_quality_score(strong_tokens)
+        result = _orientation_candidate_can_replace_upright(
+            tokens=strong_tokens,
+            score=score,
+            best_score=score - 0.1,  # rotation beats upright
+        )
+        assert result is True
+
+    def test_attempts_include_sufficient_flag(self) -> None:
+        """Orientation attempts dict must include 'sufficient' key for each angle."""
+        img = np.ones((100, 100, 3), dtype=np.uint8) * 200
+        weak_raw = _make_weak_raw("A", 0.30, n=1)
+
+        with patch.object(easyocr_mod, "_run_easyocr", lambda *a, **kw: (weak_raw, None)):
+            _, diag = _adaptive_with_orientation_selection(
+                object(), img, _base_kwargs(),
+                page_index=0, language="pt",
+            )
+
+        attempts = diag.get("attempts", [])
+        assert len(attempts) >= 1
+        assert "sufficient" in attempts[0], (
+            "Each attempt must include 'sufficient' key for auditability"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestRotationSufficiencyDiagnostics — Correction 5
+#
+# Verifies that the "sufficient" field in orientation diagnostics uses
+# _orientation_rotated_evidence_sufficient() for rotated candidates (which
+# excludes horizontal_ratio) and _orientation_quality_sufficient() for
+# upright (which includes horizontal_ratio).  This ensures diagnostics
+# are coherent with the actual selection decision.
+# ---------------------------------------------------------------------------
+
+class TestRotationSufficiencyDiagnostics:
+    """Diagnostic 'sufficient' must use the same rule as the selection decision."""
+
+    def _make_vertical_tokens(self, n: int = 4, conf: float = 0.92) -> "list[Any]":
+        """Create tokens with width < height (vertical bboxes).
+
+        These tokens pass token_count/char_count/confidence/low_conf_ratio
+        but FAIL horizontal_ratio (width < height → horizontal_ratio = 0.0).
+        This simulates correctly-corrected text that has been remapped to the
+        original image space, where it appears vertical.
+        """
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox
+        tokens = []
+        for i in range(n):
+            # Tall, narrow bbox: 5 px wide × 20 px tall → horizontal = False
+            tokens.append(OcrToken(
+                text=f"WORD{i}",
+                bbox=BBox(float(i * 10), 0.0, float(i * 10 + 5), 20.0),
+                confidence=conf,
+                language="pt",
+                source=SourceKind.OCR_PAGE,
+            ))
+        return tokens
+
+    def test_rotated_evidence_sufficient_ignores_horizontal_ratio(self) -> None:
+        """Tokens with vertical bboxes must pass _orientation_rotated_evidence_sufficient.
+
+        Case A from spec §19: tokens pass token_count/chars/confidence/low_conf_ratio
+        but fail horizontal_ratio.  The rotated sufficiency function must return True.
+        """
+        tokens = self._make_vertical_tokens(n=4, conf=0.92)
+        # Sanity check: these tokens fail the upright rule (horizontal_ratio too low)
+        assert not _orientation_quality_sufficient(tokens), (
+            "Vertical tokens should fail the upright sufficiency check "
+            "(requires horizontal_ratio >= threshold)"
+        )
+        # But they must pass the rotated rule (no horizontal_ratio check)
+        assert _orientation_rotated_evidence_sufficient(tokens), (
+            "Vertical tokens with good confidence/count should pass "
+            "_orientation_rotated_evidence_sufficient"
+        )
+
+    def test_rotated_sufficient_candidate_can_replace_upright(self) -> None:
+        """A rotated candidate with vertical bboxes but good quality must be selected.
+
+        Case A from spec §19: can_replace must be True when evidence passes
+        _orientation_rotated_evidence_sufficient AND score exceeds upright.
+        """
+        tokens = self._make_vertical_tokens(n=4, conf=0.92)
+        score = _orientation_quality_score(tokens)
+        result = _orientation_candidate_can_replace_upright(
+            tokens=tokens,
+            score=score,
+            best_score=score - 0.1,  # rotated scores better than upright
+        )
+        assert result is True, (
+            "Candidate with sufficient rotated evidence and better score must win"
+        )
+
+    def test_upright_vertical_tokens_fail_quality_sufficient(self) -> None:
+        """Upright _orientation_quality_sufficient still checks horizontal_ratio.
+
+        Case B from spec §19: the upright rule must still reject vertical tokens
+        to preserve the distinction between the two helpers.
+        """
+        tokens = self._make_vertical_tokens(n=4, conf=0.92)
+        assert not _orientation_quality_sufficient(tokens), (
+            "_orientation_quality_sufficient must still check horizontal_ratio "
+            "for the upright candidate; vertical tokens must fail"
+        )
+
+    def test_diagnostic_sufficient_uses_rotated_rule_for_nonzero_angles(self) -> None:
+        """The 'sufficient' field in rotation diagnostics must use the rotated rule.
+
+        Case A from spec §19: tokens pass count/confidence but fail horizontal_ratio.
+        When these tokens appear as a rotated candidate, the diagnostic 'sufficient'
+        must be True (using _orientation_rotated_evidence_sufficient), even though
+        _orientation_quality_sufficient would return False.
+
+        Tests the adaptive path; the exhaustive path has the same fix.
+        """
+        img = np.ones((100, 300, 3), dtype=np.uint8) * 200  # non-square to trigger rotation
+
+        # Upright returns very few tokens (triggers rotation probe)
+        upright_raw = _make_weak_raw("Z", 0.30, n=1)
+
+        # Rotated result: horizontal-layout tokens that become vertical after remap.
+        # We create tokens that pass confidence/count but look vertical in page space.
+        # Since EasyOCR returns bbox_pts and _remap_raw_for_rotation swaps axes for
+        # 90°, we set height > width in the raw bbox to simulate a vertical appearance.
+        # Box: x spans [0,5], y spans [0,20] → after remap for 90°, still narrow.
+        rot_raw = []
+        for i in range(4):
+            box = [[float(i * 10), 0.0], [float(i * 10 + 5), 0.0],
+                   [float(i * 10 + 5), 20.0], [float(i * 10), 20.0]]
+            rot_raw.append((box, f"WORD{i}", 0.92))
+
+        call_index = [0]
+
+        def mock_run(reader, image, **kw):
+            call_index[0] += 1
+            arr = np.asarray(image)
+            h, w = arr.shape[:2]
+            # 90° rotated image of (100, 300) becomes (300, 100) → h > w
+            if h > w:
+                return rot_raw, None
+            return upright_raw, None
+
+        with patch.object(easyocr_mod, "_run_easyocr", mock_run):
+            _, diag = _adaptive_with_orientation_selection(
+                object(), img, _base_kwargs(),
+                page_index=0, language="pt",
+            )
+
+        # Find the rot90 attempt
+        rot_attempt = next(
+            (a for a in diag.get("attempts", []) if a.get("angle") == 90),
+            None,
+        )
+        assert rot_attempt is not None, "rot90 attempt must be recorded in diagnostics"
+        assert rot_attempt.get("sufficient") is True, (
+            f"Rotated candidate with good evidence must report sufficient=True in diagnostics. "
+            f"Got: {rot_attempt}"
+        )
+
+    def test_weak_rotated_candidate_reports_sufficient_false(self) -> None:
+        """Case C from spec §19: weak rotated candidate must report sufficient=False.
+
+        When a rotation produces very few tokens (below _ORIENTATION_MIN_TOKENS),
+        _orientation_rotated_evidence_sufficient must return False, and the
+        diagnostic 'sufficient' must be False.
+        """
+        tokens = self._make_vertical_tokens(n=1, conf=0.85)  # n=1 < _ORIENTATION_MIN_TOKENS=3
+        assert not _orientation_rotated_evidence_sufficient(tokens), (
+            "Single-token rotated candidate must not pass rotated sufficiency check"
+        )
+
+    def test_weak_rotation_keeps_upright_as_selected(self) -> None:
+        """Case C from spec §19: weak rotated candidate must not replace upright.
+
+        When rotation returns only 1 token (insufficient evidence), the selected
+        angle must remain 0° even if the rotation score is slightly higher.
+        """
+        img = np.ones((100, 300, 3), dtype=np.uint8) * 200
+        upright_raw = _make_weak_raw("FRACO", 0.35, n=2)
+        single_rot_raw = [
+            ([[0.0, 0.0], [5.0, 0.0], [5.0, 20.0], [0.0, 20.0]], "X", 0.95)
+        ]
+
+        def mock_run(reader, image, **kw):
+            arr = np.asarray(image)
+            h, w = arr.shape[:2]
+            if h > w:  # rotated image
+                return single_rot_raw, None
+            return upright_raw, None
+
+        with patch.object(easyocr_mod, "_run_easyocr", mock_run):
+            _, diag = _adaptive_with_orientation_selection(
+                object(), img, _base_kwargs(),
+                page_index=0, language="pt",
+            )
+
+        assert diag["selected_angle"] == 0, (
+            f"Weak rotation (1 token) must not replace upright. "
+            f"Got selected_angle={diag['selected_angle']}"
+        )

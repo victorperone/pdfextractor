@@ -136,7 +136,17 @@ def reconstruct_ocr_lines(
                 line_id=_ocr_line_id(page_index, bbox, ordered),
             )
         )
-    if page_rotation % 360 or any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines):
+    # ``groups`` were created and appended in the upright OCR coordinate
+    # system above.  Do not sort them again by their source-page bboxes when
+    # EasyOCR corrected a physically rotated scan: those bboxes deliberately
+    # remain in source coordinates for evidence and table assignment, where a
+    # 180° scan would otherwise reverse the already-correct reading order.
+    has_rotated_ocr_tokens = any(token.rotation % 360 for token in visible)
+    if (
+        page_rotation % 360
+        or has_rotated_ocr_tokens
+        or any(line.baseline is not None and abs(line.baseline.angle) > 0.01 for line in lines)
+    ):
         result = lines
     else:
         result = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))

@@ -532,3 +532,99 @@ class TestP1PreprocessingDedup:
         except Exception:
             pytest.skip("cv2/PIL not available")
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Figure no_text — _recover_selected_regions distinguishes optional from required
+# ---------------------------------------------------------------------------
+
+from structured_pdf_text.api import _recover_selected_regions  # noqa: E402
+from PIL import Image  # noqa: E402
+
+
+def _make_figure_region(region_id: str = "page-1:region-1") -> LayoutRegion:
+    return LayoutRegion(
+        region_id=region_id,
+        kind=RegionKind.FIGURE,
+        bbox=BBox(0.0, 0.0, 100.0, 100.0),
+        layout_confidence=1.0,
+        native_lines=[],
+        ocr_tokens=[],
+        quality=RegionQuality(decision=RegionDecision.OCR_REGION),
+    )
+
+
+def _make_table_region(region_id: str = "page-1:region-2") -> LayoutRegion:
+    return LayoutRegion(
+        region_id=region_id,
+        kind=RegionKind.TABLE,
+        bbox=BBox(0.0, 0.0, 100.0, 100.0),
+        layout_confidence=1.0,
+        native_lines=[],
+        ocr_tokens=[],
+        quality=RegionQuality(decision=RegionDecision.OCR_REGION, reasons=["missing"]),
+    )
+
+
+class _EmptyOCREngine:
+    """Fake engine that always returns empty tokens (simulates logo/signature)."""
+
+    class _Identity:
+        engine = "easyocr"
+
+    identity = _Identity()
+    last_pass_count = 0
+    last_batch_count = 0
+
+    def recognize_page(self, image, page_index, page_bbox, **kwargs):
+        return []
+
+
+class TestFigureNoTextPolicy:
+    """figure + no_text + zero errors must NOT mark ocr_failed=True."""
+
+    def test_figure_no_text_no_errors_not_ocr_failed(self, monkeypatch) -> None:
+        monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "100.0")
+        region = _make_figure_region()
+        engine = _EmptyOCREngine()
+        page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+
+        _, _, _, stats = _recover_selected_regions(
+            engine,
+            Image.new("RGB", (100, 100), "white"),
+            page_index=0,
+            page_bbox=page_bbox,
+            regions=[region],
+            quality_variants=False,
+        )
+
+        stat = stats[region.region_id]
+        assert stat["ocr_empty"] is True, "Figure with no tokens must set ocr_empty=True"
+        assert stat["ocr_failed"] is False, (
+            "Figure with no tokens and no errors must NOT be marked as ocr_failed"
+        )
+        assert stat["ocr_required"] is False, (
+            "Figure with no errors is an optional region — ocr_required must be False"
+        )
+
+    def test_table_no_text_is_ocr_failed(self, monkeypatch) -> None:
+        monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "100.0")
+        region = _make_table_region()
+        engine = _EmptyOCREngine()
+        page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
+
+        _, _, _, stats = _recover_selected_regions(
+            engine,
+            Image.new("RGB", (100, 100), "white"),
+            page_index=0,
+            page_bbox=page_bbox,
+            regions=[region],
+            quality_variants=False,
+        )
+
+        stat = stats[region.region_id]
+        assert stat["ocr_empty"] is True
+        assert stat["ocr_failed"] is True, (
+            "Table with no text and no errors is a required region — must be ocr_failed"
+        )
+        assert stat["ocr_required"] is True

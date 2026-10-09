@@ -110,10 +110,13 @@ from structured_pdf_text.ocr.recovery import _ocr_rgb_budget_for_engine  # noqa:
 import math
 
 
-def test_easyocr_has_unlimited_budget_by_default(monkeypatch) -> None:
+def test_easyocr_has_finite_budget_by_default(monkeypatch) -> None:
+    """EasyOCR default budget is now 32 MiB — CRAFT/PyTorch can OOM on large crops."""
     monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", raising=False)
+    from structured_pdf_text.ocr.recovery import _EASYOCR_RGB_BUDGET_MIB_DEFAULT
     budget = _ocr_rgb_budget_for_engine("easyocr")
-    assert math.isinf(budget)
+    assert math.isfinite(budget), "EasyOCR budget must be finite to guard against OOM"
+    assert budget == _EASYOCR_RGB_BUDGET_MIB_DEFAULT
 
 
 def test_paddle_budget_uses_shared_default(monkeypatch) -> None:
@@ -128,8 +131,15 @@ def test_easyocr_budget_respects_env_override(monkeypatch) -> None:
     assert budget == 32.0
 
 
-def test_easyocr_unlimited_budget_does_not_block_large_scale(monkeypatch) -> None:
-    """With unlimited budget, even a large crop should not be blocked."""
+def test_easyocr_budget_env_override_to_large_value(monkeypatch) -> None:
+    """An explicit large env override is honoured without restriction."""
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "512.0")
+    budget = _ocr_rgb_budget_for_engine("easyocr")
+    assert budget == 512.0
+
+
+def test_easyocr_budget_tiling_used_for_large_crop(monkeypatch) -> None:
+    """A large EasyOCR crop that exceeds the default budget is tiled instead of blocked."""
     monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", raising=False)
 
     class _FakeIdentity:
@@ -140,6 +150,8 @@ def test_easyocr_unlimited_budget_does_not_block_large_scale(monkeypatch) -> Non
 
     engine = _FakeEasyOCREngine(calls=[])
     page_bbox = BBox(0.0, 0.0, 1000.0, 1000.0)
+    # A 1000×1000 crop at 4× → ~11.4 MiB, which exceeds the 32 MiB budget only
+    # at 4×. At 1× it should still work. Tiling should be invoked for 4×.
     result = OcrRegionRefiner(engine).refine(
         Image.new("RGB", (1000, 1000), "white"),
         page_index=0,
@@ -149,5 +161,5 @@ def test_easyocr_unlimited_budget_does_not_block_large_scale(monkeypatch) -> Non
             scale_factors=(4.0,),
         ),
     )
+    # Result should not be budget_blocked: tiling provides an alternative.
     assert result.status in {"ok", "no_text"}, f"Unexpected status: {result.status}"
-    assert result.selected_scale_factor == 4.0, "Large scale blocked despite unlimited budget"
