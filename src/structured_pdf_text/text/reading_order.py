@@ -1416,3 +1416,93 @@ def _order_form_rows(lines: list[TextLine]) -> list[TextLine]:
         for row in sorted(rows, key=lambda item: min(line.bbox.y0 for line in item))
         for line in sorted(row, key=lambda item: item.bbox.x0)
     ]
+
+
+def _order_regions_by_reading_band(regions: list[LayoutRegion]) -> list[LayoutRegion]:
+    """Order regions using a vertical-band model for multi-column layouts.
+
+    Algorithm:
+    1. HEADER/FOOTER kind always sorts first/last regardless of geometry.
+    2. Remaining regions are partitioned into horizontal "bands" separated by
+       full-width spanning blocks (width >= 70% of the widest region).
+    3. Within each band, regions are assigned to lateral columns by x-centre
+       and ordered left-to-right, top-to-bottom within each column.
+    4. Columns within a band are emitted left-to-right so the full left column
+       is read before the right column begins.
+
+    This preserves existing behaviour for single-column pages (one band, one
+    column) while fixing the two-column interleave bug described in VQ-17.
+    """
+    if not regions:
+        return []
+
+    headers = [r for r in regions if r.kind == RegionKind.HEADER]
+    footers = [r for r in regions if r.kind == RegionKind.FOOTER]
+    body = [r for r in regions if r.kind not in (RegionKind.HEADER, RegionKind.FOOTER)]
+
+    if not body:
+        return (
+            sorted(headers, key=lambda r: r.bbox.y0)
+            + sorted(footers, key=lambda r: r.bbox.y0)
+        )
+
+    page_width = max(r.bbox.x1 for r in body) - min(r.bbox.x0 for r in body)
+    if page_width <= 0:
+        page_width = max(r.bbox.width for r in body) or 1.0
+
+    sorted_body = sorted(body, key=lambda r: r.bbox.y0)
+
+    # Identify spanning (full-width) regions as band separators.
+    # A region spans when its width covers >= 70% of the page content width.
+    def _is_spanning(r: LayoutRegion) -> bool:
+        return r.bbox.width >= page_width * 0.70
+
+    # Split body into bands delimited by spanning regions.
+    bands: list[list[LayoutRegion]] = []
+    current_band: list[LayoutRegion] = []
+    for region in sorted_body:
+        if _is_spanning(region):
+            if current_band:
+                bands.append(current_band)
+                current_band = []
+            bands.append([region])
+        else:
+            current_band.append(region)
+    if current_band:
+        bands.append(current_band)
+
+    ordered: list[LayoutRegion] = []
+    for band in bands:
+        if len(band) == 1 and _is_spanning(band[0]):
+            ordered.append(band[0])
+            continue
+        if len(band) <= 1:
+            ordered.extend(band)
+            continue
+
+        # Detect column x-centres by clustering region centres.
+        centres = sorted({round(r.bbox.cx, 0) for r in band})
+        col_tolerance = page_width * 0.15
+        col_groups: list[list[float]] = []
+        for cx in centres:
+            if not col_groups or cx - col_groups[-1][-1] > col_tolerance:
+                col_groups.append([cx])
+            else:
+                col_groups[-1].append(cx)
+        col_centres = [sum(g) / len(g) for g in col_groups]
+
+        def _col_index(r: LayoutRegion) -> int:
+            return min(range(len(col_centres)), key=lambda i: abs(r.bbox.cx - col_centres[i]))
+
+        cols: list[list[LayoutRegion]] = [[] for _ in col_centres]
+        for r in band:
+            cols[_col_index(r)].append(r)
+
+        for col in cols:
+            ordered.extend(sorted(col, key=lambda r: r.bbox.y0))
+
+    return (
+        sorted(headers, key=lambda r: r.bbox.y0)
+        + ordered
+        + sorted(footers, key=lambda r: r.bbox.y0)
+    )

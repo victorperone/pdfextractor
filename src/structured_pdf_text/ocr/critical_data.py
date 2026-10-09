@@ -53,6 +53,16 @@ _NUMERIC_PATTERN = re.compile(r"\d[\d.]*,\d+|\d{4,}")
 _TIME_PATTERN = re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?")
 _CEP_PATTERN = re.compile(r"\d{5}-?\d{3}")
 _PROCESS_NUMBER_PATTERN = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
+# Scientific notation (Brazilian/international): 1,20e-5 or 1.20E+3 or 3,5×10⁻²
+_SCIENTIFIC_PATTERN = re.compile(r"[+-]?\d+[,.]?\d*[eE][+-]?\d+|[+-]?\d+[,.]?\d*\s*[×x]\s*10\s*[\^]?\s*[+-]?\d+")
+# UUID v4 (dashes canonical form)
+_UUID_PATTERN = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# Inscricão estadual: digits with optional dots/dashes, 8-14 digits total
+_INSCRICAO_PATTERN = re.compile(r"\d{2,4}\.?\d{3}\.?\d{3}\.?\d{1,4}")
+# NF-e access key: 44 digits (chave de acesso)
+_NFE_KEY_PATTERN = re.compile(r"\d{44}")
+# Signed/unsigned numeric range: 10-20, 1,5 a 3,0
+_NUMERIC_RANGE_PATTERN = re.compile(r"[+-]?\d+[,.]?\d*\s*(?:-|a|até)\s*[+-]?\d+[,.]?\d*")
 
 
 # Labels that indicate the following token is a structured data type.
@@ -79,6 +89,11 @@ _CEP_LABELS: frozenset[str] = frozenset({"cep", "codigo postal", "cod postal"})
 _PROCESS_LABELS: frozenset[str] = frozenset({"processo", "processo no", "numero do processo", "n processo"})
 _INVOICE_LABELS: frozenset[str] = frozenset({"nf", "nfe", "nota fiscal", "numero da nota", "invoice", "pedido"})
 _NUMERIC_LABELS: frozenset[str] = frozenset({"quantidade", "numero", "qtd", "item", "lote"})
+_SCIENTIFIC_LABELS: frozenset[str] = frozenset({"notacao", "expoente", "escalar", "fator", "coeficiente"})
+_UUID_LABELS: frozenset[str] = frozenset({"uuid", "guid", "id", "identificador", "chave"})
+_INSCRICAO_LABELS: frozenset[str] = frozenset({"ie", "inscricao estadual", "inscricao", "matricula", "insc"})
+_NFE_KEY_LABELS: frozenset[str] = frozenset({"chave de acesso", "chave nfe", "acesso nfe", "nfe chave"})
+_NUMERIC_RANGE_LABELS: frozenset[str] = frozenset({"faixa", "intervalo", "range", "entre", "de a"})
 
 
 def _normalize_label(text: str) -> str:
@@ -139,6 +154,11 @@ class DataType:
     CEP = "cep"
     PROCESS_NUMBER = "process_number"
     INVOICE_NUMBER = "invoice_number"
+    SCIENTIFIC = "scientific"
+    UUID = "uuid"
+    INSCRICAO = "inscricao"
+    NFE_KEY = "nfe_key"
+    NUMERIC_RANGE = "numeric_range"
 
 
 def _score_as_cpf(text: str) -> float:
@@ -234,6 +254,56 @@ def _score_as_invoice_number(text: str) -> float:
     return 0.0
 
 
+def _score_as_scientific(text: str) -> float:
+    """Score scientific notation match — preserves surface exactly."""
+    value = text.strip()
+    if _SCIENTIFIC_PATTERN.fullmatch(value):
+        return 1.0
+    if _SCIENTIFIC_PATTERN.search(value):
+        return 0.75
+    return 0.0
+
+
+def _score_as_uuid(text: str) -> float:
+    """Score UUID (RFC 4122) format match."""
+    value = text.strip()
+    if _UUID_PATTERN.fullmatch(value):
+        return 1.0
+    # All 32 hex digits without dashes
+    if re.fullmatch(r"[0-9a-fA-F]{32}", value):
+        return 0.5
+    return 0.0
+
+
+def _score_as_inscricao(text: str) -> float:
+    """Score Inscrição Estadual format match."""
+    value = text.strip()
+    if _INSCRICAO_PATTERN.fullmatch(value):
+        return 1.0
+    digits = re.sub(r"\D", "", value)
+    if 8 <= len(digits) <= 14:
+        return 0.4
+    return 0.0
+
+
+def _score_as_nfe_key(text: str) -> float:
+    """Score NF-e 44-digit access key match."""
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 44:
+        return 1.0 if _NFE_KEY_PATTERN.fullmatch(text.strip()) else 0.85
+    return 0.0
+
+
+def _score_as_numeric_range(text: str) -> float:
+    """Score numeric range (10-20, 1,5 a 3,0) match."""
+    value = text.strip()
+    if _NUMERIC_RANGE_PATTERN.fullmatch(value):
+        return 1.0
+    if _NUMERIC_RANGE_PATTERN.search(value):
+        return 0.6
+    return 0.0
+
+
 def _data_type_score(text: str, data_type: str) -> float:
     if data_type == DataType.CPF:
         return _score_as_cpf(text)
@@ -255,6 +325,16 @@ def _data_type_score(text: str, data_type: str) -> float:
         return _score_as_process_number(text)
     if data_type == DataType.INVOICE_NUMBER:
         return _score_as_invoice_number(text)
+    if data_type == DataType.SCIENTIFIC:
+        return _score_as_scientific(text)
+    if data_type == DataType.UUID:
+        return _score_as_uuid(text)
+    if data_type == DataType.INSCRICAO:
+        return _score_as_inscricao(text)
+    if data_type == DataType.NFE_KEY:
+        return _score_as_nfe_key(text)
+    if data_type == DataType.NUMERIC_RANGE:
+        return _score_as_numeric_range(text)
     return 0.0
 
 
@@ -286,6 +366,16 @@ def _detect_context_type(context_labels: "list[str]") -> "str | None":
             return DataType.PERCENTAGE
         if norm in _NUMERIC_LABELS:
             return DataType.NUMERIC
+        if norm in _SCIENTIFIC_LABELS:
+            return DataType.SCIENTIFIC
+        if norm in _UUID_LABELS:
+            return DataType.UUID
+        if norm in _INSCRICAO_LABELS:
+            return DataType.INSCRICAO
+        if norm in _NFE_KEY_LABELS:
+            return DataType.NFE_KEY
+        if norm in _NUMERIC_RANGE_LABELS:
+            return DataType.NUMERIC_RANGE
     return None
 
 
@@ -304,6 +394,11 @@ _ALLOWLISTS: dict[str, str] = {
     DataType.CEP:        "0123456789-",
     DataType.PROCESS_NUMBER: "0123456789-.",
     DataType.INVOICE_NUMBER: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz./-",
+    DataType.SCIENTIFIC: "0123456789.,eE+- ×x^",
+    DataType.UUID:        "0123456789abcdefABCDEF-",
+    DataType.INSCRICAO:   "0123456789.-/",
+    DataType.NFE_KEY:     "0123456789",
+    DataType.NUMERIC_RANGE: "0123456789,.- aAt",
 }
 
 

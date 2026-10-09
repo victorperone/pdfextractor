@@ -299,27 +299,84 @@ def _mark_identifier_continuations(lines: list[TextLine]) -> list[TextLine]:
 
 
 def _collapse_spaced_capital_runs(lines: list[TextLine]) -> list[TextLine]:
-    """Join a standalone, strongly tracked uppercase word into one token.
+    """Join standalone tracking-spaced text into compact tokens.
 
-    This targets stamp-like lines serialized as ``R A S C U N H O``. The
-    complete-line, minimum-length, and wide-geometry checks avoid changing
-    ordinary acronym sequences embedded in prose.
+    Handles two cases:
+    1. ALL-CAPS stamp lines (``R A S C U N H O``) — tight geometry check.
+    2. Mixed/lowercase tracked titles (``L i s t a s ,  s u b l i s t a s``) —
+       every alphabetic character is followed by a space, so the collapsed form
+       has no interior spaces between letters. Commas and punctuation are allowed
+       between spaced words, making the pattern safe for typical prose titles.
+
+    The complete-line and wide-geometry checks prevent changing ordinary acronym
+    sequences embedded in a prose sentence.
     """
-    pattern = re.compile(r"(?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ]\s+){4,}[A-ZÁÉÍÓÚÂÊÔÃÕÇ]")
+    all_caps_pattern = re.compile(r"(?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ]\s+){4,}[A-ZÁÉÍÓÚÂÊÔÃÕÇ]")
+    # Tracking pattern: every alpha char is individually spaced, with optional
+    # punctuation/spaces separating groups. Minimum 6 spaced letters total.
+    # Example: "L i s t a s , s u b l i s t a s" or "T í t u l o"
+    tracking_pattern = re.compile(
+        r"[A-Za-záéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ]"
+        r"(?:\s[A-Za-záéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ]){5,}"
+        r"(?:\s*[,;.:!?\-]\s*[A-Za-záéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ]"
+        r"(?:\s[A-Za-záéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ])*)*"
+    )
     result: list[TextLine] = []
     for line in lines:
         text = line.text.strip()
         compact = "".join(text.split())
+
         if (
-            pattern.fullmatch(text)
+            all_caps_pattern.fullmatch(text)
             and 5 <= len(compact) <= 16
             and line.bbox.height > 0
             and line.bbox.width / line.bbox.height >= 5.0
         ):
             result.append(replace(line, text_override=compact))
-        else:
-            result.append(line)
+            continue
+
+        # Mixed-case tracking: every letter individually spaced, long enough
+        # that it's clearly a title style, not a short acronym.
+        if (
+            tracking_pattern.fullmatch(text)
+            and len(compact) >= 8
+            and line.bbox.height > 0
+            and line.bbox.width / line.bbox.height >= 4.0
+        ):
+            # Collapse inter-letter spaces but preserve inter-word punctuation.
+            # Split on punctuation boundaries, collapse each word fragment, then
+            # rejoin with the punctuation in between.
+            collapsed = _collapse_tracking_text(text)
+            if collapsed != compact and len(collapsed) < len(text) * 0.7:
+                result.append(replace(line, text_override=collapsed))
+                continue
+
+        result.append(line)
     return result
+
+
+def _collapse_tracking_text(text: str) -> str:
+    """Collapse individually-spaced letters while preserving punctuation spacing.
+
+    Input:  ``L i s t a s ,  s u b l i s t a s  e  a l i n h a m e n t o``
+    Output: ``Listas, sublistas e alinhamento``
+    """
+    # Tokenize into alpha-runs and punctuation tokens.
+    tokens = re.split(r"(\s*[,;.:!?\-]\s*|\s{2,})", text)
+    parts: list[str] = []
+    for token in tokens:
+        stripped = token.strip()
+        if not stripped:
+            continue
+        if re.fullmatch(r"[,;.:!?\-]", stripped):
+            parts.append(stripped + " ")
+        elif re.search(r"[A-Za-záéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ]\s[A-Za-záéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ]", token):
+            # It's a spaced-letter run — collapse interior spaces.
+            word = "".join(token.split())
+            parts.append(word + " ")
+        else:
+            parts.append(token.strip() + " ")
+    return " ".join(p.strip() for p in parts if p.strip())
 
 
 def _native_orders_adjacent(first: TextLine, second: TextLine) -> bool:

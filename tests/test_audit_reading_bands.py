@@ -10,6 +10,7 @@ import pytest
 
 from structured_pdf_text.document import LayoutRegion, RegionKind
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.text.reading_order import _order_regions_by_reading_band
 
 
 def _region(kind: RegionKind, x0: float, y0: float, x1: float, y1: float) -> LayoutRegion:
@@ -38,7 +39,6 @@ class TestReadingBandsUnit:
         assert col2.bbox.x0 > col1.bbox.x1 - 50  # gap >= -50 (they don't heavily overlap)
 
 
-@pytest.mark.xfail(reason="VQ-17 Phase C — reading bands not yet implemented", strict=False)
 class TestReadingBandsPhasec:
     """Specification tests for multi-column reading-band ordering."""
 
@@ -53,7 +53,7 @@ class TestReadingBandsPhasec:
             _region(RegionKind.TEXT, 300, 360, 550, 700),
         ]
         all_regions = col1_regions + col2_regions
-        ordered = _order_regions_by_reading_band(all_regions)  # type: ignore[name-defined]
+        ordered = _order_regions_by_reading_band(all_regions)
         col1_indices = [ordered.index(r) for r in col1_regions]
         col2_indices = [ordered.index(r) for r in col2_regions]
         assert max(col1_indices) < min(col2_indices), "All col1 before all col2"
@@ -63,12 +63,12 @@ class TestReadingBandsPhasec:
         header = _region(RegionKind.TITLE, 0, 0, 550, 60)
         col1 = _region(RegionKind.TEXT, 0, 80, 250, 700)
         col2 = _region(RegionKind.TEXT, 300, 80, 550, 700)
-        ordered = _order_regions_by_reading_band([col1, col2, header])  # type: ignore[name-defined]
+        ordered = _order_regions_by_reading_band([col1, col2, header])
         assert ordered.index(header) == 0
 
     def test_footer_comes_last(self):
         """Footer/page-number regions come after all content."""
         footer = _region(RegionKind.FOOTER, 0, 680, 550, 700)
         body = _region(RegionKind.TEXT, 0, 0, 550, 650)
-        ordered = _order_regions_by_reading_band([footer, body])  # type: ignore[name-defined]
+        ordered = _order_regions_by_reading_band([footer, body])
         assert ordered[-1] == footer
