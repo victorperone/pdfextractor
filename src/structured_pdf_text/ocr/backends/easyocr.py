@@ -2035,6 +2035,98 @@ def _exhaustive_with_orientation_selection(
     return pipeline_candidates, orientation_diag
 
 
+def _supplement_with_regional_orientation(
+    reader: "Any",
+    img: "Any",
+    base_kwargs: "dict[str, Any]",
+    existing_tokens: "list[OcrToken]",
+    page_index: int,
+    language: str,
+) -> "list[OcrToken]":
+    """VQ-14: supplement global OCR with regional passes for uncovered areas.
+
+    After global orientation selection, images areas without any token coverage
+    may contain text at a different orientation (e.g. a vertical stamp on a
+    horizontal page). This function:
+    1. Divides the image into a coarse grid.
+    2. Finds cells with no existing token coverage.
+    3. Crops each uncovered cell and probes alternative orientations (90°/270°).
+    4. Remaps new tokens to original image space and appends them.
+
+    Only tokens with confidence >= 0.40 and text length >= 2 are admitted from
+    regional passes to limit noise from empty/decorative regions.
+    """
+    import numpy as _np_sup
+
+    arr = _np_sup.asarray(img)
+    img_h, img_w = arr.shape[:2]
+    if img_h <= 0 or img_w <= 0:
+        return existing_tokens
+
+    # Build coverage map: which cells have existing tokens
+    GRID_ROWS, GRID_COLS = 4, 4
+    cell_h = img_h / GRID_ROWS
+    cell_w = img_w / GRID_COLS
+    covered = [[False] * GRID_COLS for _ in range(GRID_ROWS)]
+
+    for token in existing_tokens:
+        # token.bbox is in image pixels via the coordinates module convention
+        # Use center point
+        cx = getattr(token.bbox, "cx", (token.bbox.x0 + token.bbox.x1) / 2)
+        cy = getattr(token.bbox, "cy", (token.bbox.y0 + token.bbox.y1) / 2)
+        col = min(int(cx / cell_w), GRID_COLS - 1) if cell_w > 0 else 0
+        row = min(int(cy / cell_h), GRID_ROWS - 1) if cell_h > 0 else 0
+        covered[row][col] = True
+
+    supplemental: "list[OcrToken]" = []
+
+    for row in range(GRID_ROWS):
+        for col in range(GRID_COLS):
+            if covered[row][col]:
+                continue
+            y0 = int(row * cell_h)
+            y1 = min(img_h, int((row + 1) * cell_h))
+            x0 = int(col * cell_w)
+            x1 = min(img_w, int((col + 1) * cell_w))
+            cell_crop = arr[y0:y1, x0:x1]
+            if cell_crop.size == 0:
+                continue
+
+            for angle in (90, 270):
+                try:
+                    rotated = _rotate_image(cell_crop, angle)
+                    rot_h, rot_w = rotated.shape[:2]
+                    raw_rot, _ = _run_easyocr(reader, rotated, **base_kwargs)
+                    if not raw_rot:
+                        continue
+                    remapped_raw = _remap_raw_for_rotation(raw_rot, angle, rot_h, rot_w)
+                    rot_tokens = _result_to_pipeline_tokens(
+                        remapped_raw,
+                        page_index,
+                        language,
+                        # offset_x/y shifts tokens from crop space to full image space
+                        offset_x=float(x0),
+                        offset_y=float(y0),
+                        token_rotation=_token_rotation_from_applied_correction(angle),
+                    )
+                    # Admit only high-confidence tokens with real text
+                    for tok in rot_tokens:
+                        if (
+                            tok.confidence is not None
+                            and tok.confidence >= 0.40
+                            and len(tok.text.strip()) >= 2
+                        ):
+                            supplemental.append(tok)
+                    if supplemental:
+                        # Mark this cell as covered to avoid double-processing
+                        covered[row][col] = True
+                        break
+                except Exception:
+                    continue
+
+    return existing_tokens + supplemental
+
+
 def _reader_init_options(reader: Any) -> dict[str, Any] | None:
     """Recover constructor inputs; upstream Reader does not retain languages.
 
@@ -2599,6 +2691,12 @@ class EasyOCRBackend:
                     self._dbnet_failure_reason = self._last_dbnet_diag[-1].get("failure_reason")
                 tokens, cand_diag = _best_candidate(pipeline_candidates)
                 self._last_candidate_diagnostics = cand_diag
+                # VQ-14: supplement global tokens with regional passes for any
+                # image areas not covered by the selected orientation. This handles
+                # pages with mixed orientations (horizontal body + vertical stamp).
+                tokens = _supplement_with_regional_orientation(
+                    self._reader, img, base_kwargs, tokens, page_index, self._language,
+                )
             else:
                 # B1/R73: adaptive with global orientation selection before fusion.
                 # Upright quality (confidence + content) drives the orientation probe;
@@ -2617,6 +2715,10 @@ class EasyOCRBackend:
                 })
                 tokens, cand_diag = _best_candidate(pipeline_candidates)
                 self._last_candidate_diagnostics = cand_diag
+                # VQ-14: regional orientation supplement for adaptive path as well.
+                tokens = _supplement_with_regional_orientation(
+                    self._reader, img, base_kwargs, tokens, page_index, self._language,
+                )
             # _easyocr_calls is incremented per-call inside _record_call; no aggregate here
         else:
             raw, fallback = _run_easyocr(self._reader, img, **self._run_kwargs())

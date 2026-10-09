@@ -47,13 +47,24 @@ class GapObservation:
 def reconstruct_native_lines(
     characters: tuple[NativeCharacter, ...],
     extracted_text: str | None = None,
+    *,
+    occluded_regions: list | None = None,
 ) -> list[TextLine]:
     """Reconstruct horizontal text lines from native PDF characters.
 
     This is intentionally conservative. It is not the final reading order engine;
     it is the native reconstruction slice used before layout and OCR exist.
+
+    ``occluded_regions`` (VQ-21): when provided, characters whose center lies
+    within any of the given BBoxes (overlap_ratio >= 0.35) are excluded before
+    line reconstruction begins.
     """
     visible_chars = [char for char in characters if _is_visible_text_char(char)]
+    if occluded_regions:
+        visible_chars = [
+            char for char in visible_chars
+            if not any(char.bbox.overlap_ratio(box) >= 0.35 for box in occluded_regions)
+        ]
     visible_chars = _remove_near_duplicates(visible_chars)
     if not visible_chars:
         return []

@@ -298,3 +298,49 @@ def _text_start_x(line: TextLine, marker: str) -> float:
 def _line_confidence(line: TextLine) -> float | None:
     values = [token.confidence for token in line.tokens if token.confidence is not None]
     return sum(values) / len(values) if values else None
+
+
+def render_list_to_markdown(result: ListSegmentationResult) -> str:
+    """Render a ListSegmentationResult to Markdown with indent-based nesting.
+
+    Each item is indented by 2 spaces per level. Continuation lines are
+    appended to the preceding item text without a new bullet. Items at level 0
+    have no leading spaces.
+    """
+    from structured_pdf_text.renderers.markdown import _escape_inline_text  # local import avoids circular
+
+    lines_out: list[str] = []
+    last_item_parts: list[str] | None = None  # accumulator for continuation
+
+    def _flush_item() -> None:
+        if last_item_parts:
+            lines_out.append(" ".join(last_item_parts))
+            last_item_parts.clear()
+
+    for segment in result.segments:
+        if not segment.is_list:
+            _flush_item()
+            for line in segment.lines:
+                text = line.text.strip()
+                if text:
+                    lines_out.append(_escape_inline_text(text, context="paragraph"))
+            continue
+
+        assignment_map = {id(a.line): a for a in result.assignments}
+
+        for item in segment.items:
+            _flush_item()
+            indent = "  " * max(0, item.level)
+            escaped = _escape_inline_text(item.text, context="list")
+            last_item_parts = [f"{indent}{item.marker} {escaped}"]
+
+        # Continuation lines: append to last item
+        for line in segment.lines:
+            assignment = assignment_map.get(id(line))
+            if assignment and assignment.role == "continuation":
+                text = line.text.strip()
+                if text and last_item_parts is not None:
+                    last_item_parts.append(_escape_inline_text(text, context="list"))
+
+    _flush_item()
+    return "\n".join(lines_out)

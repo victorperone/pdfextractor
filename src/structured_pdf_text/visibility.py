@@ -128,6 +128,27 @@ def characters_occluded(
     return visible, suppressed
 
 
+def is_char_visible(character: NativeCharacter, *, opacity: float | None = None) -> bool:
+    """Return True when a NativeCharacter should be included in line reconstruction.
+
+    VQ-21: provides an explicit visibility policy:
+    - Characters with opacity < 0.15 are treated as watermarks and suppressed.
+    - Characters whose fill_color alpha channel is < 20 (near-transparent) are
+      suppressed. The alpha is the 4th component of fill_color (0-255 scale).
+    - All other characters are considered visible.
+
+    ``opacity`` is an optional override in [0, 1]; when provided it takes
+    precedence over fill_color inspection (used mainly in tests).
+    """
+    if opacity is not None:
+        return opacity >= 0.15
+    if character.fill_color is not None:
+        _, _, _, alpha = character.fill_color
+        if alpha < 20:
+            return False
+    return True
+
+
 def _crop_pixels(
     image: object,
     box: BBox,

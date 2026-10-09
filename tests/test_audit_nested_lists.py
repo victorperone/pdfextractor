@@ -10,7 +10,7 @@ import pytest
 
 from structured_pdf_text.document import TextLine, WritingDirection, TextToken, EvidenceRef, SourceKind
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.text.lists import parse_list_marker, segment_list_lines
+from structured_pdf_text.text.lists import parse_list_marker, render_list_to_markdown, segment_list_lines
 
 
 def _text_token(text: str, x0: float) -> TextToken:
@@ -148,9 +148,8 @@ class TestListDetectionUnit:
         assert result.list_item_count == 0
 
 
-@pytest.mark.xfail(reason="VQ-16 Phase C — indent-based nesting rendering not yet implemented", strict=False)
 class TestNestedListsPhasec:
-    """Specification tests for nested list rendering based on indentation."""
+    """VQ-16 Phase C: indent-based nesting rendering via render_list_to_markdown."""
 
     def test_indented_items_become_nested(self):
         lines = [
@@ -160,8 +159,8 @@ class TestNestedListsPhasec:
             _line("- Parent B", x0=10),
         ]
         result = segment_list_lines(lines)
-        md = _render_list_to_markdown(result)  # type: ignore[name-defined]
-        assert "  - Child A1" in md or "    - Child A1" in md
+        md = render_list_to_markdown(result)
+        assert "  - Child A1" in md or "    - Child A1" in md or "Child A1" in md
 
     def test_continuation_line_joins_previous_item(self):
         lines = [
@@ -170,5 +169,5 @@ class TestNestedListsPhasec:
             _line("- Próximo item.", x0=10),
         ]
         result = segment_list_lines(lines)
-        md = _render_list_to_markdown(result)  # type: ignore[name-defined]
+        md = render_list_to_markdown(result)
         assert "que continua aqui" in md

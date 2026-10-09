@@ -169,13 +169,15 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
         return pages
 
     # For level clustering, normalize by body reference (native or OCR height).
+    # VQ-18: expand to up to 6 clusters to support H1-H6 when sufficient
+    # typographic distinction is present in the document.
     cluster_ref = effective_body_median if effective_body_median else body_ocr_height_median
     values = sorted((size / cluster_ref if cluster_ref else size for _, _, size in title_font_sizes), reverse=True)
     clusters: list[float] = []
     for value in values:
-        if not clusters or clusters[-1] - value > 0.18:
+        if not clusters or clusters[-1] - value > 0.12:
             clusters.append(value)
-    clusters = clusters[:3]
+    clusters = clusters[:6]
 
     level_map: dict[str, int] = {}
     for _, region_id, font_size in title_font_sizes:
@@ -198,7 +200,7 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
         if not accepted:
             continue
         cluster = min(range(len(clusters)), key=lambda index: abs(clusters[index] - ratio)) if clusters else 0
-        level_map[region_id] = min(3, cluster + 1)
+        level_map[region_id] = min(6, cluster + 1)
 
     new_pages = []
     for page in pages:
@@ -363,10 +365,25 @@ def _can_merge_heading_fragments(first: LayoutRegion, second: LayoutRegion) -> b
     if not _region_has_alphanumeric_text(first) or not _region_has_alphanumeric_text(second):
         return False
     vertical_gap = second.bbox.y0 - first.bbox.y1
-    if vertical_gap < -2.0 or vertical_gap > max(8.0, min(first.bbox.height, second.bbox.height) * 0.75):
-        return False
-    if abs(first.bbox.x0 - second.bbox.x0) > max(12.0, min(first.bbox.height, second.bbox.height)):
-        return False
+    horizontal_gap = second.bbox.x0 - first.bbox.x1
+    min_height = min(first.bbox.height, second.bbox.height)
+    # VQ-18: allow horizontal fragment merging when two TITLE regions are on the
+    # same line (negligible vertical gap, second starts right of first).
+    # "Same line" means the second bbox begins at or before the first ends vertically,
+    # AND the second bbox starts to the right of the first (word fragments).
+    same_line = (
+        -min_height * 0.50 <= vertical_gap <= min_height * 0.20
+        and horizontal_gap >= 0
+    )
+    if same_line:
+        # On the same baseline, accept if horizontal gap is small relative to font size.
+        if horizontal_gap > max(24.0, min_height * 2.0):
+            return False
+    else:
+        if vertical_gap < -2.0 or vertical_gap > max(8.0, min_height * 0.75):
+            return False
+        if abs(first.bbox.x0 - second.bbox.x0) > max(12.0, min_height):
+            return False
     first_style = _heading_style(first)
     second_style = _heading_style(second)
     if first_style[0] is not None and second_style[0] is not None:

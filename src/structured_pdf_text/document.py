@@ -547,6 +547,10 @@ class PageContentBlock:
     # VQ-20: URI from a LINK annotation whose bbox overlaps this block.
     # Populated by the assembler when native_evidence carries a LINK annotation.
     link_uri: str | None = None
+    # VQ-19: dominant inline style for this block, derived from native font
+    # metadata. Values: None (unknown/mixed), "bold", "italic", "bold_italic".
+    # The renderer uses this to wrap text with ** or * markers.
+    inline_style: str | None = None
 
 
 @dataclass(slots=True)
@@ -616,6 +620,57 @@ def make_ocr_token_evidence_id(
     index so two detections of the same region always yield distinct IDs.
     """
     return f"ocr:p{page_index}:{region_id}:{candidate_id}:idx{token_index}"
+
+
+def detect_inline_style(tokens: "list[TextToken]") -> "str | None":
+    """Detect the dominant inline style of a sequence of tokens.
+
+    VQ-19: returns "bold", "italic", or "bold_italic" when the dominant style
+    (covering > 60% of non-whitespace characters) can be determined from
+    font_weight and font_name. Returns None when evidence is mixed or absent.
+
+    Bold heuristics:
+    - font_weight >= 600 (CSS-style numeric weight)
+    - font_name contains "Bold", "Heavy", "Black", "Semibold", "Demi"
+
+    Italic heuristics:
+    - font_name contains "Italic", "Oblique", "Slanted"
+    """
+    if not tokens:
+        return None
+    bold_chars = 0
+    italic_chars = 0
+    total_chars = 0
+    for token in tokens:
+        text_len = len(token.text.strip())
+        if not text_len:
+            continue
+        total_chars += text_len
+        is_bold = False
+        is_italic = False
+        if token.font_weight is not None and token.font_weight >= 600:
+            is_bold = True
+        if token.font_name:
+            name_lower = token.font_name.lower()
+            if any(kw in name_lower for kw in ("bold", "heavy", "black", "semibold", "demi")):
+                is_bold = True
+            if any(kw in name_lower for kw in ("italic", "oblique", "slanted")):
+                is_italic = True
+        if is_bold:
+            bold_chars += text_len
+        if is_italic:
+            italic_chars += text_len
+    if total_chars == 0:
+        return None
+    bold_ratio = bold_chars / total_chars
+    italic_ratio = italic_chars / total_chars
+    if bold_ratio >= 0.60 and italic_ratio >= 0.60:
+        return "bold_italic"
+    if bold_ratio >= 0.60:
+        return "bold"
+    if italic_ratio >= 0.60:
+        return "italic"
+    return None
 
 
 def to_plain_data(value: Any) -> Any:

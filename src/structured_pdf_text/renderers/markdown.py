@@ -103,6 +103,15 @@ def _render_content_block(
         return _escape_inline_text(block.text, context="paragraph") if block.text else ""
 
     text = _escape_inline_text(block.text, context="paragraph")
+    # VQ-19: wrap text with inline style markers when block carries a dominant style.
+    inline_style = getattr(block, "inline_style", None)
+    if inline_style and text:
+        if inline_style == "bold_italic":
+            text = f"***{text}***"
+        elif inline_style == "bold":
+            text = f"**{text}**"
+        elif inline_style == "italic":
+            text = f"*{text}*"
     # VQ-20: emit Markdown link syntax when the block carries a URI from a LINK
     # annotation. The displayed text is preserved as-is; only the href is added.
     link_uri = getattr(block, "link_uri", None)
@@ -290,6 +299,9 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
     CommonMark tables cannot represent row/column spans. The structured JSON
     already retains them; HTML keeps the same semantics in the human-facing
     Markdown view without flattening headers into blank cells.
+
+    VQ-24: when a cell's text contains list-marker lines, they are rendered as
+    an HTML <ul>/<ol> inside the cell instead of being joined with <br>.
     """
     max_row = max((cell.row for cell in table.cells), default=0)
     row_count = max(table.row_count, max_row + 1)
@@ -304,13 +316,40 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
         if cell.colspan > 1:
             attrs.append(f'colspan="{cell.colspan}"')
         attribute_text = (" " + " ".join(attrs)) if attrs else ""
-        value = _escape_html(cell.text).replace("\n", "<br>")
+        value = _render_cell_html(cell.text)
         rows[cell.row].append(f"<{tag}{attribute_text}>{value}</{tag}>")
     body = "\n".join(
         "  <tr>\n    " + "\n    ".join(cells) + "\n  </tr>"
         for cells in rows
     )
     return "<table>\n" + body + "\n</table>"
+
+
+def _render_cell_html(text: str) -> str:
+    """Render cell text as HTML, promoting list-marker lines to <ul>/<ol> items.
+
+    VQ-24: if any line of the cell text looks like a list item, the entire cell
+    is treated as a list. Otherwise, newlines become <br> and the text is
+    HTML-escaped normally.
+    """
+    import re as _re
+    _LIST_LINE = _re.compile(r"^\s*(?:[•◦▪‣*\-–—]|\d+[.):]|[a-zA-Z][.):])\s+(.+)")
+
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    # Detect if the content is a list
+    list_lines = [_LIST_LINE.match(line) for line in lines if line.strip()]
+    if list_lines and all(m is not None for m in list_lines):
+        # All non-empty lines are list items: render as <ul>
+        items_html = "".join(
+            f"<li>{_escape_html(m.group(1).strip())}</li>"
+            for m in list_lines
+            if m is not None
+        )
+        return f"<ul>{items_html}</ul>"
+    # Mixed or plain content: use <br> for newlines
+    return _escape_html(text).replace("\n", "<br>")
 
 
 def _escape_cell(value: str) -> str:
