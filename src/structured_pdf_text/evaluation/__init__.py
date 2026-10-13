@@ -55,6 +55,24 @@ from structured_pdf_text.evaluation.critical_data import (
     compute_critical_data_metrics,
     CriticalDataMetrics,
 )
+from structured_pdf_text.evaluation.integrity_metrics import (
+    compute_integrity_metrics,
+    IntegrityMetrics,
+    duplicate_excess_rate,
+    missing_page_rate,
+    page_content_coverage_recall,
+    markdown_validity_report,
+    edge_content_diagnostic,
+    MarkdownValidityReport,
+    EdgeContentDiagnostic,
+)
+from structured_pdf_text.evaluation.aggregation import (
+    aggregate_metric,
+    AggregatedMetric,
+    V2DocumentMetrics,
+    check_comparability,
+    evaluate_rank_eligibility,
+)
 
 __all__ = [
     "MarkdownNode", "NodeKind", "NormProfile", "MetricStatus",
@@ -69,4 +87,10 @@ __all__ = [
     "table_detection_f1", "table_row_and_column_metrics",
     "cell_metrics", "table_content_f1",
     "compute_critical_data_metrics", "CriticalDataMetrics",
+    "compute_integrity_metrics", "IntegrityMetrics",
+    "duplicate_excess_rate", "missing_page_rate",
+    "page_content_coverage_recall", "markdown_validity_report",
+    "edge_content_diagnostic", "MarkdownValidityReport", "EdgeContentDiagnostic",
+    "aggregate_metric", "AggregatedMetric", "V2DocumentMetrics",
+    "check_comparability", "evaluate_rank_eligibility",
 ]

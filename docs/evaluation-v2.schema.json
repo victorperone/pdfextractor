@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation-v2.schema.json",
+  "title": "PDFExtractor Evaluation V2 Result",
+  "description": "Schema for a single evaluation run produced by the V2 evaluator (spec §11.3).",
+  "type": "object",
+  "required": ["schema_version", "evaluator", "inputs", "quality", "evaluation"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "evaluation-v2.0"
+    },
+    "evaluator": {
+      "type": "object",
+      "properties": {
+        "implementation_commit": {"type": ["string", "null"]},
+        "metric_definitions_version": {"type": "string"},
+        "normalization_policy": {"type": "string"},
+        "parser": {"type": "string"},
+        "alignment_policy": {"type": "string"},
+        "created_at_utc": {"type": ["string", "null"]}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "properties": {
+        "reference_sha256":  {"type": ["string", "null"]},
+        "hypothesis_sha256": {"type": ["string", "null"]},
+        "manifest_sha256":   {"type": ["string", "null"]},
+        "pdf_sha256":        {"type": ["string", "null"]},
+        "selected_pages":    {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1},
+          "uniqueItems": true
+        },
+        "selected_missing_pages":   {"type": "array", "items": {"type": "integer"}},
+        "extra_pages_out_of_scope": {"type": "array", "items": {"type": "integer"}}
+      }
+    },
+    "quality": {
+      "type": "object",
+      "properties": {
+        "text":          {"type": "object"},
+        "structure":     {"type": "object"},
+        "reading_order": {"type": "object"},
+        "tables":        {"type": "object"},
+        "critical_data": {"type": "object"}
+      }
+    },
+    "integrity": {
+      "type": "object"
+    },
+    "operational": {
+      "type": "object",
+      "properties": {
+        "benchmark_status": {"type": "string"},
+        "fallback_rate":    {"type": ["number", "null"]},
+        "elapsed_s":        {"type": ["number", "null"]},
+        "memory_mb":        {"type": ["number", "null"]}
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "required": ["status", "rank_eligible"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["ok", "partial", "unavailable", "partial_evaluation"]
+        },
+        "rank_eligible": {"type": "boolean"},
+        "rank_ineligibility_reasons": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "applicable_metric_count":  {"type": "integer", "minimum": 0},
+        "unavailable_metric_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "definitions": {
+    "metric_result": {
+      "type": "object",
+      "required": ["value", "status", "direction"],
+      "properties": {
+        "value": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "number", "not": {"enum": [null]}}
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok", "not_applicable", "undefined_denominator",
+            "unavailable_alignment", "insufficient_reference_evidence",
+            "resource_limit", "invalid_input", "partial_evaluation",
+            "false_positive_only", "false_negative_only"
+          ]
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["higher_is_better", "lower_is_better", "descriptive_only"]
+        },
+        "unit":                  {"type": "string"},
+        "definition_id":         {"type": "string"},
+        "counts":                {"type": "object"},
+        "scope":                 {"type": "string"},
+        "normalization_profile": {"type": ["string", "null"]},
+        "warnings":              {"type": "array", "items": {"type": "string"}},
+        "coverage":              {"type": ["number", "null"]}
+      }
+    }
+  }
+}
