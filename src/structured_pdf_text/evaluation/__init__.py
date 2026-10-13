@@ -31,6 +31,15 @@ from structured_pdf_text.evaluation.block_alignment import (
     MIN_SCORE,
     AMBIGUITY_MARGIN,
 )
+from structured_pdf_text.evaluation.structure_metrics import (
+    compute_structure_metrics,
+    StructureMetrics,
+    heading_detection_f1,
+    paragraph_detection_f1,
+    list_metrics,
+    pairwise_reading_order_accuracy,
+    block_type_confusion,
+)
 
 __all__ = [
     "MarkdownNode", "NodeKind", "NormProfile", "MetricStatus",
@@ -38,4 +47,7 @@ __all__ = [
     "normalize", "parse_document", "PARSER_VERSION", "build_page_scope",
     "align_blocks", "AlignmentSummary", "compute_pair_score",
     "MIN_SCORE", "AMBIGUITY_MARGIN",
+    "compute_structure_metrics", "StructureMetrics",
+    "heading_detection_f1", "paragraph_detection_f1",
+    "list_metrics", "pairwise_reading_order_accuracy", "block_type_confusion",
 ]
