@@ -7,6 +7,9 @@ normalization    — Normalisation profiles (raw, unicode_layout, visible_text)
 markdown_parser  — CommonMark+GFM parser producing MarkdownNode trees
 page_scope       — Page-set selection, missing/extra page classification
 block_alignment  — 1:1 block aligner with provenance (split/merge)
+structure_metrics — Heading/paragraph/list/reading-order metrics
+table_metrics    — Table detection, rows, columns, cells
+critical_data    — Numbers, currency, dates, CPF/CNPJ, identifiers
 """
 from structured_pdf_text.evaluation.models import (
     MarkdownNode,
@@ -40,6 +43,18 @@ from structured_pdf_text.evaluation.structure_metrics import (
     pairwise_reading_order_accuracy,
     block_type_confusion,
 )
+from structured_pdf_text.evaluation.table_metrics import (
+    compute_table_metrics,
+    TableMetrics,
+    table_detection_f1,
+    table_row_and_column_metrics,
+    cell_metrics,
+    table_content_f1,
+)
+from structured_pdf_text.evaluation.critical_data import (
+    compute_critical_data_metrics,
+    CriticalDataMetrics,
+)
 
 __all__ = [
     "MarkdownNode", "NodeKind", "NormProfile", "MetricStatus",
@@ -50,4 +65,8 @@ __all__ = [
     "compute_structure_metrics", "StructureMetrics",
     "heading_detection_f1", "paragraph_detection_f1",
     "list_metrics", "pairwise_reading_order_accuracy", "block_type_confusion",
+    "compute_table_metrics", "TableMetrics",
+    "table_detection_f1", "table_row_and_column_metrics",
+    "cell_metrics", "table_content_f1",
+    "compute_critical_data_metrics", "CriticalDataMetrics",
 ]
