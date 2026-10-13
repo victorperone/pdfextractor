@@ -7,6 +7,7 @@ normalization    — Normalisation profiles (raw, unicode_layout, visible_text)
 markdown_parser  — CommonMark+GFM parser producing MarkdownNode trees
 page_scope       — Page-set selection, missing/extra page classification
 block_alignment  — 1:1 block aligner with provenance (split/merge)
+text_metrics     — CER/WER sequential + aligned block CER + coverage (MET-TX*)
 structure_metrics — Heading/paragraph/list/reading-order metrics
 table_metrics    — Table detection, rows, columns, cells
 critical_data    — Numbers, currency, dates, CPF/CNPJ, identifiers
@@ -33,6 +34,15 @@ from structured_pdf_text.evaluation.block_alignment import (
     compute_pair_score,
     MIN_SCORE,
     AMBIGUITY_MARGIN,
+)
+from structured_pdf_text.evaluation.text_metrics import (
+    compute_text_metrics,
+    TextMetrics,
+    cer_sequential,
+    wer_sequential,
+    aligned_block_text_cer,
+    text_coverage_recall,
+    text_coverage_precision,
 )
 from structured_pdf_text.evaluation.structure_metrics import (
     compute_structure_metrics,
@@ -93,4 +103,7 @@ __all__ = [
     "edge_content_diagnostic", "MarkdownValidityReport", "EdgeContentDiagnostic",
     "aggregate_metric", "AggregatedMetric", "V2DocumentMetrics",
     "check_comparability", "evaluate_rank_eligibility",
+    "compute_text_metrics", "TextMetrics",
+    "cer_sequential", "wer_sequential", "aligned_block_text_cer",
+    "text_coverage_recall", "text_coverage_precision",
 ]

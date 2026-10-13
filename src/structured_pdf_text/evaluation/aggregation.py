@@ -157,8 +157,8 @@ class V2DocumentMetrics:
     """Complete V2 metric result for a single (ref, hyp) evaluation."""
     schema_version: str = "evaluation-v2.0"
 
-    # Per-group results (all are MetricResult dicts or dataclass.to_dict())
-    text:           dict = field(default_factory=dict)
+    # Per-group results (all are MetricResult dicts via dataclass.to_dict())
+    text:           dict = field(default_factory=dict)   # MET-TX01..TX07
     structure:      dict = field(default_factory=dict)
     reading_order:  dict = field(default_factory=dict)
     tables:         dict = field(default_factory=dict)

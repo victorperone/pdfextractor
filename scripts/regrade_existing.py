@@ -53,6 +53,7 @@ from structured_pdf_text.evaluation import (
     PageScope,
     StructureMetrics,
     TableMetrics,
+    TextMetrics,
     V2DocumentMetrics,
     align_blocks,
     build_page_scope,
@@ -61,6 +62,7 @@ from structured_pdf_text.evaluation import (
     compute_integrity_metrics,
     compute_structure_metrics,
     compute_table_metrics,
+    compute_text_metrics,
     evaluate_rank_eligibility,
     parse_document,
 )
@@ -184,6 +186,10 @@ def _run_v2(
     # --- Block alignment ---
     pairs = align_blocks(ref_nodes, hyp_nodes)
     alignment_summary = AlignmentSummary.from_pairs(pairs, len(ref_nodes), len(hyp_nodes))
+
+    # --- Text metrics (Group 1) ---
+    text: TextMetrics = compute_text_metrics(ref_nodes, hyp_nodes, pairs)
+    doc.text = text.to_dict()
 
     # --- Structure metrics ---
     struct: StructureMetrics = compute_structure_metrics(pairs, ref_nodes, hyp_nodes)
