@@ -97,7 +97,8 @@ _METRICS: list[tuple[str, str, str]] = [
 _LOWER_IS_BETTER = {
     "cer_raw", "cer_normalized", "cer_text_only", "wer", "substitution_rate",
     "deletion_rate", "insertion_rate", "omission_rate", "heading_text_cer",
-    "cell_cer", "duplicate_content_rate", "header_leakage_rate",
+    "cell_cer", "duplicate_content_rate", "duplicate_block_rate",  # MET-025 fix
+    "header_leakage_rate",
     "footer_leakage_rate", "page_number_leakage_rate", "failure_rate",
     "invalid_markdown_rate",
     "missing_page_rate", "easyocr_fallback_rate",
