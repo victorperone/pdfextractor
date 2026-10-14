@@ -502,7 +502,17 @@ def _validate_schema_homogeneity(all_data: list[tuple[str, dict]]) -> list[str]:
 
 
 def _comparability_key_v2(data: dict) -> dict:
-    """Extract comparability fields from a V2 metrics document."""
+    """Extract comparability fields from a V2 metrics document (spec §10.4).
+
+    Fields checked (all must match across a comparison set):
+      schema_version       — evaluation-v2.0
+      reference_sha256     — hash of the reference document used
+      selected_pages       — sorted tuple of 1-based page IDs
+      evaluator_version    — metric_definitions_version from evaluator block
+      normalization_policy — normalization_policy from evaluator block
+      parser_id            — parser field from evaluator block
+      alignment_policy     — alignment_policy field from evaluator block
+    """
     inputs = data.get("inputs") or {}
     pages = inputs.get("selected_pages")
     try:
@@ -511,24 +521,36 @@ def _comparability_key_v2(data: dict) -> dict:
         selected = None
     evaluator = data.get("evaluator") or {}
     return {
-        "schema_version":    data.get("schema_version"),
-        "reference_sha256":  inputs.get("reference_sha256"),
-        "selected_pages":    selected,
-        "evaluator_version": evaluator.get("version"),
+        "schema_version":      data.get("schema_version"),
+        "reference_sha256":    inputs.get("reference_sha256"),
+        "selected_pages":      selected,
+        "evaluator_version":   evaluator.get("metric_definitions_version") or evaluator.get("version"),
+        "normalization_policy": evaluator.get("normalization_policy"),
+        "parser_id":           evaluator.get("parser"),
+        "alignment_policy":    evaluator.get("alignment_policy"),
     }
+
+
+# Fields that MUST match for runs to be comparable (spec §10.4 required fields).
+# evaluator_version/normalization_policy/parser_id/alignment_policy are checked
+# only when at least one run has a non-None value for that field — absent fields
+# are treated as "unknown" and generate a warning, not a hard error.
+_V2_REQUIRED_COMPARABILITY = ("schema_version", "reference_sha256", "selected_pages")
+_V2_SOFT_COMPARABILITY = ("evaluator_version", "normalization_policy", "parser_id", "alignment_policy")
 
 
 def _validate_comparability_v2(
     all_data: list[tuple[str, dict]],
 ) -> list[str]:
-    """Check comparability of V2 runs. Returns list of error strings."""
+    """Check comparability of V2 runs (spec §10.4). Returns list of error strings."""
     errors: list[str] = []
     if len(all_data) < 2:
         return errors
     keys = [(eng, _comparability_key_v2(data)) for eng, data in all_data]
     ref_eng, ref_key = keys[0]
     for eng, key in keys[1:]:
-        for field in ("schema_version", "reference_sha256", "selected_pages"):
+        # Hard required fields — mismatch is always an error
+        for field in _V2_REQUIRED_COMPARABILITY:
             ref_val = ref_key.get(field)
             val = key.get(field)
             if ref_val != val:
@@ -536,6 +558,18 @@ def _validate_comparability_v2(
                     f"Comparability mismatch on '{field}': "
                     f"'{ref_eng}'={ref_val!r} vs '{eng}'={val!r}. "
                     "Runs are not comparable."
+                )
+        # Soft fields — only checked when at least one run has a non-None value
+        for field in _V2_SOFT_COMPARABILITY:
+            ref_val = ref_key.get(field)
+            val = key.get(field)
+            if ref_val is None and val is None:
+                continue
+            if ref_val != val:
+                errors.append(
+                    f"Comparability mismatch on '{field}': "
+                    f"'{ref_eng}'={ref_val!r} vs '{eng}'={val!r}. "
+                    "Runs used different evaluator configurations."
                 )
     return errors
 
