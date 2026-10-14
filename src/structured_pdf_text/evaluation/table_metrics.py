@@ -11,9 +11,13 @@ MET-T02  table_row_detection_f1      P/R/F1 of rows inside matched tables
 MET-T03  table_column_count_accuracy fraction of matched tables with same column count
 MET-T04  cell_detection_f1           P/R/F1 of cells (including empty structural slots)
 MET-T05  cell_content_exact_match    fraction of matched cells with identical text
-MET-T06  cell_alignment_accuracy     fraction of cells at the correct logical slot
+MET-T06  cell_alignment_accuracy     fraction of content-matched cells at correct column index
+                                      (fixed: previously always 100% due to positional definition)
 MET-T07  cell_cer                    char-level error on matched cell pairs
+                                      (fixed: empty-ref cells no longer silently fold into denominator)
 MET-T08  table_content_f1            multiset coverage of cell text (no positional requirement)
+MET-T09  table_row_order_accuracy    pairwise row order accuracy within matched tables
+MET-T10  table_column_order_accuracy pairwise column order accuracy within matched tables
 """
 from __future__ import annotations
 
@@ -325,6 +329,33 @@ def _match_rows(
     return matched
 
 
+def _match_cells_by_content(
+    ref_cells: list[MarkdownNode],
+    hyp_cells: list[MarkdownNode],
+    threshold: float = 0.10,
+) -> list[tuple[int, int]]:
+    """Greedy 1:1 cell matching by text similarity; returns (ref_col_idx, hyp_col_idx) pairs."""
+    if not ref_cells or not hyp_cells:
+        return []
+    scores: list[tuple[float, int, int]] = []
+    for ri, rc in enumerate(ref_cells):
+        for hi, hc in enumerate(hyp_cells):
+            s = _text_sim(rc.visible_text, hc.visible_text)
+            scores.append((s, ri, hi))
+    scores.sort(key=lambda x: x[0], reverse=True)
+    pairs: list[tuple[int, int]] = []
+    used_r: set[int] = set()
+    used_h: set[int] = set()
+    for s, ri, hi in scores:
+        if ri in used_r or hi in used_h:
+            continue
+        if s >= threshold:
+            pairs.append((ri, hi))
+            used_r.add(ri)
+            used_h.add(hi)
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # MET-T04/T05/T06/T07: Cell metrics
 # ---------------------------------------------------------------------------
@@ -349,6 +380,7 @@ def cell_metrics(
     align_total = 0
     cer_num = 0
     cer_den = 0
+    cer_insertion_only = 0  # ref=0 hyp>0: not added to cer_den per spec §4.1
 
     for ref_t, hyp_t, _ in matched_tables:
         ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
@@ -357,7 +389,7 @@ def cell_metrics(
         row_pairs = _match_rows(ref_rows, hyp_rows)
         matched_hyp_rows = {hr.node_id for _, hr in row_pairs}
 
-        # Count cells
+        # Count cells (for detection P/R/F1)
         ref_cells_total = sum(
             len(_children_of_kind(r, ref_map, NodeKind.TABLE_CELL)) for r in ref_rows
         )
@@ -382,13 +414,26 @@ def cell_metrics(
                 exact_total += 1
                 if _norm(rc.visible_text) == _norm(hc.visible_text):
                     exact_match_count += 1
-                # Cell alignment: same row position slot
-                align_total += 1
-                align_correct += 1  # by definition when matched positionally
-                # CER
+                # CER — spec §7.4: do not divide by max(len,1) when ref is empty
                 ref_t_len = len(_norm(rc.visible_text))
-                cer_num += _lev_distance(rc.visible_text, hc.visible_text)
-                cer_den += max(ref_t_len, 1) if ref_t_len > 0 else 0
+                hyp_t_len = len(_norm(hc.visible_text))
+                dist = _lev_distance(rc.visible_text, hc.visible_text)
+                if ref_t_len > 0:
+                    cer_num += dist
+                    cer_den += ref_t_len
+                elif hyp_t_len > 0:
+                    # Pure insertion: ref empty, hyp non-empty — track separately,
+                    # not folded into the CER rate (undefined_denominator for this cell).
+                    cer_insertion_only += hyp_t_len
+
+            # MET-T06: cell_alignment_accuracy — spec §7.4
+            # Align cells by content within the row pair, then check if the
+            # content-matched cell index in hyp matches the ref column index.
+            col_pairs = _match_cells_by_content(ref_cells, hyp_cells)
+            for ref_col_idx, hyp_col_idx in col_pairs:
+                align_total += 1
+                if ref_col_idx == hyp_col_idx:
+                    align_correct += 1
 
         fn_c = ref_cells_total - cell_tp
         fp_c = hyp_cells_total - cell_tp
@@ -433,9 +478,125 @@ def cell_metrics(
         "cell_alignment_accuracy":     _make_result(align_val, align_st, "MET-T06",
                                                     {"aligned": align_correct, "total": align_total}),
         "cell_cer":                    _make_result(cer_val,   cer_st,   "MET-T07",
-                                                    {"edit_distance": cer_num, "ref_chars": cer_den},
+                                                    {"edit_distance": cer_num, "ref_chars": cer_den,
+                                                     "insertion_only_chars": cer_insertion_only},
                                                     direction="lower_is_better"),
     }
+
+
+# ---------------------------------------------------------------------------
+# MET-T09/T10: Row and column order accuracy
+# ---------------------------------------------------------------------------
+
+def _pairwise_order_accuracy(indices: list[tuple[int, int]]) -> tuple[int, int]:
+    """Count concordant and total pairs from (ref_idx, hyp_idx) pairs.
+
+    Sorts by ref_idx, then checks if hyp_idx is monotonically increasing.
+    Returns (concordant, total_pairs).
+    """
+    if len(indices) < 2:
+        return 0, 0
+    ordered = sorted(indices, key=lambda x: x[0])
+    hyp_seq = [o[1] for o in ordered]
+    n = len(hyp_seq)
+    concordant = total = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            total += 1
+            if hyp_seq[i] < hyp_seq[j]:
+                concordant += 1
+    return concordant, total
+
+
+def table_row_order_accuracy(
+    ref_nodes: Sequence[MarkdownNode],
+    hyp_nodes: Sequence[MarkdownNode],
+) -> MetricResult:
+    """MET-T09: Pairwise row order accuracy within matched tables.
+
+    For each matched table pair, align rows by content, then measure the
+    fraction of row pairs where ref order == hyp order.
+    """
+    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
+    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
+    ref_map = _build_parent_map(ref_nodes)
+    hyp_map = _build_parent_map(hyp_nodes)
+
+    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    if not matched:
+        return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T09", {})
+
+    total_concordant = total_pairs = 0
+    for ref_t, hyp_t, _ in matched:
+        ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
+        hyp_rows = _children_of_kind(hyp_t, hyp_map, NodeKind.TABLE_ROW)
+        row_pairs = _match_rows(ref_rows, hyp_rows)
+        if len(row_pairs) < 2:
+            continue
+        # Map matched row pairs to (ref_position, hyp_position) index pairs
+        ref_idx_map  = {r.node_id: i for i, r in enumerate(ref_rows)}
+        hyp_idx_map  = {h.node_id: i for i, h in enumerate(hyp_rows)}
+        index_pairs  = [(ref_idx_map[rr.node_id], hyp_idx_map[hr.node_id])
+                        for rr, hr in row_pairs]
+        c, t = _pairwise_order_accuracy(index_pairs)
+        total_concordant += c
+        total_pairs      += t
+
+    if total_pairs == 0:
+        return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T09",
+                            {"matched_table_pairs": len(matched)})
+    return _make_result(
+        total_concordant / total_pairs, MetricStatus.OK, "MET-T09",
+        {"concordant_pairs": total_concordant, "total_pairs": total_pairs},
+    )
+
+
+def table_column_order_accuracy(
+    ref_nodes: Sequence[MarkdownNode],
+    hyp_nodes: Sequence[MarkdownNode],
+) -> MetricResult:
+    """MET-T10: Pairwise column order accuracy within matched tables.
+
+    For each matched table pair, align columns by content profile (using
+    the first matched row as a proxy), then measure concordant column pairs.
+    """
+    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
+    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
+    ref_map = _build_parent_map(ref_nodes)
+    hyp_map = _build_parent_map(hyp_nodes)
+
+    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    if not matched:
+        return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T10", {})
+
+    total_concordant = total_pairs = 0
+    for ref_t, hyp_t, _ in matched:
+        ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
+        hyp_rows = _children_of_kind(hyp_t, hyp_map, NodeKind.TABLE_ROW)
+
+        # Use header row (index 0) for column alignment when available
+        row_pairs = _match_rows(ref_rows, hyp_rows)
+        if not row_pairs:
+            continue
+        ref_hdr, hyp_hdr = row_pairs[0]
+
+        ref_cells = _children_of_kind(ref_hdr, ref_map, NodeKind.TABLE_CELL)
+        hyp_cells = _children_of_kind(hyp_hdr, hyp_map, NodeKind.TABLE_CELL)
+        col_pairs = _match_cells_by_content(ref_cells, hyp_cells)
+        if len(col_pairs) < 2:
+            continue
+
+        c, t = _pairwise_order_accuracy(col_pairs)
+        total_concordant += c
+        total_pairs      += t
+
+    if total_pairs == 0:
+        return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T10",
+                            {"matched_table_pairs": len(matched)})
+    return _make_result(
+        total_concordant / total_pairs, MetricStatus.OK, "MET-T10",
+        {"concordant_pairs": total_concordant, "total_pairs": total_pairs},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +636,8 @@ class TableMetrics:
     rows_columns: dict[str, MetricResult] = field(default_factory=dict)
     cells:        dict[str, MetricResult] = field(default_factory=dict)
     content_f1:   MetricResult | None = None
+    row_order:    MetricResult | None = None
+    col_order:    MetricResult | None = None
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -486,6 +649,10 @@ class TableMetrics:
             result[k] = v.to_dict()
         if self.content_f1:
             result["table_content_f1"] = self.content_f1.to_dict()
+        if self.row_order:
+            result["table_row_order_accuracy"] = self.row_order.to_dict()
+        if self.col_order:
+            result["table_column_order_accuracy"] = self.col_order.to_dict()
         return result
 
 
@@ -493,7 +660,7 @@ def compute_table_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
 ) -> TableMetrics:
-    """Compute all table metrics (MET-T01 to MET-T08).
+    """Compute all table metrics (MET-T01 to MET-T10).
 
     Parameters
     ----------
@@ -509,4 +676,6 @@ def compute_table_metrics(
         rows_columns = table_row_and_column_metrics(ref_nodes, hyp_nodes),
         cells        = cell_metrics(ref_nodes, hyp_nodes),
         content_f1   = table_content_f1(ref_nodes, hyp_nodes),
+        row_order    = table_row_order_accuracy(ref_nodes, hyp_nodes),
+        col_order    = table_column_order_accuracy(ref_nodes, hyp_nodes),
     )
