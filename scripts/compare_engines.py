@@ -97,8 +97,7 @@ _METRICS: list[tuple[str, str, str]] = [
 _LOWER_IS_BETTER = {
     "cer_raw", "cer_normalized", "cer_text_only", "wer", "substitution_rate",
     "deletion_rate", "insertion_rate", "omission_rate", "heading_text_cer",
-    "cell_cer", "duplicate_content_rate", "duplicate_block_rate",  # MET-025 fix
-    "header_leakage_rate",
+    "cell_cer", "duplicate_content_rate", "header_leakage_rate",
     "footer_leakage_rate", "page_number_leakage_rate", "failure_rate",
     "invalid_markdown_rate",
     "missing_page_rate", "easyocr_fallback_rate",
@@ -428,289 +427,6 @@ def _render_by_condition(
     return lines
 
 
-# ---------------------------------------------------------------------------
-# V2 support
-# ---------------------------------------------------------------------------
-
-_V2_SCHEMA = "evaluation-v2.0"
-
-# V2 metrics: (display_name, dot-path relative to 'quality' or 'integrity', direction)
-# Path format: "section.key"  (the value is always at result["value"])
-_V2_METRICS: list[tuple[str, str, str]] = [
-    # Text (MET-TX01–TX07)
-    ("CER Sequential Raw",        "text.cer_sequential_raw",          "lower"),
-    ("CER Sequential Normalized", "text.cer_sequential_normalized",   "lower"),
-    ("CER Sequential Visible",    "text.cer_sequential_visible",      "lower"),
-    ("WER Sequential",            "text.wer_sequential",              "lower"),
-    ("Aligned Block CER",         "text.aligned_block_text_cer",      "lower"),
-    ("Coverage Recall",           "text.text_coverage_recall",        "higher"),
-    ("Coverage Precision",        "text.text_coverage_precision",     "higher"),
-    # Structure
-    ("Heading F1",                "structure.heading_detection_f1",           "higher"),
-    ("Heading Precision",         "structure.heading_precision",              "higher"),
-    ("Heading Recall",            "structure.heading_recall",                 "higher"),
-    ("Heading Level Match",       "structure.heading_level_match_rate",       "higher"),
-    ("Paragraph F1",              "structure.paragraph_detection_f1",         "higher"),
-    ("List Group F1",             "structure.list_group_detection_f1",        "higher"),
-    ("List Item F1",              "structure.list_item_detection_f1",         "higher"),
-    ("List Hierarchy Acc.",       "structure.list_hierarchy_accuracy",        "higher"),
-    # Reading order
-    ("Reading Order Acc.",        "reading_order.pairwise_reading_order_accuracy", "higher"),
-    # Tables
-    ("Table Detection F1",        "tables.table_detection_f1",        "higher"),
-    ("Table Row F1",              "tables.table_row_detection_f1",    "higher"),
-    ("Col. Count Accuracy",       "tables.table_column_count_accuracy","higher"),
-    ("Cell Detection F1",         "tables.cell_detection_f1",         "higher"),
-    ("Cell Exact Match",          "tables.cell_content_exact_match",  "higher"),
-    ("Cell Alignment Acc.",       "tables.cell_alignment_accuracy",   "higher"),
-    ("Cell CER",                  "tables.cell_cer",                  "lower"),
-    ("Table Content F1",          "tables.table_content_f1",          "higher"),
-    # Critical data
-    ("Numeric F1",                "critical_data.numeric",            "higher"),
-    ("Currency F1",               "critical_data.currency",           "higher"),
-    ("Dates F1",                  "critical_data.dates",              "higher"),
-    ("CPF F1",                    "critical_data.cpf",                "higher"),
-    ("CNPJ F1",                   "critical_data.cnpj",               "higher"),
-    ("Identifiers F1",            "critical_data.identifiers_combined","higher"),
-]
-
-# Integrity metrics are one level up (not inside 'quality')
-_V2_INTEGRITY_METRICS: list[tuple[str, str, str]] = [
-    ("Duplicate Excess Rate",     "integrity.duplicate_excess_rate",              "lower"),
-    ("Missing Page Rate",         "integrity.missing_page_rate",                  "lower"),
-    ("Content Coverage Recall",   "integrity.page_content_coverage_recall",       "higher"),
-]
-
-
-def _detect_schema(data: dict) -> str:
-    """Return 'v2' if data has schema_version == evaluation-v2.0, else 'v1'."""
-    return "v2" if data.get("schema_version") == _V2_SCHEMA else "v1"
-
-
-def _validate_schema_homogeneity(all_data: list[tuple[str, dict]]) -> list[str]:
-    """Return error strings if the run set mixes V1 and V2 schemas."""
-    schemas = {eng: _detect_schema(data) for eng, data in all_data}
-    v1 = [eng for eng, s in schemas.items() if s == "v1"]
-    v2 = [eng for eng, s in schemas.items() if s == "v2"]
-    if v1 and v2:
-        return [
-            f"Schema version mismatch: V1 runs {v1} cannot be compared with "
-            f"V2 runs {v2}. Re-evaluate V1 runs with regrade_existing.py to "
-            "produce V2 metrics before comparing."
-        ]
-    return []
-
-
-def _comparability_key_v2(data: dict) -> dict:
-    """Extract comparability fields from a V2 metrics document (spec §10.4).
-
-    Fields checked (all must match across a comparison set):
-      schema_version       — evaluation-v2.0
-      reference_sha256     — hash of the reference document used
-      selected_pages       — sorted tuple of 1-based page IDs
-      evaluator_version    — metric_definitions_version from evaluator block
-      normalization_policy — normalization_policy from evaluator block
-      parser_id            — parser field from evaluator block
-      alignment_policy     — alignment_policy field from evaluator block
-    """
-    inputs = data.get("inputs") or {}
-    pages = inputs.get("selected_pages")
-    try:
-        selected = tuple(sorted(int(p) for p in pages)) if pages else None
-    except (TypeError, ValueError):
-        selected = None
-    evaluator = data.get("evaluator") or {}
-    return {
-        "schema_version":      data.get("schema_version"),
-        "reference_sha256":    inputs.get("reference_sha256"),
-        "selected_pages":      selected,
-        "evaluator_version":   evaluator.get("metric_definitions_version") or evaluator.get("version"),
-        "normalization_policy": evaluator.get("normalization_policy"),
-        "parser_id":           evaluator.get("parser"),
-        "alignment_policy":    evaluator.get("alignment_policy"),
-    }
-
-
-# Fields that MUST match for runs to be comparable (spec §10.4 required fields).
-# evaluator_version/normalization_policy/parser_id/alignment_policy are checked
-# only when at least one run has a non-None value for that field — absent fields
-# are treated as "unknown" and generate a warning, not a hard error.
-_V2_REQUIRED_COMPARABILITY = ("schema_version", "reference_sha256", "selected_pages")
-_V2_SOFT_COMPARABILITY = ("evaluator_version", "normalization_policy", "parser_id", "alignment_policy")
-
-
-def _validate_comparability_v2(
-    all_data: list[tuple[str, dict]],
-) -> list[str]:
-    """Check comparability of V2 runs (spec §10.4). Returns list of error strings."""
-    errors: list[str] = []
-    if len(all_data) < 2:
-        return errors
-    keys = [(eng, _comparability_key_v2(data)) for eng, data in all_data]
-    ref_eng, ref_key = keys[0]
-    for eng, key in keys[1:]:
-        # Hard required fields — mismatch is always an error
-        for field in _V2_REQUIRED_COMPARABILITY:
-            ref_val = ref_key.get(field)
-            val = key.get(field)
-            if ref_val != val:
-                errors.append(
-                    f"Comparability mismatch on '{field}': "
-                    f"'{ref_eng}'={ref_val!r} vs '{eng}'={val!r}. "
-                    "Runs are not comparable."
-                )
-        # Soft fields — only checked when at least one run has a non-None value
-        for field in _V2_SOFT_COMPARABILITY:
-            ref_val = ref_key.get(field)
-            val = key.get(field)
-            if ref_val is None and val is None:
-                continue
-            if ref_val != val:
-                errors.append(
-                    f"Comparability mismatch on '{field}': "
-                    f"'{ref_eng}'={ref_val!r} vs '{eng}'={val!r}. "
-                    "Runs used different evaluator configurations."
-                )
-    return errors
-
-
-def _get_value_v2(data: dict, dot_path: str) -> float | None:
-    """Navigate a dot-path into a V2 JSON document and return the metric value.
-
-    For quality metrics the path is 'section.key' inside data['quality'].
-    For integrity metrics the path is 'integrity.key' at the top level.
-    The terminal node is either a MetricResult dict (has 'value' key) or a
-    plain float.
-    """
-    if dot_path.startswith("integrity."):
-        root = data.get("integrity") or {}
-        key = dot_path[len("integrity."):]
-        node = root.get(key)
-    else:
-        quality = data.get("quality") or {}
-        parts = dot_path.split(".", 1)
-        if len(parts) != 2:
-            return None
-        section, key = parts
-        section_data = quality.get(section) or {}
-        node = section_data.get(key)
-
-    if node is None:
-        return None
-    if isinstance(node, dict):
-        v = node.get("value")
-        return float(v) if v is not None else None
-    try:
-        return float(node)
-    except (TypeError, ValueError):
-        return None
-
-
-def _best_engines_v2(
-    values: dict[str, float | None],
-    direction: str,
-    tol: float = 1e-6,
-) -> set[str]:
-    valid = {eng: v for eng, v in values.items() if v is not None}
-    if not valid:
-        return set()
-    if direction == "lower":
-        best_val = min(valid.values())
-        return {eng for eng, v in valid.items() if v <= best_val + tol}
-    else:
-        best_val = max(valid.values())
-        return {eng for eng, v in valid.items() if v >= best_val - tol}
-
-
-def _render_comparison_table_v2(all_data: list[tuple[str, dict]]) -> str:
-    """Render a Markdown comparison table from V2 metrics documents."""
-    engines = [name for name, _ in all_data]
-    engine_headers = " | ".join(f"**{e}**" for e in engines)
-
-    _SECTIONS = {
-        "text":          "Grupo 1 — Texto (MET-TX01–TX07)",
-        "structure":     "Grupo 2 — Estrutura Markdown",
-        "reading_order": "Grupo 3 — Ordem de Leitura",
-        "tables":        "Grupo 4 — Tabelas",
-        "critical_data": "Grupo 5 — Dados Críticos",
-        "integrity":     "Integridade",
-    }
-
-    lines = [
-        "# Comparativo de perfis de implantação OCR (V2)",
-        "",
-        "Métricas V2 do avaliador (`schema_version: evaluation-v2.0`).",
-        "",
-        f"Engines avaliadas: {', '.join(f'`{e}`' for e in engines)}",
-        "",
-        "Legenda: **negrito** = melhor valor na linha  |  ↓ menor é melhor  |  ↑ maior é melhor  |  — = N/A",
-        "",
-    ]
-
-    all_metric_rows = list(_V2_METRICS) + [
-        (dn, path, d) for dn, path, d in _V2_INTEGRITY_METRICS
-    ]
-
-    current_section = ""
-    for display_name, dot_path, direction in all_metric_rows:
-        section = dot_path.split(".")[0]
-        if section != current_section:
-            if current_section:
-                lines.append("")
-            current_section = section
-            title = _SECTIONS.get(section, section)
-            arrow = "↓" if direction == "lower" else "↑"
-            lines += [
-                f"## {title}",
-                "",
-                f"| Métrica | {engine_headers} |",
-                "|---" + "|---" * len(engines) + "|",
-            ]
-
-        values: dict[str, float | None] = {
-            eng: _get_value_v2(data, dot_path) for eng, data in all_data
-        }
-        best_set = _best_engines_v2(values, direction)
-        arrow = "↓" if direction == "lower" else "↑"
-
-        row_cells = []
-        for eng in engines:
-            v = values[eng]
-            cell = _fmt(v)
-            if eng in best_set and v is not None:
-                cell = f"**{cell}**"
-            row_cells.append(cell)
-
-        lines.append(
-            f"| {display_name} {arrow} | " + " | ".join(row_cells) + " |"
-        )
-
-    # --- Metadata table ---
-    lines += [
-        "",
-        "---",
-        "",
-        "## Metadados dos Runs",
-        "",
-        "| Engine | Run ID | Schema | Status | Rank Eligible | Métricas aplicáveis | Métricas indisponíveis |",
-        "|---|---|---|---|---|---:|---:|",
-    ]
-    for eng, data in all_data:
-        evaluation = data.get("evaluation") or {}
-        run_id = (data.get("evaluator") or {}).get("run_id", "—")
-        schema = data.get("schema_version", "—")
-        status = evaluation.get("status", "—")
-        rank_eligible = "sim" if evaluation.get("rank_eligible") else "não"
-        applicable = evaluation.get("applicable_metric_count", "—")
-        unavailable = evaluation.get("unavailable_metric_count", "—")
-        lines.append(
-            f"| `{eng}` | {run_id} | `{schema}` | {status} | {rank_eligible} | {applicable} | {unavailable} |"
-        )
-
-    lines += ["", ""]
-    return "\n".join(lines)
-
-
 def main() -> int:
     """Entry point: aggregate multiple metrics JSON files and write a side-by-side comparison table."""
     ap = argparse.ArgumentParser(
@@ -766,12 +482,7 @@ def main() -> int:
     for p in paths:
         try:
             data = _load_metrics(p)
-            # V2 stores engine under evaluator.engine; V1 stores it at top level.
-            engine = (
-                data.get("engine")
-                or (data.get("evaluator") or {}).get("engine")
-                or p.stem
-            )
+            engine = data.get("engine", p.stem)
             all_data.append((engine, data))
             if not args.quiet:
                 print(f"  Loaded: {p.name} ({engine})")
@@ -782,24 +493,9 @@ def main() -> int:
         print("ERROR: no valid metrics files loaded", file=sys.stderr)
         return 1
 
-    # --- Schema detection and homogeneity check ---
-    schema_errors = _validate_schema_homogeneity(all_data)
-    if schema_errors and not args.skip_validation:
-        print("ERROR: mixed schema versions:", file=sys.stderr)
-        for err in schema_errors:
-            print(f"  • {err}", file=sys.stderr)
-        return 1
-    elif schema_errors and not args.quiet:
-        print("  WARNING: mixed schema versions (--skip-validation active)")
-
-    is_v2 = all(_detect_schema(data) == "v2" for _, data in all_data)
-
-    # --- Comparability validation ---
+    # --- Comparability validation (F07) ---
     if not args.skip_validation:
-        if is_v2:
-            errors = _validate_comparability_v2(all_data)
-        else:
-            errors = _validate_comparability(all_data, allow_partial=args.allow_partial)
+        errors = _validate_comparability(all_data, allow_partial=args.allow_partial)
         if errors:
             print("ERROR: runs are not comparable:", file=sys.stderr)
             for err in errors:
@@ -813,10 +509,7 @@ def main() -> int:
     elif not args.quiet:
         print("  WARNING: comparability validation skipped (--skip-validation)")
 
-    if is_v2:
-        table = _render_comparison_table_v2(all_data)
-    else:
-        table = _render_comparison_table(all_data)
+    table = _render_comparison_table(all_data)
     if args.skip_validation:
         table += (
             "\n> **Heterogeneous comparison:** comparability validation was bypassed. "

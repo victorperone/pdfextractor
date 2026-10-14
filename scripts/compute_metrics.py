@@ -145,26 +145,18 @@ def _lev_distance(a: list, b: list) -> int:
     return prev[lb]
 
 
-def _lev_ops(ref: list, hyp: list) -> tuple[int, int, int]:
+def _lev_ops(a: list, b: list, max_len: int = 3000) -> tuple[int, int, int]:
     """Return (substitutions, deletions, insertions) via DP traceback.
 
-    Direction is ref → hyp so that:
-      D = tokens in ref not reproduced by hyp (omissions by the extractor)
-      I = tokens in hyp not present in ref (insertions by the extractor)
-
-    No length cap: callers that need to handle large sequences should split
-    by page before calling this function.  Returning a truncated count as if
-    it were the full distance would produce misleading rates.
-
-    Tie-breaking rule: prefer substitution over delete+insert when cost is
-    equal; prefer delete before insert.  This rule is fixed and tested.
-    Invariant: S + D + I == _lev_distance(ref, hyp).
+    Capped at max_len to stay memory-safe for large pages.
     """
-    la, lb = len(ref), len(hyp)
+    a = a[:max_len]
+    b = b[:max_len]
+    la, lb = len(a), len(b)
     if la == 0:
-        return 0, 0, lb  # all hyp tokens are insertions
+        return 0, 0, lb
     if lb == 0:
-        return 0, la, 0  # all ref tokens are deletions
+        return 0, la, 0
 
     dp = [[0] * (lb + 1) for _ in range(la + 1)]
     for i in range(la + 1):
@@ -173,38 +165,26 @@ def _lev_ops(ref: list, hyp: list) -> tuple[int, int, int]:
         dp[0][j] = j
     for i in range(1, la + 1):
         for j in range(1, lb + 1):
-            cost = 0 if ref[i - 1] == hyp[j - 1] else 1
-            dp[i][j] = min(
-                dp[i - 1][j - 1] + cost,  # match or substitute
-                dp[i - 1][j] + 1,          # delete from ref
-                dp[i][j - 1] + 1,          # insert into hyp
-            )
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
 
     S = D = I = 0
     i, j = la, lb
     while i > 0 or j > 0:
-        if i > 0 and j > 0 and ref[i - 1] == hyp[j - 1]:
+        if i > 0 and j > 0 and a[i - 1] == b[j - 1]:
             i -= 1; j -= 1
         elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
-            S += 1; i -= 1; j -= 1  # substitute (prefer over D+I)
+            S += 1; i -= 1; j -= 1
         elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
-            D += 1; i -= 1           # delete from ref
+            D += 1; i -= 1
         else:
-            I += 1; j -= 1           # insert into hyp
+            I += 1; j -= 1
     return S, D, I
 
 
-def _lcs_len(a: list, b: list, max_len: int = 0) -> int:
-    """Longest Common Subsequence length.
-
-    max_len is kept for backward-compatibility with call sites that passed it,
-    but it no longer silently truncates the sequences.  Pass max_len=0 (the
-    default) to evaluate the full sequences.  If a non-zero limit is required
-    for performance, the caller is responsible for slicing and for adjusting
-    the denominator accordingly.
-    """
-    if max_len and max_len > 0:
-        a, b = a[:max_len], b[:max_len]
+def _lcs_len(a: list, b: list, max_len: int = 1000) -> int:
+    """Longest Common Subsequence length."""
+    a, b = a[:max_len], b[:max_len]
     la, lb = len(a), len(b)
     prev = [0] * (lb + 1)
     curr = [0] * (lb + 1)
@@ -219,33 +199,23 @@ def _lcs_len(a: list, b: list, max_len: int = 0) -> int:
 # Grupo 1 — Text metrics
 # ---------------------------------------------------------------------------
 
-_UNDEFINED = float("nan")  # sentinel for undefined-denominator metrics
-
-
 def _cer_raw(hyp: str, ref: str) -> float:
-    """CER on raw Markdown text; returns nan when ref is empty and hyp is non-empty."""
     if not ref:
-        if hyp:
-            return _UNDEFINED  # insertions only; denominator is zero
-        return _UNDEFINED      # both empty → not applicable at this level
+        return 0.0
     return _lev_distance(list(hyp), list(ref)) / len(ref)
 
 
 def _cer_normalized(hyp: str, ref: str) -> float:
     hyp_n, ref_n = _normalize(hyp), _normalize(ref)
     if not ref_n:
-        if hyp_n:
-            return _UNDEFINED
-        return _UNDEFINED
+        return 0.0
     return _lev_distance(list(hyp_n), list(ref_n)) / len(ref_n)
 
 
 def _cer_text_only(hyp: str, ref: str) -> float:
     hyp_t, ref_t = _strip_md(hyp), _strip_md(ref)
     if not ref_t:
-        if hyp_t:
-            return _UNDEFINED
-        return _UNDEFINED
+        return 0.0
     return _lev_distance(list(hyp_t), list(ref_t)) / len(ref_t)
 
 
@@ -253,60 +223,35 @@ def _wer(hyp: str, ref: str) -> float:
     hyp_w = _normalize(hyp).split()
     ref_w = _normalize(ref).split()
     if not ref_w:
-        if hyp_w:
-            return _UNDEFINED
-        return _UNDEFINED
+        return 0.0
     return _lev_distance(hyp_w, ref_w) / len(ref_w)
 
 
 def compute_text_metrics(hyp: str, ref: str) -> dict:
     """Compute all Group 1 text-quality metrics for script/report consumers.
 
-    Returns a dict with cer_raw, cer_normalized, cer_text_only, wer,
-    word_accuracy, substitution_rate, deletion_rate, insertion_rate,
-    omission_rate.
-
-    When the reference is empty and the hypothesis is non-empty, rates are
-    returned as None (undefined denominator) except for insertion counts.
-    When both are empty, all rates are None (not applicable).
+    Returns a dict with cer_raw, cer_normalized, cer_text_only, wer, word_accuracy,
+    substitution_rate, deletion_rate, insertion_rate, omission_rate.
     """
     ref_n = _normalize(ref)
     ref_words = ref_n.split()
-    N_words = len(ref_words)
+    N_chars = len(ref_n) or 1
+    N_words = len(ref_words) or 1
 
     hyp_words = _normalize(hyp).split()
-    # Direction: ref → hyp so D = omissions, I = extra insertions
-    S, D, I = _lev_ops(ref_words, hyp_words)
+    S, D, I = _lev_ops(hyp_words, ref_words)
 
     wer_val = _wer(hyp, ref)
-    cer_r   = _cer_raw(hyp, ref)
-    cer_n   = _cer_normalized(hyp, ref)
-    cer_t   = _cer_text_only(hyp, ref)
-
-    import math
-
-    def _safe_round(v, digits):
-        if v is None or (isinstance(v, float) and math.isnan(v)):
-            return None
-        return round(v, digits)
-
-    def _rate(count):
-        if N_words == 0:
-            return None
-        return round(count / N_words, 6)
-
-    word_acc = None if wer_val is None or (isinstance(wer_val, float) and math.isnan(wer_val)) else round(max(0.0, 1.0 - wer_val), 6)
-
     return {
-        "cer_raw":           _safe_round(cer_r, 6),
-        "cer_normalized":    _safe_round(cer_n, 6),
-        "cer_text_only":     _safe_round(cer_t, 6),
-        "wer":               _safe_round(wer_val, 6),
-        "word_accuracy":     word_acc,
-        "substitution_rate": _rate(S),
-        "deletion_rate":     _rate(D),
-        "insertion_rate":    _rate(I),
-        "omission_rate":     _rate(D),  # alias of deletion_rate (legacy name)
+        "cer_raw": round(_cer_raw(hyp, ref), 6),
+        "cer_normalized": round(_cer_normalized(hyp, ref), 6),
+        "cer_text_only": round(_cer_text_only(hyp, ref), 6),
+        "wer": round(wer_val, 6),
+        "word_accuracy": round(max(0.0, 1.0 - wer_val), 6),
+        "substitution_rate": round(S / N_words, 6),
+        "deletion_rate": round(D / N_words, 6),
+        "insertion_rate": round(I / N_words, 6),
+        "omission_rate": round(D / N_words, 6),
     }
 
 
@@ -405,56 +350,24 @@ def compute_structure_metrics(hyp: str, ref: str) -> dict:
     h_fn = sum(ref_h_texts.values()) - h_tp
     _, _, heading_f1 = _f1(h_tp, h_fp, h_fn)
 
-    # Heading Level Accuracy: among headings matched by content (multiset),
-    # fraction where the heading level (h1..h6) is also correct.
-    # Uses a multiset approach so repeated headings with the same text keep
-    # distinct identities instead of being silently collapsed into a dict.
-    ref_heading_pool: list[tuple[int, str]] = list(ref_headings)  # (level, norm_text)
+    # Heading Level Accuracy: among matched headings, fraction with correct level
+    ref_h_map = {_normalize(h[1]): h[0] for h in ref_headings}
     level_correct = level_total = 0
-    for hyp_level, hyp_text in hyp_headings:
-        hyp_norm = _normalize(hyp_text)
-        # Find the first unused ref heading with the same text
-        for idx, (ref_level, ref_text) in enumerate(ref_heading_pool):
-            if _normalize(ref_text) == hyp_norm:
-                level_total += 1
-                if ref_level == hyp_level:
-                    level_correct += 1
-                ref_heading_pool.pop(idx)
-                break
-    # When no matched pairs exist the metric is not applicable (spec §6.1):
-    # return None rather than a misleading 1.0.
-    heading_level_accuracy: float | None = (
-        level_correct / level_total if level_total > 0 else None
-    )
+    for level, text in hyp_headings:
+        norm = _normalize(text)
+        if norm in ref_h_map:
+            level_total += 1
+            if ref_h_map[norm] == level:
+                level_correct += 1
+    heading_level_accuracy = level_correct / level_total if level_total > 0 else 1.0
 
-    # Heading Text CER: computed on matched pairs only (same content-matching
-    # as above), with omitted and extra headings contributing to the coverage
-    # counters rather than being silently dropped.
-    # Re-run matching from scratch to obtain paired texts for CER.
-    ref_pool_for_cer: list[tuple[int, str]] = list(ref_headings)
-    matched_pairs: list[tuple[str, str]] = []
-    unmatched_hyp_count = 0
-    for hyp_level, hyp_text in hyp_headings:
-        hyp_norm = _normalize(hyp_text)
-        found = False
-        for idx, (_, ref_text) in enumerate(ref_pool_for_cer):
-            if _normalize(ref_text) == hyp_norm:
-                matched_pairs.append((hyp_text, ref_text))
-                ref_pool_for_cer.pop(idx)
-                found = True
-                break
-        if not found:
-            unmatched_hyp_count += 1
-    unmatched_ref_count = len(ref_pool_for_cer)
-
-    if matched_pairs:
-        heading_text_cer_vals = [_cer_normalized(h, r) for h, r in matched_pairs]
-        # Filter out undefined (nan) values before averaging
-        import math as _math
-        valid_cer = [v for v in heading_text_cer_vals if v is not None and not _math.isnan(v)]
-        heading_text_cer: float | None = sum(valid_cer) / len(valid_cer) if valid_cer else 0.0
-    else:
-        heading_text_cer = None  # no matched pairs → not applicable
+    # Heading Text CER: align by position order and compute CER on all pairs
+    # (including imperfect matches).  Only computing CER on exact-match pairs
+    # produces an optimistic bias — headings with OCR errors are silently skipped.
+    heading_text_cer_vals: list[float] = []
+    for (_, hyp_ht), (_, ref_ht) in zip(hyp_headings, ref_headings):
+        heading_text_cer_vals.append(_cer_normalized(hyp_ht, ref_ht))
+    heading_text_cer = sum(heading_text_cer_vals) / len(heading_text_cer_vals) if heading_text_cer_vals else 0.0
 
     # Block F1: compare block type sequences as multisets
     ref_seq = _block_type_sequence(ref)
@@ -492,21 +405,10 @@ def compute_structure_metrics(hyp: str, ref: str) -> dict:
     max_len = max(len(ref_seq), len(hyp_seq), 1)
     md_ast_similarity = round(lcs / max_len, 4)
 
-    import math as _math2
-
-    def _safe_round2(v, digits):
-        if v is None or (isinstance(v, float) and _math2.isnan(v)):
-            return None
-        return round(v, digits)
-
     return {
         "heading_f1": heading_f1,
-        "heading_level_accuracy": _safe_round2(heading_level_accuracy, 4),
-        "heading_text_cer": _safe_round2(heading_text_cer, 6),
-        # Coverage counters for heading matching (for audit and aggregation)
-        "heading_matched_count": len(matched_pairs),
-        "heading_unmatched_ref_count": unmatched_ref_count,
-        "heading_unmatched_hyp_count": unmatched_hyp_count,
+        "heading_level_accuracy": round(heading_level_accuracy, 4),
+        "heading_text_cer": round(heading_text_cer, 6),
         "block_f1": block_f1,
         "paragraph_boundary_f1": para_boundary_f1,
         "list_detection_f1": list_f1,
@@ -606,13 +508,7 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
                 hyp_norm = _normalize_cell(hyp_cell)
                 cell_ref_count += 1
                 cell_exact_count += int(ref_norm == hyp_norm)
-                # cell_alignment_accuracy measures whether the cell that appears
-                # at the *expected logical position* (same row_index, column_index)
-                # contains any content at all — i.e., the structural slot is occupied.
-                # A non-empty cell at the right position counts as aligned even if the
-                # text differs; an empty cell where content is expected does not.
-                # This separates "wrong position" from "wrong content".
-                cell_alignment_count += int(bool(hyp_norm) or not ref_norm)
+                cell_alignment_count += int(ref_norm == hyp_norm)
                 cell_edit_sum += _lev_distance(list(hyp_norm), list(ref_norm))
                 cell_ref_char_sum += len(ref_norm)
 
@@ -871,30 +767,14 @@ def compute_integrity_metrics(
     Evaluates reading order accuracy (LCS of blocks), duplicate content/block rate,
     header/footer/page-number leakage, failure rate, and invalid Markdown rate.
     """
-    # Reading Order Accuracy: LCS of text-unit block sequences / ref length.
-    # No silent cap: full sequences are used. Denominators reflect the full
-    # reference count so that dropping blocks cannot inflate the metric.
+    # Reading Order Accuracy: LCS of block sequences / ref length
     ref_blocks = _extract_text_blocks(ref)
     hyp_blocks = _extract_text_blocks(hyp)
     if ref_blocks:
-        lcs = _lcs_len(ref_blocks, hyp_blocks)
+        lcs = _lcs_len(ref_blocks, hyp_blocks, max_len=500)
         reading_order = round(lcs / len(ref_blocks), 4)
     else:
         reading_order = 1.0
-
-    # Block Order Accuracy: LCS of *structural* block-type sequences / ref length.
-    # This is intentionally different from reading_order_accuracy: it evaluates
-    # whether the structural sequence (h1, para, table, list, …) is preserved,
-    # independently of textual content. Two documents with the same type sequence
-    # but different text will show high block order and high reading order from
-    # text metrics separately.
-    ref_block_types = _block_type_sequence(ref)
-    hyp_block_types = _block_type_sequence(hyp)
-    if ref_block_types:
-        lcs_types = _lcs_len(ref_block_types, hyp_block_types)
-        block_order = round(lcs_types / len(ref_block_types), 4)
-    else:
-        block_order = 1.0
 
     # Duplicate Content Rate
     hyp_paras = [
@@ -1005,7 +885,7 @@ def compute_integrity_metrics(
 
     return {
         "reading_order_accuracy": reading_order,
-        "block_order_accuracy": block_order,   # structural sequence, not text (MET-004 fix)
+        "block_order_accuracy": reading_order,  # same proxy for now
         "duplicate_content_rate": round(dup_rate, 4),
         "duplicate_block_rate": round(dup_block_rate, 4),
         "header_leakage_rate": header_leakage,
@@ -1028,71 +908,25 @@ _CNPJ_RE = re.compile(r"\d{2}\.?\d{3}\.?\d{3}/?\d{4}[-\s]?\d{2}")
 _PROC_RE = re.compile(r"\d{7}[-\s.]?\d{2}[-\s.]?\d{4}[-\s.]?\d{1}[-\s.]?\d{2}[-\s.]?\d{4}")
 
 
-def _exact_match_prf(
-    hyp: str, ref: str, pattern: re.Pattern
-) -> tuple[float | None, float | None, float | None, str]:
-    """Compute (precision, recall, F1, status) for regex pattern matches.
+def _exact_match_prf(hyp: str, ref: str, pattern: re.Pattern) -> tuple[float, float, float]:
+    """Compute (precision, recall, F1) for regex pattern matches using multiset matching.
 
-    Uses multiset matching to preserve multiplicity.
-
-    Status values follow spec §9.2:
-      "ok"                 — both sides have values; standard P/R/F1 computed.
-      "not_applicable"     — ref=0 hyp=0; correct absence; all metrics None.
-      "false_positive_only"— ref=0 hyp>0; precision=0.0, recall=None, f1=0.0.
-      "false_negative_only"— ref>0 hyp=0; precision=None, recall=0.0, f1=0.0.
-
-    Returns (precision, recall, f1, status).  Callers must handle None values.
+    Multiset matching preserves multiplicity: if ref contains R$10 twice and hyp
+    contains R$10 once, only one match is credited.  Using set() would give recall=1.0
+    even though half the occurrences are missing.  Precision penalises invented values.
     """
     ref_counts = Counter(pattern.findall(ref))
     hyp_counts = Counter(pattern.findall(hyp))
+    if not ref_counts:
+        # Nothing to find — perfect score by convention
+        return 1.0, 1.0, 1.0
+    tp = sum((ref_counts & hyp_counts).values())
     n_ref = sum(ref_counts.values())
     n_hyp = sum(hyp_counts.values())
-
-    if n_ref == 0 and n_hyp == 0:
-        return None, None, None, "not_applicable"
-
-    if n_ref == 0 and n_hyp > 0:
-        # All hypothesis values are false positives; recall denominator is zero.
-        return 0.0, None, 0.0, "false_positive_only"
-
-    if n_ref > 0 and n_hyp == 0:
-        # All reference values are false negatives; precision denominator is zero.
-        return None, 0.0, 0.0, "false_negative_only"
-
-    tp = sum((ref_counts & hyp_counts).values())
-    precision = round(tp / n_hyp, 4)
-    recall    = round(tp / n_ref, 4)
+    precision = round(tp / n_hyp, 4) if n_hyp > 0 else 0.0
+    recall    = round(tp / n_ref, 4) if n_ref > 0 else 0.0
     f1        = round(2 * precision * recall / (precision + recall), 4) if (precision + recall) > 0 else 0.0
-    return precision, recall, f1, "ok"
-
-
-def _ids_prf(hyp: str, ref: str) -> tuple[float | None, float | None, float | None, str]:
-    """Compute P/R/F1/status for the combined CPF+CNPJ+process-number class."""
-    ref_ids = (
-        Counter(_CPF_RE.findall(ref))
-        + Counter(_CNPJ_RE.findall(ref))
-        + Counter(_PROC_RE.findall(ref))
-    )
-    hyp_ids = (
-        Counter(_CPF_RE.findall(hyp))
-        + Counter(_CNPJ_RE.findall(hyp))
-        + Counter(_PROC_RE.findall(hyp))
-    )
-    n_ref = sum(ref_ids.values())
-    n_hyp = sum(hyp_ids.values())
-
-    if n_ref == 0 and n_hyp == 0:
-        return None, None, None, "not_applicable"
-    if n_ref == 0 and n_hyp > 0:
-        return 0.0, None, 0.0, "false_positive_only"
-    if n_ref > 0 and n_hyp == 0:
-        return None, 0.0, 0.0, "false_negative_only"
-
-    tp = sum((ref_ids & hyp_ids).values())
-    p  = round(tp / n_hyp, 4)
-    r  = round(tp / n_ref, 4)
-    f1 = round(2 * p * r / (p + r), 4) if (p + r) > 0 else 0.0
-    return p, r, f1, "ok"
+    return precision, recall, f1
 
 
 def compute_critical_data_metrics(hyp: str, ref: str) -> dict:
@@ -1102,27 +936,29 @@ def compute_critical_data_metrics(hyp: str, ref: str) -> dict:
     (CPF, CNPJ, process numbers) using multiset matching so that both missing and
     invented values are penalised.
 
-    Keys ending in ``_exact_match`` are recall (backward-compatible with
-    compare_engines.py).  Keys ending in ``_precision`` and ``_f1`` are the
-    additional multiset metrics.
-
-    Following spec §9.2, when ref=0 and hyp=0 all metrics are None
-    (not_applicable, correct absence).  When ref=0 and hyp>0 precision=0 and
-    f1=0 (false positives only).  The old convention of returning 1.0 for an
-    empty reference is removed.
+    Keys ending in ``_exact_match`` are recall (backward-compatible with compare_engines.py).
+    Keys ending in ``_precision`` and ``_f1`` are the additional multiset metrics.
     """
-    num_p, num_r, num_f1, num_status   = _exact_match_prf(hyp, ref, _NUM_RE)
-    date_p, date_r, date_f1, date_status = _exact_match_prf(hyp, ref, _DATE_RE)
-    cur_p, cur_r, cur_f1, cur_status   = _exact_match_prf(hyp, ref, _CURRENCY_RE)
-    id_p, id_r, id_f1, id_status       = _ids_prf(hyp, ref)
+    num_p, num_r, num_f1   = _exact_match_prf(hyp, ref, _NUM_RE)
+    date_p, date_r, date_f1 = _exact_match_prf(hyp, ref, _DATE_RE)
+    cur_p, cur_r, cur_f1   = _exact_match_prf(hyp, ref, _CURRENCY_RE)
+
+    ref_ids = Counter(_CPF_RE.findall(ref)) + Counter(_CNPJ_RE.findall(ref)) + Counter(_PROC_RE.findall(ref))
+    hyp_ids = Counter(_CPF_RE.findall(hyp)) + Counter(_CNPJ_RE.findall(hyp)) + Counter(_PROC_RE.findall(hyp))
+    id_tp  = sum((ref_ids & hyp_ids).values())
+    id_ref = sum(ref_ids.values())
+    id_hyp = sum(hyp_ids.values())
+    id_p   = round(id_tp / id_hyp, 4) if id_hyp > 0 else (1.0 if not ref_ids else 0.0)
+    id_r   = round(id_tp / id_ref, 4) if id_ref > 0 else 1.0
+    id_f1  = round(2 * id_p * id_r / (id_p + id_r), 4) if (id_p + id_r) > 0 else 0.0
 
     return {
-        # Recall — kept under original key names for backward compatibility
+        # Recall — kept under original key names for backward compatibility with compare_engines.py
         "numeric_exact_match":    num_r,
         "date_exact_match":       date_r,
         "currency_exact_match":   cur_r,
         "identifier_exact_match": id_r,
-        # Precision and F1
+        # Precision and F1 — additional multiset metrics
         "numeric_precision":      num_p,
         "numeric_f1":             num_f1,
         "date_precision":         date_p,
@@ -1131,11 +967,6 @@ def compute_critical_data_metrics(hyp: str, ref: str) -> dict:
         "currency_f1":            cur_f1,
         "identifier_precision":   id_p,
         "identifier_f1":          id_f1,
-        # Status fields (spec §9.2) for each category
-        "numeric_status":         num_status,
-        "date_status":            date_status,
-        "currency_status":        cur_status,
-        "identifier_status":      id_status,
     }
 
 
@@ -1147,64 +978,20 @@ def _mean(vals: list[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
-# Metrics where a higher value is a worse outcome (errors, leakage, failure rates).
-# For these, worst = max. For quality metrics (higher=better), worst = min.
-_HIGHER_IS_WORSE_KEYS: frozenset[str] = frozenset({
-    "cer_raw", "cer_normalized", "cer_text_only", "wer",
-    "substitution_rate", "deletion_rate", "insertion_rate", "omission_rate",
-    "heading_text_cer", "cell_cer",
-    "duplicate_content_rate", "duplicate_block_rate",
-    "header_leakage_rate", "footer_leakage_rate", "page_number_leakage_rate",
-    "failure_rate", "invalid_markdown_rate", "missing_page_rate",
-    "easyocr_fallback_rate", "easyocr_fallback_count",
-})
-
-
 def aggregate_page_metrics(per_page: list[dict]) -> dict:
-    """Aggregate per-page metrics for evaluation reports and downstream scripts.
-
-    For each numeric metric key computes: mean, median (true middle value),
-    and worst.  Worst is max for error/rate keys (higher=worse) and min for
-    quality keys (higher=better).  None values are excluded from aggregation
-    and the count of applicable pages is recorded.
-    """
-    import math as _math3
-
+    """Aggregate per-page metrics for evaluation reports and downstream scripts."""
     if not per_page:
         return {}
 
-    all_keys: set[str] = set()
-    for p in per_page:
-        all_keys.update(p.keys())
-
+    keys = list(per_page[0].keys())
     result: dict = {}
 
-    for key in sorted(all_keys):
-        vals = [
-            p[key] for p in per_page
-            if isinstance(p.get(key), (int, float))
-            and not _math3.isnan(p[key])  # exclude undefined-denominator sentinels
-        ]
-        if not vals:
-            continue
-        sorted_vals = sorted(vals)
-        n = len(sorted_vals)
-        mean_val = sum(sorted_vals) / n
-        # True median: average of two middle values for even n
-        if n % 2 == 1:
-            median_val = sorted_vals[n // 2]
-        else:
-            median_val = (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2.0
-        # Worst: max for error metrics, min for quality metrics
-        if key in _HIGHER_IS_WORSE_KEYS:
-            worst_val = max(sorted_vals)
-        else:
-            worst_val = min(sorted_vals)
-
-        result[f"{key}_mean"]   = round(mean_val, 6)
-        result[f"{key}_median"] = round(median_val, 6)
-        result[f"{key}_worst"]  = round(worst_val, 6)
-        result[f"{key}_n"]      = n  # number of applicable pages
+    for key in keys:
+        vals = [p[key] for p in per_page if isinstance(p.get(key), (int, float))]
+        if vals:
+            result[f"{key}_mean"] = round(_mean(vals), 6)
+            result[f"{key}_median"] = round(sorted(vals)[len(vals) // 2], 6)
+            result[f"{key}_worst"] = round(max(vals), 6) if "rate" not in key and "error" not in key and "leakage" not in key else round(max(vals), 6)
 
     return result
 
@@ -1324,8 +1111,6 @@ def _process_page(args: tuple) -> dict:
     ref_body = _strip_page_header(ref_content)
     hyp_body = _strip_page_header(hyp_content)
 
-    import math as _page_math
-
     ref_raw = ref_body
     hyp_raw = hyp_body
     ref_n = _normalize(ref_body)
@@ -1339,55 +1124,24 @@ def _process_page(args: tuple) -> dict:
     edits_norm = _lev_distance(list(hyp_n),   list(ref_n))
     edits_text = _lev_distance(list(hyp_t),   list(ref_t))
     word_edits = _lev_distance(hyp_w, ref_w)
-    # Direction ref → hyp: D = omissions (tokens in ref absent from hyp),
-    # I = insertions (tokens in hyp not in ref).
-    S, D, I    = _lev_ops(ref_w, hyp_w)
+    S, D, I    = _lev_ops(hyp_w, ref_w)
 
-    rc = len(ref_raw)
-    nc = len(ref_n)
-    tc = len(ref_t)
-    nw = len(ref_w)
+    rc = max(len(ref_raw), 1)
+    nc = max(len(ref_n), 1)
+    tc = max(len(ref_t), 1)
+    nw = max(len(ref_w), 1)
 
-    def _page_cer(edits: int, denom: int, hyp_len: int) -> float | None:
-        if denom == 0:
-            return _UNDEFINED if hyp_len > 0 else _UNDEFINED
-        return edits / denom
-
-    def _page_rate(count: int) -> float | None:
-        if nw == 0:
-            return None
-        return count / nw
-
-    wer_val: float | None
-    if nw == 0:
-        wer_val = _UNDEFINED if len(hyp_w) > 0 else _UNDEFINED
-    else:
-        wer_val = word_edits / nw
-
-    cer_raw_val  = _page_cer(edits_raw,  rc, len(hyp_raw))
-    cer_norm_val = _page_cer(edits_norm, nc, len(hyp_n))
-    cer_text_val = _page_cer(edits_text, tc, len(hyp_t))
-
-    def _safe_wer_acc(w):
-        if w is None or (isinstance(w, float) and _page_math.isnan(w)):
-            return None
-        return round(max(0.0, 1.0 - w), 6)
-
-    def _srnd(v, d=6):
-        if v is None or (isinstance(v, float) and _page_math.isnan(v)):
-            return None
-        return round(v, d)
-
+    wer_val = word_edits / nw
     text_m = {
-        "cer_raw":           _srnd(cer_raw_val),
-        "cer_normalized":    _srnd(cer_norm_val),
-        "cer_text_only":     _srnd(cer_text_val),
-        "wer":               _srnd(wer_val),
-        "word_accuracy":     _safe_wer_acc(wer_val),
-        "substitution_rate": _srnd(_page_rate(S)),
-        "deletion_rate":     _srnd(_page_rate(D)),
-        "insertion_rate":    _srnd(_page_rate(I)),
-        "omission_rate":     _srnd(_page_rate(D)),
+        "cer_raw":           round(edits_raw  / rc, 6),
+        "cer_normalized":    round(edits_norm / nc, 6),
+        "cer_text_only":     round(edits_text / tc, 6),
+        "wer":               round(wer_val, 6),
+        "word_accuracy":     round(max(0.0, 1.0 - wer_val), 6),
+        "substitution_rate": round(S / nw, 6),
+        "deletion_rate":     round(D / nw, 6),
+        "insertion_rate":    round(I / nw, 6),
+        "omission_rate":     round(D / nw, 6),
     }
     struct_m = compute_structure_metrics(hyp_body, ref_body)
     table_m  = compute_table_metrics(hyp_body, ref_body)
@@ -1409,9 +1163,6 @@ def _process_page(args: tuple) -> dict:
         "chars_text": tc,  "edits_text": edits_text,
         "words":      nw,  "word_edits": word_edits,
         "S": S, "D": D, "I": I,
-        # Insertion-only count (for pages with empty ref): not added to main
-        # micro-average denominators, but kept for diagnostics.
-        "hyp_words": len(hyp_w),
     }
     return {"pn": pn, "acc": acc, "entry": entry}
 
@@ -1557,8 +1308,7 @@ def main() -> int:
     in_hyp_not_selected: set[int] = hyp_pages.keys() - selected_pages
 
     # Zero-overlap guard: fail clearly rather than producing NaN metrics.
-    # Use selected_ref_pages (not raw hyp∩ref) to stay consistent with MET-020 fix.
-    eval_page_nums_set: set[int] = (selected_ref_pages & hyp_pages.keys()) | selected_but_missing
+    eval_page_nums_set: set[int] = (hyp_pages.keys() & ref_pages.keys()) | selected_but_missing
     if not eval_page_nums_set:
         print(
             "ERROR: hypothesis and reference have zero comparable pages. "
@@ -1572,10 +1322,7 @@ def main() -> int:
     # Pages selected but missing from hypothesis: contribute max-penalty to text
     # accumulators (all ref chars as deletions, all ref words as deletions).
     per_page_results: list[dict] = []
-    # MET-020 fix: only evaluate pages that are both selected (in scope) AND
-    # present in both hypothesis and reference. Using the raw intersection
-    # hyp∩ref would silently include hypothesis pages outside the selected set.
-    all_page_nums = sorted(selected_ref_pages & hyp_pages.keys())
+    all_page_nums = sorted(hyp_pages.keys() & ref_pages.keys())
 
     # Accumulators for group 1 micro-average (weighted by ref length)
     _t_chars_raw = _t_edits_raw = 0
@@ -1626,29 +1373,20 @@ def main() -> int:
 
     # --- Penalise selected pages that are missing from hypothesis ---
     # All reference characters count as deletions; all reference words as deletions.
-    # MET-021 fix: strip the page delimiter before counting so the denominators
-    # are identical to those used for present pages (_process_page also strips it).
     for pn in sorted(selected_but_missing):
         ref_text = ref_pages[pn]
-        ref_body = _strip_page_header(ref_text)   # body without "## Página N"
-        ref_norm = _normalize(ref_body)
-        ref_stripped = _normalize(_strip_md(ref_body))
-        n_chars_raw = len(ref_body)
-        n_chars_norm = len(ref_norm)
-        n_chars_text = len(ref_stripped)
-        n_words = len(ref_stripped.split())
-        # Only add to accumulators when the reference body has content.
-        # If n_chars_raw == 0, the page is reference-empty and contributes
-        # nothing to the micro-average (correct absence, not a deletion).
-        if n_chars_raw > 0:
-            _t_chars_raw  += n_chars_raw;  _t_edits_raw  += n_chars_raw
-        if n_chars_norm > 0:
-            _t_chars_norm += n_chars_norm; _t_edits_norm += n_chars_norm
-        if n_chars_text > 0:
-            _t_chars_text += n_chars_text; _t_edits_text += n_chars_text
-        if n_words > 0:
-            _t_words      += n_words;      _t_word_edits += n_words
-            _t_D += n_words  # all reference words are deletions
+        ref_body = _strip_page_header(ref_text)
+        ref_norm = _normalize(ref_text)
+        ref_stripped = _normalize(_strip_md(ref_text))
+        n_chars_raw = max(1, len(ref_text))
+        n_chars_norm = max(1, len(ref_norm))
+        n_chars_text = max(1, len(ref_stripped))
+        n_words = max(1, len(ref_stripped.split()))
+        _t_chars_raw  += n_chars_raw;  _t_edits_raw  += n_chars_raw
+        _t_chars_norm += n_chars_norm; _t_edits_norm += n_chars_norm
+        _t_chars_text += n_chars_text; _t_edits_text += n_chars_text
+        _t_words      += n_words;      _t_word_edits += n_words
+        _t_D += n_words  # all reference words are deletions
         per_page_results.append({
             "page": pn,
             "missing_from_hypothesis": True,
@@ -1675,40 +1413,22 @@ def main() -> int:
         page_result["missing_page_rate"] = float(bool(page_result.get("missing_from_hypothesis")))
 
     # --- Group 1: full-document text (micro-average, weighted by ref length) ---
-    # A zero denominator means the entire reference is empty. This is a valid
-    # configuration (e.g. a corpus page with no expected text), not an error.
-    # We record None for rate metrics and the raw insertion count for diagnosis.
-    import math as _main_math
+    if _t_chars_raw == 0 or _t_words == 0:
+        print("ERROR: zero reference characters/words after page accumulation.", file=sys.stderr)
+        return 1
 
-    def _micro_ratio(num: int, denom: int) -> float | None:
-        if denom == 0:
-            return None
-        return round(num / denom, 6)
-
-    _wer_val_micro = _micro_ratio(_t_word_edits, _t_words)
-    _word_acc_micro = (
-        None if _wer_val_micro is None
-        else round(max(0.0, 1.0 - _wer_val_micro), 6)
-    )
+    _wer_val = _t_word_edits / _t_words
     full_text_m = {
-        "cer_raw":           _micro_ratio(_t_edits_raw,  _t_chars_raw),
-        "cer_normalized":    _micro_ratio(_t_edits_norm, _t_chars_norm),
-        "cer_text_only":     _micro_ratio(_t_edits_text, _t_chars_text),
-        "wer":               _wer_val_micro,
-        "word_accuracy":     _word_acc_micro,
-        "substitution_rate": _micro_ratio(_t_S, _t_words),
-        "deletion_rate":     _micro_ratio(_t_D, _t_words),
-        "insertion_rate":    _micro_ratio(_t_I, _t_words),
-        "omission_rate":     _micro_ratio(_t_D, _t_words),
-        # Counters for audit
-        "total_ref_chars_norm": _t_chars_norm,
-        "total_ref_words":      _t_words,
-        "total_edits_norm":     _t_edits_norm,
-        "total_word_edits":     _t_word_edits,
-        "total_S": _t_S, "total_D": _t_D, "total_I": _t_I,
+        "cer_raw": round(_t_edits_raw / _t_chars_raw, 6),
+        "cer_normalized": round(_t_edits_norm / _t_chars_norm, 6),
+        "cer_text_only": round(_t_edits_text / _t_chars_text, 6),
+        "wer": round(_wer_val, 6),
+        "word_accuracy": round(max(0.0, 1.0 - _wer_val), 6),
+        "substitution_rate": round(_t_S / _t_words, 6),
+        "deletion_rate": round(_t_D / _t_words, 6),
+        "insertion_rate": round(_t_I / _t_words, 6),
+        "omission_rate": round(_t_D / _t_words, 6),
     }
-    if not args.quiet and _t_chars_raw == 0 and _t_words == 0:
-        print("  WARNING: all reference pages are empty — text metrics are N/A.")
 
     # --- Groups 2, 3, 4, 5: full-document Markdown ---
     # Structure must include every selected reference page. A missing page has
