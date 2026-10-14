@@ -253,18 +253,22 @@ def check_comparability(
     if va != vb:
         reasons.append(f"schema_version_mismatch: {va!r} vs {vb!r}")
 
-    # Reference hash must match (same ground truth)
+    # Reference hash must match (same ground truth).
+    # If either side is None or missing, that is itself a mismatch (spec §10.4:
+    # "hash/versão de configuração ausente → comparabilidade rejeitada").
     ia = result_a.get("inputs", {})
     ib = result_b.get("inputs", {})
     ref_a = ia.get("reference_sha256")
     ref_b = ib.get("reference_sha256")
-    if ref_a and ref_b and ref_a != ref_b:
-        reasons.append(f"reference_sha256_mismatch: {ref_a[:12]}… vs {ref_b[:12]}…")
+    if ref_a != ref_b:
+        a_display = (ref_a[:12] + "…") if ref_a else repr(ref_a)
+        b_display = (ref_b[:12] + "…") if ref_b else repr(ref_b)
+        reasons.append(f"reference_sha256_mismatch: {a_display} vs {b_display}")
 
     # Selected pages must match
-    pages_a = set(ia.get("selected_pages", []))
-    pages_b = set(ib.get("selected_pages", []))
-    if pages_a and pages_b and pages_a != pages_b:
+    pages_a = set(ia.get("selected_pages") or [])
+    pages_b = set(ib.get("selected_pages") or [])
+    if pages_a != pages_b:
         reasons.append(f"selected_pages_mismatch: {sorted(pages_a)} vs {sorted(pages_b)}")
 
     comparable = len(reasons) == 0

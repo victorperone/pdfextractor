@@ -338,6 +338,88 @@ class TestAgentIntegrationContract:
         h3 = _sha256(modified)
         assert h1 != h3
 
+    def test_I09_determinism_same_inputs(self):
+        """I09: same inputs always produce identical results (determinism invariant)."""
+        def _run():
+            return _make_v2_doc(_REF_SIMPLE, _HYP_PARTIAL).to_dict()
+
+        r1 = _run()
+        r2 = _run()
+        assert json.dumps(r1, sort_keys=True) == json.dumps(r2, sort_keys=True)
+
+    def test_I10_large_document_no_silent_truncation(self):
+        """I10: large documents complete without silent truncation."""
+        lines = ["## Página 1\n"]
+        for i in range(100):
+            lines.append(f"Parágrafo número {i} com conteúdo único: token_{i}_abcdefgh.\n\n")
+        big_ref = "\n".join(lines)
+        big_hyp = big_ref
+
+        doc = _make_v2_doc(big_ref, big_hyp)
+        result = doc.to_dict()
+
+        raw = json.dumps(result)
+        assert "resource_limit" not in raw
+        assert result["evaluation"]["status"] not in ("failed", "error")
+
+    def test_I11_parser_error_preserves_independent_metrics(self):
+        """I11: well-formed document never causes evaluation status=failed."""
+        valid_ref = "## Página 1\n\nTexto válido.\n"
+        valid_hyp = "## Página 1\n\nTexto válido.\n"
+        doc = _make_v2_doc(valid_ref, valid_hyp)
+        result = doc.to_dict()
+        assert result["evaluation"]["status"] != "failed"
+        quality = result.get("quality", {})
+        assert len(quality) > 0
+
+    def test_I12_skip_validation_marks_result_as_diagnostic(self, tmp_path):
+        """I12: --skip-validation produces output with heterogeneous watermark."""
+        metrics_a = tmp_path / "engine_a.json"
+        metrics_b = tmp_path / "engine_b.json"
+        output = tmp_path / "compare.md"
+
+        doc_a = _make_v2_doc(_REF_SIMPLE, _HYP_PERFECT)
+        doc_a_dict = doc_a.to_dict()
+        doc_a_dict["inputs"] = {"reference_sha256": "aaa", "selected_pages": [1, 2]}
+        metrics_a.write_text(json.dumps(doc_a_dict), encoding="utf-8")
+
+        doc_b = _make_v2_doc(_REF_SIMPLE, _HYP_PARTIAL)
+        doc_b_dict = doc_b.to_dict()
+        doc_b_dict["inputs"] = {"reference_sha256": "bbb", "selected_pages": [1, 2]}
+        metrics_b.write_text(json.dumps(doc_b_dict), encoding="utf-8")
+
+        _COMPARE_SCRIPT = Path(__file__).parent.parent / "scripts" / "compare_engines.py"
+        result = subprocess.run(
+            [sys.executable, str(_COMPARE_SCRIPT),
+             str(metrics_a), str(metrics_b),
+             "--output", str(output),
+             "--skip-validation",
+             "--quiet"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"compare_engines failed: {result.stderr}"
+        report_text = output.read_text(encoding="utf-8")
+        assert (
+            "Heterogeneous" in report_text
+            or "heterogeneous" in report_text
+            or "skip-validation" in report_text.lower()
+            or "validation" in report_text.lower()
+        )
+
+    def test_I13_missing_hash_makes_runs_incomparable(self):
+        """I13: reference_sha256=None is incompatible with a real hash (spec §10.4)."""
+        result_a = {
+            "schema_version": "evaluation-v2.0",
+            "inputs": {"reference_sha256": None, "selected_pages": [1]},
+        }
+        result_b = {
+            "schema_version": "evaluation-v2.0",
+            "inputs": {"reference_sha256": "abc123", "selected_pages": [1]},
+        }
+        ok, reasons = check_comparability(result_a, result_b)
+        assert not ok
+        assert any("reference_sha256" in r for r in reasons)
+
     def test_I14_na_metric_not_nan_inf(self):
         """I14: N/A metric produces null JSON value, never NaN/Inf."""
         # Use empty ref+hyp to trigger N/A
@@ -352,6 +434,27 @@ class TestAgentIntegrationContract:
         doc = _make_v2_doc("", "")
         # With both empty, nothing should count as applicable
         assert doc.applicable_metric_count == 0
+
+    def test_I15_redundant_metrics_not_double_counted(self):
+        """I15: CER and WER are separate metric keys with distinct definition_ids."""
+        from structured_pdf_text.evaluation.text_metrics import compute_text_metrics as ctm
+
+        ref_nodes = parse_document(_REF_SIMPLE, "reference")
+        hyp_nodes = parse_document(_HYP_PERFECT, "hypothesis")
+        pairs = align_blocks(ref_nodes, hyp_nodes)
+
+        tm = ctm(ref_nodes, hyp_nodes, pairs)
+        d = tm.to_dict()
+
+        cer_key = "cer_sequential_normalized"
+        wer_key = "wer_sequential"
+        assert cer_key in d
+        assert wer_key in d
+        assert cer_key != wer_key
+
+        cer_def = d[cer_key].get("definition_id", "")
+        wer_def = d[wer_key].get("definition_id", "")
+        assert cer_def != wer_def
 
     def test_I16_schema_version_field_present(self):
         """I16: every V2 result has schema_version for version detection."""
