@@ -1,11 +1,11 @@
-"""Text-quality metrics for the V2 evaluation pipeline (spec §4, MET-TX*).
+"""Text-quality metrics for the unified evaluation pipeline (spec §4, MET-TX*).
 
 Metrics
 -------
-MET-TX01  cer_sequential_raw         CER on raw Markdown text (ref→hyp direction)
-MET-TX02  cer_sequential_normalized  CER after unicode_layout normalisation
-MET-TX03  cer_sequential_visible     CER on parser-extracted visible text
-MET-TX04  wer_sequential             WER on normalised word tokens
+MET-TX01  cer_markdown_raw           CER on raw Markdown body (no page markers, no visible extraction)
+MET-TX02  cer_sequential_normalized  CER after unicode_layout normalisation of visible text
+MET-TX03  cer_sequential_visible     CER on parser-extracted visible text (leaf nodes only, no overlap)
+MET-TX04  wer_sequential             WER on normalised word tokens (leaf nodes only)
 MET-TX05  aligned_block_text_cer     CER per paired block (independent of position)
 MET-TX06  text_coverage_recall       token-level multiset recall (no order required)
 MET-TX07  text_coverage_precision    token-level multiset precision
@@ -16,6 +16,12 @@ Design notes
 - S + D + I == edit_distance (invariant tested in test suite).
 - No max(N, 1) shims.  ref=0 + hyp>0 → undefined_denominator; both
   empty → not_applicable.
+- ``cer_markdown_raw`` (MET-TX01) operates on the raw Markdown body strings,
+  NOT on visible_text extracted from nodes.  This measures representation
+  fidelity including formatting markers.
+- ``cer_sequential_visible`` and WER operate on the deduplicated leaf-node
+  projection from CanonicalDocument: TABLE, TABLE_ROW, LIST container nodes
+  are excluded so their text is not counted multiple times (bug A02 fix).
 - `aligned_block_text_cer` is computed only on MATCHED/AMBIGUOUS pairs;
   unmatched ref nodes contribute FN chars, unmatched hyp nodes contribute FP
   chars via a synthetic empty-ref / empty-hyp pair (spec §4.3).
@@ -35,9 +41,13 @@ from structured_pdf_text.evaluation.models import (
     MarkdownNode,
     MetricResult,
     MetricStatus,
+    NodeKind,
     NormProfile,
 )
 from structured_pdf_text.evaluation.normalization import normalize
+
+# Import here to avoid circular imports; canonical_document imports models/normalization only.
+from structured_pdf_text.evaluation.canonical_document import CanonicalDocument
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +124,44 @@ def _norm(text: str, profile: NormProfile) -> str:
 
 
 def _collect_visible_text(nodes: Sequence[MarkdownNode]) -> str:
-    """Concatenate visible_text of all nodes, space-separated."""
-    return " ".join(n.visible_text for n in nodes if n.visible_text.strip())
+    """Deduplicated visible text: uses CanonicalDocument leaf projection.
+
+    Container nodes (TABLE, TABLE_ROW, LIST) are excluded so their text is
+    not counted multiple times alongside their children (bug A02 fix).
+    """
+    doc = CanonicalDocument.from_nodes(nodes)
+    return doc.visible_text
+
+
+def _node_markdown_repr(node: MarkdownNode) -> str:
+    """Return the raw Markdown text for a node.
+
+    When raw_markdown is populated by the parser, use it directly.
+    When it is empty (e.g. HEADING tokens whose tok.map is None), reconstruct
+    a synthetic Markdown representation that preserves formatting markers so
+    that cer_markdown_raw can still distinguish `# H` from `## H`.
+    """
+    if node.raw_markdown.strip():
+        return node.raw_markdown
+    # Reconstruct: use kind + heading_level + visible_text
+    if node.kind == NodeKind.HEADING:
+        level = node.heading_level or 1
+        return f"{'#' * level} {node.visible_text}"
+    return node.visible_text
+
+
+def _collect_raw_markdown(nodes: Sequence[MarkdownNode]) -> str:
+    """Concatenate raw Markdown representation of all leaf nodes, newline-separated.
+
+    Used for MET-TX01 (cer_markdown_raw): measures CER on the Markdown body
+    including formatting markers, NOT on visible_text (bug A10 fix).
+
+    When raw_markdown is empty on a node (parser did not populate tok.map),
+    a synthetic representation is reconstructed from kind + attributes.
+    """
+    doc = CanonicalDocument.from_nodes(nodes)
+    parts = [_node_markdown_repr(n) for n in doc.leaf_nodes]
+    return "\n".join(p for p in parts if p.strip())
 
 
 def _make_result(
@@ -210,7 +256,30 @@ def _wer_result(
 
 
 # ---------------------------------------------------------------------------
-# MET-TX01 / TX02 / TX03: CER sequential
+# MET-TX01: CER on raw Markdown body (not visible text)
+# ---------------------------------------------------------------------------
+
+def cer_markdown_raw(
+    ref_nodes: Sequence[MarkdownNode],
+    hyp_nodes: Sequence[MarkdownNode],
+) -> MetricResult:
+    """MET-TX01: CER on raw Markdown body strings (bug A10 fix).
+
+    Uses the raw_markdown field of each node — preserves formatting markers
+    like **bold**, # headings, | table pipes.  Page-marker lines are already
+    excluded because parse_document strips them before building nodes.
+    NFC + CRLF normalisation applied; no Markdown syntax removal.
+    """
+    profile = NormProfile.RAW
+    ref_text = _collect_raw_markdown(ref_nodes)
+    hyp_text = _collect_raw_markdown(hyp_nodes)
+    ref_n = _norm(ref_text, profile)
+    hyp_n = _norm(hyp_text, profile)
+    return _cer_result(list(ref_n), list(hyp_n), "MET-TX01", profile)
+
+
+# ---------------------------------------------------------------------------
+# MET-TX02 / TX03: CER sequential on visible text (leaf projection)
 # ---------------------------------------------------------------------------
 
 def cer_sequential(
@@ -219,7 +288,11 @@ def cer_sequential(
     profile: NormProfile,
     definition_id: str,
 ) -> MetricResult:
-    """CER on the full concatenated text under the given normalisation profile."""
+    """CER on deduplicated visible text under the given normalisation profile.
+
+    Uses CanonicalDocument leaf projection so container nodes (TABLE, LIST)
+    do not duplicate their children's text (bug A02 fix).
+    """
     ref_text = _collect_visible_text(ref_nodes)
     hyp_text = _collect_visible_text(hyp_nodes)
 
@@ -359,6 +432,7 @@ def text_coverage_recall(
     """MET-TX06: token-level multiset recall, order-independent (spec §4.3).
 
     recall = Σ min(ref_count, hyp_count) / Σ ref_count
+    Uses leaf-only projection to avoid double-counting (bug A02 fix).
     """
     profile = NormProfile.UNICODE_LAYOUT
     ref_text = _collect_visible_text(ref_nodes)
@@ -435,18 +509,18 @@ def text_coverage_precision(
 @dataclass
 class TextMetrics:
     """All text-quality metrics for one evaluation run."""
-    cer_raw:                MetricResult | None = None
-    cer_normalized:         MetricResult | None = None
-    cer_visible:            MetricResult | None = None
-    wer_sequential:         MetricResult | None = None
-    aligned_block_text_cer: MetricResult | None = None
-    coverage_recall:        MetricResult | None = None
-    coverage_precision:     MetricResult | None = None
+    cer_raw:                MetricResult | None = None   # MET-TX01: raw Markdown body
+    cer_normalized:         MetricResult | None = None   # MET-TX02: visible text, unicode_layout
+    cer_visible:            MetricResult | None = None   # MET-TX03: visible text, visible_text profile
+    wer_sequential:         MetricResult | None = None   # MET-TX04
+    aligned_block_text_cer: MetricResult | None = None   # MET-TX05
+    coverage_recall:        MetricResult | None = None   # MET-TX06
+    coverage_precision:     MetricResult | None = None   # MET-TX07
 
     def to_dict(self) -> dict:
         result: dict = {}
         _MAP = {
-            "cer_sequential_raw":        self.cer_raw,
+            "cer_markdown_raw":          self.cer_raw,        # A10 fix: was cer_sequential_raw
             "cer_sequential_normalized": self.cer_normalized,
             "cer_sequential_visible":    self.cer_visible,
             "wer_sequential":            self.wer_sequential,
@@ -478,10 +552,7 @@ def compute_text_metrics(
     TextMetrics dataclass with all metric results.
     """
     return TextMetrics(
-        cer_raw=cer_sequential(
-            ref_nodes, hyp_nodes,
-            NormProfile.RAW, "MET-TX01",
-        ),
+        cer_raw=cer_markdown_raw(ref_nodes, hyp_nodes),          # MET-TX01: raw body
         cer_normalized=cer_sequential(
             ref_nodes, hyp_nodes,
             NormProfile.UNICODE_LAYOUT, "MET-TX02",

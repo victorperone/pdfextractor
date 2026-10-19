@@ -1,16 +1,20 @@
-"""Evaluation sub-package for PDFExtractor V2 metrics.
+"""Evaluation sub-package — unified engine (schema evaluation-3.0.0).
 
 Modules
 -------
-models           — MarkdownNode, PageScope, AlignedPair, MetricResult
-normalization    — Normalisation profiles (raw, unicode_layout, visible_text)
-markdown_parser  — CommonMark+GFM parser producing MarkdownNode trees
-page_scope       — Page-set selection, missing/extra page classification
-block_alignment  — 1:1 block aligner with provenance (split/merge)
-text_metrics     — CER/WER sequential + aligned block CER + coverage (MET-TX*)
-structure_metrics — Heading/paragraph/list/reading-order metrics
-table_metrics    — Table detection, rows, columns, cells
-critical_data    — Numbers, currency, dates, CPF/CNPJ, identifiers
+models             — MarkdownNode, PageScope, AlignedPair, MetricResult
+normalization      — Normalisation profiles (raw, unicode_layout, visible_text)
+canonical_document — Leaf-node projection (no overlapping ancestor text)
+markdown_parser    — CommonMark+GFM parser producing MarkdownNode trees
+page_scope         — Page-set selection, missing/extra page classification
+block_alignment    — 1:1 block aligner with provenance (split/merge)
+text_metrics       — CER/WER sequential + aligned block CER + coverage (MET-TX*)
+structure_metrics  — Heading/paragraph/list/reading-order metrics
+table_metrics      — Table detection, rows, columns, cells
+critical_data      — Numbers, currency, percent, dates, CPF/CNPJ, identifiers
+integrity_metrics  — Duplicate, missing pages, validity
+aggregation        — Micro/macro aggregation, comparability, eligibility
+evaluator          — Central evaluate() API (EvaluationRequest → result dict)
 """
 from structured_pdf_text.evaluation.models import (
     MarkdownNode,
@@ -35,9 +39,11 @@ from structured_pdf_text.evaluation.block_alignment import (
     MIN_SCORE,
     AMBIGUITY_MARGIN,
 )
+from structured_pdf_text.evaluation.canonical_document import CanonicalDocument
 from structured_pdf_text.evaluation.text_metrics import (
     compute_text_metrics,
     TextMetrics,
+    cer_markdown_raw,
     cer_sequential,
     wer_sequential,
     aligned_block_text_cer,
@@ -104,6 +110,7 @@ __all__ = [
     "aggregate_metric", "AggregatedMetric", "V2DocumentMetrics",
     "check_comparability", "evaluate_rank_eligibility",
     "compute_text_metrics", "TextMetrics",
-    "cer_sequential", "wer_sequential", "aligned_block_text_cer",
+    "CanonicalDocument",
+    "cer_markdown_raw", "cer_sequential", "wer_sequential", "aligned_block_text_cer",
     "text_coverage_recall", "text_coverage_precision",
 ]

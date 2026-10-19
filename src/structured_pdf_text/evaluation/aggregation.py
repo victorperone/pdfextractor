@@ -154,8 +154,8 @@ def aggregate_metric(
 
 @dataclass
 class V2DocumentMetrics:
-    """Complete V2 metric result for a single (ref, hyp) evaluation."""
-    schema_version: str = "evaluation-v2.0"
+    """Complete unified metric result for a single (ref, hyp) evaluation."""
+    schema_version: str = "evaluation-3.0.0"
 
     # Per-group results (all are MetricResult dicts via dataclass.to_dict())
     text:           dict = field(default_factory=dict)   # MET-TX01..TX07
@@ -254,13 +254,14 @@ def check_comparability(
         reasons.append(f"schema_version_mismatch: {va!r} vs {vb!r}")
 
     # Reference hash must match (same ground truth).
-    # If either side is None or missing, that is itself a mismatch (spec §10.4:
-    # "hash/versão de configuração ausente → comparabilidade rejeitada").
+    # A09 fix: if EITHER side has no hash, that is a mismatch — None==None
+    # must NOT be treated as comparable ("fail-closed" rule, spec §10.4).
     ia = result_a.get("inputs", {})
     ib = result_b.get("inputs", {})
     ref_a = ia.get("reference_sha256")
     ref_b = ib.get("reference_sha256")
-    if ref_a != ref_b:
+    hash_mismatch = (ref_a is None or ref_b is None or ref_a != ref_b)
+    if hash_mismatch:
         a_display = (ref_a[:12] + "…") if ref_a else repr(ref_a)
         b_display = (ref_b[:12] + "…") if ref_b else repr(ref_b)
         reasons.append(f"reference_sha256_mismatch: {a_display} vs {b_display}")

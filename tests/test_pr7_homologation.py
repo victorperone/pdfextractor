@@ -143,10 +143,10 @@ class TestAcceptanceConditions:
     """§0.3: conditions that must hold before V2 cutover."""
 
     def test_AC01_schema_version_constant(self):
-        """V2 output always carries schema_version = 'evaluation-v2.0'."""
+        """Unified output carries schema_version = 'evaluation-3.0.0' (A09/schema fix)."""
         doc = _make_v2_doc(_REF_SIMPLE, _HYP_PERFECT)
         result = doc.to_dict()
-        assert result["schema_version"] == "evaluation-v2.0"
+        assert result["schema_version"] == "evaluation-3.0.0"
 
     def test_AC02_na_preserved_not_zero(self):
         """N/A metrics appear as null value, not 0.0 or 1.0."""
@@ -326,7 +326,7 @@ class TestAgentIntegrationContract:
         metrics_files = list(output_dir.glob("metrics_v2_*.json"))
         assert len(metrics_files) == 1, "Expected one metrics JSON"
         data = json.loads(metrics_files[0].read_text())
-        assert data["schema_version"] == "evaluation-v2.0"
+        assert data["schema_version"] == "evaluation-3.0.0"
 
     def test_I08_reference_hash_stable(self):
         """I08: SHA-256 of reference does not change across two computations."""
@@ -457,11 +457,11 @@ class TestAgentIntegrationContract:
         assert cer_def != wer_def
 
     def test_I16_schema_version_field_present(self):
-        """I16: every V2 result has schema_version for version detection."""
+        """I16: every result has schema_version for version detection (now 3.0.0)."""
         doc = _make_v2_doc(_REF_SIMPLE, _HYP_PERFECT)
         result = doc.to_dict()
         assert "schema_version" in result
-        assert result["schema_version"] == "evaluation-v2.0"
+        assert result["schema_version"] == "evaluation-3.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -699,10 +699,13 @@ class TestComparabilityGuard:
         assert reasons == []
 
     def test_missing_inputs_does_not_crash(self):
-        result_a = {"schema_version": "evaluation-v2.0"}
-        result_b = {"schema_version": "evaluation-v2.0"}
+        # A09 fix: ausência de hash de gabarito é incomparável (fail-closed).
+        # O teste não deve travar, mas deve retornar ok=False com razão explícita.
+        result_a = {"schema_version": "evaluation-3.0.0"}
+        result_b = {"schema_version": "evaluation-3.0.0"}
         ok, reasons = check_comparability(result_a, result_b)
-        assert ok  # no evidence of incompatibility without hashes
+        assert not ok  # hash ausente = incomparável (fail-closed, A09)
+        assert any("hash" in r.lower() or "reference" in r.lower() for r in reasons)
 
     def test_all_mismatches_collected(self):
         result_a = {
@@ -746,7 +749,7 @@ class TestRegradeScript:
         metrics_file = out / "metrics_v2_pytest_testrun.json"
         assert metrics_file.exists()
         data = json.loads(metrics_file.read_text())
-        assert data["schema_version"] == "evaluation-v2.0"
+        assert data["schema_version"] == "evaluation-3.0.0"
         assert "evaluation" in data
         assert "quality" in data
 

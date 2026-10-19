@@ -473,8 +473,10 @@ class TestComputeTextMetrics:
         pairs = [_matched("r1", "h1")]
         tm = compute_text_metrics(ref, hyp, pairs)
         d = tm.to_dict()
+        # A10 fix: chave renomeada de 'cer_sequential_raw' para 'cer_markdown_raw'
+        # (mede o corpo Markdown bruto, não o visible_text)
         expected_keys = {
-            "cer_sequential_raw",
+            "cer_markdown_raw",
             "cer_sequential_normalized",
             "cer_sequential_visible",
             "wer_sequential",
