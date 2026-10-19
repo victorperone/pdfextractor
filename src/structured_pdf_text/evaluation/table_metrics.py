@@ -18,6 +18,9 @@ MET-T07  cell_cer                    char-level error on matched cell pairs
 MET-T08  table_content_f1            multiset coverage of cell text (no positional requirement)
 MET-T09  table_row_order_accuracy    pairwise row order accuracy within matched tables
 MET-T10  table_column_order_accuracy pairwise column order accuracy within matched tables
+MET-T11  table_page_location_accuracy fraction of matched tables where hyp page == ref page;
+                                       separate from detection F1 — a table may be detected but
+                                       placed on the wrong page (spec §7.4 / T20)
 """
 from __future__ import annotations
 
@@ -626,18 +629,67 @@ def table_content_f1(
 
 
 # ---------------------------------------------------------------------------
+# MET-T11: Table page location accuracy
+# ---------------------------------------------------------------------------
+
+def table_page_location_accuracy(
+    ref_nodes: Sequence[MarkdownNode],
+    hyp_nodes: Sequence[MarkdownNode],
+) -> MetricResult:
+    """MET-T11: Fraction of matched tables where hyp page equals ref page.
+
+    A table may be content-matched (MET-T01 TP) but still appear on the wrong
+    page in the hypothesis output.  This metric is distinct from detection F1
+    and measures placement fidelity specifically.
+
+    - Only matched table pairs with page information on BOTH sides are counted.
+    - Pairs where either side has page=None are excluded (not penalised).
+    - If no matched pairs have page information, status=not_applicable.
+    """
+    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
+    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
+    ref_map = _build_parent_map(ref_nodes)
+    hyp_map = _build_parent_map(hyp_nodes)
+
+    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    if not matched:
+        return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T11",
+                            {"matched_table_pairs": 0})
+
+    total = 0
+    correct = 0
+    for ref_t, hyp_t, _ in matched:
+        if ref_t.page is None or hyp_t.page is None:
+            continue
+        total += 1
+        if ref_t.page == hyp_t.page:
+            correct += 1
+
+    if total == 0:
+        return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T11",
+                            {"matched_table_pairs": len(matched),
+                             "pairs_with_page_info": 0})
+    return _make_result(
+        correct / total, MetricStatus.OK, "MET-T11",
+        {"correct_page": correct, "total_with_page_info": total,
+         "matched_table_pairs": len(matched)},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Convenience: compute all table metrics
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TableMetrics:
     """All table metrics for one evaluation run."""
-    detection:    dict[str, MetricResult] = field(default_factory=dict)
-    rows_columns: dict[str, MetricResult] = field(default_factory=dict)
-    cells:        dict[str, MetricResult] = field(default_factory=dict)
-    content_f1:   MetricResult | None = None
-    row_order:    MetricResult | None = None
-    col_order:    MetricResult | None = None
+    detection:      dict[str, MetricResult] = field(default_factory=dict)
+    rows_columns:   dict[str, MetricResult] = field(default_factory=dict)
+    cells:          dict[str, MetricResult] = field(default_factory=dict)
+    content_f1:     MetricResult | None = None
+    row_order:      MetricResult | None = None
+    col_order:      MetricResult | None = None
+    page_location:  MetricResult | None = None
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -653,6 +705,8 @@ class TableMetrics:
             result["table_row_order_accuracy"] = self.row_order.to_dict()
         if self.col_order:
             result["table_column_order_accuracy"] = self.col_order.to_dict()
+        if self.page_location:
+            result["table_page_location_accuracy"] = self.page_location.to_dict()
         return result
 
 
@@ -660,7 +714,7 @@ def compute_table_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
 ) -> TableMetrics:
-    """Compute all table metrics (MET-T01 to MET-T10).
+    """Compute all table metrics (MET-T01 to MET-T11).
 
     Parameters
     ----------
@@ -672,10 +726,11 @@ def compute_table_metrics(
     TableMetrics dataclass with all metric results.
     """
     return TableMetrics(
-        detection    = table_detection_f1(ref_nodes, hyp_nodes),
-        rows_columns = table_row_and_column_metrics(ref_nodes, hyp_nodes),
-        cells        = cell_metrics(ref_nodes, hyp_nodes),
-        content_f1   = table_content_f1(ref_nodes, hyp_nodes),
-        row_order    = table_row_order_accuracy(ref_nodes, hyp_nodes),
-        col_order    = table_column_order_accuracy(ref_nodes, hyp_nodes),
+        detection     = table_detection_f1(ref_nodes, hyp_nodes),
+        rows_columns  = table_row_and_column_metrics(ref_nodes, hyp_nodes),
+        cells         = cell_metrics(ref_nodes, hyp_nodes),
+        content_f1    = table_content_f1(ref_nodes, hyp_nodes),
+        row_order     = table_row_order_accuracy(ref_nodes, hyp_nodes),
+        col_order     = table_column_order_accuracy(ref_nodes, hyp_nodes),
+        page_location = table_page_location_accuracy(ref_nodes, hyp_nodes),
     )

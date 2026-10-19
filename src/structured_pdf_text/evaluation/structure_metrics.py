@@ -8,16 +8,19 @@ Metrics defined here
 --------------------
 MET-S01  heading_detection_f1         P/R/F1 for headings present in output
 MET-S02  heading_level_match_rate     fraction of matched headings with correct level
-MET-S03  paragraph_detection_f1      P/R/F1 for paragraph blocks
-MET-S04  list_group_detection_f1     P/R/F1 for list container blocks
-MET-S05  list_item_detection_f1      P/R/F1 for list item blocks
-MET-S06  list_hierarchy_accuracy     fraction of matched items with correct depth
-MET-S07  pairwise_reading_order_acc  fraction of ref ordered pairs preserved in hyp
+MET-S03  heading_text_cer             char-level error rate on matched heading pairs
+                                       (uses visible_text; mismatched level does NOT block CER —
+                                       T24: '# Título correto' vs '# Titulo correto' → CER > 0)
+MET-S04  paragraph_detection_f1      P/R/F1 for paragraph blocks
+MET-S05  list_group_detection_f1     P/R/F1 for list container blocks
+MET-S06  list_item_detection_f1      P/R/F1 for list item blocks
+MET-S07  list_hierarchy_accuracy     fraction of matched items with correct depth
+MET-S08  pairwise_reading_order_acc  fraction of ref ordered pairs preserved in hyp
                                       (universe: all textual units)
-MET-S08  block_type_confusion        dict mapping (expected, observed) mismatches
-MET-S09  block_order_pairwise_acc    pairwise order accuracy for structural blocks only
+MET-S09  block_type_confusion        dict mapping (expected, observed) mismatches
+MET-S10  block_order_pairwise_acc    pairwise order accuracy for structural blocks only
                                       (universe: heading/paragraph/table/list/code —
-                                       distinct from MET-S07 per spec §8.1)
+                                       distinct from MET-S08 per spec §8.1)
 MET-SL01 list_item_text_cer_on_matched  CER on matched item text pairs
 MET-SL02 list_kind_accuracy          ordered vs unordered agreement on matched groups
 MET-SL03 list_item_order_accuracy    pairwise order of items within each parent list
@@ -182,7 +185,93 @@ def heading_detection_f1(
 
 
 # ---------------------------------------------------------------------------
-# MET-S03: Paragraph detection
+# MET-S03: Heading text CER (on matched heading pairs)
+# ---------------------------------------------------------------------------
+
+def heading_text_cer(
+    pairs: Sequence[AlignedPair],
+    ref_nodes: Sequence[MarkdownNode],
+    hyp_nodes: Sequence[MarkdownNode],
+) -> MetricResult:
+    """MET-S03: CER on matched heading pairs, using visible_text.
+
+    A heading match does NOT require identical text — the alignment matches
+    headings that are in the same structural position.  CER then measures how
+    far the text deviates.  An accent difference (e.g. 'Título' vs 'Titulo')
+    will produce CER > 0 (strict profile: accents preserved).
+
+    - Only pairs where both ref and hyp are HEADING nodes are included.
+    - Missing ref headings (FN) contribute D-chars to the numerator and their
+      length to the denominator, ensuring they are not silently ignored.
+    - Unmatched hyp headings (FP) contribute I-chars tracked separately but
+      not added to the denominator (undefined_denominator for those).
+    """
+    ref_id_to_node: dict[str, MarkdownNode] = {n.node_id: n for n in ref_nodes}
+    hyp_id_to_node: dict[str, MarkdownNode] = {n.node_id: n for n in hyp_nodes}
+
+    ref_headings = {n.node_id for n in ref_nodes if n.kind == NodeKind.HEADING}
+    hyp_headings = {n.node_id for n in hyp_nodes if n.kind == NodeKind.HEADING}
+
+    # Build ref→hyp match for heading pairs only
+    ref_to_hyp_heading: dict[str, str] = {}
+    matched_hyp_heading_ids: set[str] = set()
+    for p in pairs:
+        if p.status not in (AlignmentStatus.MATCHED, AlignmentStatus.AMBIGUOUS):
+            continue
+        if p.reference_id in ref_headings and p.hypothesis_id in hyp_headings:
+            ref_to_hyp_heading[p.reference_id] = p.hypothesis_id
+            matched_hyp_heading_ids.add(p.hypothesis_id)
+
+    cer_num = 0
+    cer_den = 0
+    insertion_only_chars = 0
+
+    # Matched pairs: compute edit distance
+    for rid, hid in ref_to_hyp_heading.items():
+        rn = ref_id_to_node.get(rid)
+        hn = hyp_id_to_node.get(hid)
+        if rn is None or hn is None:
+            continue
+        ref_text = rn.visible_text
+        hyp_text = hn.visible_text
+        dist = _lev_distance(ref_text, hyp_text)
+        if len(ref_text) > 0:
+            cer_num += dist
+            cer_den += len(ref_text)
+        elif len(hyp_text) > 0:
+            insertion_only_chars += len(hyp_text)
+
+    # Unmatched ref headings → all chars are deletions
+    for rid in ref_headings:
+        if rid not in ref_to_hyp_heading:
+            rn = ref_id_to_node.get(rid)
+            if rn and len(rn.visible_text) > 0:
+                cer_num += len(rn.visible_text)
+                cer_den += len(rn.visible_text)
+
+    if cer_den == 0 and insertion_only_chars == 0 and not ref_headings:
+        return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-S03",
+                            {"matched_pairs": 0, "ref_headings": 0})
+
+    if cer_den == 0:
+        # Only FP (unmatched hyp headings) or ref headings all had empty text
+        return _make_result(None, MetricStatus.UNDEFINED_DENOMINATOR, "MET-S03",
+                            {"edit_distance": cer_num, "ref_chars": 0,
+                             "insertion_only_chars": insertion_only_chars})
+
+    return _make_result(
+        cer_num / cer_den,
+        MetricStatus.OK,
+        "MET-S03",
+        {"edit_distance": cer_num, "ref_chars": cer_den,
+         "matched_pairs": len(ref_to_hyp_heading),
+         "insertion_only_chars": insertion_only_chars},
+        direction="lower_is_better",
+    )
+
+
+# ---------------------------------------------------------------------------
+# MET-S04: Paragraph detection
 # ---------------------------------------------------------------------------
 
 def paragraph_detection_f1(
@@ -538,17 +627,20 @@ def block_order_pairwise_accuracy(
 @dataclass
 class StructureMetrics:
     """All structure/list/order metrics for one evaluation run."""
-    heading:        dict[str, MetricResult] = field(default_factory=dict)
-    paragraph:      dict[str, MetricResult] = field(default_factory=dict)
-    lists:          dict[str, MetricResult] = field(default_factory=dict)
-    reading_order:  MetricResult | None = None
-    block_order:    MetricResult | None = None
-    type_confusion: dict[str, int] = field(default_factory=dict)
+    heading:         dict[str, MetricResult] = field(default_factory=dict)
+    heading_cer:     MetricResult | None = None
+    paragraph:       dict[str, MetricResult] = field(default_factory=dict)
+    lists:           dict[str, MetricResult] = field(default_factory=dict)
+    reading_order:   MetricResult | None = None
+    block_order:     MetricResult | None = None
+    type_confusion:  dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         result: dict = {}
         for k, v in self.heading.items():
             result[k] = v.to_dict()
+        if self.heading_cer:
+            result["heading_text_cer"] = self.heading_cer.to_dict()
         for k, v in self.paragraph.items():
             result[k] = v.to_dict()
         for k, v in self.lists.items():
@@ -566,7 +658,7 @@ def compute_structure_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
 ) -> StructureMetrics:
-    """Compute all structure metrics (MET-S01 to MET-S09).
+    """Compute all structure metrics (MET-S01 to MET-S10, MET-SL01 to MET-SL04).
 
     Parameters
     ----------
@@ -580,6 +672,7 @@ def compute_structure_metrics(
     """
     return StructureMetrics(
         heading        = heading_detection_f1(pairs, ref_nodes, hyp_nodes),
+        heading_cer    = heading_text_cer(pairs, ref_nodes, hyp_nodes),
         paragraph      = paragraph_detection_f1(pairs, ref_nodes, hyp_nodes),
         lists          = list_metrics(pairs, ref_nodes, hyp_nodes),
         reading_order  = pairwise_reading_order_accuracy(pairs),
