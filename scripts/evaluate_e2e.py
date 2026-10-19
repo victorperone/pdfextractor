@@ -162,6 +162,13 @@ def _diagnostic_reasons(diag) -> tuple[list[str], list[str]]:
     return partial, complexity
 
 
+def _selected_page_numbers(config, document) -> list[int]:
+    """Return the requested 1-based page scope, retaining pages with no output."""
+    if config.page_indices is not None:
+        return sorted({int(index) + 1 for index in config.page_indices})
+    return sorted({int(page.page_index) + 1 for page in document.pages})
+
+
 def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None, provider: str | None = None):
     """Build an ExtractorConfig for the given engine and extraction mode.
 
@@ -475,11 +482,7 @@ def main() -> int:
     memory_stats.update(memory_sampler.as_dict())
 
     from structured_pdf_text.benchmark_protocol import protocol_manifest
-    selected_page_numbers = (
-        sorted(index + 1 for index in config.page_indices)
-        if config.page_indices is not None
-        else sorted(page.page_index + 1 for page in document.pages)
-    )
+    selected_page_numbers = _selected_page_numbers(config, document)
     manifest = {
         "schema_version": "2.0",
         "run_id": run_id,

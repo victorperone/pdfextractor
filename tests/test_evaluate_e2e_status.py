@@ -1,4 +1,9 @@
-from scripts.evaluate_e2e import _classify_document_status, _classify_page_status, _page_body
+from scripts.evaluate_e2e import (
+    _classify_document_status,
+    _classify_page_status,
+    _page_body,
+    _selected_page_numbers,
+)
 from scripts.evaluate_e2e import _diagnostic_reasons
 from types import SimpleNamespace
 
@@ -30,3 +35,15 @@ def test_partial_reasons_and_complexity_reasons_are_independent_fields():
     ))
     assert partial == ["page_ocr_unavailable"]
     assert complexity == ["low_native_text"]
+
+
+def test_selected_page_scope_retains_requested_pages_missing_from_output():
+    config = SimpleNamespace(page_indices=(0, 1, 2))
+    document = SimpleNamespace(pages=[SimpleNamespace(page_index=0), SimpleNamespace(page_index=2)])
+    assert _selected_page_numbers(config, document) == [1, 2, 3]
+
+
+def test_all_pages_scope_uses_document_page_indices():
+    config = SimpleNamespace(page_indices=None)
+    document = SimpleNamespace(pages=[SimpleNamespace(page_index=0), SimpleNamespace(page_index=4)])
+    assert _selected_page_numbers(config, document) == [1, 5]
