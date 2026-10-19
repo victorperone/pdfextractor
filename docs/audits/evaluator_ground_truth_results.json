@@ -1,0 +1,290 @@
+{
+  "audit_date": "2026-10-19",
+  "head": "439bd75",
+  "working_tree_included_pending_rapidocr_changes": true,
+  "python_version": "3.12.13",
+  "packages": {
+    "pytest": "9.1.1",
+    "markdown-it-py": "4.2.0",
+    "rapidocr": "3.9.2",
+    "onnxruntime": "1.30.0",
+    "openvino": "2024.4.0"
+  },
+  "repository_suite": {
+    "exit_code": 0,
+    "passed": 1736,
+    "skipped": 6,
+    "xfail": 4,
+    "total": 1746
+  },
+  "independent_requirements_probes": {
+    "passed": 7,
+    "failed": 32,
+    "errors": 0,
+    "total": 39,
+    "cases": [
+      {
+        "name": "test_selected_page_scope_applies_to_quality",
+        "status": "failed",
+        "assertion": "assert 0.714286 == 0"
+      },
+      {
+        "name": "test_selected_page_scope_applies_to_missing_page_rate",
+        "status": "failed",
+        "assertion": "assert [2] == []\n  \n  Left contains one more item: 2\n  Use -v to get more diff"
+      },
+      {
+        "name": "test_same_effective_reference_hash_implies_same_evaluated_reference",
+        "status": "failed",
+        "assertion": "AssertionError: assert {'text': {'ce....}, ...}, ...} == {'text': {'ce....}, ...}, ...}\n  \n  Omitting 3 identical items, use -vv to show\n  Differing items:\n  {'structure': {'heading_detection_f1': {'value': 0.0, 'status': 'false_negative_only', 'direction': 'higher_is_better'..._match_rate': {'value': None, 'status': 'not_applicable', 'direction': 'higher_is_better', 'unit': 'ratio', ...}, ...}} != {'structure': {'heading_detection_f1': {'value': 0.0, 'status': 'false_negative_only', 'direction': 'higher_is_better'..._match_rate': {'value': None, 'status': 'not_applicable', 'direction': 'higher_is_better', 'unit': 'ratio', ...}, ...}}\n  {'text': {'cer_markdown_raw': {'v...\n  \n  ...Full output truncated (2 lines hidden), use '-vv' to show"
+      },
+      {
+        "name": "test_missing_whole_table_has_full_cell_deletion",
+        "status": "failed",
+        "assertion": "assert None == 1"
+      },
+      {
+        "name": "test_missing_table_row_reduces_cell_accuracy",
+        "status": "failed",
+        "assertion": "assert 1.0 < 1"
+      },
+      {
+        "name": "test_missing_table_row_increases_cell_cer",
+        "status": "failed",
+        "assertion": "assert 0.0 > 0"
+      },
+      {
+        "name": "test_raw_markdown_cer_sees_bold_delimiters",
+        "status": "failed",
+        "assertion": "assert 0.0 > 0"
+      },
+      {
+        "name": "test_visible_text_keeps_adjacent_inline_text_together",
+        "status": "failed",
+        "assertion": "assert 0.4 == 0"
+      },
+      {
+        "name": "test_visible_text_preserves_literal_code_characters",
+        "status": "failed",
+        "assertion": "assert 0.0 > 0"
+      },
+      {
+        "name": "test_aligned_cer_does_not_count_table_ancestors",
+        "status": "failed",
+        "assertion": "assert 50 == 15"
+      },
+      {
+        "name": "test_changed_paragraph_boundaries_are_penalised",
+        "status": "failed",
+        "assertion": "assert 1.0 < 1"
+      },
+      {
+        "name": "test_inverted_pages_are_not_perfect_reading_order",
+        "status": "failed",
+        "assertion": "assert 1.0 < 1"
+      },
+      {
+        "name": "test_ordered_list_changed_start_is_measured",
+        "status": "failed",
+        "assertion": "assert None == 0"
+      },
+      {
+        "name": "test_page_marker_in_fenced_code_is_literal",
+        "status": "failed",
+        "assertion": "assert {1, 2} == {1}\n  \n  Extra items in the left set:\n  2\n  Use -v to get more diff"
+      },
+      {
+        "name": "test_macro_keeps_zero_f1_from_missing_or_invented_entities[false_negative_only]",
+        "status": "failed",
+        "assertion": "AssertionError: assert 1.0 == 0.5\n +  where 1.0 = AggregatedMetric(definition_id='', direction='higher_is_better', n_applicable=1, n_total=2, micro_value=None, macro_value=1.0, worst_value=1.0, median_value=1.0, min_value=1.0, max_value=1.0, values=[1.0]).macro_value\n +    where AggregatedMetric(definition_id='', direction='higher_is_better', n_applicable=1, n_total=2, micro_value=None, macro_value=1.0, worst_value=1.0, median_value=1.0, min_value=1.0, max_value=1.0, values=[1.0]) = aggregate_metric([MetricResult(value=1.0, status=<MetricStatus.OK: 'ok'>, direction='higher_is_better', unit='ratio', definition_id='',..., unit='ratio', definition_id='', counts={}, scope='document', normalization_profile=None, warnings=[], coverage=None)])"
+      },
+      {
+        "name": "test_macro_keeps_zero_f1_from_missing_or_invented_entities[false_positive_only]",
+        "status": "failed",
+        "assertion": "AssertionError: assert 1.0 == 0.5\n +  where 1.0 = AggregatedMetric(definition_id='', direction='higher_is_better', n_applicable=1, n_total=2, micro_value=None, macro_value=1.0, worst_value=1.0, median_value=1.0, min_value=1.0, max_value=1.0, values=[1.0]).macro_value\n +    where AggregatedMetric(definition_id='', direction='higher_is_better', n_applicable=1, n_total=2, micro_value=None, macro_value=1.0, worst_value=1.0, median_value=1.0, min_value=1.0, max_value=1.0, values=[1.0]) = aggregate_metric([MetricResult(value=1.0, status=<MetricStatus.OK: 'ok'>, direction='higher_is_better', unit='ratio', definition_id='',..., unit='ratio', definition_id='', counts={}, scope='document', normalization_profile=None, warnings=[], coverage=None)])"
+      },
+      {
+        "name": "test_public_comparator_rejects_different_pdfs",
+        "status": "failed",
+        "assertion": "assert True is False"
+      },
+      {
+        "name": "test_public_comparator_rejects_missing_hash_protocol",
+        "status": "failed",
+        "assertion": "assert True is False"
+      },
+      {
+        "name": "test_manifest_without_ground_truth_is_rejected",
+        "status": "failed",
+        "assertion": "AssertionError: assert 0 != 0\n +  where 0 = CompletedProcess(args=['/home/victor-wsl/workspace/pdfextractor/.venv/bin/python', '/home/victor-wsl/workspace/pdfextr...mp/pytest-of-victor-wsl/pytest-19/test_manifest_without_ground_t0/out', '--quiet'], returncode=0, stdout='', stderr='').returncode"
+      },
+      {
+        "name": "test_canonical_failure_does_not_return_cli_success",
+        "status": "failed",
+        "assertion": "AssertionError: assert (0 != 0 or False)\n +  where 0 = CompletedProcess(args=['/home/victor-wsl/workspace/pdfextractor/.venv/bin/python', '/home/victor-wsl/workspace/pdfextr...mp/pytest-of-victor-wsl/pytest-19/test_canonical_failure_does_no0/out', '--quiet'], returncode=0, stdout='', stderr='').returncode\n +  and   False = exists()\n +    where exists = (PosixPath('/tmp/pytest-of-victor-wsl/pytest-19/test_canonical_failure_does_no0/out') / 'metrics_v3_audit_r1.json').exists"
+      },
+      {
+        "name": "test_regrade_keeps_run_stability_metadata",
+        "status": "failed",
+        "assertion": "AssertionError: assert 'valid' == 'partial'\n  \n  - partial\n  + valid"
+      },
+      {
+        "name": "test_canonical_renderer_shows_run_outcomes",
+        "status": "failed",
+        "assertion": "AssertionError: assert ('recovered' in '# Comparativo de perfis de implantação OCR\\n\\nMétricas do avaliador (`schema_version: evaluation-3.0.0`).\\n\\nEngines ...tricas indisponíveis |\\n|---|---|---|---|---|---:|---:|\\n| `audit` | — | `evaluation-3.0.0` | ok | sim | 14 | 52 |\\n\\n')"
+      },
+      {
+        "name": "test_raw_reference_identity_hash_is_platform_stable",
+        "status": "passed"
+      },
+      {
+        "name": "test_critical_data_penalises_cross_page_relocation",
+        "status": "passed"
+      },
+      {
+        "name": "test_critical_percent_is_distinct_from_plain_number",
+        "status": "passed"
+      },
+      {
+        "name": "test_cli_comparator_rejects_different_pdfs",
+        "status": "passed"
+      },
+      {
+        "name": "test_legacy_missing_table_penalty_is_fixed",
+        "status": "passed"
+      },
+      {
+        "name": "test_legacy_perfect_table_with_negative_page_keeps_f1",
+        "status": "passed"
+      },
+      {
+        "name": "test_html_table_ground_truth_is_not_discarded",
+        "status": "failed",
+        "assertion": "assert None == 1"
+      },
+      {
+        "name": "test_valid_four_backtick_fence_with_literal_triples_is_valid",
+        "status": "failed",
+        "assertion": "AssertionError: assert 'invalid' == 'valid'\n  \n  - valid\n  + invalid\n  ? ++"
+      },
+      {
+        "name": "test_produced_metric_artifact_can_be_used_by_runner_comparator[False]",
+        "status": "failed",
+        "assertion": "AssertionError: ERROR: mixed schema versions:\n    • Engine 'engine_a': schema version 'missing' is not accepted. Only evaluation-3.0.0 is supported. Re-evaluate with regrade_existing.py.\n    • Engine 'engine_b': schema version 'missing' is not accepted. Only evaluation-3.0.0 is supported. Re-evaluate with regrade_existing.py.\n  \nassert 1 == 0\n +  where 1 = CompletedProcess(args=['/home/victor-wsl/workspace/pdfextractor/.venv/bin/python', '/home/victor-wsl/workspace/pdfextr...schema version 'missing' is not accepted. Only evaluation-3.0.0 is supported. Re-evaluate with regrade_existing.py.\\n\").returncode"
+      },
+      {
+        "name": "test_produced_metric_artifact_can_be_used_by_runner_comparator[True]",
+        "status": "passed"
+      },
+      {
+        "name": "test_compute_and_regrade_accept_same_implicit_single_page_input",
+        "status": "failed",
+        "assertion": "AssertionError: ERROR: no pages found in reference\n  \nassert 1 == 0\n +  where 1 = CompletedProcess(args=['/home/victor-wsl/workspace/pdfextractor/.venv/bin/python', '/home/victor-wsl/workspace/pdfextr...st_compute_and_regrade_accep0/out', '--quiet'], returncode=1, stdout='', stderr='ERROR: no pages found in reference\\n').returncode"
+      },
+      {
+        "name": "test_same_run_id_with_different_input_preserves_prior_artifact",
+        "status": "failed",
+        "assertion": "assert (0 != 0 or b'{\\n  \"schem...\": 51\\n  }\\n}' == b'{\\n  \"schem...\": 52\\n  }\\n}'\n +  where 0 = CompletedProcess(args=['/home/victor-wsl/workspace/pdfextractor/.venv/bin/python', '/home/victor-wsl/workspace/pdfextr...mp/pytest-of-victor-wsl/pytest-19/test_same_run_id_with_differen0/out', '--quiet'], returncode=0, stdout='', stderr='').returncode\n  \n  At index 358 diff: b'6' != b'5'\n  Use -v to get more diff)"
+      },
+      {
+        "name": "test_compute_manifest_with_embedded_marker_produces_canonical_artifact",
+        "status": "failed",
+        "assertion": "AssertionError: assert False\n +  where False = exists()\n +    where exists = (PosixPath('/tmp/pytest-of-victor-wsl/pytest-19/test_compute_manifest_with_emb0/out') / 'metrics_v3_audit_r1.json').exists"
+      },
+      {
+        "name": "test_parser_identity_reports_installed_version",
+        "status": "failed",
+        "assertion": "AssertionError: assert '4.2.0' in 'markdown-it-py-3.0.0+gfm'\n +  where '4.2.0' = <function version at 0x732a134318a0>('markdown-it-py')"
+      },
+      {
+        "name": "test_legacy_parser_keeps_empty_structural_table_row",
+        "status": "failed",
+        "assertion": "assert 2 == 4"
+      },
+      {
+        "name": "test_legacy_parser_keeps_escaped_pipe_inside_one_cell",
+        "status": "failed",
+        "assertion": "AssertionError: assert 3 == 2\n +  where 3 = len(['A \\\\', 'B', 'C'])"
+      },
+      {
+        "name": "test_legacy_heading_cer_sees_text_error",
+        "status": "failed",
+        "assertion": "assert (None is not None)"
+      }
+    ]
+  },
+  "rapidocr_synthetic_image": [
+    {
+      "provider": "onnxruntime",
+      "status": "ready",
+      "reason": null,
+      "details": {
+        "status": "ok",
+        "token_count": 4,
+        "smoke_cer": 0.0,
+        "smoke_max_cer": 0.4,
+        "precision_checks": {
+          "currency_exact": true,
+          "date_exact": true,
+          "percentage_exact": true,
+          "accented_portuguese": true,
+          "hyphen_preserved": true
+        },
+        "identity": "OCRBackendIdentity(engine='rapidocr', runtime='onnxruntime', profile='latin/pt-compatible', language='pt-BR', device='cpu', package_versions={'rapidocr': '3.9.2', 'onnxruntime': '1.30.0'}, artifact_hashes={'rec_model': 'b20bd37c168a570f583afbc8cd7925603890efbcdc000a59e22c269d160b5f5a', 'rec_keys': '3c0a8a79b612653c25f765271714f71281e4e955962c153e272b7b8c1d2b13ff'}, extra={'render_scale': 3.0, 'clahe': True, 'det_db_unclip_ratio': 1.8, 'det_db_box_thresh': 0.45, 'det_db_thresh': 0.25, 'text_score': 0.5, 'with_angle_cls': False, 'requested_threads': 1, 'effective_threads': 1, 'rec_model': '/tmp/rapidocr_latin_ppocrv5_rec.onnx', 'rec_keys': '/tmp/rapidocr_latin_ppocrv5_dict.txt', 'language_profile': 'latin/pt-compatible', 'det_model': None})"
+      }
+    },
+    {
+      "provider": "openvino",
+      "status": "ready",
+      "reason": null,
+      "details": {
+        "status": "ok",
+        "token_count": 4,
+        "smoke_cer": 0.0,
+        "smoke_max_cer": 0.4,
+        "precision_checks": {
+          "currency_exact": true,
+          "date_exact": true,
+          "percentage_exact": true,
+          "accented_portuguese": true,
+          "hyphen_preserved": true
+        },
+        "identity": "OCRBackendIdentity(engine='rapidocr', runtime='openvino', profile='latin/pt-compatible', language='pt-BR', device='cpu', package_versions={'rapidocr': '3.9.2', 'openvino': '2024.4.0'}, artifact_hashes={'rec_model': 'b20bd37c168a570f583afbc8cd7925603890efbcdc000a59e22c269d160b5f5a', 'rec_keys': '3c0a8a79b612653c25f765271714f71281e4e955962c153e272b7b8c1d2b13ff'}, extra={'render_scale': 3.0, 'clahe': True, 'det_db_unclip_ratio': 1.8, 'det_db_box_thresh': 0.45, 'det_db_thresh': 0.25, 'text_score': 0.5, 'with_angle_cls': False, 'requested_threads': 1, 'effective_threads': 1, 'rec_model': '/tmp/rapidocr_latin_ppocrv5_rec.onnx', 'rec_keys': '/tmp/rapidocr_latin_ppocrv5_dict.txt', 'language_profile': 'latin/pt-compatible', 'det_model': None})"
+      }
+    }
+  ],
+  "corpus_reference_inspection": {
+    "V3": {
+      "pages": 144,
+      "manifest_entries_without_expected_markdown": 144,
+      "projected_visible_chars": 32841,
+      "matrix_pointer_storage_min_gib": 8.04
+    },
+    "V4": {
+      "pages": 224,
+      "expected_markdown_with_embedded_page_marker": 222,
+      "html_table_pages": [
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        157,
+        158,
+        159,
+        160,
+        161,
+        162
+      ],
+      "projected_visible_chars": 631033,
+      "matrix_pointer_storage_min_gib": 2966.85
+    }
+  },
+  "scope_limits": [
+    "No corpus PDF-to-Markdown extraction",
+    "No native Windows execution",
+    "No commit or push",
+    "Quadratic matrix memory is a lower-bound calculation; large matrix was not allocated"
+  ]
+}

@@ -104,8 +104,8 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
         if configured_rec or configured_keys:
             rec, keys = configured_rec, configured_keys
         else:
-            rec = str(cache / "latin_PP-OCRv3_rec_mobile.onnx")
-            keys = str(cache / "latin_dict.txt")
+            rec = str(cache / "latin_PP-OCRv5_rec_mobile.onnx")
+            keys = str(cache / "ppocrv5_latin_dict.txt")
         if bool(rec) != bool(keys):
             return ReadinessResult(ReadinessStatus.INCOMPLETE, "model_configuration_incomplete")
         if rec and keys:

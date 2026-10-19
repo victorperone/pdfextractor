@@ -31,7 +31,8 @@ Or with a plain reference Markdown file:
         --output-dir output\\fase8
 
 Output:
-    output/fase8/metrics_{engine}_{run_id}.json
+    output/fase8/metrics_v3_{engine}_{run_id}.json (canonical)
+    output/fase8/metrics_{engine}_{run_id}.json (legacy diagnostics)
     output/fase8/errors_{engine}_{run_id}.md
 """
 from __future__ import annotations
@@ -51,6 +52,12 @@ from pathlib import Path
 _SRC = Path(__file__).parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+from structured_pdf_text.evaluation.evaluator import EvaluationRequest, evaluate_document
+from structured_pdf_text.evaluation.reference_inputs import (
+    document_pages, load_reference_text, load_run_metadata, manifest_pages,
+    selected_pages_from_run,
+)
 
 
 def _sha256_file(path: Path | None) -> str | None:
@@ -1235,34 +1242,13 @@ def aggregate_page_metrics(per_page: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 def _parse_pages(text: str) -> dict[int, str]:
-    """Split a Markdown document into a dict of {1-based page number → page text}, handling both '## Página 1' and '## Página 001 |' formats."""
-    pattern = re.compile(
-        r"^##\s+P[áa]gina\s+0*(\d+)",
-        re.MULTILINE | re.IGNORECASE,
-    )
-    matches = list(pattern.finditer(text))
-    if not matches:
-        return {}
-    pages: dict[int, str] = {}
-    for i, m in enumerate(matches):
-        num = int(m.group(1))
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        pages[num] = text[start:end].strip()
-    return pages
+    """Split with the same validation and implicit-page rules as the evaluator."""
+    return document_pages(text)
 
 
 def _load_reference_from_manifesto(manifesto_path: Path) -> dict[int, str]:
-    """Load per-page expected_markdown from the corpus manifesto JSON, returning {page_number → expected_markdown}."""
-    with open(manifesto_path, encoding="utf-8") as f:
-        data = json.load(f)
-    pages: dict[int, str] = {}
-    for entry in data.get("pages", []):
-        page_num = entry.get("page")
-        expected_md = entry.get("expected_markdown", "")
-        if page_num is not None and expected_md is not None:
-            pages[int(page_num)] = expected_md
-    return pages
+    data = json.loads(manifesto_path.read_text(encoding="utf-8"))
+    return manifest_pages(data)
 
 
 # ---------------------------------------------------------------------------
@@ -1461,7 +1447,7 @@ def main() -> int:
     ap.add_argument("--reference", type=Path, default=None, help="Reference Markdown file")
     ap.add_argument(
         "--manifesto", type=Path, default=None,
-        help="Corpus manifesto JSON (preferred over --reference; contains per-page expected_markdown)"
+        help="Corpus manifesto JSON (ground truth when --reference is absent; otherwise metadata)"
     )
     ap.add_argument(
         "--run-manifest", type=Path, default=None,
@@ -1498,23 +1484,21 @@ def main() -> int:
         print(f"  Hypothesis : {args.hypothesis}")
         print(f"  Source     : {args.manifesto or args.reference}")
 
-    hyp_text = args.hypothesis.read_text(encoding="utf-8")
-    hyp_pages = _parse_pages(hyp_text)
-
-    # A separate Markdown reference takes precedence; the manifesto can then
-    # provide page conditions and run metadata even when it has no reference text.
-    ref_pages: dict[int, str] = {}
-    if args.reference and args.reference.exists():
-        ref_text = args.reference.read_text(encoding="utf-8")
+    # Evaluate before writing either artifact. Canonical failures must make the
+    # command fail, including when an older artifact exists at the same path.
+    try:
+        hyp_text = args.hypothesis.read_text(encoding="utf-8")
+        ref_text = load_reference_text(args.reference, args.manifesto)
+        hyp_pages = _parse_pages(hyp_text)
         ref_pages = _parse_pages(ref_text)
-    elif args.manifesto and args.manifesto.exists():
-        ref_pages = _load_reference_from_manifesto(args.manifesto)
-    else:
-        print("ERROR: reference Markdown or manifesto not found", file=sys.stderr)
-        return 1
-
-    if not ref_pages:
-        print("ERROR: no pages found in reference", file=sys.stderr)
+        run_metadata = load_run_metadata(args.run_manifest)
+        canonical_doc = evaluate_document(EvaluationRequest(
+            ref_text=ref_text, hyp_text=hyp_text, ref_path=args.reference,
+            hyp_path=args.hypothesis, manifesto_path=args.manifesto,
+            engine=args.engine, run_id=run_id, run_metadata=run_metadata,
+        ))
+    except Exception as exc:
+        print(f"ERROR: canonical evaluation failed: {exc}", file=sys.stderr)
         return 1
 
     if not args.quiet:
@@ -1546,19 +1530,10 @@ def main() -> int:
     run_manifest_pages: set[int] | None = None
     _run_meta: dict = {}
     run_page_meta: dict[int, dict] = {}
-    if args.run_manifest and args.run_manifest.exists():
-        with open(args.run_manifest, encoding="utf-8") as f:
-            _rm = json.load(f)
-        if "selected_pages" in _rm:
-            run_manifest_pages = {int(page) for page in _rm["selected_pages"]}
-        else:
-            # Backward-compatible inference for E2E manifests written before
-            # selected_pages became an explicit input field.
-            run_manifest_pages = {
-                int(e["page"])
-                for e in _rm.get("pages", [])
-                if e.get("page") is not None
-            }
+    if args.run_manifest is not None:
+        _rm = run_metadata
+        _selected = selected_pages_from_run(_rm)
+        run_manifest_pages = set(_selected) if _selected is not None else None
         run_page_meta = {
             int(page["page"]): page for page in _rm.get("pages", [])
             if page.get("page") is not None
@@ -1758,7 +1733,7 @@ def main() -> int:
     # Groups 3 and 5 (tables, critical data): include selected-but-missing pages
     # so that absent tables and critical values are penalised (ref content present,
     # hypothesis contributes empty string).
-    penalised_page_nums = sorted((hyp_pages.keys() & ref_pages.keys()) | selected_but_missing)
+    penalised_page_nums = sorted(selected_ref_pages)
     hyp_penalised_body = "\n\n".join(
         _strip_page_header(hyp_pages[pn]) if pn in hyp_pages else ""
         for pn in penalised_page_nums
@@ -1855,54 +1830,9 @@ def main() -> int:
     from structured_pdf_text.atomic_io import atomic_write_json, atomic_write_text
     atomic_write_json(metrics_path, summary)
 
-    # --- Canonical evaluation-3.0.0 output (parallel, same inputs) ---
-    try:
-        _scripts_dir = str(Path(__file__).parent)
-        if _scripts_dir not in sys.path:
-            sys.path.insert(0, _scripts_dir)
-        from regrade_existing import _run_v2 as _run_canonical  # noqa: PLC0415
-
-        # Build ref_text the same way regrade_existing does
-        if args.reference is not None:
-            _canonical_ref_text = args.reference.read_text(encoding="utf-8")
-            _canonical_manifesto_path = args.manifesto
-        else:
-            _canonical_manifesto_path = args.manifesto
-            # ref_pages already computed above in hyp_pages / ref_pages
-            _parts: list[str] = []
-            for _pnum in sorted(ref_pages):
-                _parts.append(f"## Página {_pnum}\n\n{ref_pages[_pnum]}")
-            _canonical_ref_text = "\n\n".join(_parts)
-
-        canonical_doc = _run_canonical(
-            ref_text=_canonical_ref_text,
-            hyp_text=hyp_text,
-            ref_path=args.reference,
-            hyp_path=args.hypothesis,
-            manifesto_path=_canonical_manifesto_path,
-            engine=args.engine,
-            run_id=run_id,
-            pdf_sha256=_run_meta.get("pdf_sha256"),
-            mode=_run_meta.get("mode"),
-            selected_page_scope=(
-                _run_meta.get("selected_pages") if args.run_manifest and args.run_manifest.exists()
-                else None
-            ),
-        )
-        # Preserve the E2E experiment identity in the canonical artifact too.
-        # The legacy summary already carried these fields at top level, but
-        # evaluation-3.0.0 consumers read operational provenance separately.
-        if _run_meta:
-            canonical_doc.operational.update({
-                key: value
-                for key, value in _run_meta.items()
-                if key != "selected_pages"
-            })
-            canonical_doc.operational["selected_pages"] = sorted(selected_pages)
-        canonical_path = args.output_dir / f"metrics_v3_{engine_slug}_{run_id}.json"
-        atomic_write_json(canonical_path, canonical_doc.to_dict())
-    except Exception:
-        pass  # canonical output is best-effort; legacy output already written
+    # Canonical output is mandatory and was evaluated before legacy diagnostics.
+    canonical_path = args.output_dir / f"metrics_v3_{engine_slug}_{run_id}.json"
+    atomic_write_json(canonical_path, canonical_doc.to_dict())
 
     # --- Build error report for summary ---
     flat_summary = {
@@ -1916,35 +1846,34 @@ def main() -> int:
     atomic_write_text(errors_path, error_report)
 
     if not args.quiet:
-        g1 = summary["grupo1_texto"]
         print()
         print("  === Resultado ===")
-        print(f"  CER Normalized  : {g1.get('cer_normalized', 0):.4f}")
-        print(f"  CER Text Only   : {g1.get('cer_text_only', 0):.4f}")
-        print(f"  WER             : {g1.get('wer', 0):.4f}")
-        print(f"  Word Accuracy   : {g1.get('word_accuracy', 0):.4f}")
-        g2 = summary["grupo2_estrutura_markdown"]
-        print(f"  Heading F1      : {g2.get('heading_f1', 0):.4f}")
-        print(f"  Block F1        : {g2.get('block_f1', 0):.4f}")
-        print(f"  AST Similarity  : {g2.get('markdown_ast_similarity', 0):.4f}")
-        g3 = summary["grupo3_tabelas"]
-        print(f"  Table F1        : {g3.get('table_f1', 0):.4f}")
-        print(f"  Cell Exact Match: {g3.get('cell_exact_match', 0):.4f}")
-        g4 = integrity_m
-        print(f"  Reading Order   : {g4.get('reading_order_accuracy', 0):.4f}")
-        print(f"  Failure Rate    : {g4.get('failure_rate', 0):.4f}")
-        g5 = summary["grupo5_dados_criticos"]
-        print(f"  Numeric Match   : {g5.get('numeric_exact_match', 0):.4f}")
-        print(f"  Currency Match  : {g5.get('currency_exact_match', 0):.4f}")
+        for group, labels in (
+            (summary["grupo1_texto"], (
+                ("CER Normalized", "cer_normalized"), ("CER Text Only", "cer_text_only"),
+                ("WER", "wer"), ("Word Accuracy", "word_accuracy"))),
+            (summary["grupo2_estrutura_markdown"], (
+                ("Heading F1", "heading_f1"), ("Block F1", "block_f1"),
+                ("AST Similarity", "markdown_ast_similarity"))),
+            (summary["grupo3_tabelas"], (
+                ("Table F1", "table_f1"), ("Cell Exact Match", "cell_exact_match"))),
+            (integrity_m, (("Reading Order", "reading_order_accuracy"),
+                           ("Failure Rate", "failure_rate"))),
+            (summary["grupo5_dados_criticos"], (
+                ("Numeric Match", "numeric_exact_match"), ("Currency Match", "currency_exact_match"))),
+        ):
+            for label, key in labels:
+                value = group.get(key)
+                display = f"{value:.4f}" if value is not None else "N/A"
+                print(f"  {label:16}: {display}")
         print()
-        print(f"  Metrics : {metrics_path}")
-        print(f"  Errors  : {errors_path}")
+        print(f"  Canonical metrics: {canonical_path}")
+        print(f"  Legacy metrics   : {metrics_path}")
+        print(f"  Errors           : {errors_path}")
         print()
         print("  Próximo passo — comparar engines:")
-        print(f"  python scripts\\compare_engines.py \\")
-        print(f"    {metrics_path} \\")
-        print(f"    [outros metrics_*.json] \\")
-        print(f"    --output {args.output_dir}\\comparison_table.md")
+        print(f'  python scripts/compare_engines.py "{canonical_path}" '
+              f'"[outros metrics_v3_*.json]" --output "{args.output_dir}/comparison_table.md"')
 
     return 0
 

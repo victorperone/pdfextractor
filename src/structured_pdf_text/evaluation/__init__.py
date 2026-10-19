@@ -99,7 +99,10 @@ from structured_pdf_text.evaluation.aggregation import (
     evaluate_rank_eligibility,
 )
 
+from structured_pdf_text.evaluation.evaluator import EvaluationRequest, evaluate
+
 __all__ = [
+    "EvaluationRequest", "evaluate",
     "MarkdownNode", "NodeKind", "NormProfile", "MetricStatus",
     "MetricResult", "AlignedPair", "AlignmentStatus", "PageScope",
     "normalize", "parse_document", "PARSER_VERSION", "build_page_scope",

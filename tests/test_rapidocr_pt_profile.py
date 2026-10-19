@@ -23,7 +23,7 @@ def test_rapidocr_pt_profile_rejects_english_dictionary(tmp_path):
 
 
 def test_rapidocr_pt_profile_accepts_latin_dictionary(tmp_path):
-    dictionary = tmp_path / "latin_dict.txt"
+    dictionary = tmp_path / "ppocrv5_latin_dict.txt"
     dictionary.write_text("\n".join(LATIN_PT_CHARS), encoding="utf-8")
 
     profile, missing = portuguese_dictionary_profile(dictionary)
@@ -33,8 +33,8 @@ def test_rapidocr_pt_profile_accepts_latin_dictionary(tmp_path):
 
 
 def test_rapidocr_model_and_dictionary_are_registered_in_identity(tmp_path, monkeypatch):
-    model = tmp_path / "latin_PP-OCRv3_rec_mobile.onnx"
-    dictionary = tmp_path / "latin_dict.txt"
+    model = tmp_path / "latin_PP-OCRv5_rec_mobile.onnx"
+    dictionary = tmp_path / "ppocrv5_latin_dict.txt"
     model.write_bytes(b"mock-model")
     dictionary.write_text("\n".join(LATIN_PT_CHARS), encoding="utf-8")
     monkeypatch.setenv("RAPIDOCR_REC_MODEL", str(model))

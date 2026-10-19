@@ -1,0 +1,60 @@
+{
+  "stage": 1,
+  "date": "2026-10-19",
+  "resolved_findings": [
+    "A01",
+    "A02",
+    "A03",
+    "A07"
+  ],
+  "partially_addressed_findings": [
+    "A13",
+    "A15",
+    "A19"
+  ],
+  "default_suite": {
+    "tests": 1804,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 10,
+    "passed": 1794,
+    "skips": 6,
+    "xfails": 4
+  },
+  "new_regression_cases": 58,
+  "explicit_audit_suite": {
+    "tests": 39,
+    "failures": 22,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 17
+  },
+  "remaining_failing_probes": [
+    "test_missing_whole_table_has_full_cell_deletion",
+    "test_missing_table_row_reduces_cell_accuracy",
+    "test_missing_table_row_increases_cell_cer",
+    "test_raw_markdown_cer_sees_bold_delimiters",
+    "test_visible_text_keeps_adjacent_inline_text_together",
+    "test_visible_text_preserves_literal_code_characters",
+    "test_aligned_cer_does_not_count_table_ancestors",
+    "test_changed_paragraph_boundaries_are_penalised",
+    "test_ordered_list_changed_start_is_measured",
+    "test_page_marker_in_fenced_code_is_literal",
+    "test_macro_keeps_zero_f1_from_missing_or_invented_entities[false_negative_only]",
+    "test_macro_keeps_zero_f1_from_missing_or_invented_entities[false_positive_only]",
+    "test_public_comparator_rejects_different_pdfs",
+    "test_public_comparator_rejects_missing_hash_protocol",
+    "test_canonical_renderer_shows_run_outcomes",
+    "test_html_table_ground_truth_is_not_discarded",
+    "test_valid_four_backtick_fence_with_literal_triples_is_valid",
+    "test_same_run_id_with_different_input_preserves_prior_artifact",
+    "test_parser_identity_reports_installed_version",
+    "test_legacy_parser_keeps_empty_structural_table_row",
+    "test_legacy_parser_keeps_escaped_pipe_inside_one_cell",
+    "test_legacy_heading_cer_sees_text_error"
+  ],
+  "audit_expectation_correction": "Legacy schema must remain rejected; actual runner integration now covered separately.",
+  "pdf_extraction_executed": false,
+  "commit_executed": false,
+  "push_executed": false
+}

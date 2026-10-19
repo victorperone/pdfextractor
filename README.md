@@ -275,10 +275,38 @@ Scripts involved:
 |---|---|
 | `scripts/evaluate_e2e.py` | Extracts PDF with one engine; saves Markdown + manifest |
 | `scripts/compute_metrics.py` | Computes metrics against ground truth |
+| `scripts/regrade_existing.py` | Evaluates existing Markdown without extraction or OCR |
 | `scripts/compare_engines.py` | Generates comparative table of all engines |
 | `scripts/run_benchmark.ps1` | Orchestrates the three steps sequentially on Windows |
 | `scripts/setup_ocr_benchmark.sh` | Installs the required runtimes and models on WSL |
 | `scripts/run_benchmark.sh` | Orchestrates the three steps sequentially on Linux/WSL |
+
+### Evaluating existing Markdown
+
+Both metric CLIs use `structured_pdf_text.evaluation.evaluate()` and schema
+`evaluation-3.0.0`. `compute_metrics.py` writes the canonical result to
+`metrics_v3_{engine}_{run_id}.json`; its `metrics_{engine}_{run_id}.json`
+is a legacy diagnostic export. The runners pass the canonical result to the
+comparator. `regrade_existing.py` writes its canonical result to
+`metrics_{engine}_{run_id}.json`.
+
+```python
+from structured_pdf_text.evaluation import EvaluationRequest, evaluate
+
+result = evaluate(EvaluationRequest(
+    ref_text=reference_markdown,
+    hyp_text=hypothesis_markdown,
+    selected_page_scope=[1, 2],
+))
+```
+
+Selected pages must have ground truth. All quality groups and integrity checks
+use this scope; extra pages are recorded separately in `inputs`. Without page
+markers, Markdown is treated as page 1. A manifesto used as ground truth must
+contain a string `expected_markdown` for every page; an explicitly empty string
+represents a blank page. Metadata-only manifestos require `--reference`, as with
+`corpus/V3/Document_AI_V3.md`. Explicit Markdown takes precedence over manifesto
+text. Invalid inputs or a canonical evaluation failure make the command fail.
 
 ## Maximum quality OCR
 

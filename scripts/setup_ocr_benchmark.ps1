@@ -160,23 +160,23 @@ Remove-Item $tmpPy -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host "Downloading RapidOCR Latin recognizer and dictionary for Portuguese..." -ForegroundColor Yellow
 $rapidocrDir  = Join-Path $HOME ".cache\pdfextractor\rapidocr"
-$rapidocrRec  = "$rapidocrDir\latin_PP-OCRv3_rec_mobile.onnx"
-$rapidocrKeys = "$rapidocrDir\latin_dict.txt"
+$rapidocrRec  = "$rapidocrDir\latin_PP-OCRv5_rec_mobile.onnx"
+$rapidocrKeys = "$rapidocrDir\ppocrv5_latin_dict.txt"
 New-Item -ItemType Directory -Force -Path $rapidocrDir | Out-Null
 
 if (-not (Test-Path $rapidocrRec)) {
     Invoke-WebRequest `
-        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile.onnx" `
+        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile.onnx" `
         -OutFile $rapidocrRec -UseBasicParsing
 } else {
-    Write-Host "  latin_PP-OCRv3_rec_mobile.onnx already present - skipping." -ForegroundColor DarkGray
+    Write-Host "  latin_PP-OCRv5_rec_mobile.onnx already present - skipping." -ForegroundColor DarkGray
 }
 if (-not (Test-Path $rapidocrKeys)) {
     Invoke-WebRequest `
-        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile/latin_dict.txt" `
+        -Uri "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile/ppocrv5_latin_dict.txt" `
         -OutFile $rapidocrKeys -UseBasicParsing
 } else {
-    Write-Host "  latin_dict.txt already present - skipping." -ForegroundColor DarkGray
+    Write-Host "  ppocrv5_latin_dict.txt already present - skipping." -ForegroundColor DarkGray
 }
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Invoke-Native python "$scriptDir\verify_rapidocr_artifacts.py" --recognizer $rapidocrRec --dictionary $rapidocrKeys

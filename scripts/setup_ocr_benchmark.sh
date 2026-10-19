@@ -92,27 +92,27 @@ easyocr.Reader(["pt"], gpu=False,
 print("EasyOCR weights ready.")
 PY
 
-# Download the official PP-OCRv4 Latin ONNX recognizer and its matching
+# Download the official PP-OCRv5 Latin ONNX recognizer and its matching
 # dictionary (Portuguese diacritics: ã ç ê õ).
 echo ""
 echo "Downloading RapidOCR Latin recognizer and dictionary for Portuguese..."
 RAPIDOCR_MODEL_DIR="$HOME/.cache/pdfextractor/rapidocr"
 mkdir -p "$RAPIDOCR_MODEL_DIR"
-_RAPIDOCR_REC="$RAPIDOCR_MODEL_DIR/latin_PP-OCRv3_rec_mobile.onnx"
-_RAPIDOCR_KEYS="$RAPIDOCR_MODEL_DIR/latin_dict.txt"
+_RAPIDOCR_REC="$RAPIDOCR_MODEL_DIR/latin_PP-OCRv5_rec_mobile.onnx"
+_RAPIDOCR_KEYS="$RAPIDOCR_MODEL_DIR/ppocrv5_latin_dict.txt"
 if [[ ! -f "$_RAPIDOCR_REC" ]]; then
     curl -fL \
-        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile.onnx" \
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile.onnx" \
         -o "$_RAPIDOCR_REC"
 else
-    echo "  latin_PP-OCRv3_rec_mobile.onnx already present — skipping."
+    echo "  latin_PP-OCRv5_rec_mobile.onnx already present — skipping."
 fi
 if [[ ! -f "$_RAPIDOCR_KEYS" ]]; then
     curl -fL \
-        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv4/rec/latin_PP-OCRv3_rec_mobile/latin_dict.txt" \
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile/ppocrv5_latin_dict.txt" \
         -o "$_RAPIDOCR_KEYS"
 else
-    echo "  latin_dict.txt already present — skipping."
+    echo "  ppocrv5_latin_dict.txt already present — skipping."
 fi
 "$PYTHON_BIN" "$SCRIPT_DIR/verify_rapidocr_artifacts.py" \
     --recognizer "$_RAPIDOCR_REC" --dictionary "$_RAPIDOCR_KEYS"

@@ -16,8 +16,8 @@ export EASYOCR_MODULE_PATH
 # RapidOCR Latin model (required for Portuguese diacritics — ã ç ê õ).
 # Downloaded by setup_ocr_benchmark.sh into .ocr-model-cache/rapidocr/.
 _RAPIDOCR_CACHE="$HOME/.cache/pdfextractor/rapidocr"
-_RAPIDOCR_REC="$_RAPIDOCR_CACHE/latin_PP-OCRv3_rec_mobile.onnx"
-_RAPIDOCR_KEYS="$_RAPIDOCR_CACHE/latin_dict.txt"
+_RAPIDOCR_REC="$_RAPIDOCR_CACHE/latin_PP-OCRv5_rec_mobile.onnx"
+_RAPIDOCR_KEYS="$_RAPIDOCR_CACHE/ppocrv5_latin_dict.txt"
 if [[ -f "$_RAPIDOCR_REC" && -f "$_RAPIDOCR_KEYS" ]]; then
     export RAPIDOCR_REC_MODEL="$_RAPIDOCR_REC"
     export RAPIDOCR_REC_KEYS="$_RAPIDOCR_KEYS"
@@ -174,7 +174,7 @@ for engine in "${engine_list[@]}"; do
     engine="${engine//[[:space:]]/}"
     run_id="$RUN_SUFFIX-$engine"
     config_slug="${engine//-/_}"
-    metrics="$OUT_DIR/metrics_${config_slug}_${run_id}.json"
+    metrics="$OUT_DIR/metrics_v3_${config_slug}_${run_id}.json"
     backend="$engine"
     provider=""
     case "$engine" in
@@ -182,6 +182,7 @@ for engine in "${engine_list[@]}"; do
         rapidocr-openvino) backend="rapidocr"; provider="openvino" ;;
     esac
     engine_slug="${backend//-/_}"
+    hypothesis="$OUT_DIR/extracted_${engine_slug}_${run_id}.md"
 
     echo
     echo "========================================"

@@ -10,10 +10,10 @@ must be exported on Linux and then pointed to via the env vars below.
 
 **Default bundled model is a Chinese + basic ASCII model that does NOT cover
 Portuguese diacritics (ã ç ê õ).** For Portuguese, configure the paired
-PP-OCRv3 Latin recognizer and its matching dictionary:
+PP-OCRv5 Latin recognizer and its matching dictionary:
 
-    RAPIDOCR_REC_MODEL=/path/to/latin_PP-OCRv3_rec_mobile.onnx
-    RAPIDOCR_REC_KEYS=/path/to/latin_dict.txt
+    RAPIDOCR_REC_MODEL=/path/to/latin_PP-OCRv5_rec_mobile.onnx
+    RAPIDOCR_REC_KEYS=/path/to/ppocrv5_latin_dict.txt
 
     # PP-OCRv6 medium (better quality; export on Linux first — CF-2):
     RAPIDOCR_REC_MODEL=/path/to/PP-OCRv6_medium_rec_infer.onnx
@@ -273,12 +273,12 @@ class RapidOCRBackend:
         configured_cache = getattr(config, "ocr_cache_home", None)
         if configured_cache:
             cache = Path(configured_cache).expanduser() / "rapidocr"
-            rec_path = rec_path or str(cache / "latin_PP-OCRv3_rec_mobile.onnx")
-            rec_keys = rec_keys or str(cache / "latin_dict.txt")
+            rec_path = rec_path or str(cache / "latin_PP-OCRv5_rec_mobile.onnx")
+            rec_keys = rec_keys or str(cache / "ppocrv5_latin_dict.txt")
         if not rec_path and not rec_keys:
             cache = Path.home() / ".cache" / "pdfextractor" / "rapidocr"
-            cached_rec = cache / "latin_PP-OCRv3_rec_mobile.onnx"
-            cached_keys = cache / "latin_dict.txt"
+            cached_rec = cache / "latin_PP-OCRv5_rec_mobile.onnx"
+            cached_keys = cache / "ppocrv5_latin_dict.txt"
             if cached_rec.is_file() or cached_keys.is_file():
                 rec_path = str(cached_rec)
                 rec_keys = str(cached_keys)

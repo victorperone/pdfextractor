@@ -35,8 +35,8 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $ScriptDir
 $env:EASYOCR_MODULE_PATH = if ($env:EASYOCR_MODULE_PATH) { $env:EASYOCR_MODULE_PATH } else { Join-Path $HOME ".cache\pdfextractor\easyocr" }
 $rapidocrCache = Join-Path $HOME ".cache\pdfextractor\rapidocr"
-$env:RAPIDOCR_REC_MODEL = if ($env:RAPIDOCR_REC_MODEL) { $env:RAPIDOCR_REC_MODEL } else { Join-Path $rapidocrCache "latin_PP-OCRv3_rec_mobile.onnx" }
-$env:RAPIDOCR_REC_KEYS = if ($env:RAPIDOCR_REC_KEYS) { $env:RAPIDOCR_REC_KEYS } else { Join-Path $rapidocrCache "latin_dict.txt" }
+$env:RAPIDOCR_REC_MODEL = if ($env:RAPIDOCR_REC_MODEL) { $env:RAPIDOCR_REC_MODEL } else { Join-Path $rapidocrCache "latin_PP-OCRv5_rec_mobile.onnx" }
+$env:RAPIDOCR_REC_KEYS = if ($env:RAPIDOCR_REC_KEYS) { $env:RAPIDOCR_REC_KEYS } else { Join-Path $rapidocrCache "ppocrv5_latin_dict.txt" }
 
 Push-Location $RepoRoot
 try {
@@ -57,8 +57,8 @@ if ($LASTEXITCODE -ne 0) {
 
 # --- RapidOCR Latin model (required for Portuguese diacritics) ---
 $rapidocrCache = Join-Path $HOME ".cache\pdfextractor\rapidocr"
-$rapidocrRec   = "$rapidocrCache\latin_PP-OCRv3_rec_mobile.onnx"
-$rapidocrKeys  = "$rapidocrCache\latin_dict.txt"
+$rapidocrRec   = "$rapidocrCache\latin_PP-OCRv5_rec_mobile.onnx"
+$rapidocrKeys  = "$rapidocrCache\ppocrv5_latin_dict.txt"
 if ((Test-Path $rapidocrRec) -and (Test-Path $rapidocrKeys)) {
     $env:RAPIDOCR_REC_MODEL = $rapidocrRec
     $env:RAPIDOCR_REC_KEYS  = $rapidocrKeys
@@ -177,7 +177,7 @@ foreach ($engine in $engines) {
     if ($engine -eq "rapidocr-openvino") { $backend = "rapidocr"; $provider = "openvino" }
     $engineSlug = $backend -replace "-", "_"
     $hyp        = "$OutDir\extracted_${engineSlug}_${runId}.md"
-    $metrics    = "$OutDir\metrics_${configSlug}_${runId}.json"
+    $metrics    = "$OutDir\metrics_v3_${configSlug}_${runId}.json"
 
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan

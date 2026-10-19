@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regrade existing hypothesis Markdown against a reference using V2 metrics.
+"""Regrade existing hypothesis Markdown using evaluation-3.0.0.
 
 Does NOT invoke OCR; works purely on pre-existing Markdown artefacts.
 Implements the tool described in spec §11.4.
@@ -22,19 +22,17 @@ Usage
 
 Outputs
 -------
-    output/evaluation_v2/metrics_v2_{engine}_{run_id}.json
-    output/evaluation_v2/errors_v2_{engine}_{run_id}.md
+    output/evaluation_v2/metrics_{engine}_{run_id}.json
+    output/evaluation_v2/errors_{engine}_{run_id}.md
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import re
 import sys
 import textwrap
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,34 +40,11 @@ _SRC = Path(__file__).parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from structured_pdf_text.evaluation import (
-    PARSER_VERSION,
-    AlignmentSummary,
-    CriticalDataMetrics,
-    IntegrityMetrics,
-    MarkdownValidityReport,
-    MetricResult,
-    MetricStatus,
-    PageScope,
-    REFERENCE_HASH_PROTOCOL,
-    StructureMetrics,
-    TableMetrics,
-    TextMetrics,
-    V2DocumentMetrics,
-    align_blocks,
-    build_page_scope,
-    check_comparability,
-    compute_critical_data_metrics,
-    compute_integrity_metrics,
-    compute_reference_effective_hash,
-    compute_structure_metrics,
-    compute_table_metrics,
-    compute_text_metrics,
-    evaluate_rank_eligibility,
-    parse_document,
-    split_pages,
+from structured_pdf_text.evaluation import V2DocumentMetrics
+from structured_pdf_text.evaluation.evaluator import EvaluationRequest, evaluate_document
+from structured_pdf_text.evaluation.reference_inputs import (
+    document_pages, load_reference_text, load_run_metadata, manifest_pages,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,16 +63,10 @@ def _sha256_path(path: Path) -> str | None:
 def _split_pages_safe(text: str) -> dict[int, str]:
     """Split Markdown text into pages using the canonical split_pages protocol.
 
-    Falls back to {1: text} when no page markers are present.
+    Unmarked documents are page 1, including an explicit blank reference.
     Duplicate page markers raise ValueError — caller should catch and report.
     """
-    try:
-        pages = split_pages(text)
-    except ValueError:
-        pages = {}
-    if not pages and text.strip():
-        pages = {1: text.strip()}
-    return pages
+    return document_pages(text)
 
 
 def _load_manifesto(path: Path) -> dict[str, Any]:
@@ -107,13 +76,7 @@ def _load_manifesto(path: Path) -> dict[str, Any]:
 
 def _manifesto_pages(manifesto: dict[str, Any]) -> dict[int, str]:
     """Extract {page_num: expected_markdown} from a manifesto JSON."""
-    pages: dict[int, str] = {}
-    for entry in manifesto.get("pages", []):
-        pnum = entry.get("page") or entry.get("page_num")
-        text = entry.get("expected_markdown", "")
-        if pnum is not None:
-            pages[int(pnum)] = text
-    return pages
+    return manifest_pages(manifesto)
 
 
 def _manifesto_metadata(manifesto: dict[str, Any]) -> dict[int, dict]:
@@ -146,130 +109,15 @@ def _run_v2(
     pdf_sha256: str | None = None,
     mode: str | None = None,
     selected_page_scope: list[int] | None = None,
+    run_metadata: dict[str, Any] | None = None,
 ) -> V2DocumentMetrics:
-    """Run the unified evaluation-3.0.0 engine and return a V2DocumentMetrics object."""
-    doc = V2DocumentMetrics()
-
-    # --- Parse reference + hypothesis ---
-    ref_nodes = parse_document(ref_text, origin="reference")
-    hyp_nodes = parse_document(hyp_text, origin="hypothesis")
-
-    # --- Page scope ---
-    ref_pages = _split_pages_safe(ref_text)
-    hyp_pages = _split_pages_safe(hyp_text)
-    scope = build_page_scope(
-        ref_page_nums=set(ref_pages.keys()),
-        hyp_page_nums=set(hyp_pages.keys()),
-    )
-
-    default_selected_pages = sorted(scope.selected_reference)
-    effective_selected_pages = (
-        sorted(set(int(page) for page in selected_page_scope))
-        if selected_page_scope is not None
-        else default_selected_pages
-    )
-
-    # --- Reference effective hash (protocol reference-effective-v1) ---
-    eff_digest, eff_meta = compute_reference_effective_hash(
-        ref_pages,
-        selected_pages=effective_selected_pages,
-    )
-
-    # --- Provenance ---
-    doc.evaluator_info = {
-        "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "3.0.0",
-        "normalization_policy": "unicode_layout",
-        "parser": PARSER_VERSION,
-        "alignment_policy": "content-match-v1",
-        "entity_policy": "entities-ptbr-v1",
-        "created_at_utc": datetime.now(tz=timezone.utc).isoformat(),
-    }
-    doc.inputs = {
-        "reference_effective_sha256": eff_digest,
-        "reference_serialization_version": REFERENCE_HASH_PROTOCOL,
-        "reference_source_sha256": _sha256_path(ref_path) if ref_path else None,
-        "hypothesis_sha256": _sha256_path(hyp_path),
-        "manifest_sha256": _sha256_path(manifesto_path) if manifesto_path else None,
-        "pdf_sha256": pdf_sha256,
-        "mode": mode,
-        "engine": engine,
-        "run_id": run_id,
-        "selected_pages": effective_selected_pages,
-        "total_pages_in_reference": eff_meta.get("total_pages_in_reference"),
-    }
-
-    doc.inputs["selected_missing_pages"] = sorted(scope.selected_missing)
-    doc.inputs["extra_pages_out_of_scope"] = sorted(scope.selected_extra)
-
-    # --- Block alignment ---
-    pairs = align_blocks(ref_nodes, hyp_nodes)
-    alignment_summary = AlignmentSummary.from_pairs(pairs, len(ref_nodes), len(hyp_nodes))
-
-    # --- Text metrics (Group 1) ---
-    text: TextMetrics = compute_text_metrics(ref_nodes, hyp_nodes, pairs)
-    doc.text = text.to_dict()
-
-    # --- Structure metrics ---
-    struct: StructureMetrics = compute_structure_metrics(pairs, ref_nodes, hyp_nodes)
-    doc.structure = {k: v for k, v in struct.to_dict().items()
-                     if k != "pairwise_reading_order_accuracy"
-                     and k != "block_type_confusion"}
-    doc.reading_order = {
-        "pairwise_reading_order_accuracy": struct.reading_order.to_dict()
-            if struct.reading_order else {},
-    }
-
-    # --- Table metrics ---
-    tables: TableMetrics = compute_table_metrics(ref_nodes, hyp_nodes)
-    doc.tables = tables.to_dict()
-
-    # --- Critical data metrics ---
-    critical: CriticalDataMetrics = compute_critical_data_metrics(ref_nodes, hyp_nodes)
-    doc.critical_data = critical.to_dict()
-
-    # --- Integrity metrics ---
-    integrity: IntegrityMetrics = compute_integrity_metrics(
-        ref_nodes, hyp_nodes,
-        selected_pages=scope.selected_reference,
-        selected_reference=scope.selected_reference,
-        hyp_page_nums=set(hyp_pages.keys()),
-        hyp_raw_text=hyp_text,
-        ref_raw_text=ref_text,
-    )
-    doc.integrity = integrity.to_dict()
-
-    # --- Operational ---
-    doc.operational = {
-        "benchmark_status": "valid",
-        "fallback_rate": None,
-        "elapsed_s": None,
-        "memory_mb": None,
-        "alignment_summary": alignment_summary.to_dict(),
-    }
-
-    # --- Eligibility ---
-    doc.finalise()
-    eligible, reasons = evaluate_rank_eligibility(doc)
-    doc.rank_eligible = eligible
-    doc.rank_ineligibility_reasons = reasons
-
-    return doc
-
-
-def _get_git_sha() -> str | None:
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-            cwd=Path(__file__).parent.parent,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
+    """Compatibility wrapper for the central package API."""
+    return evaluate_document(EvaluationRequest(
+        ref_text=ref_text, hyp_text=hyp_text, ref_path=ref_path,
+        hyp_path=hyp_path, manifesto_path=manifesto_path, engine=engine,
+        run_id=run_id, pdf_sha256=pdf_sha256, mode=mode,
+        selected_page_scope=selected_page_scope, run_metadata=run_metadata or {},
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +327,7 @@ def _delta_report(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Regrade hypothesis Markdown with V2 metrics (no OCR invoked).",
+        description="Regrade hypothesis Markdown with canonical metrics (no OCR invoked).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:
@@ -525,79 +373,26 @@ def main() -> int:
     run_id = args.run_id or uuid.uuid4().hex[:12]
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    run_metadata: dict[str, Any] = {}
-    if args.run_manifest is not None:
-        if not args.run_manifest.is_file():
-            print(f"ERROR: run manifest not found: {args.run_manifest}", file=sys.stderr)
-            return 1
-        try:
-            run_metadata = json.loads(args.run_manifest.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"ERROR: invalid run manifest: {exc}", file=sys.stderr)
-            return 1
-
-    # Load hypothesis
-    hyp_text = args.hypothesis.read_text(encoding="utf-8")
-
-    # Load reference
-    if args.reference is not None:
-        ref_text = args.reference.read_text(encoding="utf-8")
-        manifesto_path = args.manifesto
-    else:
-        manifesto = _load_manifesto(args.manifesto)
-        ref_pages = _manifesto_pages(manifesto)
-        # Reconstruct ref_text as ## Página N ... blocks.
-        # If expected_markdown already begins with a page marker (some corpora
-        # embed the marker inside the field), use the content directly to avoid
-        # duplicate markers that would cause a ValueError in split_pages().
-        import re as _re
-        _PAGE_MARKER_RE = _re.compile(r"^##\s+Página\s+", _re.IGNORECASE)
-        parts = []
-        for pnum in sorted(ref_pages):
-            content = ref_pages[pnum]
-            if _PAGE_MARKER_RE.match(content.lstrip()):
-                parts.append(content.lstrip())
-            else:
-                parts.append(f"## Página {pnum}\n\n{content}")
-        ref_text = "\n\n".join(parts)
-        manifesto_path = args.manifesto
-
-    # Verify reference hash stability (spec §0.3 and §12.6 invariant)
-    ref_sha = _sha256_path(args.reference) if args.reference else None
-    if not args.quiet:
-        if ref_sha:
-            print(f"Reference SHA-256: {ref_sha}")
-        print(f"Hypothesis SHA-256: {_sha256_path(args.hypothesis)}")
-
-    # Run V2 evaluation
-    doc = _run_v2(
-        ref_text=ref_text,
-        hyp_text=hyp_text,
-        ref_path=args.reference,
-        hyp_path=args.hypothesis,
-        manifesto_path=manifesto_path,
-        engine=args.engine,
-        run_id=run_id,
-        pdf_sha256=run_metadata.get("pdf_sha256"),
-        mode=run_metadata.get("mode"),
-        selected_page_scope=(
-            sorted({int(page) for page in run_metadata["selected_pages"]})
-            if "selected_pages" in run_metadata
-            else sorted({int(entry["page"]) for entry in run_metadata.get("pages", [])
-                         if entry.get("page") is not None})
-            if "pages" in run_metadata
-            else None
-        ),
-    )
+    try:
+        run_metadata = load_run_metadata(args.run_manifest)
+        hyp_text = args.hypothesis.read_text(encoding="utf-8")
+        ref_text = load_reference_text(args.reference, args.manifesto)
+        doc = _run_v2(
+            ref_text=ref_text, hyp_text=hyp_text,
+            ref_path=args.reference, hyp_path=args.hypothesis,
+            manifesto_path=args.manifesto, engine=args.engine, run_id=run_id,
+            run_metadata=run_metadata,
+        )
+    except Exception as exc:
+        print(f"ERROR: canonical evaluation failed: {exc}", file=sys.stderr)
+        return 1
 
     result_dict = doc.to_dict()
 
     # Write metrics JSON (canonical name: metrics_{engine}_{run_id}.json)
     metrics_path = args.output_dir / f"metrics_{args.engine}_{run_id}.json"
-    metrics_path.write_text(
-        json.dumps(result_dict, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    from structured_pdf_text.atomic_io import atomic_write_json, atomic_write_text
+    atomic_write_json(metrics_path, result_dict)
 
     # Write error report (canonical name: errors_{engine}_{run_id}.md)
     report_text = _generate_error_report(
@@ -605,7 +400,7 @@ def main() -> int:
         ref_path=args.reference, hyp_path=args.hypothesis,
     )
     report_path = args.output_dir / f"errors_{args.engine}_{run_id}.md"
-    report_path.write_text(report_text, encoding="utf-8")
+    atomic_write_text(report_path, report_text)
 
     # Write delta report if V1 metrics provided
     if args.v1_metrics and args.v1_metrics.is_file():
