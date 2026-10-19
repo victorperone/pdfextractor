@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+from pathlib import Path
+
 from scripts.compare_engines import (
     _comparability_key,
     _comparability_key_v2,
@@ -91,6 +96,56 @@ def test_same_page_count_with_different_page_numbers_is_not_comparable():
     assert any("selected_pages" in error for error in errors)
 
 
+def test_canonical_comparator_uses_operational_protocol_and_input_page_scope():
+    a = _v2_run("engine-a")
+    b = _v2_run("engine-b")
+    for run in (a, b):
+        run["operational"]["benchmark_protocol_id"] = "protocol-v1"
+        run["inputs"]["selected_pages"] = [1, 2]
+
+    assert _validate_comparability_v2([("engine-a", a), ("engine-b", b)]) == []
+
+
+def test_canonical_comparator_rejects_different_benchmark_protocol():
+    a = _v2_run("engine-a")
+    b = _v2_run("engine-b")
+    for run in (a, b):
+        run["operational"]["benchmark_protocol_id"] = "protocol-v1"
+        run["inputs"]["selected_pages"] = [1, 2]
+    b["operational"]["benchmark_protocol_id"] = "protocol-v2"
+
+    errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+    assert any("benchmark_protocol_id" in error for error in errors)
+
+
+def test_compare_engines_cli_routes_evaluation_3_to_canonical_comparison(tmp_path):
+    runs = []
+    for engine in ("engine-a", "engine-b"):
+        run = _v2_run(engine)
+        run["inputs"]["selected_pages"] = [1, 2]
+        path = tmp_path / f"{engine}.json"
+        path.write_text(json.dumps(run), encoding="utf-8")
+        runs.append(path)
+    output = tmp_path / "comparison.md"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parents[1] / "scripts" / "compare_engines.py"),
+            *(str(path) for path in runs),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.exists()
+    assert "engine-a" in output.read_text(encoding="utf-8")
+
+
 def test_comparison_requires_exact_page_list_for_multiple_runs():
     errors = _validate_comparability(
         [("engine-a", _run()), ("engine-b", _run(selected_pages=None))],
@@ -158,6 +213,7 @@ def _v2_run(engine: str = "test_engine", **overrides) -> dict:
             "hypothesis_sha256": "hyp-sha-xyz",
             "selected_pages": [1, 2, 3],
         },
+        "operational": {"benchmark_protocol_id": "protocol-v1"},
         "quality": {
             "text": {
                 "cer_sequential_normalized": {"value": 0.05, "status": "ok", "direction": "lower_is_better"},

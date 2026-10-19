@@ -138,6 +138,8 @@ def test_compute_propagates_run_input_identity_to_canonical_metrics(tmp_path):
         run_manifest={
             "pdf_sha256": "b" * 64,
             "mode": "native",
+            "benchmark_protocol_id": "protocol-smoke-v1",
+            "benchmark_status": "partial",
             "selected_pages": [2],
             "pages": [],
         },
@@ -146,6 +148,9 @@ def test_compute_propagates_run_input_identity_to_canonical_metrics(tmp_path):
     assert inputs["pdf_sha256"] == "b" * 64
     assert inputs["mode"] == "native"
     assert inputs["selected_pages"] == [2]
+    assert run["operational"]["benchmark_protocol_id"] == "protocol-smoke-v1"
+    assert run["operational"]["benchmark_status"] == "partial"
+    assert run["operational"]["selected_pages"] == [2]
 
 
 def _assert_no_nan_infinity(obj, path: str = "") -> None:

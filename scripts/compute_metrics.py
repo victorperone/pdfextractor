@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -121,6 +122,19 @@ def _selected_document_bodies(
     hyp = "\n\n".join(_strip_page_header(hyp_pages.get(pn, "")) for pn in page_numbers)
     ref = "\n\n".join(_strip_page_header(ref_pages[pn]) for pn in page_numbers)
     return hyp, ref
+
+
+def _macro_average(pages: list[dict], metric_key: str) -> float | None:
+    """Average applicable page scores, ignoring undefined metrics and non-finite values."""
+    values: list[float] = []
+    for page in pages:
+        value = page.get(metric_key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        numeric = float(value)
+        if math.isfinite(numeric):
+            values.append(numeric)
+    return round(sum(values) / len(values), 6) if values else None
 
 
 # ---------------------------------------------------------------------------
@@ -1275,26 +1289,37 @@ def _build_error_report(
         "## Páginas por CER Normalized (piores primeiras)",
         "",
     ]
-    sorted_pages = sorted(per_page, key=lambda p: p.get("cer_normalized", 0.0), reverse=True)
+    def _sort_cer(page: dict) -> float:
+        value = page.get("cer_normalized")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+        return float("-inf")
+
+    def _fmt_metric(value) -> str:
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            return "n/a"
+        return f"{value:.4f}"
+
+    sorted_pages = sorted(per_page, key=_sort_cer, reverse=True)
     for entry in sorted_pages[:20]:
         pn = entry["page"]
-        cer_n = entry.get("cer_normalized", 0.0)
-        wer = entry.get("wer", 0.0)
+        cer_n = _fmt_metric(entry.get("cer_normalized"))
+        wer = _fmt_metric(entry.get("wer"))
         table_f1 = entry.get("table_f1", None)
         cond_value = entry.get("conditions", [])
         cond = ", ".join(cond_value) if isinstance(cond_value, list) else cond_value
         lines += [
-            f"### Página {pn} — CER={cer_n:.4f} WER={wer:.4f}"
+            f"### Página {pn} — CER={cer_n} WER={wer}"
             + (f" [{cond}]" if cond else ""),
             "",
-            f"- Substitutions: {entry.get('substitution_rate', 0):.4f}",
-            f"- Deletions:     {entry.get('deletion_rate', 0):.4f}",
-            f"- Insertions:    {entry.get('insertion_rate', 0):.4f}",
-            f"- Heading F1:    {entry.get('heading_f1', 0):.4f}",
-            f"- Block F1:      {entry.get('block_f1', 0):.4f}",
+            f"- Substitutions: {_fmt_metric(entry.get('substitution_rate'))}",
+            f"- Deletions:     {_fmt_metric(entry.get('deletion_rate'))}",
+            f"- Insertions:    {_fmt_metric(entry.get('insertion_rate'))}",
+            f"- Heading F1:    {_fmt_metric(entry.get('heading_f1'))}",
+            f"- Block F1:      {_fmt_metric(entry.get('block_f1'))}",
         ]
         if table_f1 is not None:
-            lines.append(f"- Table F1:      {table_f1:.4f}")
+            lines.append(f"- Table F1:      {_fmt_metric(table_f1)}")
         lines.append("")
 
     return "\n".join(lines)
@@ -1607,7 +1632,8 @@ def main() -> int:
     ]
     results = []
     if page_args:
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        worker_count = min(os.cpu_count() or 1, len(page_args))
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
             futures = {executor.submit(_process_page, arg): arg[0] for arg in page_args}
             done = 0
             for future in as_completed(futures):
@@ -1759,12 +1785,12 @@ def main() -> int:
         for name, pages in sorted(groups.items()):
             output[name] = {
                 "pages": len(pages),
-                "cer_text_only_macro": round(sum(p.get("cer_text_only", 1.0) for p in pages) / len(pages), 6),
-                "wer_macro": round(sum(p.get("wer", 1.0) for p in pages) / len(pages), 6),
+                "cer_text_only_macro": _macro_average(pages, "cer_text_only"),
+                "wer_macro": _macro_average(pages, "wer"),
                 "missing_pages": sum(bool(p.get("missing_from_hypothesis")) for p in pages),
-                "table_f1_macro": round(sum(p.get("table_f1", 1.0) for p in pages) / len(pages), 6),
-                "currency_f1_macro": round(sum(p.get("currency_f1", 1.0) for p in pages) / len(pages), 6),
-                "identifier_f1_macro": round(sum(p.get("identifier_f1", 1.0) for p in pages) / len(pages), 6),
+                "table_f1_macro": _macro_average(pages, "table_f1"),
+                "currency_f1_macro": _macro_average(pages, "currency_f1"),
+                "identifier_f1_macro": _macro_average(pages, "identifier_f1"),
             }
         return output
 
@@ -1856,6 +1882,16 @@ def main() -> int:
                 else None
             ),
         )
+        # Preserve the E2E experiment identity in the canonical artifact too.
+        # The legacy summary already carried these fields at top level, but
+        # evaluation-3.0.0 consumers read operational provenance separately.
+        if _run_meta:
+            canonical_doc.operational.update({
+                key: value
+                for key, value in _run_meta.items()
+                if key != "selected_pages"
+            })
+            canonical_doc.operational["selected_pages"] = sorted(selected_pages)
         canonical_path = args.output_dir / f"metrics_v3_{engine_slug}_{run_id}.json"
         atomic_write_json(canonical_path, canonical_doc.to_dict())
     except Exception:

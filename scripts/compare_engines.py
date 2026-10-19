@@ -558,6 +558,7 @@ def _comparability_key_v2(data: dict) -> dict:
     except (TypeError, ValueError):
         selected = None
     evaluator = data.get("evaluator") or {}
+    operational = data.get("operational") or {}
     return {
         "schema_version":                  data.get("schema_version"),
         "reference_effective_sha256":      inputs.get("reference_effective_sha256"),
@@ -566,6 +567,7 @@ def _comparability_key_v2(data: dict) -> dict:
         "manifest_sha256":                 inputs.get("manifest_sha256"),
         "mode":                            inputs.get("mode"),
         "selected_pages":                  selected,
+        "benchmark_protocol_id":           operational.get("benchmark_protocol_id"),
         "evaluator_version":               evaluator.get("metric_definitions_version"),
         "normalization_policy":            evaluator.get("normalization_policy"),
         "parser_id":                       evaluator.get("parser"),
@@ -582,6 +584,7 @@ _V2_REQUIRED_COMPARABILITY = (
     "manifest_sha256",
     "mode",
     "selected_pages",
+    "benchmark_protocol_id",
 )
 _V2_SOFT_COMPARABILITY = ("evaluator_version", "normalization_policy", "parser_id", "alignment_policy")
 
@@ -862,11 +865,11 @@ def main() -> int:
     elif schema_errors and not args.quiet:
         print("  WARNING: mixed schema versions (--skip-validation active)")
 
-    is_v2 = all(_detect_schema(data) == "v2" for _, data in all_data)
+    is_v3 = all(_detect_schema(data) == "v3" for _, data in all_data)
 
     # --- Comparability validation ---
     if not args.skip_validation:
-        if is_v2:
+        if is_v3:
             errors = _validate_comparability_v2(all_data)
         else:
             errors = _validate_comparability(all_data, allow_partial=args.allow_partial)
@@ -883,7 +886,7 @@ def main() -> int:
     elif not args.quiet:
         print("  WARNING: comparability validation skipped (--skip-validation)")
 
-    if is_v2:
+    if is_v3:
         table = _render_comparison_table_v2(all_data)
     else:
         table = _render_comparison_table(all_data)
