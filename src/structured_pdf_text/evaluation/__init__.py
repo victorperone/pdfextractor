@@ -11,7 +11,8 @@ block_alignment    — 1:1 block aligner with provenance (split/merge)
 text_metrics       — CER/WER sequential + aligned block CER + coverage (MET-TX*)
 structure_metrics  — Heading/paragraph/list/reading-order metrics
 table_metrics      — Table detection, rows, columns, cells
-critical_data      — Numbers, currency, percent, dates, CPF/CNPJ, identifiers
+critical_data      — Numbers, currency, percent, dates, CPF/CNPJ, identifiers (doc+page F1)
+reference_hash     — Reference effective hash protocol (reference-effective-v1)
 integrity_metrics  — Duplicate, missing pages, validity
 aggregation        — Micro/macro aggregation, comparability, eligibility
 evaluator          — Central evaluate() API (EvaluationRequest → result dict)
@@ -82,6 +83,12 @@ from structured_pdf_text.evaluation.integrity_metrics import (
     MarkdownValidityReport,
     EdgeContentDiagnostic,
 )
+from structured_pdf_text.evaluation.reference_hash import (
+    compute_reference_effective_hash,
+    compute_reference_source_hash,
+    split_pages,
+    REFERENCE_HASH_PROTOCOL,
+)
 from structured_pdf_text.evaluation.aggregation import (
     aggregate_metric,
     AggregatedMetric,
@@ -107,6 +114,8 @@ __all__ = [
     "duplicate_excess_rate", "missing_page_rate",
     "page_content_coverage_recall", "markdown_validity_report",
     "edge_content_diagnostic", "MarkdownValidityReport", "EdgeContentDiagnostic",
+    "compute_reference_effective_hash", "compute_reference_source_hash",
+    "split_pages", "REFERENCE_HASH_PROTOCOL",
     "aggregate_metric", "AggregatedMetric", "V2DocumentMetrics",
     "check_comparability", "evaluate_rank_eligibility",
     "compute_text_metrics", "TextMetrics",

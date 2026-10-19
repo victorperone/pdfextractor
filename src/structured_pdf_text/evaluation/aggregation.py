@@ -228,22 +228,27 @@ class V2DocumentMetrics:
 # Comparability guard
 # ---------------------------------------------------------------------------
 
-_REQUIRED_COMPARABLE_KEYS = (
-    "reference_sha256",
-    "schema_version",
-)
-
-
 def check_comparability(
     result_a: dict,
     result_b: dict,
     *,
     strict: bool = True,
 ) -> tuple[bool, list[str]]:
-    """Check whether two V2 evaluation results are comparable.
+    """Check whether two evaluation results are comparable (spec §10.4).
 
     Returns (comparable: bool, reasons: list[str]).
-    When strict=True, incompatible results must not be ranked together.
+
+    Fail-closed rules
+    -----------------
+    - ``reference_effective_sha256`` absent in either → incomparable.
+    - Hashes present but different → incomparable.
+    - ``reference_serialization_version`` absent or different → incomparable.
+    - ``schema_version`` mismatch → incomparable.
+    - ``selected_pages`` mismatch → incomparable.
+    - Legacy ``reference_sha256`` (raw-file hash) is accepted as fallback ONLY
+      when ``reference_effective_sha256`` is absent in BOTH results AND both
+      have the legacy key.  This allows gradual migration without silently
+      accepting None==None.
     """
     reasons: list[str] = []
 
@@ -253,18 +258,38 @@ def check_comparability(
     if va != vb:
         reasons.append(f"schema_version_mismatch: {va!r} vs {vb!r}")
 
-    # Reference hash must match (same ground truth).
-    # A09 fix: if EITHER side has no hash, that is a mismatch — None==None
-    # must NOT be treated as comparable ("fail-closed" rule, spec §10.4).
     ia = result_a.get("inputs", {})
     ib = result_b.get("inputs", {})
-    ref_a = ia.get("reference_sha256")
-    ref_b = ib.get("reference_sha256")
-    hash_mismatch = (ref_a is None or ref_b is None or ref_a != ref_b)
-    if hash_mismatch:
-        a_display = (ref_a[:12] + "…") if ref_a else repr(ref_a)
-        b_display = (ref_b[:12] + "…") if ref_b else repr(ref_b)
-        reasons.append(f"reference_sha256_mismatch: {a_display} vs {b_display}")
+
+    # Primary: reference_effective_sha256 (protocol-based, Fase 2+)
+    eff_a = ia.get("reference_effective_sha256")
+    eff_b = ib.get("reference_effective_sha256")
+
+    if eff_a is not None or eff_b is not None:
+        # At least one side has the effective hash — require both sides to match.
+        hash_mismatch = (eff_a is None or eff_b is None or eff_a != eff_b)
+        if hash_mismatch:
+            a_disp = (eff_a[:12] + "…") if eff_a else repr(eff_a)
+            b_disp = (eff_b[:12] + "…") if eff_b else repr(eff_b)
+            reasons.append(f"reference_effective_sha256_mismatch: {a_disp} vs {b_disp}")
+
+        # Serialization version must also match when effective hash present
+        sv_a = ia.get("reference_serialization_version")
+        sv_b = ib.get("reference_serialization_version")
+        if sv_a != sv_b:
+            reasons.append(
+                f"reference_serialization_version_mismatch: {sv_a!r} vs {sv_b!r}"
+            )
+    else:
+        # Fallback: legacy reference_sha256 (raw-file hash, pre-Fase-2 results).
+        # A09 fix: None==None is NOT comparable — fail-closed.
+        ref_a = ia.get("reference_sha256")
+        ref_b = ib.get("reference_sha256")
+        hash_mismatch = (ref_a is None or ref_b is None or ref_a != ref_b)
+        if hash_mismatch:
+            a_disp = (ref_a[:12] + "…") if ref_a else repr(ref_a)
+            b_disp = (ref_b[:12] + "…") if ref_b else repr(ref_b)
+            reasons.append(f"reference_sha256_mismatch: {a_disp} vs {b_disp}")
 
     # Selected pages must match
     pages_a = set(ia.get("selected_pages") or [])

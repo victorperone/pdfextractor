@@ -336,30 +336,111 @@ def _metric_for_class(
     return _prf_multiset(Counter(ref_vals), Counter(hyp_vals), definition_id)
 
 
+def _page_f1_for_class(
+    ref_nodes: Sequence[MarkdownNode],
+    hyp_nodes: Sequence[MarkdownNode],
+    extractor,
+    definition_id: str,
+) -> MetricResult:
+    """Compute page-aware F1: multiset over (page_number, canonical_value) pairs.
+
+    Each entity occurrence is tagged with its page number.  A value on page 1
+    is distinct from the same value on page 2, so transpositions across pages
+    are penalized.
+
+    When nodes have page=None (no page markers in document), returns the same
+    result as document F1 (page information unavailable → falls back gracefully).
+    """
+    from structured_pdf_text.evaluation.canonical_document import CanonicalDocument
+
+    def _extract_with_page(nodes: Sequence[MarkdownNode]) -> list[str]:
+        """Return list of 'page:value' tagged entity strings."""
+        doc = CanonicalDocument.from_nodes(nodes)
+        results: list[str] = []
+        pages_seen: set[int | None] = {n.page for n in doc.leaf_nodes}
+
+        if pages_seen == {None}:
+            # No page information: fall back to document-level (page=0 sentinel)
+            text = doc.visible_text
+            return [f"0:{v}" for v in extractor(text)]
+
+        # Group leaf nodes by page
+        from collections import defaultdict
+        nodes_by_page: dict[int | None, list[MarkdownNode]] = defaultdict(list)
+        for n in doc.leaf_nodes:
+            nodes_by_page[n.page].append(n)
+
+        for page_num, page_nodes in sorted(nodes_by_page.items(), key=lambda x: x[0] or 0):
+            page_text = " ".join(n.visible_text.strip() for n in page_nodes if n.visible_text.strip())
+            p = page_num if page_num is not None else 0
+            results.extend(f"{p}:{v}" for v in extractor(page_text))
+        return results
+
+    ref_vals = _extract_with_page(ref_nodes)
+    hyp_vals = _extract_with_page(hyp_nodes)
+    return _prf_multiset(Counter(ref_vals), Counter(hyp_vals), definition_id)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 @dataclass
 class CriticalDataMetrics:
-    """All critical data metrics for one evaluation run."""
+    """All critical data metrics for one evaluation run.
+
+    Each category has a ``document_f1`` (multiset global, ignores page) and
+    a ``page_f1`` (multiset tagged with page number, penalizes cross-page transposition).
+    When page information is unavailable, ``page_f1`` equals ``document_f1``.
+
+    The legacy fields (numeric, currency, …) remain as ``document_f1`` aliases
+    for backwards compatibility with callers that read only the document view.
+    """
+    # Document-level F1 (multiset global — page-agnostic, spec §9.4 "document_f1")
     numeric:              MetricResult | None = None   # MET-CD01
     currency:             MetricResult | None = None   # MET-CD02
-    percent:              MetricResult | None = None   # MET-CD08 (new — D3 approval)
+    percent:              MetricResult | None = None   # MET-CD08
     dates:                MetricResult | None = None   # MET-CD03
     cpf:                  MetricResult | None = None   # MET-CD04
     cnpj:                 MetricResult | None = None   # MET-CD05
     process_numbers:      MetricResult | None = None   # MET-CD06
     identifiers_combined: MetricResult | None = None   # MET-CD07
 
+    # Page-level F1 (multiset over (page, value) pairs — penalizes transpositions)
+    numeric_page:              MetricResult | None = None
+    currency_page:             MetricResult | None = None
+    percent_page:              MetricResult | None = None
+    dates_page:                MetricResult | None = None
+    cpf_page:                  MetricResult | None = None
+    cnpj_page:                 MetricResult | None = None
+    process_numbers_page:      MetricResult | None = None
+    identifiers_combined_page: MetricResult | None = None
+
     def to_dict(self) -> dict:
         result: dict = {}
-        for attr in ("numeric", "currency", "percent", "dates", "cpf", "cnpj",
-                     "process_numbers", "identifiers_combined"):
+        _DOC_ATTRS = (
+            "numeric", "currency", "percent", "dates", "cpf", "cnpj",
+            "process_numbers", "identifiers_combined",
+        )
+        _PAGE_ATTRS = (
+            "numeric_page", "currency_page", "percent_page", "dates_page",
+            "cpf_page", "cnpj_page", "process_numbers_page",
+            "identifiers_combined_page",
+        )
+        for attr in _DOC_ATTRS + _PAGE_ATTRS:
             v = getattr(self, attr)
             if v is not None:
                 result[attr] = v.to_dict()
         return result
+
+
+def _all_ids_extractor(text: str) -> list[str]:
+    """Combined identifier extractor: CPF + CNPJ + process numbers."""
+    return (
+        [f"cpf:{v}" for v in _extract_cpf(text)]
+        + [f"cnpj:{v}" for v in _extract_cnpj(text)]
+        + [f"proc:{v}" for v in _extract_process_numbers(text)]
+    )
 
 
 def compute_critical_data_metrics(
@@ -375,55 +456,61 @@ def compute_critical_data_metrics(
 
     Returns
     -------
-    CriticalDataMetrics dataclass.
+    CriticalDataMetrics with both ``document_f1`` and ``page_f1`` views.
+
+    Document F1
+        Multiset of canonical values across the whole document, independent
+        of page.  T17: same value in table vs paragraph on the same document
+        still gives F1=1.0.
+
+    Page F1
+        Multiset of ``(page_number, canonical_value)`` pairs.  T19: same value
+        on different pages gives F1=0.0.  When node.page is None for all nodes
+        (no page markers), page_f1 falls back to document_f1 values.
 
     Notes
     -----
-    All extraction uses span-protection: each text position is claimed by
-    at most one category (priority: identifiers > currency > dates > percent
-    > numeric). This prevents a value like 'R$ 1.234,00' from matching both
-    currency and numeric, and '30%' from matching both percent and numeric.
-
-    Entity text is collected from leaf nodes only (CanonicalDocument projection)
-    to prevent double-counting when the same value appears in a table cell that
-    also has a parent TABLE/TABLE_ROW node (bug A07 fix).
+    Span-protection: identifiers > currency > dates > percent > numeric.
+    Leaf-node projection via CanonicalDocument prevents A07 triple-counting.
     """
     ref_text = _text_from_nodes(ref_nodes)
     hyp_text = _text_from_nodes(hyp_nodes)
 
-    # Numbers: canonical form for comparison (A08 fix: any integer length)
-    def _num_canonical(text: str) -> list[str]:
-        return _extract_numbers(text)
+    # Document-level F1 (global multiset, page-agnostic)
+    numeric          = _metric_for_class(ref_text, hyp_text, _extract_numbers,         "MET-CD01")
+    currency         = _metric_for_class(ref_text, hyp_text, _extract_currency,        "MET-CD02")
+    dates            = _metric_for_class(ref_text, hyp_text, _extract_dates,           "MET-CD03")
+    cpf              = _metric_for_class(ref_text, hyp_text, _extract_cpf,             "MET-CD04")
+    cnpj             = _metric_for_class(ref_text, hyp_text, _extract_cnpj,            "MET-CD05")
+    process_numbers  = _metric_for_class(ref_text, hyp_text, _extract_process_numbers, "MET-CD06")
+    ids_combined     = _metric_for_class(ref_text, hyp_text, _all_ids_extractor,       "MET-CD07")
+    percent          = _metric_for_class(ref_text, hyp_text, _extract_percent,         "MET-CD08")
 
-    numeric = _metric_for_class(ref_text, hyp_text, _num_canonical, "MET-CD01")
-    currency = _metric_for_class(ref_text, hyp_text, _extract_currency, "MET-CD02")
-    dates = _metric_for_class(ref_text, hyp_text, _extract_dates, "MET-CD03")
-    cpf = _metric_for_class(ref_text, hyp_text, _extract_cpf, "MET-CD04")
-    cnpj = _metric_for_class(ref_text, hyp_text, _extract_cnpj, "MET-CD05")
-    process_numbers = _metric_for_class(
-        ref_text, hyp_text, _extract_process_numbers, "MET-CD06"
-    )
-
-    # Combined identifiers: CPF + CNPJ + process numbers
-    def _all_ids(text: str) -> list[str]:
-        return (
-            [f"cpf:{v}" for v in _extract_cpf(text)]
-            + [f"cnpj:{v}" for v in _extract_cnpj(text)]
-            + [f"proc:{v}" for v in _extract_process_numbers(text)]
-        )
-
-    ids_combined = _metric_for_class(ref_text, hyp_text, _all_ids, "MET-CD07")
-
-    # Percent: separate category (D3 approval, A06 fix)
-    percent = _metric_for_class(ref_text, hyp_text, _extract_percent, "MET-CD08")
+    # Page-level F1 ((page, value) multiset — penalises transpositions)
+    numeric_page     = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_numbers,         "MET-CD01-page")
+    currency_page    = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_currency,        "MET-CD02-page")
+    dates_page       = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_dates,           "MET-CD03-page")
+    cpf_page         = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_cpf,             "MET-CD04-page")
+    cnpj_page        = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_cnpj,            "MET-CD05-page")
+    proc_page        = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_process_numbers, "MET-CD06-page")
+    ids_page         = _page_f1_for_class(ref_nodes, hyp_nodes, _all_ids_extractor,       "MET-CD07-page")
+    percent_page     = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_percent,         "MET-CD08-page")
 
     return CriticalDataMetrics(
-        numeric           = numeric,
-        currency          = currency,
-        percent           = percent,
-        dates             = dates,
-        cpf               = cpf,
-        cnpj              = cnpj,
-        process_numbers   = process_numbers,
-        identifiers_combined = ids_combined,
+        numeric                  = numeric,
+        currency                 = currency,
+        percent                  = percent,
+        dates                    = dates,
+        cpf                      = cpf,
+        cnpj                     = cnpj,
+        process_numbers          = process_numbers,
+        identifiers_combined     = ids_combined,
+        numeric_page             = numeric_page,
+        currency_page            = currency_page,
+        percent_page             = percent_page,
+        dates_page               = dates_page,
+        cpf_page                 = cpf_page,
+        cnpj_page                = cnpj_page,
+        process_numbers_page     = proc_page,
+        identifiers_combined_page= ids_page,
     )
