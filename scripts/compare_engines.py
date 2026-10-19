@@ -429,16 +429,17 @@ def _render_by_condition(
 
 
 # ---------------------------------------------------------------------------
-# V2 support
+# Schema version support — evaluation-3.0.0 is canonical; V1/V2 are legacy
 # ---------------------------------------------------------------------------
 
-_V2_SCHEMA = "evaluation-v2.0"
+_V3_SCHEMA = "evaluation-3.0.0"
+_V2_SCHEMA = "evaluation-v2.0"  # legacy — kept for rejection message only
 
-# V2 metrics: (display_name, dot-path relative to 'quality' or 'integrity', direction)
+# V3 metrics: (display_name, dot-path relative to 'quality' or 'integrity', direction)
 # Path format: "section.key"  (the value is always at result["value"])
 _V2_METRICS: list[tuple[str, str, str]] = [
     # Text (MET-TX01–TX07)
-    ("CER Sequential Raw",        "text.cer_sequential_raw",          "lower"),
+    ("CER Markdown Raw",          "text.cer_markdown_raw",            "lower"),
     ("CER Sequential Normalized", "text.cer_sequential_normalized",   "lower"),
     ("CER Sequential Visible",    "text.cer_sequential_visible",      "lower"),
     ("WER Sequential",            "text.wer_sequential",              "lower"),
@@ -447,6 +448,7 @@ _V2_METRICS: list[tuple[str, str, str]] = [
     ("Coverage Precision",        "text.text_coverage_precision",     "higher"),
     # Structure
     ("Heading F1",                "structure.heading_detection_f1",           "higher"),
+    ("Heading Text CER",          "structure.heading_text_cer",               "lower"),
     ("Heading Precision",         "structure.heading_precision",              "higher"),
     ("Heading Recall",            "structure.heading_recall",                 "higher"),
     ("Heading Level Match",       "structure.heading_level_match_rate",       "higher"),
@@ -457,21 +459,31 @@ _V2_METRICS: list[tuple[str, str, str]] = [
     # Reading order
     ("Reading Order Acc.",        "reading_order.pairwise_reading_order_accuracy", "higher"),
     # Tables
-    ("Table Detection F1",        "tables.table_detection_f1",        "higher"),
-    ("Table Row F1",              "tables.table_row_detection_f1",    "higher"),
-    ("Col. Count Accuracy",       "tables.table_column_count_accuracy","higher"),
-    ("Cell Detection F1",         "tables.cell_detection_f1",         "higher"),
-    ("Cell Exact Match",          "tables.cell_content_exact_match",  "higher"),
-    ("Cell Alignment Acc.",       "tables.cell_alignment_accuracy",   "higher"),
-    ("Cell CER",                  "tables.cell_cer",                  "lower"),
-    ("Table Content F1",          "tables.table_content_f1",          "higher"),
-    # Critical data
-    ("Numeric F1",                "critical_data.numeric",            "higher"),
-    ("Currency F1",               "critical_data.currency",           "higher"),
-    ("Dates F1",                  "critical_data.dates",              "higher"),
-    ("CPF F1",                    "critical_data.cpf",                "higher"),
-    ("CNPJ F1",                   "critical_data.cnpj",               "higher"),
-    ("Identifiers F1",            "critical_data.identifiers_combined","higher"),
+    ("Table Detection F1",        "tables.table_detection_f1",              "higher"),
+    ("Table Page Location Acc.",  "tables.table_page_location_accuracy",    "higher"),
+    ("Table Row F1",              "tables.table_row_detection_f1",          "higher"),
+    ("Col. Count Accuracy",       "tables.table_column_count_accuracy",     "higher"),
+    ("Cell Detection F1",         "tables.cell_detection_f1",               "higher"),
+    ("Cell Exact Match",          "tables.cell_content_exact_match",        "higher"),
+    ("Cell Alignment Acc.",       "tables.cell_alignment_accuracy",         "higher"),
+    ("Cell CER",                  "tables.cell_cer",                        "lower"),
+    ("Table Content F1",          "tables.table_content_f1",                "higher"),
+    # Critical data — document F1 (position-independent)
+    ("Numeric Doc F1",            "critical_data.numeric",                  "higher"),
+    ("Currency Doc F1",           "critical_data.currency",                 "higher"),
+    ("Percent Doc F1",            "critical_data.percent",                  "higher"),
+    ("Dates Doc F1",              "critical_data.dates",                    "higher"),
+    ("CPF Doc F1",                "critical_data.cpf",                      "higher"),
+    ("CNPJ Doc F1",               "critical_data.cnpj",                     "higher"),
+    ("Identifiers Doc F1",        "critical_data.identifiers_combined",     "higher"),
+    # Critical data — page F1 (penalises cross-page displacements)
+    ("Numeric Page F1",           "critical_data.numeric_page",             "higher"),
+    ("Currency Page F1",          "critical_data.currency_page",            "higher"),
+    ("Percent Page F1",           "critical_data.percent_page",             "higher"),
+    ("Dates Page F1",             "critical_data.dates_page",               "higher"),
+    ("CPF Page F1",               "critical_data.cpf_page",                 "higher"),
+    ("CNPJ Page F1",              "critical_data.cnpj_page",                "higher"),
+    ("Identifiers Page F1",       "critical_data.identifiers_combined_page","higher"),
 ]
 
 # Integrity metrics are one level up (not inside 'quality')
@@ -483,35 +495,57 @@ _V2_INTEGRITY_METRICS: list[tuple[str, str, str]] = [
 
 
 def _detect_schema(data: dict) -> str:
-    """Return 'v2' if data has schema_version == evaluation-v2.0, else 'v1'."""
-    return "v2" if data.get("schema_version") == _V2_SCHEMA else "v1"
+    """Classify schema: 'v3' (canonical), 'v2' (legacy), or 'v1' (no schema_version)."""
+    sv = data.get("schema_version", "")
+    if sv == _V3_SCHEMA:
+        return "v3"
+    if sv == _V2_SCHEMA:
+        return "v2"
+    return "v1"
 
 
 def _validate_schema_homogeneity(all_data: list[tuple[str, dict]]) -> list[str]:
-    """Return error strings if the run set mixes V1 and V2 schemas."""
+    """Return error strings if any run is not schema evaluation-3.0.0.
+
+    V1 and V2 results must be re-evaluated with regrade_existing.py before
+    comparing.  Mixing any two schema versions is rejected.
+    """
+    errors: list[str] = []
     schemas = {eng: _detect_schema(data) for eng, data in all_data}
-    v1 = [eng for eng, s in schemas.items() if s == "v1"]
-    v2 = [eng for eng, s in schemas.items() if s == "v2"]
-    if v1 and v2:
-        return [
-            f"Schema version mismatch: V1 runs {v1} cannot be compared with "
-            f"V2 runs {v2}. Re-evaluate V1 runs with regrade_existing.py to "
-            "produce V2 metrics before comparing."
-        ]
-    return []
+    non_v3 = {eng: s for eng, s in schemas.items() if s != "v3"}
+    if non_v3:
+        for eng, s in non_v3.items():
+            if s == "v2":
+                errors.append(
+                    f"Engine '{eng}': schema evaluation-v2.0 is not accepted for "
+                    f"comparison. Re-evaluate with regrade_existing.py to produce "
+                    f"evaluation-3.0.0 output."
+                )
+            else:
+                raw_sv = next(
+                    (d.get("schema_version", "missing") for e, d in all_data if e == eng),
+                    "missing",
+                )
+                errors.append(
+                    f"Engine '{eng}': schema version '{raw_sv}' "
+                    f"is not accepted. Only evaluation-3.0.0 is supported. "
+                    f"Re-evaluate with regrade_existing.py."
+                )
+    return errors
 
 
 def _comparability_key_v2(data: dict) -> dict:
-    """Extract comparability fields from a V2 metrics document (spec §10.4).
+    """Extract comparability fields from an evaluation-3.0.0 metrics document.
 
     Fields checked (all must match across a comparison set):
-      schema_version       — evaluation-v2.0
-      reference_sha256     — hash of the reference document used
-      selected_pages       — sorted tuple of 1-based page IDs
-      evaluator_version    — metric_definitions_version from evaluator block
-      normalization_policy — normalization_policy from evaluator block
-      parser_id            — parser field from evaluator block
-      alignment_policy     — alignment_policy field from evaluator block
+      schema_version                  — evaluation-3.0.0
+      reference_effective_sha256      — canonical hash of reference pages used
+      reference_serialization_version — hash protocol identifier
+      selected_pages                  — sorted tuple of 1-based page IDs
+      evaluator_version               — metric_definitions_version
+      normalization_policy            — normalization_policy
+      parser_id                       — parser field
+      alignment_policy                — alignment_policy field
     """
     inputs = data.get("inputs") or {}
     pages = inputs.get("selected_pages")
@@ -521,21 +555,24 @@ def _comparability_key_v2(data: dict) -> dict:
         selected = None
     evaluator = data.get("evaluator") or {}
     return {
-        "schema_version":      data.get("schema_version"),
-        "reference_sha256":    inputs.get("reference_sha256"),
-        "selected_pages":      selected,
-        "evaluator_version":   evaluator.get("metric_definitions_version") or evaluator.get("version"),
-        "normalization_policy": evaluator.get("normalization_policy"),
-        "parser_id":           evaluator.get("parser"),
-        "alignment_policy":    evaluator.get("alignment_policy"),
+        "schema_version":                  data.get("schema_version"),
+        "reference_effective_sha256":      inputs.get("reference_effective_sha256"),
+        "reference_serialization_version": inputs.get("reference_serialization_version"),
+        "selected_pages":                  selected,
+        "evaluator_version":               evaluator.get("metric_definitions_version"),
+        "normalization_policy":            evaluator.get("normalization_policy"),
+        "parser_id":                       evaluator.get("parser"),
+        "alignment_policy":                evaluator.get("alignment_policy"),
     }
 
 
-# Fields that MUST match for runs to be comparable (spec §10.4 required fields).
-# evaluator_version/normalization_policy/parser_id/alignment_policy are checked
-# only when at least one run has a non-None value for that field — absent fields
-# are treated as "unknown" and generate a warning, not a hard error.
-_V2_REQUIRED_COMPARABILITY = ("schema_version", "reference_sha256", "selected_pages")
+# Fields that MUST match for runs to be comparable (spec §10.4).
+_V2_REQUIRED_COMPARABILITY = (
+    "schema_version",
+    "reference_effective_sha256",
+    "reference_serialization_version",
+    "selected_pages",
+)
 _V2_SOFT_COMPARABILITY = ("evaluator_version", "normalization_policy", "parser_id", "alignment_policy")
 
 
@@ -637,9 +674,9 @@ def _render_comparison_table_v2(all_data: list[tuple[str, dict]]) -> str:
     }
 
     lines = [
-        "# Comparativo de perfis de implantação OCR (V2)",
+        "# Comparativo de perfis de implantação OCR",
         "",
-        "Métricas V2 do avaliador (`schema_version: evaluation-v2.0`).",
+        f"Métricas do avaliador (`schema_version: {_V3_SCHEMA}`).",
         "",
         f"Engines avaliadas: {', '.join(f'`{e}`' for e in engines)}",
         "",

@@ -1817,6 +1817,39 @@ def main() -> int:
     from structured_pdf_text.atomic_io import atomic_write_json, atomic_write_text
     atomic_write_json(metrics_path, summary)
 
+    # --- Canonical evaluation-3.0.0 output (parallel, same inputs) ---
+    try:
+        _scripts_dir = str(Path(__file__).parent)
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        from regrade_existing import _run_v2 as _run_canonical  # noqa: PLC0415
+
+        # Build ref_text the same way regrade_existing does
+        if args.reference is not None:
+            _canonical_ref_text = args.reference.read_text(encoding="utf-8")
+            _canonical_manifesto_path = None
+        else:
+            _canonical_manifesto_path = args.manifesto
+            # ref_pages already computed above in hyp_pages / ref_pages
+            _parts: list[str] = []
+            for _pnum in sorted(ref_pages):
+                _parts.append(f"## Página {_pnum}\n\n{ref_pages[_pnum]}")
+            _canonical_ref_text = "\n\n".join(_parts)
+
+        canonical_doc = _run_canonical(
+            ref_text=_canonical_ref_text,
+            hyp_text=hyp_text,
+            ref_path=args.reference,
+            hyp_path=args.hypothesis,
+            manifesto_path=_canonical_manifesto_path,
+            engine=args.engine,
+            run_id=run_id,
+        )
+        canonical_path = args.output_dir / f"metrics_v3_{engine_slug}_{run_id}.json"
+        atomic_write_json(canonical_path, canonical_doc.to_dict())
+    except Exception:
+        pass  # canonical output is best-effort; legacy output already written
+
     # --- Build error report for summary ---
     flat_summary = {
         **summary["grupo1_texto"],

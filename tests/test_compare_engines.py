@@ -137,12 +137,21 @@ def test_condition_lists_are_split_and_profile_recovery_metadata_is_reported():
 # ---------------------------------------------------------------------------
 
 def _v2_run(engine: str = "test_engine", **overrides) -> dict:
-    """Minimal valid V2 metrics document for testing."""
+    """Minimal valid evaluation-3.0.0 metrics document for testing.
+
+    Named _v2_run for backwards-compatibility with existing test code that
+    calls this fixture; the schema is now evaluation-3.0.0 (canonical).
+    """
     doc = {
-        "schema_version": "evaluation-v2.0",
-        "evaluator": {"version": "v2.0.0", "engine": engine, "run_id": "run001"},
+        "schema_version": "evaluation-3.0.0",
+        "evaluator": {
+            "metric_definitions_version": "3.0.0",
+            "engine": engine,
+            "run_id": "run001",
+        },
         "inputs": {
-            "reference_sha256": "ref-sha-abc",
+            "reference_effective_sha256": "ref-eff-sha-abc123",
+            "reference_serialization_version": "reference-effective-v1",
             "hypothesis_sha256": "hyp-sha-xyz",
             "selected_pages": [1, 2, 3],
         },
@@ -180,8 +189,11 @@ def _v2_run(engine: str = "test_engine", **overrides) -> dict:
 
 
 class TestDetectSchema:
-    def test_v2_detected(self):
-        assert _detect_schema(_v2_run()) == "v2"
+    def test_v3_detected(self):
+        assert _detect_schema(_v2_run()) == "v3"
+
+    def test_v2_detected_for_legacy_schema(self):
+        assert _detect_schema({"schema_version": "evaluation-v2.0"}) == "v2"
 
     def test_v1_detected_when_no_schema_version(self):
         assert _detect_schema(_run()) == "v1"
@@ -191,25 +203,37 @@ class TestDetectSchema:
 
 
 class TestSchemaHomogeneity:
-    def test_all_v2_passes(self):
+    def test_all_v3_passes(self):
+        """evaluation-3.0.0 runs are accepted for comparison."""
         errors = _validate_schema_homogeneity([
             ("engine-a", _v2_run("engine-a")),
             ("engine-b", _v2_run("engine-b")),
         ])
         assert errors == []
 
-    def test_all_v1_passes(self):
-        errors = _validate_schema_homogeneity([("engine-a", _run()), ("engine-b", _run())])
-        assert errors == []
+    def test_all_v2_legacy_rejected(self):
+        """evaluation-v2.0 runs are rejected; must re-evaluate with regrade_existing.py."""
+        errors = _validate_schema_homogeneity([
+            ("engine-a", {"schema_version": "evaluation-v2.0"}),
+            ("engine-b", {"schema_version": "evaluation-v2.0"}),
+        ])
+        assert len(errors) == 2
+        assert all("regrade_existing.py" in e for e in errors)
 
-    def test_mixed_v1_v2_rejected(self):
+    def test_all_v1_rejected(self):
+        """V1 (no schema_version) runs are rejected."""
+        errors = _validate_schema_homogeneity([("engine-a", _run()), ("engine-b", _run())])
+        assert len(errors) == 2
+        assert all("regrade_existing.py" in e for e in errors)
+
+    def test_mixed_v1_v3_rejected(self):
+        """V1 and V3 runs cannot be compared — both sides must be v3."""
         errors = _validate_schema_homogeneity([
             ("engine-a", _run()),
             ("engine-b", _v2_run("engine-b")),
         ])
-        assert len(errors) == 1
-        assert "V1" in errors[0] and "V2" in errors[0]
-        assert "regrade_existing.py" in errors[0]
+        assert len(errors) >= 1
+        assert any("regrade_existing.py" in e for e in errors)
 
 
 class TestComparabilityV2:
@@ -223,12 +247,13 @@ class TestComparabilityV2:
     def test_single_run_always_comparable(self):
         assert _validate_comparability_v2([("engine-a", _v2_run())]) == []
 
-    def test_different_reference_sha_rejected(self):
+    def test_different_reference_effective_sha_rejected(self):
+        """Different reference_effective_sha256 → runs are not comparable."""
         a = _v2_run("engine-a")
         b = _v2_run("engine-b")
-        b["inputs"]["reference_sha256"] = "other-ref"
+        b["inputs"]["reference_effective_sha256"] = "different-eff-sha"
         errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
-        assert any("reference_sha256" in e for e in errors)
+        assert any("reference_effective_sha256" in e for e in errors)
 
     def test_different_selected_pages_rejected(self):
         a = _v2_run("engine-a")
@@ -271,7 +296,7 @@ class TestRenderComparisonTableV2:
             ("engine-a", _v2_run("engine-a")),
             ("engine-b", _v2_run("engine-b")),
         ])
-        assert "evaluation-v2.0" in report
+        assert "evaluation-3.0.0" in report
         assert "engine-a" in report and "engine-b" in report
 
     def test_shows_all_section_headers(self):

@@ -323,7 +323,7 @@ class TestAgentIntegrationContract:
         assert result.returncode == 0, f"regrade failed: {result.stderr}"
         # Verify output files
         output_dir = tmp_path / "out"
-        metrics_files = list(output_dir.glob("metrics_v2_*.json"))
+        metrics_files = list(output_dir.glob("metrics_*.json"))
         assert len(metrics_files) == 1, "Expected one metrics JSON"
         data = json.loads(metrics_files[0].read_text())
         assert data["schema_version"] == "evaluation-3.0.0"
@@ -746,7 +746,7 @@ class TestRegradeScript:
             capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, f"Script failed: {result.stderr}"
-        metrics_file = out / "metrics_v2_pytest_testrun.json"
+        metrics_file = out / "metrics_pytest_testrun.json"
         assert metrics_file.exists()
         data = json.loads(metrics_file.read_text())
         assert data["schema_version"] == "evaluation-3.0.0"
@@ -770,10 +770,10 @@ class TestRegradeScript:
              "--quiet"],
             capture_output=True, text=True, timeout=60,
         )
-        report = out / "errors_v2_pytest_errtestrun.md"
+        report = out / "errors_pytest_errtestrun.md"
         assert report.exists()
         content = report.read_text()
-        assert "V2 Evaluation Error Report" in content
+        assert "Evaluation Error Report" in content
         assert "Quality Metrics Summary" in content
 
     def test_regrade_delta_report(self, tmp_path):
@@ -850,7 +850,7 @@ class TestRegradeScript:
             capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, f"Script failed: {result.stderr}"
-        metrics_files = list(out.glob("metrics_v2_*.json"))
+        metrics_files = list(out.glob("metrics_*.json"))
         assert len(metrics_files) == 1
 
     def test_regrade_no_ocr_invocation(self, tmp_path):

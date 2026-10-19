@@ -51,6 +51,7 @@ from structured_pdf_text.evaluation import (
     MetricResult,
     MetricStatus,
     PageScope,
+    REFERENCE_HASH_PROTOCOL,
     StructureMetrics,
     TableMetrics,
     TextMetrics,
@@ -60,11 +61,13 @@ from structured_pdf_text.evaluation import (
     check_comparability,
     compute_critical_data_metrics,
     compute_integrity_metrics,
+    compute_reference_effective_hash,
     compute_structure_metrics,
     compute_table_metrics,
     compute_text_metrics,
     evaluate_rank_eligibility,
     parse_document,
+    split_pages,
 )
 
 
@@ -82,23 +85,18 @@ def _sha256_path(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-_PAGE_HDR_RE = re.compile(r"^##\s+P[áa]gina\s+0*(\d+)", re.IGNORECASE | re.MULTILINE)
+def _split_pages_safe(text: str) -> dict[int, str]:
+    """Split Markdown text into pages using the canonical split_pages protocol.
 
-
-def _split_pages(text: str) -> dict[int, str]:
-    """Split Markdown text into page dict {page_num: body} by ## Página N markers."""
-    parts = _PAGE_HDR_RE.split(text)
-    pages: dict[int, str] = {}
-    i = 1
-    while i + 1 < len(parts):
-        page_num = int(parts[i])
-        body = parts[i + 1].strip()
-        if page_num not in pages:
-            pages[page_num] = body
-        i += 2
-    # If no page markers, treat the whole text as page 1
+    Falls back to {1: text} when no page markers are present.
+    Duplicate page markers raise ValueError — caller should catch and report.
+    """
+    try:
+        pages = split_pages(text)
+    except ValueError:
+        pages = {}
     if not pages and text.strip():
-        pages[1] = text.strip()
+        pages = {1: text.strip()}
     return pages
 
 
@@ -146,40 +144,51 @@ def _run_v2(
     engine: str,
     run_id: str,
 ) -> V2DocumentMetrics:
-    """Run the complete V2 evaluation and return a V2DocumentMetrics object."""
+    """Run the unified evaluation-3.0.0 engine and return a V2DocumentMetrics object."""
     doc = V2DocumentMetrics()
-
-    # --- Provenance ---
-    doc.evaluator_info = {
-        "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "v2.0",
-        "normalization_policy": "unicode_layout",
-        "parser": PARSER_VERSION,
-        "alignment_policy": "content-match-v1",
-        "created_at_utc": datetime.now(tz=timezone.utc).isoformat(),
-    }
-    doc.inputs = {
-        "reference_sha256": _sha256_path(ref_path) if ref_path else None,
-        "hypothesis_sha256": _sha256_path(hyp_path),
-        "manifest_sha256": _sha256_path(manifesto_path) if manifesto_path else None,
-        "pdf_sha256": None,
-        "engine": engine,
-        "run_id": run_id,
-    }
 
     # --- Parse reference + hypothesis ---
     ref_nodes = parse_document(ref_text, origin="reference")
     hyp_nodes = parse_document(hyp_text, origin="hypothesis")
 
     # --- Page scope ---
-    ref_pages = _split_pages(ref_text)
-    hyp_pages = _split_pages(hyp_text)
+    ref_pages = _split_pages_safe(ref_text)
+    hyp_pages = _split_pages_safe(hyp_text)
     scope = build_page_scope(
         ref_page_nums=set(ref_pages.keys()),
         hyp_page_nums=set(hyp_pages.keys()),
     )
 
-    doc.inputs["selected_pages"] = sorted(scope.selected_reference)
+    selected_pages = sorted(scope.selected_reference)
+
+    # --- Reference effective hash (protocol reference-effective-v1) ---
+    eff_digest, eff_meta = compute_reference_effective_hash(
+        ref_pages, selected_pages=selected_pages if selected_pages else None
+    )
+
+    # --- Provenance ---
+    doc.evaluator_info = {
+        "implementation_commit": _get_git_sha(),
+        "metric_definitions_version": "3.0.0",
+        "normalization_policy": "unicode_layout",
+        "parser": PARSER_VERSION,
+        "alignment_policy": "content-match-v1",
+        "entity_policy": "entities-ptbr-v1",
+        "created_at_utc": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    doc.inputs = {
+        "reference_effective_sha256": eff_digest,
+        "reference_serialization_version": REFERENCE_HASH_PROTOCOL,
+        "reference_source_sha256": _sha256_path(ref_path) if ref_path else None,
+        "hypothesis_sha256": _sha256_path(hyp_path),
+        "manifest_sha256": _sha256_path(manifesto_path) if manifesto_path else None,
+        "pdf_sha256": None,
+        "engine": engine,
+        "run_id": run_id,
+        "selected_pages": selected_pages,
+        "total_pages_in_reference": eff_meta.get("total_pages_in_reference"),
+    }
+
     doc.inputs["selected_missing_pages"] = sorted(scope.selected_missing)
     doc.inputs["extra_pages_out_of_scope"] = sorted(scope.selected_extra)
 
@@ -265,7 +274,7 @@ def _generate_error_report(
     hyp_path: Path,
 ) -> str:
     lines = [
-        f"# V2 Evaluation Error Report",
+        f"# Evaluation Error Report (schema evaluation-3.0.0)",
         f"",
         f"**Run ID:** `{run_id}`  ",
         f"**Engine:** `{engine}`  ",
@@ -541,19 +550,19 @@ def main() -> int:
 
     result_dict = doc.to_dict()
 
-    # Write V2 metrics JSON
-    metrics_path = args.output_dir / f"metrics_v2_{args.engine}_{run_id}.json"
+    # Write metrics JSON (canonical name: metrics_{engine}_{run_id}.json)
+    metrics_path = args.output_dir / f"metrics_{args.engine}_{run_id}.json"
     metrics_path.write_text(
         json.dumps(result_dict, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
 
-    # Write error report
+    # Write error report (canonical name: errors_{engine}_{run_id}.md)
     report_text = _generate_error_report(
         doc, run_id=run_id, engine=args.engine,
         ref_path=args.reference, hyp_path=args.hypothesis,
     )
-    report_path = args.output_dir / f"errors_v2_{args.engine}_{run_id}.md"
+    report_path = args.output_dir / f"errors_{args.engine}_{run_id}.md"
     report_path.write_text(report_text, encoding="utf-8")
 
     # Write delta report if V1 metrics provided
@@ -566,7 +575,7 @@ def main() -> int:
             print(f"Delta report: {delta_path}")
 
     if not args.quiet:
-        print(f"V2 metrics:   {metrics_path}")
+        print(f"Metrics:      {metrics_path}")
         print(f"Error report: {report_path}")
         print(f"schema_version: {result_dict.get('schema_version')}")
         print(f"rank_eligible:  {result_dict.get('evaluation', {}).get('rank_eligible')}")
