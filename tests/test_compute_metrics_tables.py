@@ -39,6 +39,16 @@ def test_missing_table_is_penalized_in_detection_and_cell_metrics():
     assert metrics["table_structure_similarity"] == 0.0
 
 
+def test_missing_table_does_not_get_credit_for_matching_empty_cells():
+    ref = "| Campo | Valor |\n| --- | --- |\n| | |"
+    metrics = compute_table_metrics("", ref)
+
+    assert metrics["table_f1"] == 0.0
+    assert metrics["cell_exact_match"] == 0.0
+    assert metrics["cell_alignment_accuracy"] == 0.0
+    assert metrics["table_content_f1"] == 0.0
+
+
 def test_missing_table_page_contributes_false_negative_to_document_aggregate():
     perfect_page = {"page": 1, **compute_table_metrics(TABLE, TABLE)}
     missing_page = {

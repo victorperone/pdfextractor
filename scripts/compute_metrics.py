@@ -619,14 +619,19 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
                 ref_norm = _normalize_cell(ref_cell)
                 hyp_norm = _normalize_cell(hyp_cell)
                 cell_ref_count += 1
-                cell_exact_count += int(ref_norm == hyp_norm)
+                # An unmatched reference table has no observed cells, even
+                # when some expected cells are intentionally blank. Do not
+                # award exact/alignment credit just because "" == "".
+                cell_exact_count += int(hyp_i is not None and ref_norm == hyp_norm)
                 # cell_alignment_accuracy measures whether the cell that appears
                 # at the *expected logical position* (same row_index, column_index)
                 # contains any content at all — i.e., the structural slot is occupied.
                 # A non-empty cell at the right position counts as aligned even if the
                 # text differs; an empty cell where content is expected does not.
                 # This separates "wrong position" from "wrong content".
-                cell_alignment_count += int(bool(hyp_norm) or not ref_norm)
+                cell_alignment_count += int(
+                    hyp_i is not None and (bool(hyp_norm) or not ref_norm)
+                )
                 cell_edit_sum += _lev_distance(list(hyp_norm), list(ref_norm))
                 cell_ref_char_sum += len(ref_norm)
 
@@ -653,7 +658,9 @@ def compute_table_metrics(hyp: str, ref: str) -> dict:
     content_fn = sum(ref_cells.values()) - content_tp
     content_fp = sum(hyp_cells.values()) - content_tp
     if not ref_cells and not hyp_cells:
-        table_content_f1 = 1.0
+        # Empty-cell-only tables still count as detected table structure; a
+        # missing/extra table must not receive a perfect content score.
+        table_content_f1 = float(n_ref == n_hyp)
     else:
         _, _, table_content_f1 = _f1(content_tp, content_fp, content_fn)
 
