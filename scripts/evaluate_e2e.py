@@ -475,6 +475,11 @@ def main() -> int:
     memory_stats.update(memory_sampler.as_dict())
 
     from structured_pdf_text.benchmark_protocol import protocol_manifest
+    selected_page_numbers = (
+        sorted(index + 1 for index in config.page_indices)
+        if config.page_indices is not None
+        else sorted(page.page_index + 1 for page in document.pages)
+    )
     manifest = {
         "schema_version": "2.0",
         "run_id": run_id,
@@ -492,6 +497,7 @@ def main() -> int:
         ),
         "pdf_path": str(args.pdf),
         "pdf_sha256": _sha256_file(args.pdf),
+        "selected_pages": selected_page_numbers,
         "document_status": doc_status_raw,
         "benchmark_status": benchmark_status,
         "document_warnings": doc_warnings,

@@ -143,6 +143,9 @@ def _run_v2(
     manifesto_path: Path | None,
     engine: str,
     run_id: str,
+    pdf_sha256: str | None = None,
+    mode: str | None = None,
+    selected_page_scope: list[int] | None = None,
 ) -> V2DocumentMetrics:
     """Run the unified evaluation-3.0.0 engine and return a V2DocumentMetrics object."""
     doc = V2DocumentMetrics()
@@ -159,11 +162,17 @@ def _run_v2(
         hyp_page_nums=set(hyp_pages.keys()),
     )
 
-    selected_pages = sorted(scope.selected_reference)
+    default_selected_pages = sorted(scope.selected_reference)
+    effective_selected_pages = (
+        sorted(set(int(page) for page in selected_page_scope))
+        if selected_page_scope is not None
+        else default_selected_pages
+    )
 
     # --- Reference effective hash (protocol reference-effective-v1) ---
     eff_digest, eff_meta = compute_reference_effective_hash(
-        ref_pages, selected_pages=selected_pages if selected_pages else None
+        ref_pages,
+        selected_pages=effective_selected_pages,
     )
 
     # --- Provenance ---
@@ -182,10 +191,11 @@ def _run_v2(
         "reference_source_sha256": _sha256_path(ref_path) if ref_path else None,
         "hypothesis_sha256": _sha256_path(hyp_path),
         "manifest_sha256": _sha256_path(manifesto_path) if manifesto_path else None,
-        "pdf_sha256": None,
+        "pdf_sha256": pdf_sha256,
+        "mode": mode,
         "engine": engine,
         "run_id": run_id,
-        "selected_pages": selected_pages,
+        "selected_pages": effective_selected_pages,
         "total_pages_in_reference": eff_meta.get("total_pages_in_reference"),
     }
 
@@ -491,6 +501,8 @@ def main() -> int:
                     help="Reference ground-truth Markdown file")
     ap.add_argument("--manifesto", type=Path, default=None,
                     help="Manifesto JSON with pages[].expected_markdown")
+    ap.add_argument("--run-manifest", type=Path, default=None,
+                    help="E2E run manifest carrying PDF hash, mode, and selected pages")
     ap.add_argument("--v1-metrics", type=Path, default=None,
                     help="Existing V1 metrics JSON for delta report")
     ap.add_argument("--engine", default="unknown",
@@ -513,13 +525,24 @@ def main() -> int:
     run_id = args.run_id or uuid.uuid4().hex[:12]
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    run_metadata: dict[str, Any] = {}
+    if args.run_manifest is not None:
+        if not args.run_manifest.is_file():
+            print(f"ERROR: run manifest not found: {args.run_manifest}", file=sys.stderr)
+            return 1
+        try:
+            run_metadata = json.loads(args.run_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"ERROR: invalid run manifest: {exc}", file=sys.stderr)
+            return 1
+
     # Load hypothesis
     hyp_text = args.hypothesis.read_text(encoding="utf-8")
 
     # Load reference
     if args.reference is not None:
         ref_text = args.reference.read_text(encoding="utf-8")
-        manifesto_path = None
+        manifesto_path = args.manifesto
     else:
         manifesto = _load_manifesto(args.manifesto)
         ref_pages = _manifesto_pages(manifesto)
@@ -555,6 +578,16 @@ def main() -> int:
         manifesto_path=manifesto_path,
         engine=args.engine,
         run_id=run_id,
+        pdf_sha256=run_metadata.get("pdf_sha256"),
+        mode=run_metadata.get("mode"),
+        selected_page_scope=(
+            sorted({int(page) for page in run_metadata["selected_pages"]})
+            if "selected_pages" in run_metadata
+            else sorted({int(entry["page"]) for entry in run_metadata.get("pages", [])
+                         if entry.get("page") is not None})
+            if "pages" in run_metadata
+            else None
+        ),
     )
 
     result_dict = doc.to_dict()

@@ -50,21 +50,27 @@ Primeiro paragrafo do documento.
 # ---------------------------------------------------------------------------
 
 def _run_regrade(tmp_path: Path, ref_text: str, hyp_text: str,
-                 engine: str = "smoke", run_id: str = "r1") -> dict:
+                 engine: str = "smoke", run_id: str = "r1",
+                 run_manifest: dict | None = None) -> dict:
     tmp_path.mkdir(parents=True, exist_ok=True)
     ref = tmp_path / "ref.md"
     hyp = tmp_path / "hyp.md"
     out = tmp_path / "out_regrade"
     ref.write_text(ref_text, encoding="utf-8")
     hyp.write_text(hyp_text, encoding="utf-8")
-    result = subprocess.run(
-        [sys.executable, str(_REGRADE_SCRIPT),
+    command = [sys.executable, str(_REGRADE_SCRIPT),
          "--hypothesis", str(hyp),
          "--reference", str(ref),
          "--engine", engine,
          "--run-id", run_id,
          "--output-dir", str(out),
-         "--quiet"],
+         "--quiet"]
+    if run_manifest is not None:
+        run_manifest_path = tmp_path / "run_manifest.json"
+        run_manifest_path.write_text(json.dumps(run_manifest), encoding="utf-8")
+        command.extend(["--run-manifest", str(run_manifest_path)])
+    result = subprocess.run(
+        command,
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, f"regrade failed: {result.stderr}"
@@ -73,8 +79,26 @@ def _run_regrade(tmp_path: Path, ref_text: str, hyp_text: str,
     return json.loads(metrics_file.read_text())
 
 
+def test_regrade_preserves_run_input_identity_and_selected_page_scope(tmp_path):
+    run = _run_regrade(
+        tmp_path, _REF_SIMPLE, _HYP_IDENTICAL,
+        run_manifest={
+            "pdf_sha256": "a" * 64,
+            "mode": "ocr",
+            "selected_pages": [1],
+            "pages": [],
+        },
+    )
+    inputs = run["inputs"]
+    assert inputs["pdf_sha256"] == "a" * 64
+    assert inputs["mode"] == "ocr"
+    assert inputs["selected_pages"] == [1]
+    assert len(inputs["reference_effective_sha256"]) == 64
+
+
 def _run_compute(tmp_path: Path, ref_text: str, hyp_text: str,
-                 engine: str = "smoke", run_id: str = "r1") -> dict:
+                 engine: str = "smoke", run_id: str = "r1",
+                 run_manifest: dict | None = None) -> dict:
     """Run compute_metrics and return the canonical v3 JSON."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     ref = tmp_path / "ref.md"
@@ -83,14 +107,19 @@ def _run_compute(tmp_path: Path, ref_text: str, hyp_text: str,
     ref.write_text(ref_text, encoding="utf-8")
     hyp.write_text(hyp_text, encoding="utf-8")
     engine_slug = engine.replace("-", "_")
-    result = subprocess.run(
-        [sys.executable, str(_COMPUTE_SCRIPT),
+    command = [sys.executable, str(_COMPUTE_SCRIPT),
          "--hypothesis", str(hyp),
          "--reference", str(ref),
          "--engine", engine,
          "--run-id", run_id,
          "--output-dir", str(out),
-         "--quiet"],
+         "--quiet"]
+    if run_manifest is not None:
+        run_manifest_path = tmp_path / "run_manifest.json"
+        run_manifest_path.write_text(json.dumps(run_manifest), encoding="utf-8")
+        command.extend(["--run-manifest", str(run_manifest_path)])
+    result = subprocess.run(
+        command,
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, f"compute_metrics failed: {result.stderr}"
@@ -101,6 +130,22 @@ def _run_compute(tmp_path: Path, ref_text: str, hyp_text: str,
         f"got: {[f.name for f in out.glob('*.json')]}"
     )
     return json.loads(canonical_file.read_text())
+
+
+def test_compute_propagates_run_input_identity_to_canonical_metrics(tmp_path):
+    run = _run_compute(
+        tmp_path, _REF_SIMPLE, _HYP_IDENTICAL,
+        run_manifest={
+            "pdf_sha256": "b" * 64,
+            "mode": "native",
+            "selected_pages": [2],
+            "pages": [],
+        },
+    )
+    inputs = run["inputs"]
+    assert inputs["pdf_sha256"] == "b" * 64
+    assert inputs["mode"] == "native"
+    assert inputs["selected_pages"] == [2]
 
 
 def _assert_no_nan_infinity(obj, path: str = "") -> None:

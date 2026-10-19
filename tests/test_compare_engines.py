@@ -150,8 +150,11 @@ def _v2_run(engine: str = "test_engine", **overrides) -> dict:
             "run_id": "run001",
         },
         "inputs": {
-            "reference_effective_sha256": "ref-eff-sha-abc123",
+            "reference_effective_sha256": "a" * 64,
             "reference_serialization_version": "reference-effective-v1",
+            "pdf_sha256": "b" * 64,
+            "manifest_sha256": "c" * 64,
+            "mode": "balanced",
             "hypothesis_sha256": "hyp-sha-xyz",
             "selected_pages": [1, 2, 3],
         },
@@ -261,6 +264,42 @@ class TestComparabilityV2:
         b["inputs"]["selected_pages"] = [4, 5, 6]
         errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
         assert any("selected_pages" in e for e in errors)
+
+    def test_different_pdf_manifest_or_mode_rejected(self):
+        for field, value in (
+            ("pdf_sha256", "other-pdf"),
+            ("manifest_sha256", "other-manifest"),
+            ("mode", "fast"),
+        ):
+            a = _v2_run("engine-a")
+            b = _v2_run("engine-b")
+            b["inputs"][field] = value
+            errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+            assert any(field in error for error in errors)
+
+    def test_missing_input_identity_fails_closed(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        for run in (a, b):
+            run["inputs"]["pdf_sha256"] = None
+        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        assert sum("pdf_sha256" in error for error in errors) >= 2
+
+    def test_malformed_digest_and_unsupported_reference_protocol_rejected(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        b["inputs"]["manifest_sha256"] = "not-a-digest"
+        b["inputs"]["reference_serialization_version"] = "reference-effective-v0"
+        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        assert any("manifest_sha256" in error and "SHA-256" in error for error in errors)
+        assert any("reference serialization protocol" in error for error in errors)
+
+    def test_engine_output_failures_do_not_change_comparability(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        b["inputs"]["selected_missing_pages"] = [3]
+        b["evaluation"]["status"] = "partial"
+        assert _validate_comparability_v2([("engine-a", a), ("engine-b", b)]) == []
 
     def test_comparability_key_is_order_independent(self):
         a = _v2_run("engine-a")

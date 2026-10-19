@@ -1517,11 +1517,16 @@ def main() -> int:
     if args.run_manifest and args.run_manifest.exists():
         with open(args.run_manifest, encoding="utf-8") as f:
             _rm = json.load(f)
-        run_manifest_pages = {
-            int(e["page"])
-            for e in _rm.get("pages", [])
-            if e.get("page") is not None
-        }
+        if "selected_pages" in _rm:
+            run_manifest_pages = {int(page) for page in _rm["selected_pages"]}
+        else:
+            # Backward-compatible inference for E2E manifests written before
+            # selected_pages became an explicit input field.
+            run_manifest_pages = {
+                int(e["page"])
+                for e in _rm.get("pages", [])
+                if e.get("page") is not None
+            }
         run_page_meta = {
             int(page["page"]): page for page in _rm.get("pages", [])
             if page.get("page") is not None
@@ -1827,7 +1832,7 @@ def main() -> int:
         # Build ref_text the same way regrade_existing does
         if args.reference is not None:
             _canonical_ref_text = args.reference.read_text(encoding="utf-8")
-            _canonical_manifesto_path = None
+            _canonical_manifesto_path = args.manifesto
         else:
             _canonical_manifesto_path = args.manifesto
             # ref_pages already computed above in hyp_pages / ref_pages
@@ -1844,6 +1849,12 @@ def main() -> int:
             manifesto_path=_canonical_manifesto_path,
             engine=args.engine,
             run_id=run_id,
+            pdf_sha256=_run_meta.get("pdf_sha256"),
+            mode=_run_meta.get("mode"),
+            selected_page_scope=(
+                _run_meta.get("selected_pages") if args.run_manifest and args.run_manifest.exists()
+                else None
+            ),
         )
         canonical_path = args.output_dir / f"metrics_v3_{engine_slug}_{run_id}.json"
         atomic_write_json(canonical_path, canonical_doc.to_dict())

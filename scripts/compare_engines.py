@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -541,6 +542,9 @@ def _comparability_key_v2(data: dict) -> dict:
       schema_version                  — evaluation-3.0.0
       reference_effective_sha256      — canonical hash of reference pages used
       reference_serialization_version — hash protocol identifier
+      pdf_sha256                      — source PDF identity
+      manifest_sha256                 — corpus/reference manifest identity
+      mode                            — extraction mode
       selected_pages                  — sorted tuple of 1-based page IDs
       evaluator_version               — metric_definitions_version
       normalization_policy            — normalization_policy
@@ -558,6 +562,9 @@ def _comparability_key_v2(data: dict) -> dict:
         "schema_version":                  data.get("schema_version"),
         "reference_effective_sha256":      inputs.get("reference_effective_sha256"),
         "reference_serialization_version": inputs.get("reference_serialization_version"),
+        "pdf_sha256":                      inputs.get("pdf_sha256"),
+        "manifest_sha256":                 inputs.get("manifest_sha256"),
+        "mode":                            inputs.get("mode"),
         "selected_pages":                  selected,
         "evaluator_version":               evaluator.get("metric_definitions_version"),
         "normalization_policy":            evaluator.get("normalization_policy"),
@@ -571,6 +578,9 @@ _V2_REQUIRED_COMPARABILITY = (
     "schema_version",
     "reference_effective_sha256",
     "reference_serialization_version",
+    "pdf_sha256",
+    "manifest_sha256",
+    "mode",
     "selected_pages",
 )
 _V2_SOFT_COMPARABILITY = ("evaluator_version", "normalization_policy", "parser_id", "alignment_policy")
@@ -584,6 +594,29 @@ def _validate_comparability_v2(
     if len(all_data) < 2:
         return errors
     keys = [(eng, _comparability_key_v2(data)) for eng, data in all_data]
+    # Missing input identities must fail closed even when every run omits the
+    # same field. In particular, None == None cannot establish that the same
+    # PDF, corpus manifest, or extraction mode was used.
+    for eng, key in keys:
+        for field in _V2_REQUIRED_COMPARABILITY:
+            value = key.get(field)
+            if value is None or value == "" or (field == "selected_pages" and not value):
+                errors.append(
+                    f"Engine '{eng}': required comparability input '{field}' is missing. "
+                    "Runs are not comparable."
+                )
+            elif field in {
+                "reference_effective_sha256", "pdf_sha256", "manifest_sha256"
+            } and not re.fullmatch(r"[0-9a-fA-F]{64}", str(value)):
+                errors.append(
+                    f"Engine '{eng}': required comparability input '{field}' "
+                    "is not a 64-character SHA-256 digest. Runs are not comparable."
+                )
+        if key.get("reference_serialization_version") != "reference-effective-v1":
+            errors.append(
+                f"Engine '{eng}': unsupported reference serialization protocol "
+                f"{key.get('reference_serialization_version')!r}. Runs are not comparable."
+            )
     ref_eng, ref_key = keys[0]
     for eng, key in keys[1:]:
         # Hard required fields — mismatch is always an error
