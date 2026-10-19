@@ -308,6 +308,18 @@ represents a blank page. Metadata-only manifestos require `--reference`, as with
 `corpus/V3/Document_AI_V3.md`. Explicit Markdown takes precedence over manifesto
 text. Invalid inputs or a canonical evaluation failure make the command fail.
 
+Text metrics use exact Levenshtein S/D/I counts with bounded working memory.
+Raw CER uses the original Markdown bodies; visible text comes from parser
+tokens, preserving literal code. Aligned CER counts terminal text units once.
+The evaluator records metric definitions version `3.0.1` and its resource policy.
+The default budgets are 8,000,000 DP cells per sequential metric (shared across
+blocks for aligned CER) and 250,000 candidate pairs per alignment. Exceeding a
+budget produces `resource_limit` with a null value; the evaluation is partial
+and ineligible for ranking. `EvaluationRequest.max_text_edit_cells` and
+`max_alignment_pairs` can configure these budgets. Large documents can still
+need further alignment optimization; a partial evaluation is not a complete
+quality score.
+
 ## Maximum quality OCR
 
 Accuracy-first extraction keeps native text selection and enables exhaustive

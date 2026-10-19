@@ -148,71 +148,12 @@ def _macro_average(pages: list[dict], metric_key: str) -> float | None:
 # Levenshtein — char and word level with S/D/I traceback
 # ---------------------------------------------------------------------------
 
-def _lev_distance(a: list, b: list) -> int:
-    """Compute Levenshtein edit distance between two token sequences using O(n) space DP."""
-    la, lb = len(a), len(b)
-    if la == 0:
-        return lb
-    if lb == 0:
-        return la
-    prev = list(range(lb + 1))
-    curr = [0] * (lb + 1)
-    for i in range(1, la + 1):
-        curr[0] = i
-        for j in range(1, lb + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-        prev, curr = curr, prev
-    return prev[lb]
-
-
-def _lev_ops(ref: list, hyp: list) -> tuple[int, int, int]:
-    """Return (substitutions, deletions, insertions) via DP traceback.
-
-    Direction is ref → hyp so that:
-      D = tokens in ref not reproduced by hyp (omissions by the extractor)
-      I = tokens in hyp not present in ref (insertions by the extractor)
-
-    No length cap: callers that need to handle large sequences should split
-    by page before calling this function.  Returning a truncated count as if
-    it were the full distance would produce misleading rates.
-
-    Tie-breaking rule: prefer substitution over delete+insert when cost is
-    equal; prefer delete before insert.  This rule is fixed and tested.
-    Invariant: S + D + I == _lev_distance(ref, hyp).
-    """
-    la, lb = len(ref), len(hyp)
-    if la == 0:
-        return 0, 0, lb  # all hyp tokens are insertions
-    if lb == 0:
-        return 0, la, 0  # all ref tokens are deletions
-
-    dp = [[0] * (lb + 1) for _ in range(la + 1)]
-    for i in range(la + 1):
-        dp[i][0] = i
-    for j in range(lb + 1):
-        dp[0][j] = j
-    for i in range(1, la + 1):
-        for j in range(1, lb + 1):
-            cost = 0 if ref[i - 1] == hyp[j - 1] else 1
-            dp[i][j] = min(
-                dp[i - 1][j - 1] + cost,  # match or substitute
-                dp[i - 1][j] + 1,          # delete from ref
-                dp[i][j - 1] + 1,          # insert into hyp
-            )
-
-    S = D = I = 0
-    i, j = la, lb
-    while i > 0 or j > 0:
-        if i > 0 and j > 0 and ref[i - 1] == hyp[j - 1]:
-            i -= 1; j -= 1
-        elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
-            S += 1; i -= 1; j -= 1  # substitute (prefer over D+I)
-        elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
-            D += 1; i -= 1           # delete from ref
-        else:
-            I += 1; j -= 1           # insert into hyp
-    return S, D, I
+# Share the exact bounded implementation with canonical evaluation.
+from structured_pdf_text.evaluation.edit_distance import (
+    EditDistanceResourceLimit,
+    levenshtein_distance as _lev_distance,
+    levenshtein_ops as _lev_ops,
+)
 
 
 def _lcs_len(a: list, b: list, max_len: int = 0) -> int:
@@ -226,6 +167,8 @@ def _lcs_len(a: list, b: list, max_len: int = 0) -> int:
     """
     if max_len and max_len > 0:
         a, b = a[:max_len], b[:max_len]
+    if a == b:
+        return len(a)
     la, lb = len(a), len(b)
     prev = [0] * (lb + 1)
     curr = [0] * (lb + 1)
@@ -1879,4 +1822,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except EditDistanceResourceLimit as exc:
+        print(f"ERROR: legacy diagnostic evaluation exceeded resource limits: {exc}", file=sys.stderr)
+        sys.exit(1)

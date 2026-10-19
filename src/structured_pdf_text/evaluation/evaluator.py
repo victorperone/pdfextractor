@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from .aggregation import V2DocumentMetrics, evaluate_rank_eligibility
-from .block_alignment import AlignmentSummary, align_blocks
+from .block_alignment import (
+    AlignmentSummary, align_blocks, AlignmentResourceLimit,
+    DEFAULT_MAX_ALIGNMENT_PAIRS, MAX_SIMILARITY_TEXT_PRODUCT,
+)
+from .edit_distance import DEFAULT_MAX_EDIT_CELLS, EDIT_DISTANCE_POLICY
 from .critical_data import CriticalDataMetrics, compute_critical_data_metrics
 from .integrity_metrics import IntegrityMetrics, compute_integrity_metrics
 from .markdown_parser import PARSER_VERSION, parse_page
@@ -41,6 +45,8 @@ class EvaluationRequest:
     mode: str | None = None
     selected_page_scope: list[int] | None = None
     run_metadata: dict[str, Any] = field(default_factory=dict)
+    max_text_edit_cells: int = DEFAULT_MAX_EDIT_CELLS
+    max_alignment_pairs: int = DEFAULT_MAX_ALIGNMENT_PAIRS
 
 
 def _sha256_path(path: Path) -> str | None:
@@ -67,6 +73,10 @@ def evaluate(request: EvaluationRequest) -> dict[str, Any]:
 def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     """Object form retained for callers that generate diagnostic reports."""
     doc = V2DocumentMetrics()
+    for name in ("max_text_edit_cells", "max_alignment_pairs"):
+        value = getattr(request, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
 
     # --- Page scope ---
     ref_pages = document_pages(request.ref_text)
@@ -100,11 +110,18 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # --- Provenance ---
     doc.evaluator_info = {
         "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "3.0.0",
+        "metric_definitions_version": "3.0.1",
         "normalization_policy": "unicode_layout",
         "parser": PARSER_VERSION,
         "alignment_policy": "content-match-v1",
         "entity_policy": "entities-ptbr-v1",
+        "text_projection_policy": "parser-visible-leaves-v2",
+        "edit_distance_policy": EDIT_DISTANCE_POLICY,
+        "resource_policy": {
+            "max_text_edit_cells": request.max_text_edit_cells,
+            "max_alignment_pairs": request.max_alignment_pairs,
+            "max_similarity_text_product": MAX_SIMILARITY_TEXT_PRODUCT,
+        },
         "created_at_utc": datetime.now(tz=timezone.utc).isoformat(),
     }
     doc.inputs = {
@@ -125,15 +142,29 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     doc.inputs["extra_pages_out_of_scope"] = sorted(scope.selected_extra)
 
     # --- Block alignment ---
-    pairs = align_blocks(ref_nodes, hyp_nodes)
+    alignment_error: str | None = None
+    try:
+        pairs = align_blocks(ref_nodes, hyp_nodes, max_candidate_pairs=request.max_alignment_pairs)
+    except AlignmentResourceLimit as exc:
+        pairs = []
+        alignment_error = str(exc)
     alignment_summary = AlignmentSummary.from_pairs(pairs, len(ref_nodes), len(hyp_nodes))
 
     # --- Text metrics (Group 1) ---
-    text: TextMetrics = compute_text_metrics(ref_nodes, hyp_nodes, pairs)
+    text: TextMetrics = compute_text_metrics(
+        ref_nodes, hyp_nodes, pairs if alignment_error is None else None,
+        ref_markdown="\n\n".join(ref_scoped.values()),
+        hyp_markdown="\n\n".join(hyp_scoped.values()),
+        max_edit_cells=request.max_text_edit_cells,
+        max_alignment_pairs=request.max_alignment_pairs,
+    )
     doc.text = text.to_dict()
 
     # --- Structure metrics ---
-    struct: StructureMetrics = compute_structure_metrics(pairs, ref_nodes, hyp_nodes)
+    struct: StructureMetrics = (
+        compute_structure_metrics(pairs, ref_nodes, hyp_nodes)
+        if alignment_error is None else compute_structure_metrics([], [], [])
+    )
     doc.structure = {k: v for k, v in struct.to_dict().items()
                      if k != "pairwise_reading_order_accuracy"
                      and k != "block_type_confusion"}
@@ -141,6 +172,12 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
         "pairwise_reading_order_accuracy": struct.reading_order.to_dict()
             if struct.reading_order else {},
     }
+    if alignment_error is not None:
+        for group in (doc.structure, doc.reading_order):
+            for metric in group.values():
+                metric.update(value=None, status="resource_limit", coverage=None,
+                              counts={"ref_nodes": len(ref_nodes), "hyp_nodes": len(hyp_nodes)},
+                              warnings=[alignment_error])
 
     # --- Table metrics ---
     tables: TableMetrics = compute_table_metrics(ref_nodes, hyp_nodes)
@@ -175,10 +212,23 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
         if key not in {"pages", "selected_pages", "alignment_summary"}
     })
     doc.operational["selected_pages"] = effective_selected_pages
+    if alignment_error is not None:
+        # Empty pairs above are an unavailable computation, never an extraction
+        # with zero matches. Do not publish its empty summary as observed data.
+        doc.operational["alignment_summary"] = {
+            "status": "resource_limit", "reason": alignment_error,
+            "total_ref": len(ref_nodes), "total_hyp": len(hyp_nodes),
+        }
 
     # --- Eligibility ---
     doc.finalise()
     eligible, reasons = evaluate_rank_eligibility(doc)
+    if any(metric.get("status") == "resource_limit"
+           for group in (doc.text, doc.structure, doc.reading_order)
+           for metric in group.values()):
+        doc.evaluation_status = "partial"
+        eligible = False
+        reasons.append("evaluation_resource_limit")
     doc.rank_eligible = eligible
     doc.rank_ineligibility_reasons = reasons
 

@@ -32,7 +32,7 @@ Design notes
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Sequence
 
 from structured_pdf_text.evaluation.models import (
@@ -50,69 +50,12 @@ from structured_pdf_text.evaluation.normalization import normalize
 from structured_pdf_text.evaluation.canonical_document import CanonicalDocument
 
 
-# ---------------------------------------------------------------------------
-# Levenshtein helpers (self-contained, no external dependency)
-# ---------------------------------------------------------------------------
-
-def _lev_distance(a: list, b: list) -> int:
-    """O(min(m,n)) space Levenshtein distance between two token sequences."""
-    la, lb = len(a), len(b)
-    if la == 0:
-        return lb
-    if lb == 0:
-        return la
-    prev = list(range(lb + 1))
-    curr = [0] * (lb + 1)
-    for i in range(1, la + 1):
-        curr[0] = i
-        for j in range(1, lb + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-        prev, curr = curr, prev
-    return prev[lb]
-
-
-def _lev_ops(ref: list, hyp: list) -> tuple[int, int, int]:
-    """Return (S, D, I) via DP traceback.
-
-    Direction: ref → hyp.
-      D = tokens in ref not reproduced (omissions).
-      I = tokens in hyp not in ref (insertions).
-    Tie-breaking: prefer S over D+I; prefer D before I.
-    Invariant: S + D + I == _lev_distance(ref, hyp).
-    """
-    la, lb = len(ref), len(hyp)
-    if la == 0:
-        return 0, 0, lb
-    if lb == 0:
-        return 0, la, 0
-
-    dp = [[0] * (lb + 1) for _ in range(la + 1)]
-    for i in range(la + 1):
-        dp[i][0] = i
-    for j in range(lb + 1):
-        dp[0][j] = j
-    for i in range(1, la + 1):
-        for j in range(1, lb + 1):
-            cost = 0 if ref[i - 1] == hyp[j - 1] else 1
-            dp[i][j] = min(
-                dp[i - 1][j - 1] + cost,
-                dp[i - 1][j] + 1,
-                dp[i][j - 1] + 1,
-            )
-
-    S = D = I = 0
-    i, j = la, lb
-    while i > 0 or j > 0:
-        if i > 0 and j > 0 and ref[i - 1] == hyp[j - 1]:
-            i -= 1; j -= 1
-        elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
-            S += 1; i -= 1; j -= 1
-        elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
-            D += 1; i -= 1
-        else:
-            I += 1; j -= 1
-    return S, D, I
+# Shared exact implementation; aliases retain the existing low-level API.
+from .edit_distance import (
+    DEFAULT_MAX_EDIT_CELLS, EditDistanceResourceLimit, EditDistanceBudget,
+    levenshtein_distance as _lev_distance, levenshtein_ops as _lev_ops,
+)
+from .block_alignment import align_blocks, AlignmentResourceLimit
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +63,9 @@ def _lev_ops(ref: list, hyp: list) -> tuple[int, int, int]:
 # ---------------------------------------------------------------------------
 
 def _norm(text: str, profile: NormProfile) -> str:
-    return normalize(text, profile)
+    # Already projected text must not undergo a second Markdown extraction.
+    effective = NormProfile.UNICODE_LAYOUT if profile == NormProfile.VISIBLE_TEXT else profile
+    return normalize(text, effective)
 
 
 def _collect_visible_text(nodes: Sequence[MarkdownNode]) -> str:
@@ -151,15 +96,11 @@ def _node_markdown_repr(node: MarkdownNode) -> str:
 
 
 def _collect_raw_markdown(nodes: Sequence[MarkdownNode]) -> str:
-    """Concatenate raw Markdown representation of all leaf nodes, newline-separated.
-
-    Used for MET-TX01 (cer_markdown_raw): measures CER on the Markdown body
-    including formatting markers, NOT on visible_text (bug A10 fix).
-
-    When raw_markdown is empty on a node (parser did not populate tok.map),
-    a synthetic representation is reconstructed from kind + attributes.
-    """
+    """Use retained source bodies; fabricate Markdown only for synthetic nodes."""
     doc = CanonicalDocument.from_nodes(nodes)
+    if any("page_markdown" in n.metadata for n in nodes):
+        return doc.raw_markdown
+    # Compatibility for fabricated nodes that have no source document.
     parts = [_node_markdown_repr(n) for n in doc.leaf_nodes]
     return "\n".join(p for p in parts if p.strip())
 
@@ -186,11 +127,19 @@ def _make_result(
     )
 
 
+def _resource_result(definition_id: str, profile: NormProfile, counts: dict, error: Exception) -> MetricResult:
+    result = _make_result(None, MetricStatus.RESOURCE_LIMIT, definition_id,
+                          "lower_is_better", counts, profile)
+    result.warnings = [str(error)]
+    return result
+
+
 def _cer_result(
-    ref_chars: list[str],
-    hyp_chars: list[str],
+    ref_chars: Sequence[str],
+    hyp_chars: Sequence[str],
     definition_id: str,
     profile: NormProfile,
+    max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> MetricResult:
     """Build a CER MetricResult for two character sequences."""
     n_ref = len(ref_chars)
@@ -210,7 +159,12 @@ def _cer_result(
                             {"S": S, "D": D, "I": I, "ref_chars": 0, "hyp_chars": n_hyp},
                             profile)
 
-    S, D, I = _lev_ops(ref_chars, hyp_chars)
+    try:
+        S, D, I = _lev_ops(ref_chars, hyp_chars, max_cells=max_edit_cells)
+    except EditDistanceResourceLimit as exc:
+        return _resource_result(definition_id, profile,
+            {"ref_chars": n_ref, "hyp_chars": n_hyp,
+             "max_edit_cells": exc.max_cells, "evaluated_cells": exc.evaluated_cells}, exc)
     dist = S + D + I
     value = dist / n_ref
 
@@ -226,6 +180,7 @@ def _wer_result(
     hyp_words: list[str],
     definition_id: str,
     profile: NormProfile,
+    max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> MetricResult:
     """Build a WER MetricResult for two word sequences."""
     n_ref = len(ref_words)
@@ -244,7 +199,12 @@ def _wer_result(
                             {"S": S, "D": D, "I": I, "ref_words": 0, "hyp_words": n_hyp},
                             profile)
 
-    S, D, I = _lev_ops(ref_words, hyp_words)
+    try:
+        S, D, I = _lev_ops(ref_words, hyp_words, max_cells=max_edit_cells)
+    except EditDistanceResourceLimit as exc:
+        return _resource_result(definition_id, profile,
+            {"ref_words": n_ref, "hyp_words": n_hyp,
+             "max_edit_cells": exc.max_cells, "evaluated_cells": exc.evaluated_cells}, exc)
     dist = S + D + I
     value = dist / n_ref
 
@@ -262,20 +222,22 @@ def _wer_result(
 def cer_markdown_raw(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, ref_markdown: str | None = None, hyp_markdown: str | None = None,
+    max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> MetricResult:
     """MET-TX01: CER on raw Markdown body strings (bug A10 fix).
 
-    Uses the raw_markdown field of each node — preserves formatting markers
-    like **bold**, # headings, | table pipes.  Page-marker lines are already
-    excluded because parse_document strips them before building nodes.
+    Explicit body strings take precedence. Otherwise use source bodies retained
+    by the parser, including formatting and blank lines. Fabricated nodes have
+    a compatibility fallback. Delimiters must be stripped by the caller.
     NFC + CRLF normalisation applied; no Markdown syntax removal.
     """
     profile = NormProfile.RAW
-    ref_text = _collect_raw_markdown(ref_nodes)
-    hyp_text = _collect_raw_markdown(hyp_nodes)
+    ref_text = _collect_raw_markdown(ref_nodes) if ref_markdown is None else ref_markdown
+    hyp_text = _collect_raw_markdown(hyp_nodes) if hyp_markdown is None else hyp_markdown
     ref_n = _norm(ref_text, profile)
     hyp_n = _norm(hyp_text, profile)
-    return _cer_result(list(ref_n), list(hyp_n), "MET-TX01", profile)
+    return _cer_result(ref_n, hyp_n, "MET-TX01", profile, max_edit_cells)
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +249,7 @@ def cer_sequential(
     hyp_nodes: Sequence[MarkdownNode],
     profile: NormProfile,
     definition_id: str,
+    *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> MetricResult:
     """CER on deduplicated visible text under the given normalisation profile.
 
@@ -299,7 +262,7 @@ def cer_sequential(
     ref_n = _norm(ref_text, profile)
     hyp_n = _norm(hyp_text, profile)
 
-    return _cer_result(list(ref_n), list(hyp_n), definition_id, profile)
+    return _cer_result(ref_n, hyp_n, definition_id, profile, max_edit_cells)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +272,7 @@ def cer_sequential(
 def wer_sequential(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> MetricResult:
     """WER on normalised word tokens (unicode_layout profile)."""
     profile = NormProfile.UNICODE_LAYOUT
@@ -316,7 +280,7 @@ def wer_sequential(
     hyp_text = _collect_visible_text(hyp_nodes)
     ref_words = _norm(ref_text, profile).split()
     hyp_words = _norm(hyp_text, profile).split()
-    return _wer_result(ref_words, hyp_words, "MET-TX04", profile)
+    return _wer_result(ref_words, hyp_words, "MET-TX04", profile, max_edit_cells)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +290,9 @@ def wer_sequential(
 def aligned_block_text_cer(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
-    pairs: Sequence[AlignedPair],
+    pairs: Sequence[AlignedPair] | None,
+    *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
+    max_alignment_pairs: int | None = None,
 ) -> MetricResult:
     """CER computed per paired block, then aggregated (spec §4.3).
 
@@ -338,9 +304,48 @@ def aligned_block_text_cer(
     """
     profile = NormProfile.UNICODE_LAYOUT
 
+    ref_leaves = CanonicalDocument.from_nodes(ref_nodes).leaf_nodes
+    hyp_leaves = CanonicalDocument.from_nodes(hyp_nodes).leaf_nodes
+    if pairs is None or len(ref_leaves) != len(ref_nodes) or len(hyp_leaves) != len(hyp_nodes):
+        # Structural parents must not compete with their descendants for text.
+        try:
+            kwargs = {} if max_alignment_pairs is None else {"max_candidate_pairs": max_alignment_pairs}
+            pairs = align_blocks(ref_leaves, hyp_leaves, **kwargs)
+        except AlignmentResourceLimit as exc:
+            return _resource_result("MET-TX05", profile,
+                                    {"ref_blocks": len(ref_leaves), "hyp_blocks": len(hyp_leaves)}, exc)
+    ref_nodes, hyp_nodes = ref_leaves, hyp_leaves
+
     # Build lookup tables
     ref_by_id = {n.node_id: n for n in ref_nodes}
     hyp_by_id = {n.node_id: n for n in hyp_nodes}
+
+    # The aligner contract covers each endpoint once. Missing or duplicated
+    # endpoints are an invalid computation, never a perfect zero-distance run.
+    seen_ref: list[str] = []
+    seen_hyp: list[str] = []
+    valid = len(ref_by_id) == len(ref_nodes) and len(hyp_by_id) == len(hyp_nodes)
+    for pair in pairs:
+        ref_id, hyp_id = pair.reference_id, pair.hypothesis_id
+        if ref_id is not None:
+            seen_ref.append(ref_id)
+        if hyp_id is not None:
+            seen_hyp.append(hyp_id)
+        valid &= (
+            pair.status in (AlignmentStatus.MATCHED, AlignmentStatus.AMBIGUOUS)
+            and ref_id is not None and hyp_id is not None
+            or pair.status == AlignmentStatus.UNMATCHED and ref_id is not None and hyp_id is None
+            or pair.status == AlignmentStatus.EXTRA and ref_id is None and hyp_id is not None
+        )
+    valid &= (len(seen_ref) == len(set(seen_ref)) and set(seen_ref) == set(ref_by_id)
+              and len(seen_hyp) == len(set(seen_hyp)) and set(seen_hyp) == set(hyp_by_id))
+    if not valid:
+        result = _make_result(None, MetricStatus.INVALID_INPUT, "MET-TX05", "lower_is_better",
+                              {"ref_blocks": len(ref_nodes), "hyp_blocks": len(hyp_nodes)}, profile)
+        result.warnings = ["Text alignment must cover every terminal node exactly once"]
+        return result
+
+    work = EditDistanceBudget(max_edit_cells)
 
     total_S = total_D = total_I = 0
     total_ref_chars = 0
@@ -357,7 +362,11 @@ def aligned_block_text_cer(
                 continue
             ref_t = _norm(ref_node.visible_text, profile)
             hyp_t = _norm(hyp_node.visible_text if hyp_node else "", profile)
-            S, D, I = _lev_ops(list(ref_t), list(hyp_t))
+            try:
+                S, D, I = _lev_ops(ref_t, hyp_t, max_cells=max_edit_cells, budget=work)
+            except EditDistanceResourceLimit as exc:
+                return _resource_result("MET-TX05", profile,
+                    {"max_edit_cells": exc.max_cells, "evaluated_cells": exc.evaluated_cells}, exc)
             total_S += S
             total_D += D
             total_I += I
@@ -537,7 +546,10 @@ class TextMetrics:
 def compute_text_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
-    pairs: Sequence[AlignedPair],
+    pairs: Sequence[AlignedPair] | None,
+    *, ref_markdown: str | None = None, hyp_markdown: str | None = None,
+    max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
+    max_alignment_pairs: int | None = None,
 ) -> TextMetrics:
     """Compute all Group 1 text-quality metrics (spec §4).
 
@@ -552,18 +564,20 @@ def compute_text_metrics(
     TextMetrics dataclass with all metric results.
     """
     return TextMetrics(
-        cer_raw=cer_markdown_raw(ref_nodes, hyp_nodes),          # MET-TX01: raw body
+        cer_raw=cer_markdown_raw(ref_nodes, hyp_nodes,
+            ref_markdown=ref_markdown, hyp_markdown=hyp_markdown, max_edit_cells=max_edit_cells),          # MET-TX01: raw body
         cer_normalized=cer_sequential(
             ref_nodes, hyp_nodes,
-            NormProfile.UNICODE_LAYOUT, "MET-TX02",
+            NormProfile.UNICODE_LAYOUT, "MET-TX02", max_edit_cells=max_edit_cells,
         ),
         cer_visible=cer_sequential(
             ref_nodes, hyp_nodes,
-            NormProfile.VISIBLE_TEXT, "MET-TX03",
+            NormProfile.VISIBLE_TEXT, "MET-TX03", max_edit_cells=max_edit_cells,
         ),
-        wer_sequential=wer_sequential(ref_nodes, hyp_nodes),
+        wer_sequential=wer_sequential(ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
         aligned_block_text_cer=aligned_block_text_cer(
-            ref_nodes, hyp_nodes, pairs,
+            ref_nodes, hyp_nodes, pairs, max_edit_cells=max_edit_cells,
+            max_alignment_pairs=max_alignment_pairs,
         ),
         coverage_recall=text_coverage_recall(ref_nodes, hyp_nodes),
         coverage_precision=text_coverage_precision(ref_nodes, hyp_nodes),

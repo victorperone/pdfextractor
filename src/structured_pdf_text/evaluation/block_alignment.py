@@ -50,6 +50,12 @@ _W_ORDER = 0.10
 
 MIN_SCORE       = 0.30   # below this, no match is attempted
 AMBIGUITY_MARGIN = 0.05  # second-best within this → pair is ambiguous
+DEFAULT_MAX_ALIGNMENT_PAIRS = 250_000
+MAX_SIMILARITY_TEXT_PRODUCT = 50_000_000
+
+
+class AlignmentResourceLimit(RuntimeError):
+    """An exact alignment cannot be produced within the declared work policy."""
 
 # NodeKind groups: kinds within the same group get partial credit
 _KIND_GROUPS: list[frozenset[NodeKind]] = [
@@ -88,10 +94,14 @@ def _text_similarity(a: str, b: str) -> float:
     """SequenceMatcher ratio on NFC-collapsed visible text."""
     a = normalize(a, NormProfile.UNICODE_LAYOUT)
     b = normalize(b, NormProfile.UNICODE_LAYOUT)
-    if not a and not b:
+    if a == b:
         return 1.0
     if not a or not b:
         return 0.0
+    if len(a) * len(b) > MAX_SIMILARITY_TEXT_PRODUCT:
+        raise AlignmentResourceLimit(
+            f"Block similarity exceeds text product budget {MAX_SIMILARITY_TEXT_PRODUCT}"
+        )
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
@@ -156,6 +166,12 @@ def _coverage(long_text: str, short_texts: list[str]) -> float:
         return 1.0
     combined = " ".join(normalize(s, NormProfile.UNICODE_LAYOUT) for s in short_texts)
     long_n = normalize(long_text, NormProfile.UNICODE_LAYOUT)
+    if long_n == combined:
+        return 1.0
+    if len(long_n) * len(combined) > MAX_SIMILARITY_TEXT_PRODUCT:
+        raise AlignmentResourceLimit(
+            f"Provenance similarity exceeds text product budget {MAX_SIMILARITY_TEXT_PRODUCT}"
+        )
     return difflib.SequenceMatcher(None, long_n, combined, autojunk=False).ratio()
 
 
@@ -212,6 +228,7 @@ def align_blocks(
     min_score: float = MIN_SCORE,
     ambiguity_margin: float = AMBIGUITY_MARGIN,
     detect_provenance: bool = True,
+    max_candidate_pairs: int = DEFAULT_MAX_ALIGNMENT_PAIRS,
 ) -> list[AlignedPair]:
     """Align reference and hypothesis node lists into a list of AlignedPair.
 
@@ -233,25 +250,24 @@ def align_blocks(
     H = list(hyp_nodes)
     nr, nh = len(R), len(H)
 
+    if (isinstance(max_candidate_pairs, bool) or not isinstance(max_candidate_pairs, int)
+            or max_candidate_pairs < 1):
+        raise ValueError("max_candidate_pairs must be a positive integer")
+    if nr * nh > max_candidate_pairs:
+        raise AlignmentResourceLimit(
+            f"Block alignment requires {nr * nh} pairs; budget is {max_candidate_pairs}"
+        )
     if nr == 0 and nh == 0:
         return []
 
     # ------------------------------------------------------------------ #
-    # Step 1: build score matrix (R × H)
-    # ------------------------------------------------------------------ #
-    matrix: list[list[tuple[float, list[str]]]] = [
-        [compute_pair_score(R[ri], H[hi], ri, nr, hi, nh) for hi in range(nh)]
-        for ri in range(nr)
-    ]
-
-    # ------------------------------------------------------------------ #
-    # Step 2: greedy 1:1 assignment (score-descending)
+    # Step 1/2: score candidates once; no duplicate R × H score matrix.
     # ------------------------------------------------------------------ #
     # Collect all valid candidates above min_score
     candidates: list[_Candidate] = []
     for ri in range(nr):
         for hi in range(nh):
-            sc, reasons = matrix[ri][hi]
+            sc, reasons = compute_pair_score(R[ri], H[hi], ri, nr, hi, nh)
             if sc >= min_score:
                 candidates.append(_Candidate(ri, hi, sc, reasons))
     candidates.sort(key=lambda c: c.score, reverse=True)

@@ -75,36 +75,17 @@ _TYPE_TO_KIND: dict[str, NodeKind] = {
 # ---------------------------------------------------------------------------
 
 def _extract_visible_text(node: SyntaxTreeNode) -> str:
-    """Recursively collect all readable text from a node's subtree."""
-    parts: list[str] = []
-    _collect(node, parts)
-    return " ".join(p for p in parts if p)
-
-
-def _collect(node: SyntaxTreeNode, out: list[str]) -> None:
+    """Join inline runs contiguously and separate structural child blocks."""
     tok = node.token
-    # Leaf text token
-    if tok and tok.type == "text" and tok.content:
-        out.append(tok.content)
-        return
-    # Inline container: children hold the actual text tokens
     if tok and tok.type == "inline":
-        for sub in (tok.children or []):
-            if sub.type == "text":
-                out.append(sub.content)
-            elif sub.type in ("softbreak", "hardbreak"):
-                out.append(" ")
-            elif sub.type == "code_inline":
-                out.append(sub.content)
-        return
-    # Fence / code_block: use the token content directly
-    if tok and tok.type in ("fence", "code_block"):
-        if tok.content:
-            out.append(tok.content.strip())
-        return
-    # For structural nodes, recurse into children
-    for child in (node.children or []):
-        _collect(child, out)
+        return "".join(
+            sub.content if sub.type in ("text", "text_special", "code_inline") else
+            " " if sub.type in ("softbreak", "hardbreak") else ""
+            for sub in (tok.children or [])
+        )
+    if tok and tok.type in ("text", "text_special", "code_inline", "fence", "code_block"):
+        return tok.content
+    return " ".join(filter(None, (_extract_visible_text(child) for child in node.children)))
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +117,7 @@ def _split_pages(text: str) -> dict[int, tuple[str, int]]:
         seen.add(pnum)
         body_start = m.end()
         body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[body_start:body_end].strip()
+        body = text[body_start:body_end].strip("\n")
         pages[pnum] = (body, body_start)
     return pages
 
@@ -188,8 +169,8 @@ def _walk(
     counter[0] += 1
     node_id = MarkdownNode.make_id(origin, page, kind, seq)
 
-    # Source offsets from the token map (line-based within page_body)
-    tok = node.token
+    # Paired SyntaxTreeNode groups expose their source on the opening token.
+    tok = node.token or (node.nester_tokens.opening if node.nester_tokens else None)
     src_start = page_body_offset
     src_end   = page_body_offset
     if tok and tok.map:
@@ -199,7 +180,9 @@ def _walk(
         src_end   = page_body_offset + sum(len(l) + 1 for l in lines[:e_line])
 
     visible_raw = _extract_visible_text(node)
-    visible     = normalize(visible_raw, NormProfile.VISIBLE_TEXT)
+    # The parser already projected Markdown. Reinterpreting the result as
+    # Markdown would erase literal code markers and escaped punctuation.
+    visible     = normalize(visible_raw, NormProfile.UNICODE_LAYOUT)
 
     # Heading-specific attributes: use node.tag (e.g. "h1") from SyntaxTreeNode,
     # not tok.tag which may be empty for paired open/close token groups.
@@ -294,9 +277,12 @@ def parse_document(
 
         tokens = _md.parse(body)
         tree = SyntaxTreeNode(tokens)
+        first_node = len(all_nodes)
         for child in tree.children:
             _walk(child, body, offset, origin, page,
                   counter=counter, parent_id=None, result=all_nodes)
+        if len(all_nodes) > first_node:
+            all_nodes[first_node].metadata["page_markdown"] = body
 
     return all_nodes
 
@@ -329,4 +315,6 @@ def parse_page(
     for child in tree.children:
         _walk(child, text, 0, origin, page,
               counter=counter, parent_id=None, result=result)
+    if result:
+        result[0].metadata["page_markdown"] = text
     return result

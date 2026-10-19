@@ -6,6 +6,9 @@
 [CORRECOES_ETAPA_1_2026-10-19.md](CORRECOES_ETAPA_1_2026-10-19.md).
 As contagens e reproduções abaixo descrevem o estado original auditado.
 
+A segunda etapa, voltada a texto e memória, está em
+[CORRECOES_ETAPA_2_2026-10-19.md](CORRECOES_ETAPA_2_2026-10-19.md).
+
 ## Estado auditado e escopo
 
 - HEAD: `439bd75` (`fix: não pontuar células vazias de tabelas ausentes`).

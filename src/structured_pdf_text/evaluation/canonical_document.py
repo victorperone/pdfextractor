@@ -92,7 +92,7 @@ class CanonicalDocument:
         cls,
         nodes: Sequence[MarkdownNode],
         origin: str = "hypothesis",
-        raw_markdown: str = "",
+        raw_markdown: str | None = None,
     ) -> "CanonicalDocument":
         """Build a CanonicalDocument from a flat node list.
 
@@ -144,6 +144,12 @@ class CanonicalDocument:
         # with a single space separator.  NFC is applied by the parser already.
         parts = [n.visible_text.strip() for n in leaf_nodes if n.visible_text.strip()]
         visible = " ".join(parts)
+        if raw_markdown is None:
+            # Parsers retain a single source body per page, including syntax
+            # and blank lines that cannot be reconstructed from terminal text.
+            raw_markdown = "\n\n".join(
+                n.metadata["page_markdown"] for n in node_list if "page_markdown" in n.metadata
+            )
 
         return cls(
             leaf_nodes=leaf_nodes,
