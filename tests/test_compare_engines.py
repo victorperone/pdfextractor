@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from scripts.compare_engines import (
     _comparability_key,
+    _comparability_key_v2,
+    _detect_schema,
+    _get_value_v2,
     _render_comparison_table,
+    _render_comparison_table_v2,
     _validate_comparability,
+    _validate_comparability_v2,
+    _validate_schema_homogeneity,
 )
 
 
@@ -124,3 +130,183 @@ def test_condition_lists_are_split_and_profile_recovery_metadata_is_reported():
     assert "latin/pt-compatible" in report
     assert "recovered" in report and "2" in report
     assert "Peak RSS MB" in report
+
+
+# ---------------------------------------------------------------------------
+# V2 schema detection and homogeneity
+# ---------------------------------------------------------------------------
+
+def _v2_run(engine: str = "test_engine", **overrides) -> dict:
+    """Minimal valid V2 metrics document for testing."""
+    doc = {
+        "schema_version": "evaluation-v2.0",
+        "evaluator": {"version": "v2.0.0", "engine": engine, "run_id": "run001"},
+        "inputs": {
+            "reference_sha256": "ref-sha-abc",
+            "hypothesis_sha256": "hyp-sha-xyz",
+            "selected_pages": [1, 2, 3],
+        },
+        "quality": {
+            "text": {
+                "cer_sequential_normalized": {"value": 0.05, "status": "ok", "direction": "lower_is_better"},
+                "wer_sequential":            {"value": 0.10, "status": "ok", "direction": "lower_is_better"},
+                "text_coverage_recall":      {"value": 0.90, "status": "ok", "direction": "higher_is_better"},
+            },
+            "structure": {
+                "heading_detection_f1": {"value": 1.0, "status": "ok", "direction": "higher_is_better"},
+            },
+            "reading_order": {
+                "pairwise_reading_order_accuracy": {"value": 1.0, "status": "ok", "direction": "higher_is_better"},
+            },
+            "tables": {},
+            "critical_data": {
+                "currency": {"value": 1.0, "status": "ok", "direction": "higher_is_better"},
+            },
+        },
+        "integrity": {
+            "duplicate_excess_rate": {"value": 0.0, "status": "ok", "direction": "lower_is_better"},
+        },
+        "evaluation": {
+            "status": "ok",
+            "rank_eligible": True,
+            "applicable_metric_count": 10,
+            "unavailable_metric_count": 1,
+        },
+    }
+    # Allow deep overrides via dot notation keys
+    for key, val in overrides.items():
+        doc[key] = val
+    return doc
+
+
+class TestDetectSchema:
+    def test_v2_detected(self):
+        assert _detect_schema(_v2_run()) == "v2"
+
+    def test_v1_detected_when_no_schema_version(self):
+        assert _detect_schema(_run()) == "v1"
+
+    def test_v1_detected_when_wrong_schema_version(self):
+        assert _detect_schema({"schema_version": "v1.0"}) == "v1"
+
+
+class TestSchemaHomogeneity:
+    def test_all_v2_passes(self):
+        errors = _validate_schema_homogeneity([
+            ("engine-a", _v2_run("engine-a")),
+            ("engine-b", _v2_run("engine-b")),
+        ])
+        assert errors == []
+
+    def test_all_v1_passes(self):
+        errors = _validate_schema_homogeneity([("engine-a", _run()), ("engine-b", _run())])
+        assert errors == []
+
+    def test_mixed_v1_v2_rejected(self):
+        errors = _validate_schema_homogeneity([
+            ("engine-a", _run()),
+            ("engine-b", _v2_run("engine-b")),
+        ])
+        assert len(errors) == 1
+        assert "V1" in errors[0] and "V2" in errors[0]
+        assert "regrade_existing.py" in errors[0]
+
+
+class TestComparabilityV2:
+    def test_identical_runs_are_comparable(self):
+        errors = _validate_comparability_v2([
+            ("engine-a", _v2_run("engine-a")),
+            ("engine-b", _v2_run("engine-b")),
+        ])
+        assert errors == []
+
+    def test_single_run_always_comparable(self):
+        assert _validate_comparability_v2([("engine-a", _v2_run())]) == []
+
+    def test_different_reference_sha_rejected(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        b["inputs"]["reference_sha256"] = "other-ref"
+        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        assert any("reference_sha256" in e for e in errors)
+
+    def test_different_selected_pages_rejected(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        b["inputs"]["selected_pages"] = [4, 5, 6]
+        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        assert any("selected_pages" in e for e in errors)
+
+    def test_comparability_key_is_order_independent(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        # Change page order — should still be equal after sorting
+        b["inputs"]["selected_pages"] = [3, 1, 2]
+        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        assert errors == []
+
+
+class TestGetValueV2:
+    def test_reads_quality_text_metric(self):
+        data = _v2_run()
+        assert _get_value_v2(data, "text.cer_sequential_normalized") == 0.05
+
+    def test_reads_integrity_metric(self):
+        data = _v2_run()
+        assert _get_value_v2(data, "integrity.duplicate_excess_rate") == 0.0
+
+    def test_returns_none_for_missing_key(self):
+        data = _v2_run()
+        assert _get_value_v2(data, "text.nonexistent_metric") is None
+
+    def test_returns_none_for_na_metric(self):
+        data = _v2_run()
+        data["quality"]["text"]["aligned_block_text_cer"] = {"value": None, "status": "not_applicable"}
+        assert _get_value_v2(data, "text.aligned_block_text_cer") is None
+
+
+class TestRenderComparisonTableV2:
+    def test_renders_without_error(self):
+        report = _render_comparison_table_v2([
+            ("engine-a", _v2_run("engine-a")),
+            ("engine-b", _v2_run("engine-b")),
+        ])
+        assert "evaluation-v2.0" in report
+        assert "engine-a" in report and "engine-b" in report
+
+    def test_shows_all_section_headers(self):
+        report = _render_comparison_table_v2([("engine-a", _v2_run())])
+        assert "MET-TX01" in report
+        assert "Estrutura Markdown" in report
+        assert "Dados Críticos" in report
+        assert "Integridade" in report
+
+    def test_bolds_best_value_higher_is_better(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        # Engine-b has better coverage recall
+        b["quality"]["text"]["text_coverage_recall"] = {"value": 0.99, "status": "ok", "direction": "higher_is_better"}
+        report = _render_comparison_table_v2([("engine-a", a), ("engine-b", b)])
+        assert "**0.9900**" in report
+
+    def test_bolds_best_value_lower_is_better(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        # Engine-a has lower (better) CER
+        a["quality"]["text"]["cer_sequential_normalized"] = {"value": 0.01, "status": "ok", "direction": "lower_is_better"}
+        b["quality"]["text"]["cer_sequential_normalized"] = {"value": 0.10, "status": "ok", "direction": "lower_is_better"}
+        report = _render_comparison_table_v2([("engine-a", a), ("engine-b", b)])
+        assert "**0.0100**" in report
+
+    def test_shows_rank_eligibility_in_metadata(self):
+        a = _v2_run("engine-a")
+        b = _v2_run("engine-b")
+        b["evaluation"]["rank_eligible"] = False
+        report = _render_comparison_table_v2([("engine-a", a), ("engine-b", b)])
+        assert "sim" in report and "não" in report
+
+    def test_na_values_shown_as_dash(self):
+        data = _v2_run("engine-a")
+        data["quality"]["tables"] = {}  # no table metrics
+        report = _render_comparison_table_v2([("engine-a", data)])
+        assert "—" in report
