@@ -21,6 +21,7 @@ MET-S09  block_type_confusion        dict mapping (expected, observed) mismatche
 MET-S10  block_order_pairwise_acc    pairwise order accuracy for structural blocks only
                                       (universe: heading/paragraph/table/list/code —
                                        distinct from MET-S08 per spec §8.1)
+MET-S11  paragraph_boundary_f1       internal paragraph cuts on exact token correspondence
 MET-SL01 list_item_text_cer_on_matched  CER on matched item text pairs
 MET-SL02 list_kind_accuracy          ordered vs unordered agreement on matched groups
 MET-SL03 list_item_order_accuracy    pairwise order of items within each parent list
@@ -32,6 +33,8 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Sequence
+from .edit_distance import DEFAULT_MAX_EDIT_CELLS, EditDistanceBudget, EditDistanceResourceLimit
+from .paragraph_boundaries import matching_gaps, paragraph_stream
 
 from structured_pdf_text.evaluation.models import (
     AlignedPair,
@@ -43,7 +46,7 @@ from structured_pdf_text.evaluation.models import (
 )
 
 # Regex to extract ordinal index from ordered-list item visible_text.
-# Matches leading "1." / "1)" / "a." patterns.
+# Matches leading "1." / "1)" on legacy manually constructed nodes.
 _ORDINAL_RE = re.compile(r"^\s*(\d+)[.)]\s")
 
 
@@ -278,8 +281,14 @@ def paragraph_detection_f1(
     pairs: Sequence[AlignedPair],
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> dict[str, MetricResult]:
-    """MET-S03: Paragraph block detection P/R/F1."""
+    """MET-S04: aligned paragraphs must preserve both token boundaries.
+
+    Exact token correspondence is independent per page. Substitutions can
+    preserve boundaries; wrong splits/merges cannot be perfect detections.
+    Internal cuts also receive separate boundary P/R/F1 (MET-S11).
+    """
     ref_paras = {n.node_id for n in ref_nodes if n.kind == NodeKind.PARAGRAPH}
     hyp_paras = {n.node_id for n in hyp_nodes if n.kind == NodeKind.PARAGRAPH}
 
@@ -289,22 +298,75 @@ def paragraph_detection_f1(
             if p.reference_id and p.hypothesis_id:
                 ref_to_hyp[p.reference_id] = p.hypothesis_id
 
-    tp = sum(1 for rid in ref_paras if rid in ref_to_hyp and ref_to_hyp[rid] in hyp_paras)
+    by_page_ref = defaultdict(list)
+    by_page_hyp = defaultdict(list)
+    for node in ref_nodes:
+        if node.node_id in ref_paras:
+            by_page_ref[node.page].append(node)
+    for node in hyp_nodes:
+        if node.node_id in hyp_paras:
+            by_page_hyp[node.page].append(node)
+    valid_matches = set()
+    boundary_tp = boundary_ref = boundary_hyp = 0
+    budget = EditDistanceBudget(max_edit_cells)
+    try:
+        for page in dict.fromkeys([*by_page_ref, *by_page_hyp]):
+            rt, rs = paragraph_stream(by_page_ref[page])
+            ht, hs = paragraph_stream(by_page_hyp[page])
+            rg = {gap for span in rs.values() for gap in span}
+            hg = {gap for span in hs.values() for gap in span}
+            gaps = matching_gaps(rt, ht, rg, hg, budget)
+            for rid, (start, end) in rs.items():
+                hid = ref_to_hyp.get(rid)
+                if hid in hs:
+                    hstart, hend = hs[hid]
+                    if (start, hstart) in gaps and (end, hend) in gaps:
+                        valid_matches.add(rid)
+            # Internal boundaries exclude page edges and duplicate empty cuts.
+            rcuts = rg - {0, len(rt)}
+            hcuts = hg - {0, len(ht)}
+            boundary_ref += len(rcuts)
+            boundary_hyp += len(hcuts)
+            # A monotone path permits maximum ordered matching greedily.
+            used_ref, used_hyp = set(), set()
+            for r, h in sorted(gaps):
+                if r in rcuts and h in hcuts and r not in used_ref and h not in used_hyp:
+                    used_ref.add(r)
+                    used_hyp.add(h)
+                    boundary_tp += 1
+    except EditDistanceResourceLimit as exc:
+        return {name: MetricResult(value=None, status=MetricStatus.RESOURCE_LIMIT,
+                                  definition_id=definition, direction="higher_is_better",
+                                  unit="ratio", counts={"max_edit_cells": max_edit_cells},
+                                  warnings=[str(exc)])
+                for name, definition in (
+                    ("paragraph_detection_f1", "MET-S04"),
+                    ("paragraph_detection_precision", "MET-S04.precision"),
+                    ("paragraph_detection_recall", "MET-S04.recall"),
+                    ("paragraph_boundary_f1", "MET-S11"),
+                    ("paragraph_boundary_precision", "MET-S11.precision"),
+                    ("paragraph_boundary_recall", "MET-S11.recall"))}
+
+    tp = len(valid_matches)
     fn = len(ref_paras) - tp
-    matched_hyp_paras = {ref_to_hyp[rid] for rid in ref_paras if rid in ref_to_hyp and ref_to_hyp[rid] in hyp_paras}
+    matched_hyp_paras = {ref_to_hyp[rid] for rid in valid_matches}
     fp = len(hyp_paras - matched_hyp_paras)
 
     precision, recall, f1, status = _prf(tp, fp, fn)
 
+    bp, br, bf, bs = _prf(boundary_tp, boundary_hyp - boundary_tp, boundary_ref - boundary_tp)
     return {
-        "paragraph_detection_f1":       _make_result(f1, status, "MET-S03", {"tp": tp, "fp": fp, "fn": fn}),
-        "paragraph_detection_precision": _make_result(precision, status, "MET-S03.precision", {}),
-        "paragraph_detection_recall":    _make_result(recall,    status, "MET-S03.recall",    {}),
+        "paragraph_detection_f1": _make_result(f1, status, "MET-S04", {"tp": tp, "fp": fp, "fn": fn}),
+        "paragraph_detection_precision": _make_result(precision, status, "MET-S04.precision", {}),
+        "paragraph_detection_recall": _make_result(recall, status, "MET-S04.recall", {}),
+        "paragraph_boundary_f1": _make_result(bf, bs, "MET-S11", {"tp": boundary_tp, "fp": boundary_hyp - boundary_tp, "fn": boundary_ref - boundary_tp}),
+        "paragraph_boundary_precision": _make_result(bp, bs, "MET-S11.precision", {}),
+        "paragraph_boundary_recall": _make_result(br, bs, "MET-S11.recall", {}),
     }
 
 
 # ---------------------------------------------------------------------------
-# MET-S04/S05/S06: List metrics
+# MET-S05/S06/S07: List metrics
 # ---------------------------------------------------------------------------
 
 def list_metrics(
@@ -312,7 +374,7 @@ def list_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
 ) -> dict[str, MetricResult]:
-    """MET-S04 through MET-S06 plus additional list metrics (spec §6.4)."""
+    """MET-S05 through MET-S07 plus additional list metrics (spec §6.4)."""
     ref_lists = {n.node_id for n in ref_nodes if n.kind == NodeKind.LIST}
     ref_items = {n.node_id for n in ref_nodes if n.kind == NodeKind.LIST_ITEM}
     hyp_lists = {n.node_id for n in hyp_nodes if n.kind == NodeKind.LIST}
@@ -327,21 +389,21 @@ def list_metrics(
     hyp_id_to_node: dict[str, MarkdownNode] = {n.node_id: n for n in hyp_nodes}
     ref_id_to_node: dict[str, MarkdownNode] = {n.node_id: n for n in ref_nodes}
 
-    # MET-S04: list group (LIST container) detection
+    # MET-S05: list group (LIST container) detection
     tp_l = sum(1 for rid in ref_lists if rid in ref_to_hyp and ref_to_hyp[rid] in hyp_lists)
     fn_l = len(ref_lists) - tp_l
     matched_hyp_lists = {ref_to_hyp[rid] for rid in ref_lists if rid in ref_to_hyp and ref_to_hyp[rid] in hyp_lists}
     fp_l = len(hyp_lists - matched_hyp_lists)
     p_l, r_l, f1_l, st_l = _prf(tp_l, fp_l, fn_l)
 
-    # MET-S05: list item detection
+    # MET-S06: list item detection
     tp_i = sum(1 for rid in ref_items if rid in ref_to_hyp and ref_to_hyp[rid] in hyp_items)
     fn_i = len(ref_items) - tp_i
     matched_hyp_items = {ref_to_hyp[rid] for rid in ref_items if rid in ref_to_hyp and ref_to_hyp[rid] in hyp_items}
     fp_i = len(hyp_items - matched_hyp_items)
     p_i, r_i, f1_i, st_i = _prf(tp_i, fp_i, fn_i)
 
-    # MET-S06: list hierarchy accuracy — fraction of matched items with correct depth
+    # MET-S07: list hierarchy accuracy — fraction of matched items with correct depth
     depth_matched = 0
     depth_total   = 0
 
@@ -369,7 +431,7 @@ def list_metrics(
         if not rn or not hn:
             continue
 
-        # MET-S06: depth
+        # MET-S07: depth
         depth_total += 1
         if rn.list_depth == hn.list_depth:
             depth_matched += 1
@@ -388,24 +450,29 @@ def list_metrics(
             if rn.ordered_list == hn.ordered_list:
                 kind_matched += 1
 
-        # MET-SL04: ordered list ordinal accuracy (regex on visible_text)
+        # MET-SL04: rendered ordinals retained by the parser.
         if rn.ordered_list:
-            m_ref = _ORDINAL_RE.match(ref_text)
-            m_hyp = _ORDINAL_RE.match(hyp_text)
-            if m_ref:
+            rordinal = rn.metadata.get("ordered_ordinal")
+            hordinal = hn.metadata.get("ordered_ordinal") if hn.ordered_list else None
+            # Compatibility for manually constructed nodes predating metadata.
+            if rordinal is None and (m_ref := _ORDINAL_RE.match(ref_text)):
+                rordinal = int(m_ref[1])
+            if hordinal is None and hn.ordered_list and (m_hyp := _ORDINAL_RE.match(hyp_text)):
+                hordinal = int(m_hyp[1])
+            if rordinal is not None:
                 ordinal_total += 1
-                if m_hyp and m_ref.group(1) == m_hyp.group(1):
+                if rordinal == hordinal:
                     ordinal_correct += 1
 
         # MET-SL03: item order accuracy — collect (ref_order, hyp_order) per parent list
         parent_order[rn.parent_id].append((rn.order_index, hn.order_index))
 
-    # MET-S06 result
+    # MET-S07 result
     if depth_total == 0:
-        hier_result = _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-S06", {"matched_pairs": 0})
+        hier_result = _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-S07", {"matched_pairs": 0})
     else:
         hier_result = _make_result(
-            depth_matched / depth_total, MetricStatus.OK, "MET-S06",
+            depth_matched / depth_total, MetricStatus.OK, "MET-S07",
             {"depth_matched": depth_matched, "depth_total": depth_total},
         )
 
@@ -465,12 +532,12 @@ def list_metrics(
         ordinal_result = _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-SL04", {})
 
     return {
-        "list_group_detection_f1":        _make_result(f1_l, st_l, "MET-S04", {"tp": tp_l, "fp": fp_l, "fn": fn_l}),
-        "list_group_detection_precision":  _make_result(p_l,  st_l, "MET-S04.precision", {}),
-        "list_group_detection_recall":     _make_result(r_l,  st_l, "MET-S04.recall",    {}),
-        "list_item_detection_f1":          _make_result(f1_i, st_i, "MET-S05", {"tp": tp_i, "fp": fp_i, "fn": fn_i}),
-        "list_item_detection_precision":   _make_result(p_i,  st_i, "MET-S05.precision", {}),
-        "list_item_detection_recall":      _make_result(r_i,  st_i, "MET-S05.recall",    {}),
+        "list_group_detection_f1":        _make_result(f1_l, st_l, "MET-S05", {"tp": tp_l, "fp": fp_l, "fn": fn_l}),
+        "list_group_detection_precision":  _make_result(p_l,  st_l, "MET-S05.precision", {}),
+        "list_group_detection_recall":     _make_result(r_l,  st_l, "MET-S05.recall",    {}),
+        "list_item_detection_f1":          _make_result(f1_i, st_i, "MET-S06", {"tp": tp_i, "fp": fp_i, "fn": fn_i}),
+        "list_item_detection_precision":   _make_result(p_i,  st_i, "MET-S06.precision", {}),
+        "list_item_detection_recall":      _make_result(r_i,  st_i, "MET-S06.recall",    {}),
         "list_hierarchy_accuracy":         hier_result,
         "list_item_text_cer_on_matched":   item_cer_result,
         "list_kind_accuracy":              kind_result,
@@ -480,13 +547,13 @@ def list_metrics(
 
 
 # ---------------------------------------------------------------------------
-# MET-S07: Pairwise reading order accuracy
+# MET-S08: Pairwise reading order accuracy
 # ---------------------------------------------------------------------------
 
 def pairwise_reading_order_accuracy(
     pairs: Sequence[AlignedPair],
 ) -> MetricResult:
-    """MET-S07: Fraction of ref ordered pairs whose relative order is preserved in hyp.
+    """MET-S08: Fraction of ref ordered pairs whose relative order is preserved in hyp.
 
     For all matched pairs (ri, rj) where ri appears before rj in the reference,
     count how many have hyp_order(ri) < hyp_order(rj).
@@ -504,7 +571,7 @@ def pairwise_reading_order_accuracy(
     n = len(matched)
     if n < 2:
         status = MetricStatus.NOT_APPLICABLE if n == 0 else MetricStatus.INSUFFICIENT_EVIDENCE
-        return _make_result(None, status, "MET-S07", {"matched_elements": n})
+        return _make_result(None, status, "MET-S08", {"matched_elements": n})
 
     # Sort by reference order
     matched_sorted = sorted(matched, key=lambda p: p.reference_order)  # type: ignore[arg-type]
@@ -521,20 +588,20 @@ def pairwise_reading_order_accuracy(
 
     accuracy = concordant / total_pairs if total_pairs > 0 else None
     return _make_result(
-        accuracy, MetricStatus.OK, "MET-S07",
+        accuracy, MetricStatus.OK, "MET-S08",
         {"matched_elements": n, "concordant_pairs": concordant,
          "total_pairs": total_pairs},
     )
 
 
 # ---------------------------------------------------------------------------
-# MET-S08: Block type confusion matrix
+# MET-S09: Block type confusion matrix
 # ---------------------------------------------------------------------------
 
 def block_type_confusion(
     pairs: Sequence[AlignedPair],
 ) -> dict[str, int]:
-    """MET-S08: Count (expected_kind, observed_kind) mismatches for matched pairs.
+    """MET-S09: Count (expected_kind, observed_kind) mismatches for matched pairs.
 
     Returns a dict with keys ``"{expected}→{observed}"`` and int counts.
     Only pairs where expected != observed are included.
@@ -552,7 +619,7 @@ def block_type_confusion(
 
 
 # ---------------------------------------------------------------------------
-# MET-S09: Block order pairwise accuracy (structural blocks only)
+# MET-S10: Block order pairwise accuracy (structural blocks only)
 # ---------------------------------------------------------------------------
 
 # Universe of top-level structural block kinds for block order.
@@ -574,7 +641,7 @@ def block_order_pairwise_accuracy(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
 ) -> MetricResult:
-    """MET-S09: Pairwise order accuracy for structural blocks (spec §8.1).
+    """MET-S10: Pairwise order accuracy for structural blocks (spec §8.1).
 
     Universe: matched pairs where the ref element is a top-level structural
     block (heading, paragraph, table, list, code, blockquote, thematic_break).
@@ -598,7 +665,7 @@ def block_order_pairwise_accuracy(
     n = len(matched)
     if n < 2:
         status = MetricStatus.NOT_APPLICABLE if n == 0 else MetricStatus.INSUFFICIENT_EVIDENCE
-        return _make_result(None, status, "MET-S09",
+        return _make_result(None, status, "MET-S10",
                             {"matched_blocks": n, "universe": "structural_blocks"})
 
     matched_sorted = sorted(matched, key=lambda p: p.reference_order)  # type: ignore[arg-type]
@@ -614,7 +681,7 @@ def block_order_pairwise_accuracy(
 
     accuracy = concordant / total_pairs if total_pairs > 0 else None
     return _make_result(
-        accuracy, MetricStatus.OK, "MET-S09",
+        accuracy, MetricStatus.OK, "MET-S10",
         {"matched_blocks": n, "concordant_pairs": concordant,
          "total_pairs": total_pairs, "universe": "structural_blocks"},
     )
@@ -657,8 +724,9 @@ def compute_structure_metrics(
     pairs: Sequence[AlignedPair],
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> StructureMetrics:
-    """Compute all structure metrics (MET-S01 to MET-S10, MET-SL01 to MET-SL04).
+    """Compute all structure metrics (MET-S01 to MET-S11, MET-SL01 to MET-SL04).
 
     Parameters
     ----------
@@ -673,7 +741,7 @@ def compute_structure_metrics(
     return StructureMetrics(
         heading        = heading_detection_f1(pairs, ref_nodes, hyp_nodes),
         heading_cer    = heading_text_cer(pairs, ref_nodes, hyp_nodes),
-        paragraph      = paragraph_detection_f1(pairs, ref_nodes, hyp_nodes),
+        paragraph      = paragraph_detection_f1(pairs, ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
         lists          = list_metrics(pairs, ref_nodes, hyp_nodes),
         reading_order  = pairwise_reading_order_accuracy(pairs),
         block_order    = block_order_pairwise_accuracy(pairs, ref_nodes, hyp_nodes),

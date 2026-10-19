@@ -17,6 +17,8 @@ from .edit_distance import DEFAULT_MAX_EDIT_CELLS, EDIT_DISTANCE_POLICY
 from .critical_data import CriticalDataMetrics, compute_critical_data_metrics
 from .integrity_metrics import IntegrityMetrics, compute_integrity_metrics
 from .markdown_parser import PARSER_VERSION, parse_page
+from .markdown_syntax import PAGE_SYNTAX_POLICY
+from .paragraph_boundaries import PARAGRAPH_POLICY
 from .html_tables import HTML_TABLE_POLICY
 from .models import MarkdownNode
 from .page_scope import build_page_scope
@@ -112,9 +114,11 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # --- Provenance ---
     doc.evaluator_info = {
         "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "3.0.3",
+        "metric_definitions_version": "3.0.4",
         "normalization_policy": "unicode_layout",
         "parser": PARSER_VERSION,
+        "page_syntax_policy": PAGE_SYNTAX_POLICY,
+        "paragraph_policy": PARAGRAPH_POLICY,
         "alignment_policy": "content-match-v1",
         "entity_policy": "entities-ptbr-v1",
         "text_projection_policy": "parser-visible-leaves-v2",
@@ -169,7 +173,7 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
 
     # --- Structure metrics ---
     struct: StructureMetrics = (
-        compute_structure_metrics(pairs, ref_nodes, hyp_nodes)
+        compute_structure_metrics(pairs, ref_nodes, hyp_nodes, max_edit_cells=request.max_text_edit_cells)
         if alignment_error is None else compute_structure_metrics([], [], [])
     )
     doc.structure = {k: v for k, v in struct.to_dict().items()

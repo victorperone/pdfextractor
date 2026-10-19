@@ -37,6 +37,7 @@ _FIELDS = (
     "evaluator.entity_policy", "evaluator.text_projection_policy", "evaluator.edit_distance_policy",
     "evaluator.html_table_policy", "evaluator.table_metric_policy", "evaluator.aggregation_policy",
     "evaluator.comparability_policy", "evaluator.resource_policy",
+    "evaluator.page_syntax_policy", "evaluator.paragraph_policy",
 )
 
 
@@ -405,7 +406,7 @@ def test_real_evaluator_documents_obey_shared_contract(tmp_path):
     a = evaluate(request)
     b = evaluate(replace(request, hyp_text="## Página 1\n\nTexto R$ 10,00",
                          engine="different", run_id="partial"))
-    assert a["evaluator"]["metric_definitions_version"] == "3.0.3"
+    assert a["evaluator"]["metric_definitions_version"] == "3.0.4"
     assert a["evaluator"]["aggregation_policy"] == "finite-numeric-outcomes-v1"
     assert compare(a, b) == (True, [])
     completed, output = cli(tmp_path, [a, b])

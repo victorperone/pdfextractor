@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .reference_hash import _PAGE_HDR_RE, split_pages
+from .reference_hash import split_pages
+from .markdown_syntax import page_markers
 
 
 def page_number(value: Any) -> int:
@@ -51,7 +52,7 @@ def manifest_pages(manifest: dict[str, Any]) -> dict[int, str]:
         # A field may contain either its body or its own page marker, never
         # another page or a multi-page document. parse_document is not used here.
         bodies = document_pages(content)
-        if _PAGE_HDR_RE.search(content):
+        if page_markers(content):
             if set(bodies) != {number}:
                 raise ValueError(f"Page marker does not match manifesto page {number}")
             content = bodies[number]

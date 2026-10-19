@@ -173,7 +173,7 @@ def test_table_budget_is_recorded_and_resource_failure_blocks_ranking(monkeypatc
     assert result["quality"]["tables"]["cell_cer"]["status"] == "resource_limit"
     assert result["evaluation"]["rank_eligible"] is False
     assert result["evaluation"]["status"] == "partial"
-    assert result["evaluator"]["metric_definitions_version"] == "3.0.3"
+    assert result["evaluator"]["metric_definitions_version"] == "3.0.4"
     assert result["evaluator"]["resource_policy"]["max_table_edit_cells"] == 20
 
 

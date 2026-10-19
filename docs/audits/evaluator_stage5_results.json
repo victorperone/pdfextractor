@@ -1,0 +1,86 @@
+{
+  "stage": 5,
+  "date": "2026-10-19",
+  "base_commit": "bc54c24",
+  "resolved_findings": [
+    "A14",
+    "A15",
+    "A16",
+    "A17"
+  ],
+  "partially_resolved_findings": {
+    "A18": "Installed parser version now recorded; formal v3 schema remains pending"
+  },
+  "metric_definitions_version": "3.0.4",
+  "schema_version": "evaluation-3.0.0",
+  "parser": "markdown-it-py-4.2.0+gfm",
+  "paragraph_policy": "page-token-spans-exact-gaps-v1",
+  "page_syntax_policy": "top-level-page-markers-outside-code-html-v1",
+  "default_suite": {
+    "tests": 2187,
+    "passed": 2177,
+    "failures": 0,
+    "errors": 0,
+    "skips": 6,
+    "xfails": 4
+  },
+  "new_regression_suite": {
+    "tests": 108,
+    "passed": 108,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "targeted_suite": {
+    "tests": 488,
+    "passed": 488,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "explicit_audit_suite": {
+    "tests": 39,
+    "passed": 34,
+    "failures": 5,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "remaining_failing_probes": [
+    "test_canonical_renderer_shows_run_outcomes",
+    "test_same_run_id_with_different_input_preserves_prior_artifact",
+    "test_legacy_parser_keeps_empty_structural_table_row",
+    "test_legacy_parser_keeps_escaped_pipe_inside_one_cell",
+    "test_legacy_heading_cer_sees_text_error"
+  ],
+  "independent_oracles": {
+    "exhaustive_sequence_pairs": 961,
+    "random_sequence_pairs": 200,
+    "seed": 183,
+    "paragraph_cut_pairs": 256,
+    "long_sequence_tokens": 20000,
+    "long_sequence_max_cells": 61000
+  },
+  "ground_truth_controls": {
+    "V3": {
+      "pages": 144,
+      "passed": true,
+      "junit": "outputs/loop/0001/V3/validacao_gabarito_estrutura_etapa5.xml"
+    },
+    "V5": {
+      "pages": 42,
+      "passed": true,
+      "html_adjacent_markers_preserved": [
+        12,
+        23
+      ],
+      "junit": "outputs/loop/0001/V5/validacao_gabarito_estrutura_etapa5.xml"
+    }
+  },
+  "git_diff_check_passed": true,
+  "pdf_extraction_executed": false,
+  "commit_executed": false,
+  "push_executed": false
+}

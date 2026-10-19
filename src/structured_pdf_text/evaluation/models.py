@@ -77,8 +77,8 @@ class MarkdownNode:
     kind          Canonical block type (NodeKind)
     raw_markdown  Exact source Markdown text for this node
     visible_text  Rendered plain text (Markdown syntax removed)
-    source_start  Byte offset of the first character in the source document
-    source_end    Byte offset one past the last character
+    source_start  Character offset of the first character in the source document
+    source_end    Character offset one past the last character
     order_index   0-based position in document reading order
     heading_level ATX heading level 1-6, or None
     list_depth    Nesting depth (0 = top-level), or None for non-list nodes

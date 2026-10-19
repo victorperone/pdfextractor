@@ -378,21 +378,16 @@ class TestT25_ParagraphBoundary:
         Reference: ['Long paragraph one', 'Short']
         Hypothesis: ['Long', 'paragraph one Short']
 
-        The aligner will attempt to match, but wrong content means some
-        paragraphs may be mismatched, reducing detection F1 below 1.
-        Note: the metric is paragraph *detection* F1 — paragraph blocks that
-        align on content are TP. Blocks with different text won't fully align.
+        The tokens and paragraph counts are identical. The exact token spans
+        differ, so neither paragraph is a TP and the internal cut is wrong.
         """
         ref_nodes = parse_document("Long paragraph one\n\nShort")
         hyp_nodes = parse_document("Long\n\nparagraph one Short")
         pairs = align_blocks(ref_nodes, hyp_nodes)
         det = paragraph_detection_f1(pairs, ref_nodes, hyp_nodes)
         result = det["paragraph_detection_f1"]
-        # With different content, we can't guarantee F1=1 automatically
-        # The important check is: both sides have 2 paragraphs, but alignment
-        # may be partial. Accept that F1 ≤ 1; the key anti-regression is
-        # that the metric EXISTS and is computed (not trivially 1 due to count).
-        assert result.status.value in ("ok", "false_positive_only", "false_negative_only")
+        assert result.value == 0
+        assert det["paragraph_boundary_f1"].value == 0
 
     def test_T25_identical_paragraphs_f1_is_1(self):
         """Identical paragraphs → detection F1 = 1."""

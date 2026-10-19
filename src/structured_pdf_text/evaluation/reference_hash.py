@@ -42,20 +42,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import unicodedata
 from pathlib import Path
 from typing import Sequence
+from .markdown_syntax import DuplicatePageMarker, split_page_sources
 
 
 # Public protocol identifier — increment when algorithm changes.
 REFERENCE_HASH_PROTOCOL = "reference-effective-v1"
-
-# Page-header pattern (matches ## Página N variants produced by the extractor)
-_PAGE_HDR_RE = re.compile(
-    r"^##\s+P[áa]gina\s+0*(\d+)[^\n]*$",
-    re.IGNORECASE | re.MULTILINE,
-)
 
 
 def _normalize_text(text: str) -> str:
@@ -79,30 +73,10 @@ def split_pages(text: str) -> dict[int, str]:
 
     Raises ``ValueError`` on duplicate page numbers.
     """
-    parts = _PAGE_HDR_RE.split(text)
-    pages: dict[int, str] = {}
-
-    if len(parts) == 1:
-        # No markers: single implicit page
-        return {1: text}
-
-    # parts[0] is the text before the first marker (usually empty — ignore)
-    i = 1
-    while i + 1 < len(parts):
-        page_num = int(parts[i])
-        body = parts[i + 1]
-        # Normalize line endings but preserve internal content
-        body = _normalize_text(body)
-        # Remove only the leading/trailing newlines produced by the split
-        # (the marker line ends with \n, so body starts with \n)
-        body = body.lstrip("\n").rstrip("\n")
-        if page_num in pages:
-            raise ValueError(
-                f"Duplicate page number {page_num} in reference Markdown"
-            )
-        pages[page_num] = body
-        i += 2
-    return pages
+    try:
+        return {page: body for page, (body, _) in split_page_sources(_normalize_text(text)).items()}
+    except DuplicatePageMarker as exc:
+        raise ValueError(f"Duplicate page number {exc.page} in reference Markdown") from exc
 
 
 def compute_reference_effective_hash(

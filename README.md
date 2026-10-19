@@ -311,7 +311,7 @@ text. Invalid inputs or a canonical evaluation failure make the command fail.
 Text metrics use exact Levenshtein S/D/I counts with bounded working memory.
 Raw CER uses the original Markdown bodies; visible text comes from parser
 tokens, preserving literal code. Aligned CER counts terminal text units once.
-The evaluator records metric definitions version `3.0.3` and its resource policy.
+The evaluator records metric definitions version `3.0.4` and its resource policy.
 The default budgets are 8,000,000 DP cells per sequential metric (shared across
 blocks for aligned CER) and 250,000 candidate pairs per alignment. Exceeding a
 budget produces `resource_limit` with a null value; the evaluation is partial
@@ -319,6 +319,20 @@ and ineligible for ranking. `EvaluationRequest.max_text_edit_cells` and
 `max_alignment_pairs` can configure these budgets. Large documents can still
 need further alignment optimization; a partial evaluation is not a complete
 quality score.
+
+Paragraph detection checks both ends of each matched paragraph on an exact,
+page-local token alignment. `paragraph_boundary_f1` separately measures internal
+paragraph cuts; pages with no cuts on either side are N/A. The paragraph metrics
+share one `max_text_edit_cells` budget across pages. Ordered-list ordinals use
+CommonMark's displayed numbering (container start plus item index). Page markers
+must be top-level, column-zero headings: markers inside code, HTML elements,
+quotes or lists remain content. A delimiter immediately after a completed HTML
+element is accepted even without a blank line (as in the V5 reference).
+Physical page order is preserved. Fence validity follows the
+parser's source maps, including backtick/tilde lengths and nested containers.
+Parser identity records the installed `markdown-it-py` version; page and paragraph
+policies are required by the shared comparison contract. Regrade older artifacts
+before comparing them with definitions `3.0.4`.
 
 Table preservation metrics include missing and extra cells, rows and tables.
 `cell_content_exact_match` divides exact positional pairs by all paired,

@@ -13,9 +13,11 @@ def comparison_result(pages=(1, 2, 3), effective_hash="a" * 64):
             "selected_pages": list(pages),
         },
         "evaluator": {
-            "metric_definitions_version": "3.0.3",
+            "metric_definitions_version": "3.0.4",
             "normalization_policy": "unicode_layout",
             "parser": "test-parser-v1",
+            "page_syntax_policy": "top-level-page-markers-outside-code-html-v1",
+            "paragraph_policy": "page-token-spans-exact-gaps-v1",
             "alignment_policy": "content-match-v1",
             "entity_policy": "entities-ptbr-v1",
             "text_projection_policy": "parser-visible-leaves-v2",

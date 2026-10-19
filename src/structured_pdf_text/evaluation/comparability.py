@@ -19,6 +19,8 @@ _EVALUATOR_FIELDS = {
     "evaluator_version": "metric_definitions_version",
     "normalization_policy": "normalization_policy",
     "parser_id": "parser",
+    "page_syntax_policy": "page_syntax_policy",
+    "paragraph_policy": "paragraph_policy",
     "alignment_policy": "alignment_policy",
     "entity_policy": "entity_policy",
     "text_projection_policy": "text_projection_policy",

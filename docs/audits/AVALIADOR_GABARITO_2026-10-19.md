@@ -15,6 +15,10 @@ A terceira etapa corrige perdas de tabelas/células e conteúdo HTML:
 A quarta etapa corrige agregação e unifica a comparabilidade entre API e CLI:
 [CORRECOES_ETAPA_4_2026-10-19.md](CORRECOES_ETAPA_4_2026-10-19.md).
 
+A quinta etapa corrige fronteiras de parágrafos, ordinais, ordem física,
+marcadores/cercas, offsets e identidade do parser:
+[CORRECOES_ETAPA_5_2026-10-19.md](CORRECOES_ETAPA_5_2026-10-19.md).
+
 ## Estado auditado e escopo
 
 - HEAD: `439bd75` (`fix: não pontuar células vazias de tabelas ausentes`).

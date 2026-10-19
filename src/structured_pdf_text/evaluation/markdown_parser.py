@@ -1,6 +1,6 @@
 """CommonMark + GFM Markdown parser producing MarkdownNode trees (spec §2.5).
 
-Uses markdown-it-py (CommonMark spec, GFM tables extension) with a locked
+Uses markdown-it-py (CommonMark spec, GFM tables extension) with the installed
 version recorded in PARSER_VERSION.  This version string must be included
 in every MetricResult that depends on structural parsing so that runs are
 comparable only when both used the same parser version.
@@ -32,13 +32,7 @@ from markdown_it.tree import SyntaxTreeNode
 from structured_pdf_text.evaluation.models import MarkdownNode, NodeKind, NormProfile
 from structured_pdf_text.evaluation.normalization import normalize
 from structured_pdf_text.evaluation.html_tables import parse_html_block
-
-PARSER_VERSION = "markdown-it-py-3.0.0+gfm"
-
-# Page header pattern used by the PDFExtractor renderer
-_PAGE_HDR_RE = re.compile(
-    r"^##\s+P[áa]gina\s+0*(\d+)[^\n]*", re.IGNORECASE | re.MULTILINE
-)
+from .markdown_syntax import PARSER_VERSION, source_lines, split_page_sources
 
 # Build a shared parser instance (thread-safe for reading)
 _md = MarkdownIt("commonmark").enable("table")
@@ -100,29 +94,11 @@ def _split_pages(text: str) -> dict[int, tuple[str, int]]:
 
     Page headers are removed from the body text but their start positions are
     recorded so that source_start/source_end on each node refer to offsets
-    within the page body (not the full document).
+    within the original document, including its page marker lines.
 
     Raises ValueError on duplicate page markers.
     """
-    matches = list(_PAGE_HDR_RE.finditer(text))
-    if not matches:
-        # No page markers: treat the entire document as a single "page 0"
-        return {0: (text, 0)}
-
-    seen: set[int] = set()
-    pages: dict[int, tuple[str, int]] = {}
-    for i, m in enumerate(matches):
-        pnum = int(m.group(1))
-        if pnum in seen:
-            raise ValueError(
-                f"Duplicate page marker '## Página {pnum}' at offset {m.start()}"
-            )
-        seen.add(pnum)
-        body_start = m.end()
-        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[body_start:body_end].strip("\n")
-        pages[pnum] = (body, body_start)
-    return pages
+    return split_page_sources(text, implicit_page=0)
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +124,7 @@ def _walk(
         tok = node.token
         offset = page_body_offset
         if tok.map:
-            offset += sum(len(line) + 1 for line in page_body.split("\n")[:tok.map[0]])
+            offset += sum(map(len, source_lines(page_body)[:tok.map[0]]))
         html_nodes = parse_html_block(_raw_lines(page_body, tok), origin=origin, page=page,
                                      start_seq=counter[0], parent_id=parent_id,
                                      source_offset=offset)
@@ -189,10 +165,10 @@ def _walk(
     src_start = page_body_offset
     src_end   = page_body_offset
     if tok and tok.map:
-        lines = page_body.split("\n")
+        lines = source_lines(page_body)
         s_line, e_line = tok.map
-        src_start = page_body_offset + sum(len(l) + 1 for l in lines[:s_line])
-        src_end   = page_body_offset + sum(len(l) + 1 for l in lines[:e_line])
+        src_start = page_body_offset + sum(map(len, lines[:s_line]))
+        src_end   = page_body_offset + sum(map(len, lines[:e_line]))
 
     visible_raw = _extract_visible_text(node)
     # The parser already projected Markdown. Reinterpreting the result as
@@ -238,6 +214,20 @@ def _walk(
     )
     result.append(mn)
 
+    if kind == NodeKind.LIST and l_ordered:
+        start = tok.attrGet("start")
+        mn.metadata["list_start"] = int(start) if start is not None else 1
+        ordinal = mn.metadata["list_start"]
+        for child in node.children or []:
+            if child.type == "list_item":
+                # CommonMark renders start + item index; subsequent source
+                # markers may repeat 1 and do not change the displayed ordinal.
+                opening = child.nester_tokens.opening
+                opening.meta["ordered_ordinal"] = ordinal
+                ordinal += 1
+    elif kind == NodeKind.LIST_ITEM and l_ordered:
+        mn.metadata["ordered_ordinal"] = tok.meta["ordered_ordinal"]
+
     # Determine nesting context for children
     new_list_depth = list_depth + 1 if kind == NodeKind.LIST else list_depth
     new_ordered    = l_ordered if kind == NodeKind.LIST else in_ordered
@@ -250,9 +240,9 @@ def _walk(
 def _raw_lines(body: str, tok) -> str:
     """Return the raw Markdown source lines for a token."""
     if tok and tok.map:
-        lines = body.split("\n")
+        lines = source_lines(body)
         s, e = tok.map
-        return "\n".join(lines[s:e])
+        return re.sub(r"(?:\r\n|\r|\n)\Z", "", "".join(lines[s:e]))
     return ""
 
 
@@ -284,7 +274,7 @@ def parse_document(
     all_nodes: list[MarkdownNode] = []
     counter = [0]
 
-    for page_num in sorted(pages.keys()):
+    for page_num in pages:
         body, offset = pages[page_num]
         page = page_num if page_num != 0 else None
         if not body.strip():

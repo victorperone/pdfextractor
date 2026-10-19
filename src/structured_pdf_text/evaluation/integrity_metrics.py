@@ -31,6 +31,7 @@ from structured_pdf_text.evaluation.models import (
     NormProfile,
 )
 from structured_pdf_text.evaluation.normalization import normalize
+from .markdown_syntax import page_markers, split_page_sources, unclosed_fence_count
 
 
 # ---------------------------------------------------------------------------
@@ -213,10 +214,6 @@ class MarkdownValidityReport:
         }
 
 
-_FENCE_OPEN_RE  = re.compile(r"^```", re.MULTILINE)
-_PAGE_HDR_RE    = re.compile(r"^##\s+P[áa]gina\s+0*(\d+)", re.IGNORECASE | re.MULTILINE)
-
-
 def markdown_validity_report(text: str) -> MarkdownValidityReport:
     """MET-I04: Analyse Markdown text for structural validity issues.
 
@@ -224,16 +221,13 @@ def markdown_validity_report(text: str) -> MarkdownValidityReport:
     """
     report = MarkdownValidityReport()
 
-    # Unclosed fences: odd number of ``` markers
-    fence_count = len(_FENCE_OPEN_RE.findall(text))
-    if fence_count % 2 != 0:
-        report.unclosed_fences = fence_count // 2 + 1
-        report.parse_errors += 1
-        report.warnings.append(f"unclosed_fence: {fence_count} fence markers (odd)")
+    report.unclosed_fences = unclosed_fence_count(text)
+    if report.unclosed_fences:
+        report.parse_errors += report.unclosed_fences
+        report.warnings.append(f"unclosed_fence: {report.unclosed_fences} unterminated blocks")
 
     # Duplicate page markers
-    page_markers = _PAGE_HDR_RE.findall(text)
-    page_counter = Counter(page_markers)
+    page_counter = Counter(marker.page for marker in page_markers(text))
     dups = {p: c for p, c in page_counter.items() if c > 1}
     if dups:
         report.duplicate_page_markers = sum(c - 1 for c in dups.values())
@@ -298,8 +292,8 @@ def edge_content_diagnostic(
     if not hyp_lines:
         return diag
 
-    # Collect first/last N lines from each "page" in hyp (split by ## Página)
-    pages = re.split(r"##\s+P[áa]gina\s+\d+[^\n]*", hyp_text, flags=re.IGNORECASE)
+    # Use the same page grammar as quality and validity, including code/HTML.
+    pages = [body for body, _ in split_page_sources(hyp_text).values()]
     header_candidates: Counter = Counter()
     footer_candidates: Counter = Counter()
 
