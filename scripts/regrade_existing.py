@@ -523,10 +523,19 @@ def main() -> int:
     else:
         manifesto = _load_manifesto(args.manifesto)
         ref_pages = _manifesto_pages(manifesto)
-        # Reconstruct ref_text as ## Página N ... blocks
+        # Reconstruct ref_text as ## Página N ... blocks.
+        # If expected_markdown already begins with a page marker (some corpora
+        # embed the marker inside the field), use the content directly to avoid
+        # duplicate markers that would cause a ValueError in split_pages().
+        import re as _re
+        _PAGE_MARKER_RE = _re.compile(r"^##\s+Página\s+", _re.IGNORECASE)
         parts = []
         for pnum in sorted(ref_pages):
-            parts.append(f"## Página {pnum}\n\n{ref_pages[pnum]}")
+            content = ref_pages[pnum]
+            if _PAGE_MARKER_RE.match(content.lstrip()):
+                parts.append(content.lstrip())
+            else:
+                parts.append(f"## Página {pnum}\n\n{content}")
         ref_text = "\n\n".join(parts)
         manifesto_path = args.manifesto
 
