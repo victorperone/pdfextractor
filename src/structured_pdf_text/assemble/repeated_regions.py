@@ -100,7 +100,9 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
         return candidates
 
     page_height = max(page.bbox.height, 1.0)
-    edge_band = max(24.0, page_height * 0.06)
+    # Keep candidate collection aligned with _stable_edge_position's 8% limit;
+    # otherwise headers between 6% and 8% never reach the repetition check.
+    edge_band = max(24.0, page_height * 0.08)
     top = page.bbox.y0 + edge_band
     bottom = page.bbox.y1 - edge_band
 
