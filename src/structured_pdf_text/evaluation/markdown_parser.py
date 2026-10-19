@@ -12,7 +12,8 @@ Design decisions
   built and the page number is recorded on each node.
 * Code fences: content inside ``` … ``` is NOT parsed for further structure.
   A ``#`` inside a fence does not produce a heading node.
-* Table: only GFM pipe tables with a valid separator row are recognised.
+* Tables: GFM pipe tables require a valid separator row. HTML table blocks
+  retain anchor cells and rowspan/colspan coordinates, without duplicated text.
   Lines with ``|`` in body text or code do not produce table nodes.
 * Duplicate page markers raise a ``ValueError`` with a descriptive message.
 * Empty documents produce an empty node list, not an error.
@@ -30,6 +31,7 @@ from markdown_it.tree import SyntaxTreeNode
 
 from structured_pdf_text.evaluation.models import MarkdownNode, NodeKind, NormProfile
 from structured_pdf_text.evaluation.normalization import normalize
+from structured_pdf_text.evaluation.html_tables import parse_html_block
 
 PARSER_VERSION = "markdown-it-py-3.0.0+gfm"
 
@@ -79,8 +81,9 @@ def _extract_visible_text(node: SyntaxTreeNode) -> str:
     tok = node.token
     if tok and tok.type == "inline":
         return "".join(
-            sub.content if sub.type in ("text", "text_special", "code_inline") else
-            " " if sub.type in ("softbreak", "hardbreak") else ""
+            " " if sub.type in ("softbreak", "hardbreak") or
+            (sub.type == "html_inline" and re.fullmatch(r"<br\s*/?>", sub.content, re.I))
+            else sub.content if sub.type in ("text", "text_special", "code_inline") else ""
             for sub in (tok.children or [])
         )
     if tok and tok.type in ("text", "text_special", "code_inline", "fence", "code_block"):
@@ -141,10 +144,22 @@ def _walk(
     """Depth-first traversal: emit one MarkdownNode per structural block."""
     ntype = node.type
 
+    if ntype == "html_block":
+        tok = node.token
+        offset = page_body_offset
+        if tok.map:
+            offset += sum(len(line) + 1 for line in page_body.split("\n")[:tok.map[0]])
+        html_nodes = parse_html_block(_raw_lines(page_body, tok), origin=origin, page=page,
+                                     start_seq=counter[0], parent_id=parent_id,
+                                     source_offset=offset)
+        result.extend(html_nodes)
+        counter[0] += len(html_nodes)
+        return
+
     # Skip the synthetic root and pure inline/text containers
     if ntype in ("root", "inline", "text", "softbreak", "hardbreak",
                  "strong", "em", "link", "image", "code_inline",
-                 "html_inline", "html_block"):
+                 "html_inline"):
         for child in (node.children or []):
             _walk(child, page_body, page_body_offset, origin, page,
                   counter, parent_id, result, list_depth, in_ordered)

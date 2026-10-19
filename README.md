@@ -311,7 +311,7 @@ text. Invalid inputs or a canonical evaluation failure make the command fail.
 Text metrics use exact Levenshtein S/D/I counts with bounded working memory.
 Raw CER uses the original Markdown bodies; visible text comes from parser
 tokens, preserving literal code. Aligned CER counts terminal text units once.
-The evaluator records metric definitions version `3.0.1` and its resource policy.
+The evaluator records metric definitions version `3.0.2` and its resource policy.
 The default budgets are 8,000,000 DP cells per sequential metric (shared across
 blocks for aligned CER) and 250,000 candidate pairs per alignment. Exceeding a
 budget produces `resource_limit` with a null value; the evaluation is partial
@@ -319,6 +319,28 @@ and ineligible for ranking. `EvaluationRequest.max_text_edit_cells` and
 `max_alignment_pairs` can configure these budgets. Large documents can still
 need further alignment optimization; a partial evaluation is not a complete
 quality score.
+
+Table preservation metrics include missing and extra cells, rows and tables.
+`cell_content_exact_match` divides exact positional pairs by all paired,
+missing and extra cells. `cell_content_exact_match_matched` is the conditional
+diagnostic; its coverage reports the fraction of reference cells paired.
+Cell CER sums edits over every reference cell character, including full
+deletions and all insertions. A missing nonempty table has Cell CER 1; a
+globally empty reference with inserted text has a null value and
+`undefined_denominator`. CER can exceed 1. The edit budget is shared by all
+cell distances, independently of the text metrics, and resource exhaustion
+also makes the evaluation partial and ineligible for ranking.
+
+HTML table blocks retain text, captions, empty cells and anchor coordinates.
+Merged cells store `row_index`, `column_index`, `rowspan` and `colspan`;
+their text is counted once. Column accuracy uses occupied width;
+`cell_span_accuracy` compares effective spans over all paired/missing/extra
+anchors. `rowspan=0` extends to the end of its row group; positive row spans
+are clipped at that group boundary. Nested tables, overlapping spans, invalid
+span values and incomplete HTML table blocks raise an explicit input error.
+Keep each complete HTML table within a single Markdown HTML block (no internal
+blank lines). HTML parsing does not render external CSS or execute scripts.
+Previously generated results must be regraded before comparing versions.
 
 ## Maximum quality OCR
 

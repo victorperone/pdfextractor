@@ -7,14 +7,13 @@ threshold — not min(n_ref, n_hyp) counting.
 Metrics
 -------
 MET-T01  table_detection_f1          P/R/F1 of tables correctly detected
-MET-T02  table_row_detection_f1      P/R/F1 of rows inside matched tables
-MET-T03  table_column_count_accuracy fraction of matched tables with same column count
+MET-T02  table_row_detection_f1      P/R/F1 of rows, including unmatched tables
+MET-T03  table_column_count_accuracy same column count over paired/missing/extra tables
 MET-T04  cell_detection_f1           P/R/F1 of cells (including empty structural slots)
-MET-T05  cell_content_exact_match    fraction of matched cells with identical text
-MET-T06  cell_alignment_accuracy     fraction of content-matched cells at correct column index
-                                      (fixed: previously always 100% due to positional definition)
-MET-T07  cell_cer                    char-level error on matched cell pairs
-                                      (fixed: empty-ref cells no longer silently fold into denominator)
+MET-T05  cell_content_exact_match    exact pairs over paired/missing/extra cells
+MET-T06  cell_alignment_accuracy     correctly placed content matches over all cells
+MET-T07  cell_cer                    edits over all reference characters, including losses/insertions
+MET-T12  cell_span_accuracy          rowspan/colspan agreement over all cells
 MET-T08  table_content_f1            multiset coverage of cell text (no positional requirement)
 MET-T09  table_row_order_accuracy    pairwise row order accuracy within matched tables
 MET-T10  table_column_order_accuracy pairwise column order accuracy within matched tables
@@ -37,6 +36,10 @@ from structured_pdf_text.evaluation.models import (
     NormProfile,
 )
 from structured_pdf_text.evaluation.normalization import normalize
+from structured_pdf_text.evaluation.edit_distance import (
+    DEFAULT_MAX_EDIT_CELLS, EditDistanceBudget, EditDistanceResourceLimit,
+    levenshtein_ops,
+)
 
 # Minimum content similarity to accept a table pair
 TABLE_MATCH_THRESHOLD = 0.40
@@ -57,22 +60,6 @@ def _text_sim(a: str, b: str) -> float:
     if not na or not nb:
         return 0.0
     return difflib.SequenceMatcher(None, na, nb, autojunk=False).ratio()
-
-
-def _lev_distance(a: str, b: str) -> int:
-    na, nb = _norm(a), _norm(b)
-    if not na:
-        return len(nb)
-    if not nb:
-        return len(na)
-    prev = list(range(len(nb) + 1))
-    for ch_a in na:
-        curr = [prev[0] + 1]
-        for j, ch_b in enumerate(nb):
-            curr.append(min(prev[j] + (0 if ch_a == ch_b else 1),
-                            curr[-1] + 1, prev[j + 1] + 1))
-        prev = curr
-    return prev[-1]
 
 
 def _make_result(
@@ -252,18 +239,10 @@ def table_row_and_column_metrics(
     hyp_map = _build_parent_map(hyp_nodes)
 
     matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
-    if not matched:
-        na = _make_result(None, MetricStatus.NOT_APPLICABLE, "N/A", {})
-        return {
-            "table_row_detection_f1":       na,
-            "table_row_detection_precision": na,
-            "table_row_detection_recall":    na,
-            "table_column_count_accuracy":   na,
-        }
-
     total_tp_r = total_fp_r = total_fn_r = 0
     col_matched = 0
-    col_total = 0
+    # A missing/extra table is a failed dimension comparison, not N/A.
+    col_total = len(ref_tables) + len(hyp_tables) - len(matched)
 
     for ref_t, hyp_t, _ in matched:
         ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
@@ -278,13 +257,18 @@ def table_row_and_column_metrics(
         total_fn_r += fn_r
         total_fp_r += fp_r
 
-        # Column count: derive from header row (first row)
+        # Maximum occupied width, including HTML column spans.
         ref_cols = _max_col_count(ref_rows, ref_map)
         hyp_cols = _max_col_count(hyp_rows, hyp_map)
-        if ref_cols > 0:
-            col_total += 1
-            if ref_cols == hyp_cols:
-                col_matched += 1
+        if ref_cols == hyp_cols:
+            col_matched += 1
+
+    matched_ref = {rt.node_id for rt, _, _ in matched}
+    matched_hyp = {ht.node_id for _, ht, _ in matched}
+    total_fn_r += sum(len(_children_of_kind(t, ref_map, NodeKind.TABLE_ROW))
+                      for t in ref_tables if t.node_id not in matched_ref)
+    total_fp_r += sum(len(_children_of_kind(t, hyp_map, NodeKind.TABLE_ROW))
+                      for t in hyp_tables if t.node_id not in matched_hyp)
 
     p_r, r_r, f1_r, st_r = _prf(total_tp_r, total_fp_r, total_fn_r)
     col_acc = (col_matched / col_total) if col_total > 0 else None
@@ -296,12 +280,16 @@ def table_row_and_column_metrics(
         "table_row_detection_precision":  _make_result(p_r, st_r, "MET-T02.precision", {}),
         "table_row_detection_recall":     _make_result(r_r, st_r, "MET-T02.recall",    {}),
         "table_column_count_accuracy":    _make_result(col_acc, col_st, "MET-T03",
-                                                       {"matched_tables": col_matched, "total_matched_tables": col_total}),
+                                                       {"matched_tables": col_matched,
+                                                        "total_matched_tables": len(matched),
+                                                        "total_tables": col_total}),
     }
 
 
 def _max_col_count(rows: list[MarkdownNode], pmap: dict) -> int:
-    counts = [len(_children_of_kind(r, pmap, NodeKind.TABLE_CELL)) for r in rows]
+    counts = [max((c.metadata.get("column_index", i) + c.metadata.get("colspan", 1)
+                   for i, c in enumerate(_children_of_kind(r, pmap, NodeKind.TABLE_CELL))),
+                  default=0) for r in rows]
     return max(counts) if counts else 0
 
 
@@ -366,125 +354,99 @@ def _match_cells_by_content(
 def cell_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *,
+    max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> dict[str, MetricResult]:
-    """MET-T04–T07: cell detection, exact match, alignment accuracy, CER."""
+    """MET-T04–T07/T12 over every cell, including unmatched rows/tables.
+
+    Exact match uses the union of positional cell pairs and unmatched cells.
+    CER sums edits and all reference characters; insertions contribute to the
+    numerator even when their individual reference cell is empty. A globally
+    empty reference remains undefined, never an invented zero denominator.
+    Merged cells carry text once per anchor.
+    """
+    budget = EditDistanceBudget(max_edit_cells)
     ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
     hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
-
-    ref_map = _build_parent_map(ref_nodes)
-    hyp_map = _build_parent_map(hyp_nodes)
-
-    matched_tables = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
-
-    total_tp_c = total_fp_c = total_fn_c = 0
-    exact_match_count = 0
-    exact_total = 0
+    ref_map, hyp_map = _build_parent_map(ref_nodes), _build_parent_map(hyp_nodes)
+    tables = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    cell_pairs: list[tuple[MarkdownNode, MarkdownNode]] = []
     align_correct = 0
-    align_total = 0
-    cer_num = 0
-    cer_den = 0
-    cer_insertion_only = 0  # ref=0 hyp>0: not added to cer_den per spec §4.1
-
-    for ref_t, hyp_t, _ in matched_tables:
-        ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
-        hyp_rows = _children_of_kind(hyp_t, hyp_map, NodeKind.TABLE_ROW)
-
-        row_pairs = _match_rows(ref_rows, hyp_rows)
-        matched_hyp_rows = {hr.node_id for _, hr in row_pairs}
-
-        # Count cells (for detection P/R/F1)
-        ref_cells_total = sum(
-            len(_children_of_kind(r, ref_map, NodeKind.TABLE_CELL)) for r in ref_rows
-        )
-        hyp_cells_total = sum(
-            len(_children_of_kind(r, hyp_map, NodeKind.TABLE_CELL)) for r in hyp_rows
-        )
-
-        cell_tp = 0
-        for ref_row, hyp_row in row_pairs:
-            ref_cells = _children_of_kind(ref_row, ref_map, NodeKind.TABLE_CELL)
-            hyp_cells = _children_of_kind(hyp_row, hyp_map, NodeKind.TABLE_CELL)
-
-            n_ref_c = len(ref_cells)
-            n_hyp_c = len(hyp_cells)
-            tp_c = min(n_ref_c, n_hyp_c)
-            cell_tp += tp_c
-
-            # Exact match and CER on positional cell pairs
-            for i in range(tp_c):
-                rc = ref_cells[i]
-                hc = hyp_cells[i]
-                exact_total += 1
-                if _norm(rc.visible_text) == _norm(hc.visible_text):
-                    exact_match_count += 1
-                # CER — spec §7.4: do not divide by max(len,1) when ref is empty
-                ref_t_len = len(_norm(rc.visible_text))
-                hyp_t_len = len(_norm(hc.visible_text))
-                dist = _lev_distance(rc.visible_text, hc.visible_text)
-                if ref_t_len > 0:
-                    cer_num += dist
-                    cer_den += ref_t_len
-                elif hyp_t_len > 0:
-                    # Pure insertion: ref empty, hyp non-empty — track separately,
-                    # not folded into the CER rate (undefined_denominator for this cell).
-                    cer_insertion_only += hyp_t_len
-
-            # MET-T06: cell_alignment_accuracy — spec §7.4
-            # Align cells by content within the row pair, then check if the
-            # content-matched cell index in hyp matches the ref column index.
-            col_pairs = _match_cells_by_content(ref_cells, hyp_cells)
-            for ref_col_idx, hyp_col_idx in col_pairs:
-                align_total += 1
-                if ref_col_idx == hyp_col_idx:
+    for rt, ht, _ in tables:
+        rows = _match_rows(_children_of_kind(rt, ref_map, NodeKind.TABLE_ROW),
+                           _children_of_kind(ht, hyp_map, NodeKind.TABLE_ROW))
+        for rr, hr in rows:
+            rc = _children_of_kind(rr, ref_map, NodeKind.TABLE_CELL)
+            hc = _children_of_kind(hr, hyp_map, NodeKind.TABLE_CELL)
+            # Anchor coordinates matter when spans reserve columns in a row.
+            hyp_columns = {c.metadata.get("column_index", i): c for i, c in enumerate(hc)}
+            cell_pairs.extend((c, hyp_columns[c.metadata.get("column_index", i)])
+                              for i, c in enumerate(rc)
+                              if c.metadata.get("column_index", i) in hyp_columns)
+            for ri, hi in _match_cells_by_content(rc, hc):
+                if rc[ri].metadata.get("column_index", ri) == hc[hi].metadata.get("column_index", hi):
                     align_correct += 1
 
-        fn_c = ref_cells_total - cell_tp
-        fp_c = hyp_cells_total - cell_tp
-        total_tp_c += cell_tp
-        total_fn_c += fn_c
-        total_fp_c += fp_c
-
-    # Unmatched ref tables: all their cells are FN
-    matched_ref_ids = {rt.node_id for rt, _, _ in matched_tables}
-    for rt in ref_tables:
-        if rt.node_id not in matched_ref_ids:
-            rows = _children_of_kind(rt, ref_map, NodeKind.TABLE_ROW)
-            for row in rows:
-                total_fn_c += len(_children_of_kind(row, ref_map, NodeKind.TABLE_CELL))
-
-    # Unmatched hyp tables: all their cells are FP
-    matched_hyp_ids = {ht.node_id for _, ht, _ in matched_tables}
-    for ht in hyp_tables:
-        if ht.node_id not in matched_hyp_ids:
-            rows = _children_of_kind(ht, hyp_map, NodeKind.TABLE_ROW)
-            for row in rows:
-                total_fp_c += len(_children_of_kind(row, hyp_map, NodeKind.TABLE_CELL))
-
-    p_c, r_c, f1_c, st_c = _prf(total_tp_c, total_fp_c, total_fn_c)
-
-    exact_val = (exact_match_count / exact_total) if exact_total > 0 else None
-    exact_st  = MetricStatus.OK if exact_total > 0 else MetricStatus.NOT_APPLICABLE
-
-    align_val = (align_correct / align_total) if align_total > 0 else None
-    align_st  = MetricStatus.OK if align_total > 0 else MetricStatus.NOT_APPLICABLE
-
-    cer_val = (cer_num / cer_den) if cer_den > 0 else None
-    cer_st  = MetricStatus.OK if cer_den > 0 else MetricStatus.NOT_APPLICABLE
-
-    return {
-        "cell_detection_f1":          _make_result(f1_c,      st_c,   "MET-T04",
-                                                    {"tp": total_tp_c, "fp": total_fp_c, "fn": total_fn_c}),
-        "cell_detection_precision":    _make_result(p_c,       st_c,   "MET-T04.precision", {}),
-        "cell_detection_recall":       _make_result(r_c,       st_c,   "MET-T04.recall",    {}),
-        "cell_content_exact_match":    _make_result(exact_val, exact_st, "MET-T05",
-                                                    {"exact": exact_match_count, "total": exact_total}),
-        "cell_alignment_accuracy":     _make_result(align_val, align_st, "MET-T06",
-                                                    {"aligned": align_correct, "total": align_total}),
-        "cell_cer":                    _make_result(cer_val,   cer_st,   "MET-T07",
-                                                    {"edit_distance": cer_num, "ref_chars": cer_den,
-                                                     "insertion_only_chars": cer_insertion_only},
-                                                    direction="lower_is_better"),
+    ref_cells = [n for n in ref_nodes if n.kind == NodeKind.TABLE_CELL]
+    hyp_cells = [n for n in hyp_nodes if n.kind == NodeKind.TABLE_CELL]
+    paired_ref = {r.node_id for r, _ in cell_pairs}
+    paired_hyp = {h.node_id for _, h in cell_pairs}
+    missing = [c for c in ref_cells if c.node_id not in paired_ref]
+    extra = [c for c in hyp_cells if c.node_id not in paired_hyp]
+    tp, fn, fp = len(cell_pairs), len(missing), len(extra)
+    total = tp + fn + fp
+    exact = sum(_norm(r.visible_text) == _norm(h.visible_text) for r, h in cell_pairs)
+    span_correct = sum((r.metadata.get("rowspan", 1), r.metadata.get("colspan", 1)) ==
+                       (h.metadata.get("rowspan", 1), h.metadata.get("colspan", 1))
+                       for r, h in cell_pairs)
+    p, recall, f1, status = _prf(tp, fp, fn)
+    global_status = MetricStatus.OK if total else MetricStatus.NOT_APPLICABLE
+    results = {
+        "cell_detection_f1": _make_result(f1, status, "MET-T04", {"tp": tp, "fp": fp, "fn": fn}),
+        "cell_detection_precision": _make_result(p, status, "MET-T04.precision", {}),
+        "cell_detection_recall": _make_result(recall, status, "MET-T04.recall", {}),
+        "cell_content_exact_match": _make_result(exact / total if total else None,
+            global_status, "MET-T05", {"exact": exact, "total": total,
+            "matched": tp, "missing": fn, "extra": fp}),
+        "cell_content_exact_match_matched": _make_result(exact / tp if tp else None,
+            MetricStatus.OK if tp else MetricStatus.NOT_APPLICABLE,
+            "MET-T05.matched", {"exact": exact, "total": tp}),
+        "cell_alignment_accuracy": _make_result(align_correct / total if total else None,
+            global_status, "MET-T06", {"aligned": align_correct, "total": total}),
+        "cell_span_accuracy": _make_result(span_correct / total if total else None,
+            global_status, "MET-T12", {"correct_spans": span_correct, "total": total}),
     }
+    coverage = tp / len(ref_cells) if ref_cells else None
+    for metric in results.values():
+        metric.coverage = round(coverage, 4) if coverage is not None else None
+
+    ref_chars = sum(len(_norm(c.visible_text)) for c in ref_cells)
+    hyp_chars = sum(len(_norm(c.visible_text)) for c in hyp_cells)
+    deleted = sum(len(_norm(c.visible_text)) for c in missing)
+    inserted = sum(len(_norm(c.visible_text)) for c in extra)
+    insertion_only = inserted + sum(len(_norm(h.visible_text)) for r, h in cell_pairs
+                                    if not _norm(r.visible_text))
+    counts = {"ref_chars": ref_chars, "hyp_chars": hyp_chars,
+              "missing_chars": deleted, "extra_chars": inserted,
+              "insertion_only_chars": insertion_only,
+              "matched_cells": tp, "missing_cells": fn, "extra_cells": fp}
+    try:
+        distance = deleted + inserted + sum(
+            sum(levenshtein_ops(_norm(r.visible_text), _norm(h.visible_text), budget=budget))
+            for r, h in cell_pairs)
+    except EditDistanceResourceLimit as exc:
+        cer = _make_result(None, MetricStatus.RESOURCE_LIMIT, "MET-T07",
+                           {**counts, "max_cells": exc.max_cells,
+                            "evaluated_cells": exc.evaluated_cells}, "lower_is_better")
+        cer.warnings = [str(exc)]
+    else:
+        cer_status = (MetricStatus.OK if ref_chars else
+                      MetricStatus.UNDEFINED_DENOMINATOR if hyp_chars else MetricStatus.NOT_APPLICABLE)
+        cer = _make_result(distance / ref_chars if ref_chars else None, cer_status,
+                           "MET-T07", {**counts, "edit_distance": distance}, "lower_is_better")
+    cer.coverage = round(coverage, 4) if coverage is not None else None
+    results["cell_cer"] = cer
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -713,8 +675,10 @@ class TableMetrics:
 def compute_table_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *,
+    max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> TableMetrics:
-    """Compute all table metrics (MET-T01 to MET-T11).
+    """Compute all table metrics (MET-T01 to MET-T12).
 
     Parameters
     ----------
@@ -728,7 +692,7 @@ def compute_table_metrics(
     return TableMetrics(
         detection     = table_detection_f1(ref_nodes, hyp_nodes),
         rows_columns  = table_row_and_column_metrics(ref_nodes, hyp_nodes),
-        cells         = cell_metrics(ref_nodes, hyp_nodes),
+        cells         = cell_metrics(ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
         content_f1    = table_content_f1(ref_nodes, hyp_nodes),
         row_order     = table_row_order_accuracy(ref_nodes, hyp_nodes),
         col_order     = table_column_order_accuracy(ref_nodes, hyp_nodes),

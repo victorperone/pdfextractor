@@ -9,6 +9,9 @@ As contagens e reproduções abaixo descrevem o estado original auditado.
 A segunda etapa, voltada a texto e memória, está em
 [CORRECOES_ETAPA_2_2026-10-19.md](CORRECOES_ETAPA_2_2026-10-19.md).
 
+A terceira etapa corrige perdas de tabelas/células e conteúdo HTML:
+[CORRECOES_ETAPA_3_2026-10-19.md](CORRECOES_ETAPA_3_2026-10-19.md).
+
 ## Estado auditado e escopo
 
 - HEAD: `439bd75` (`fix: não pontuar células vazias de tabelas ausentes`).

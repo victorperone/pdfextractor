@@ -16,6 +16,7 @@ from .edit_distance import DEFAULT_MAX_EDIT_CELLS, EDIT_DISTANCE_POLICY
 from .critical_data import CriticalDataMetrics, compute_critical_data_metrics
 from .integrity_metrics import IntegrityMetrics, compute_integrity_metrics
 from .markdown_parser import PARSER_VERSION, parse_page
+from .html_tables import HTML_TABLE_POLICY
 from .models import MarkdownNode
 from .page_scope import build_page_scope
 from .reference_hash import REFERENCE_HASH_PROTOCOL, compute_reference_effective_hash
@@ -110,15 +111,18 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # --- Provenance ---
     doc.evaluator_info = {
         "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "3.0.1",
+        "metric_definitions_version": "3.0.2",
         "normalization_policy": "unicode_layout",
         "parser": PARSER_VERSION,
         "alignment_policy": "content-match-v1",
         "entity_policy": "entities-ptbr-v1",
         "text_projection_policy": "parser-visible-leaves-v2",
+        "html_table_policy": HTML_TABLE_POLICY,
+        "table_metric_policy": "all-cell-anchors-v2",
         "edit_distance_policy": EDIT_DISTANCE_POLICY,
         "resource_policy": {
             "max_text_edit_cells": request.max_text_edit_cells,
+            "max_table_edit_cells": request.max_text_edit_cells,
             "max_alignment_pairs": request.max_alignment_pairs,
             "max_similarity_text_product": MAX_SIMILARITY_TEXT_PRODUCT,
         },
@@ -180,7 +184,8 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
                               warnings=[alignment_error])
 
     # --- Table metrics ---
-    tables: TableMetrics = compute_table_metrics(ref_nodes, hyp_nodes)
+    tables: TableMetrics = compute_table_metrics(
+        ref_nodes, hyp_nodes, max_edit_cells=request.max_text_edit_cells)
     doc.tables = tables.to_dict()
 
     # --- Critical data metrics ---
@@ -224,7 +229,7 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     doc.finalise()
     eligible, reasons = evaluate_rank_eligibility(doc)
     if any(metric.get("status") == "resource_limit"
-           for group in (doc.text, doc.structure, doc.reading_order)
+           for group in (doc.text, doc.structure, doc.reading_order, doc.tables)
            for metric in group.values()):
         doc.evaluation_status = "partial"
         eligible = False

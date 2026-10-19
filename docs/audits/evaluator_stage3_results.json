@@ -1,0 +1,96 @@
+{
+  "stage": 3,
+  "date": "2026-10-19",
+  "resolved_findings": [
+    "A04",
+    "A05"
+  ],
+  "metric_definitions_version": "3.0.2",
+  "schema_version": "evaluation-3.0.0",
+  "html_table_policy": "html-table-anchors-v1",
+  "table_metric_policy": "all-cell-anchors-v2",
+  "default_suite": {
+    "tests": 1895,
+    "passed": 1885,
+    "failures": 0,
+    "errors": 0,
+    "skips": 6,
+    "xfails": 4
+  },
+  "new_regression_suite": {
+    "tests": 45,
+    "passed": 45,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "explicit_audit_suite": {
+    "tests": 39,
+    "passed": 25,
+    "failures": 14,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "remaining_failing_probes": [
+    "test_changed_paragraph_boundaries_are_penalised",
+    "test_ordered_list_changed_start_is_measured",
+    "test_page_marker_in_fenced_code_is_literal",
+    "test_macro_keeps_zero_f1_from_missing_or_invented_entities[false_negative_only]",
+    "test_macro_keeps_zero_f1_from_missing_or_invented_entities[false_positive_only]",
+    "test_public_comparator_rejects_different_pdfs",
+    "test_public_comparator_rejects_missing_hash_protocol",
+    "test_canonical_renderer_shows_run_outcomes",
+    "test_valid_four_backtick_fence_with_literal_triples_is_valid",
+    "test_same_run_id_with_different_input_preserves_prior_artifact",
+    "test_parser_identity_reports_installed_version",
+    "test_legacy_parser_keeps_empty_structural_table_row",
+    "test_legacy_parser_keeps_escaped_pipe_inside_one_cell",
+    "test_legacy_heading_cer_sees_text_error"
+  ],
+  "reference_controls": {
+    "V3": {
+      "html_tables": 10,
+      "pages": [
+        44,
+        45,
+        46,
+        49,
+        67,
+        71,
+        91,
+        110,
+        111,
+        118
+      ],
+      "checks": [
+        "identity",
+        "complete_deletion"
+      ],
+      "artifact": "outputs/loop/0001/V3/validacao_gabarito_html_etapa3.xml"
+    },
+    "V5": {
+      "html_tables": 2,
+      "pages": [
+        11,
+        22
+      ],
+      "checks": [
+        "identity",
+        "complete_deletion"
+      ],
+      "artifact": "outputs/loop/0001/V5/validacao_gabarito_html_etapa3.xml"
+    }
+  },
+  "explicit_html_limits": [
+    "nested_tables",
+    "overlapping_or_invalid_spans",
+    "incomplete_commonmark_html_table_blocks",
+    "external_css_rendering"
+  ],
+  "remaining_scalability_work": "Global/table/row matching still needs scalable alignment; this stage bounds the shared cell edit-distance work.",
+  "pdf_extraction_executed": false,
+  "commit_executed": false,
+  "push_executed": false
+}
