@@ -32,8 +32,10 @@ Covers:
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 import pytest
+from evaluation_contract_helpers import comparison_result
 
 from structured_pdf_text.evaluation.aggregation import (
     AggregatedMetric,
@@ -340,40 +342,28 @@ class TestAggregation:
 # ---------------------------------------------------------------------------
 
 class TestComparability:
-    BASE = {
-        "schema_version": "evaluation-v2.0",
-        "inputs": {
-            "reference_sha256": "abc123",
-            "selected_pages": [1, 2, 3],
-        },
-    }
+    BASE = comparison_result()
 
     def test_I03_schema_version_mismatch_rejected(self):
         """I03: Different schema_version → not comparable."""
-        a = dict(self.BASE)
+        a = deepcopy(self.BASE)
         b = {"schema_version": "evaluation-v1.0", "inputs": self.BASE["inputs"]}
         ok, reasons = check_comparability(a, b)
         assert not ok
         assert any("schema_version" in r for r in reasons)
 
     def test_I04_reference_sha_mismatch_rejected(self):
-        """I04: Different reference SHA → not comparable."""
-        a = dict(self.BASE)
-        b = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "xyz999", "selected_pages": [1, 2, 3]},
-        }
+        """I04: Different effective reference SHA → not comparable."""
+        a, b = deepcopy(self.BASE), deepcopy(self.BASE)
+        b["inputs"]["reference_effective_sha256"] = "d" * 64
         ok, reasons = check_comparability(a, b)
         assert not ok
-        assert any("reference_sha256" in r for r in reasons)
+        assert any("reference_effective_sha256" in r for r in reasons)
 
     def test_I05_selected_pages_mismatch_rejected(self):
         """I05: Different selected_pages → not comparable."""
-        a = dict(self.BASE)
-        b = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "abc123", "selected_pages": [1, 2]},
-        }
+        a, b = deepcopy(self.BASE), deepcopy(self.BASE)
+        b["inputs"]["selected_pages"] = [1, 2]
         ok, reasons = check_comparability(a, b)
         assert not ok
         assert any("selected_pages" in r for r in reasons)

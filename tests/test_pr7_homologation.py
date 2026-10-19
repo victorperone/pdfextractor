@@ -20,6 +20,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from evaluation_contract_helpers import comparison_result
 
 _SRC = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(_SRC))
@@ -268,29 +269,17 @@ class TestAgentIntegrationContract:
         assert any("schema_version" in r for r in reasons)
 
     def test_I04_incompatible_reference_rejected(self):
-        """I04: different reference SHA is rejected."""
-        result_a = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "aaa111", "selected_pages": [1]},
-        }
-        result_b = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "bbb222", "selected_pages": [1]},
-        }
+        """I04: different effective reference SHA is rejected."""
+        result_a = comparison_result([1], "a" * 64)
+        result_b = comparison_result([1], "d" * 64)
         ok, reasons = check_comparability(result_a, result_b)
         assert not ok
-        assert any("reference_sha256" in r for r in reasons)
+        assert any("reference_effective_sha256" in r for r in reasons)
 
     def test_I05_incompatible_pages_rejected(self):
         """I05: different selected_pages are rejected."""
-        result_a = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"selected_pages": [1, 2, 3]},
-        }
-        result_b = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"selected_pages": [1, 2, 4]},
-        }
+        result_a = comparison_result([1, 2, 3])
+        result_b = comparison_result([1, 2, 4])
         ok, reasons = check_comparability(result_a, result_b)
         assert not ok
         assert any("selected_pages" in r for r in reasons)
@@ -407,18 +396,12 @@ class TestAgentIntegrationContract:
         )
 
     def test_I13_missing_hash_makes_runs_incomparable(self):
-        """I13: reference_sha256=None is incompatible with a real hash (spec §10.4)."""
-        result_a = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": None, "selected_pages": [1]},
-        }
-        result_b = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "abc123", "selected_pages": [1]},
-        }
+        """I13: missing effective hash is incompatible with a real hash."""
+        result_a = comparison_result([1], None)
+        result_b = comparison_result([1])
         ok, reasons = check_comparability(result_a, result_b)
         assert not ok
-        assert any("reference_sha256" in r for r in reasons)
+        assert any("reference_effective_sha256" in r for r in reasons)
 
     def test_I14_na_metric_not_nan_inf(self):
         """I14: N/A metric produces null JSON value, never NaN/Inf."""
@@ -686,14 +669,8 @@ class TestPropertyInvariants:
 
 class TestComparabilityGuard:
     def test_same_inputs_comparable(self):
-        result_a = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "abc", "selected_pages": [1, 2]},
-        }
-        result_b = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "abc", "selected_pages": [1, 2]},
-        }
+        result_a = comparison_result([1, 2])
+        result_b = comparison_result([1, 2])
         ok, reasons = check_comparability(result_a, result_b)
         assert ok
         assert reasons == []
@@ -708,17 +685,13 @@ class TestComparabilityGuard:
         assert any("hash" in r.lower() or "reference" in r.lower() for r in reasons)
 
     def test_all_mismatches_collected(self):
-        result_a = {
-            "schema_version": "evaluation-v2.0",
-            "inputs": {"reference_sha256": "aaa", "selected_pages": [1]},
-        }
-        result_b = {
-            "schema_version": "evaluation-v1.0",
-            "inputs": {"reference_sha256": "bbb", "selected_pages": [2]},
-        }
+        result_a = comparison_result([1], "a" * 64)
+        result_b = comparison_result([2], "d" * 64)
+        result_b["schema_version"] = "evaluation-v2.0"
         ok, reasons = check_comparability(result_a, result_b)
         assert not ok
-        assert len(reasons) == 3  # schema + ref + pages
+        for field in ("schema_version", "reference_effective_sha256", "selected_pages"):
+            assert any(field in reason for reason in reasons)
 
 
 # ---------------------------------------------------------------------------

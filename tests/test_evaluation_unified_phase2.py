@@ -39,6 +39,7 @@ from collections import Counter
 from typing import Sequence
 
 import pytest
+from evaluation_contract_helpers import comparison_result
 
 from structured_pdf_text.evaluation.critical_data import (
     compute_critical_data_metrics,
@@ -81,14 +82,9 @@ def _cd(ref_md: str, hyp_md: str):
 
 def _make_ref_result(eff_hash: str, pages: list[int], serial_v: str = REFERENCE_HASH_PROTOCOL) -> dict:
     """Build a minimal evaluation result dict with reference effective hash."""
-    return {
-        "schema_version": "evaluation-3.0.0",
-        "inputs": {
-            "reference_effective_sha256": eff_hash,
-            "reference_serialization_version": serial_v,
-            "selected_pages": pages,
-        },
-    }
+    result = comparison_result(pages, eff_hash)
+    result["inputs"]["reference_serialization_version"] = serial_v
+    return result
 
 
 # ---------------------------------------------------------------------------

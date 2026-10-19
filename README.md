@@ -311,7 +311,7 @@ text. Invalid inputs or a canonical evaluation failure make the command fail.
 Text metrics use exact Levenshtein S/D/I counts with bounded working memory.
 Raw CER uses the original Markdown bodies; visible text comes from parser
 tokens, preserving literal code. Aligned CER counts terminal text units once.
-The evaluator records metric definitions version `3.0.2` and its resource policy.
+The evaluator records metric definitions version `3.0.3` and its resource policy.
 The default budgets are 8,000,000 DP cells per sequential metric (shared across
 blocks for aligned CER) and 250,000 candidate pairs per alignment. Exceeding a
 budget produces `resource_limit` with a null value; the evaluation is partial
@@ -341,6 +341,31 @@ span values and incomplete HTML table blocks raise an explicit input error.
 Keep each complete HTML table within a single Markdown HTML block (no internal
 blank lines). HTML parsing does not render external CSS or execute scripts.
 Previously generated results must be regraded before comparing versions.
+
+Aggregation includes finite numeric outcomes with status `ok`,
+`false_positive_only` or `false_negative_only`, including valid zero scores.
+N/A and unavailable scalar values are excluded from macro/distribution
+statistics; coverage reports the applicable fraction. Micro is a ratio of
+complete summed counts. It retains insertion-only counts even when a page's
+local denominator is zero. Missing/invalid count keys raise an error;
+incomplete evaluation of any page makes the complete micro value null.
+Different definitions, units, directions or normalization profiles cannot
+be aggregated together.
+
+The public `check_comparability()` and `compare_engines.py` share one
+fail-closed validator. Canonical comparisons require valid effective-reference,
+PDF and corpus-manifest SHA-256 identities; `reference-effective-v1`; a nonempty
+scope of unique positive integer page IDs; mode and benchmark protocol; and
+matching evaluator versions, policies and resource limits. Page order and
+hexadecimal digest letter case do not alter identity. Missing provenance,
+legacy schemas and raw-reference-hash fallbacks are rejected, including when
+both runs omit the same field. Standalone Markdown can still be evaluated;
+comparison requires its input provenance. Extraction failures, missing pages,
+recovery, engine identity and quality scores are outcomes and do not invalidate
+otherwise matching comparison inputs. `strict=False` does not bypass the API
+validator; the CLI's explicit `--skip-validation` produces a labelled
+heterogeneous diagnostic report. Missing or unreadable requested artifacts
+make the CLI fail rather than silently shortening the comparison set.
 
 ## Maximum quality OCR
 

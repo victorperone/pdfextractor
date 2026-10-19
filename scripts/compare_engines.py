@@ -6,10 +6,10 @@ Reads multiple metrics JSON files (one per engine) and generates a
 comparison table in Markdown.
 
 Before building the table the script validates that all runs are comparable:
-same PDF SHA-256 (when available), same reference SHA-256 (when available),
-same manifesto SHA-256 (when available), the exact selected page set, and the
-same extraction mode. Run status and missing-page counts are outcomes and are
-shown in the report rather than used to reject otherwise comparable runs.
+valid matching PDF, effective-reference and manifesto SHA-256 identities,
+the exact selected page set, mode, benchmark protocol and evaluator policies.
+Run status and missing-page counts are outcomes; they do not reject otherwise
+comparable runs. API and CLI share the canonical validation contract.
 
 Usage (Windows server):
     python scripts\\compare_engines.py ^
@@ -512,10 +512,11 @@ def _validate_schema_homogeneity(all_data: list[tuple[str, dict]]) -> list[str]:
     comparing.  Mixing any two schema versions is rejected.
     """
     errors: list[str] = []
-    schemas = {eng: _detect_schema(data) for eng, data in all_data}
-    non_v3 = {eng: s for eng, s in schemas.items() if s != "v3"}
-    if non_v3:
-        for eng, s in non_v3.items():
+    # Do not collapse runs by engine name: duplicate labels can otherwise hide
+    # a legacy artifact behind a later canonical artifact.
+    for eng, data in all_data:
+        s = _detect_schema(data)
+        if s != "v3":
             if s == "v2":
                 errors.append(
                     f"Engine '{eng}': schema evaluation-v2.0 is not accepted for "
@@ -523,10 +524,7 @@ def _validate_schema_homogeneity(all_data: list[tuple[str, dict]]) -> list[str]:
                     f"evaluation-3.0.0 output."
                 )
             else:
-                raw_sv = next(
-                    (d.get("schema_version", "missing") for e, d in all_data if e == eng),
-                    "missing",
-                )
+                raw_sv = data.get("schema_version", "missing")
                 errors.append(
                     f"Engine '{eng}': schema version '{raw_sv}' "
                     f"is not accepted. Only evaluation-3.0.0 is supported. "
@@ -536,115 +534,17 @@ def _validate_schema_homogeneity(all_data: list[tuple[str, dict]]) -> list[str]:
 
 
 def _comparability_key_v2(data: dict) -> dict:
-    """Extract comparability fields from an evaluation-3.0.0 metrics document.
-
-    Fields checked (all must match across a comparison set):
-      schema_version                  — evaluation-3.0.0
-      reference_effective_sha256      — canonical hash of reference pages used
-      reference_serialization_version — hash protocol identifier
-      pdf_sha256                      — source PDF identity
-      manifest_sha256                 — corpus/reference manifest identity
-      mode                            — extraction mode
-      selected_pages                  — sorted tuple of 1-based page IDs
-      evaluator_version               — metric_definitions_version
-      normalization_policy            — normalization_policy
-      parser_id                       — parser field
-      alignment_policy                — alignment_policy field
-    """
-    inputs = data.get("inputs") or {}
-    pages = inputs.get("selected_pages")
-    try:
-        selected = tuple(sorted(int(p) for p in pages)) if pages else None
-    except (TypeError, ValueError):
-        selected = None
-    evaluator = data.get("evaluator") or {}
-    operational = data.get("operational") or {}
-    return {
-        "schema_version":                  data.get("schema_version"),
-        "reference_effective_sha256":      inputs.get("reference_effective_sha256"),
-        "reference_serialization_version": inputs.get("reference_serialization_version"),
-        "pdf_sha256":                      inputs.get("pdf_sha256"),
-        "manifest_sha256":                 inputs.get("manifest_sha256"),
-        "mode":                            inputs.get("mode"),
-        "selected_pages":                  selected,
-        "benchmark_protocol_id":           operational.get("benchmark_protocol_id"),
-        "evaluator_version":               evaluator.get("metric_definitions_version"),
-        "normalization_policy":            evaluator.get("normalization_policy"),
-        "parser_id":                       evaluator.get("parser"),
-        "alignment_policy":                evaluator.get("alignment_policy"),
-    }
-
-
-# Fields that MUST match for runs to be comparable (spec §10.4).
-_V2_REQUIRED_COMPARABILITY = (
-    "schema_version",
-    "reference_effective_sha256",
-    "reference_serialization_version",
-    "pdf_sha256",
-    "manifest_sha256",
-    "mode",
-    "selected_pages",
-    "benchmark_protocol_id",
-)
-_V2_SOFT_COMPARABILITY = ("evaluator_version", "normalization_policy", "parser_id", "alignment_policy")
+    """Compatibility wrapper for the package's canonical input/config key."""
+    from structured_pdf_text.evaluation.comparability import comparability_key
+    return comparability_key(data)
 
 
 def _validate_comparability_v2(
     all_data: list[tuple[str, dict]],
 ) -> list[str]:
-    """Check comparability of V2 runs (spec §10.4). Returns list of error strings."""
-    errors: list[str] = []
-    if len(all_data) < 2:
-        return errors
-    keys = [(eng, _comparability_key_v2(data)) for eng, data in all_data]
-    # Missing input identities must fail closed even when every run omits the
-    # same field. In particular, None == None cannot establish that the same
-    # PDF, corpus manifest, or extraction mode was used.
-    for eng, key in keys:
-        for field in _V2_REQUIRED_COMPARABILITY:
-            value = key.get(field)
-            if value is None or value == "" or (field == "selected_pages" and not value):
-                errors.append(
-                    f"Engine '{eng}': required comparability input '{field}' is missing. "
-                    "Runs are not comparable."
-                )
-            elif field in {
-                "reference_effective_sha256", "pdf_sha256", "manifest_sha256"
-            } and not re.fullmatch(r"[0-9a-fA-F]{64}", str(value)):
-                errors.append(
-                    f"Engine '{eng}': required comparability input '{field}' "
-                    "is not a 64-character SHA-256 digest. Runs are not comparable."
-                )
-        if key.get("reference_serialization_version") != "reference-effective-v1":
-            errors.append(
-                f"Engine '{eng}': unsupported reference serialization protocol "
-                f"{key.get('reference_serialization_version')!r}. Runs are not comparable."
-            )
-    ref_eng, ref_key = keys[0]
-    for eng, key in keys[1:]:
-        # Hard required fields — mismatch is always an error
-        for field in _V2_REQUIRED_COMPARABILITY:
-            ref_val = ref_key.get(field)
-            val = key.get(field)
-            if ref_val != val:
-                errors.append(
-                    f"Comparability mismatch on '{field}': "
-                    f"'{ref_eng}'={ref_val!r} vs '{eng}'={val!r}. "
-                    "Runs are not comparable."
-                )
-        # Soft fields — only checked when at least one run has a non-None value
-        for field in _V2_SOFT_COMPARABILITY:
-            ref_val = ref_key.get(field)
-            val = key.get(field)
-            if ref_val is None and val is None:
-                continue
-            if ref_val != val:
-                errors.append(
-                    f"Comparability mismatch on '{field}': "
-                    f"'{ref_eng}'={ref_val!r} vs '{eng}'={val!r}. "
-                    "Runs used different evaluator configurations."
-                )
-    return errors
+    """Use the same fail-closed rules as public check_comparability()."""
+    from structured_pdf_text.evaluation.comparability import validate_comparison
+    return validate_comparison(all_data)
 
 
 def _get_value_v2(data: dict, dot_path: str) -> float | None:
@@ -821,24 +721,37 @@ def main() -> int:
     # Expand globs using the glob module, which handles both relative and absolute
     # paths (Path.glob() rejects absolute patterns in Python ≥ 3.12).
     paths: list[Path] = []
+    input_errors: list[str] = []
     for pattern in args.metrics:
         if "*" in pattern or "?" in pattern:
-            matched = [Path(m) for m in glob.glob(pattern)]
-            paths.extend(m for m in matched if m.exists())
+            matched = [Path(m) for m in glob.glob(pattern) if Path(m).is_file()]
+            paths.extend(matched)
+            if not matched:
+                input_errors.append(f"no metrics files match {pattern!r}")
         else:
             p = Path(pattern)
-            if p.exists():
+            if p.is_file():
                 paths.append(p)
+            else:
+                input_errors.append(f"metrics file does not exist: {p}")
     paths = sorted(set(paths))
+
+    if input_errors:
+        for error in input_errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        return 1
 
     if not paths:
         print("ERROR: no metrics files found", file=sys.stderr)
         return 1
 
     all_data: list[tuple[str, dict]] = []
+    load_errors: list[str] = []
     for p in paths:
         try:
             data = _load_metrics(p)
+            if not isinstance(data, dict):
+                raise ValueError("metrics JSON must be an object")
             # V2 stores engine under evaluator.engine; V1 stores it at top level.
             engine = (
                 data.get("engine")
@@ -849,7 +762,12 @@ def main() -> int:
             if not args.quiet:
                 print(f"  Loaded: {p.name} ({engine})")
         except Exception as exc:
-            print(f"  WARNING: skipping {p}: {exc}", file=sys.stderr)
+            load_errors.append(f"ERROR: cannot load metrics {p}: {exc}")
+
+    if load_errors:
+        for error in load_errors:
+            print(error, file=sys.stderr)
+        return 1
 
     if not all_data:
         print("ERROR: no valid metrics files loaded", file=sys.stderr)

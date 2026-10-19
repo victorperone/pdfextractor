@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .aggregation import V2DocumentMetrics, evaluate_rank_eligibility
+from .aggregation import AGGREGATION_POLICY, V2DocumentMetrics, evaluate_rank_eligibility
+from .comparability import COMPARABILITY_POLICY
 from .block_alignment import (
     AlignmentSummary, align_blocks, AlignmentResourceLimit,
     DEFAULT_MAX_ALIGNMENT_PAIRS, MAX_SIMILARITY_TEXT_PRODUCT,
@@ -111,7 +112,7 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # --- Provenance ---
     doc.evaluator_info = {
         "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "3.0.2",
+        "metric_definitions_version": "3.0.3",
         "normalization_policy": "unicode_layout",
         "parser": PARSER_VERSION,
         "alignment_policy": "content-match-v1",
@@ -119,6 +120,8 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
         "text_projection_policy": "parser-visible-leaves-v2",
         "html_table_policy": HTML_TABLE_POLICY,
         "table_metric_policy": "all-cell-anchors-v2",
+        "aggregation_policy": AGGREGATION_POLICY,
+        "comparability_policy": COMPARABILITY_POLICY,
         "edit_distance_policy": EDIT_DISTANCE_POLICY,
         "resource_policy": {
             "max_text_edit_cells": request.max_text_edit_cells,

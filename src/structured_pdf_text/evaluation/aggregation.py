@@ -4,6 +4,7 @@ Rules
 -----
 - Micro: sum numerators / sum denominators before dividing.
 - Macro: arithmetic mean of *applicable* page scores only.
+- Finite numeric FP-only/FN-only outcomes are applicable, including zero.
 - N/A values are EXCLUDED from averages, not replaced with 0 or 1.
 - Worst-case: min for quality metrics (higher_is_better),
               max for error metrics (lower_is_better).
@@ -18,6 +19,14 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from structured_pdf_text.evaluation.models import MetricResult, MetricStatus
+from structured_pdf_text.evaluation.comparability import validate_comparison
+
+AGGREGATION_POLICY = "finite-numeric-outcomes-v1"
+_NUMERIC_STATUSES = frozenset({MetricStatus.OK, MetricStatus.FALSE_POSITIVE_ONLY,
+                              MetricStatus.FALSE_NEGATIVE_ONLY})
+_COMPLETE_COUNT_STATUSES = _NUMERIC_STATUSES | {
+    MetricStatus.NOT_APPLICABLE, MetricStatus.UNDEFINED_DENOMINATOR,
+}
 
 # ---------------------------------------------------------------------------
 # Scalar helpers
@@ -28,13 +37,54 @@ _LOWER_IS_WORSE = frozenset({
 })
 
 
+def _finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _is_applicable_value(value: object, status: object) -> bool:
+    return isinstance(status, str) and status in _NUMERIC_STATUSES and _finite_number(value)
+
+
 def _is_applicable(result: MetricResult) -> bool:
-    """True when this result has a real numeric value."""
-    return (
-        result.status == MetricStatus.OK
-        and result.value is not None
-        and math.isfinite(result.value)
-    )
+    """Numeric zero in FP/FN-only outcomes is defined and applicable."""
+    return _is_applicable_value(result.value, result.status)
+
+
+def _micro_from_counts(results: list[MetricResult], numerator: str, denominator: str) -> float | None:
+    # An unavailable page cannot be treated as a page with zero errors.
+    if any(r.status not in _COMPLETE_COUNT_STATUSES for r in results):
+        return None
+    numerators, denominators = [], []
+    for result in results:
+        counts = result.counts
+        if (result.status == MetricStatus.NOT_APPLICABLE
+                and numerator not in counts and denominator not in counts):
+            # A declared correct absence contributes no events/characters.
+            continue
+        if numerator not in counts or denominator not in counts:
+            raise ValueError(f"Micro aggregation requires counts {numerator!r} and {denominator!r}")
+        num, den = counts[numerator], counts[denominator]
+        if any(not _finite_number(v) or v < 0 for v in (num, den)):
+            raise ValueError("Micro counts must be finite, nonnegative numbers")
+        if result.status == MetricStatus.NOT_APPLICABLE and (num != 0 or den != 0):
+            raise ValueError("Not-applicable micro counts must describe a correct absence (0/0)")
+        numerators.append(num)
+        denominators.append(den)
+    # Keep integer counts exact, including totals beyond float's 53-bit mantissa.
+    try:
+        total_num = sum(numerators) if all(type(v) is int for v in numerators) else math.fsum(numerators)
+        total_den = sum(denominators) if all(type(v) is int for v in denominators) else math.fsum(denominators)
+        value = total_num / total_den if total_den > 0 else None
+    except OverflowError as exc:
+        raise ValueError("Micro aggregation exceeds finite numeric range") from exc
+    if value is not None and not math.isfinite(value):
+        raise ValueError("Micro aggregation exceeds finite numeric range")
+    return value
 
 
 def _worst_value(values: list[float], direction: str) -> float | None:
@@ -95,10 +145,18 @@ def aggregate_metric(
     results          : Iterable of per-page MetricResult for the same metric.
     numerator_key    : Key in result.counts used for micro numerator.
     denominator_key  : Key in result.counts used for micro denominator.
-                       When both are given, computes micro as Σnum/Σden.
+                       Both must be supplied. Computes micro as Σnum/Σden
+                       from complete validated counts, including insertion-only
+                       pages. An unavailable page makes the full micro null;
+                       invalid/missing counts raise instead of fabricating zero.
     """
     results_list = list(results)
     n_total = len(results_list)
+    if (numerator_key is None) != (denominator_key is None):
+        raise ValueError("Micro aggregation requires both count keys")
+    if numerator_key is not None and any(not isinstance(key, str) or not key
+                                         for key in (numerator_key, denominator_key)):
+        raise ValueError("Micro count keys must be nonempty strings")
 
     if n_total == 0:
         return AggregatedMetric(
@@ -109,17 +167,18 @@ def aggregate_metric(
         )
 
     direction = results_list[0].direction
+    for result in results_list[1:]:
+        for field_name in ("definition_id", "direction", "unit", "normalization_profile"):
+            if getattr(result, field_name) != getattr(results_list[0], field_name):
+                raise ValueError(f"Cannot aggregate different metric {field_name}")
     applicable = [r for r in results_list if _is_applicable(r)]
     values = [r.value for r in applicable]  # type: ignore[misc]
     n_applicable = len(values)
 
     # Micro
     micro: float | None = None
-    if numerator_key and denominator_key:
-        total_num = sum(r.counts.get(numerator_key, 0) for r in results_list)
-        total_den = sum(r.counts.get(denominator_key, 0) for r in results_list)
-        if total_den > 0:
-            micro = total_num / total_den
+    if numerator_key is not None and denominator_key is not None:
+        micro = _micro_from_counts(results_list, numerator_key, denominator_key)
 
     # Macro (mean of applicable values only)
     macro = statistics.mean(values) if values else None
@@ -127,7 +186,10 @@ def aggregate_metric(
     # Median (true arithmetic; average of two middle for even n)
     median: float | None = None
     if values:
-        median = statistics.median(values)
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        median = (ordered[middle] if len(ordered) % 2
+                  else statistics.mean(ordered[middle - 1:middle + 1]))
 
     worst  = _worst_value(values, direction)
     mn     = min(values) if values else None
@@ -181,10 +243,11 @@ class V2DocumentMetrics:
         applicable = unavailable = 0
         for v in group.values():
             if isinstance(v, dict):
-                status = v.get("status", "ok")
-                if status == "ok":
+                if "status" not in v or "value" not in v:
+                    continue  # Diagnostics are not scalar metrics.
+                if _is_applicable_value(v["value"], v["status"]):
                     applicable += 1
-                elif status not in ("ok",):
+                else:
                     unavailable += 1
         return applicable, unavailable
 
@@ -234,71 +297,15 @@ def check_comparability(
     *,
     strict: bool = True,
 ) -> tuple[bool, list[str]]:
-    """Check whether two evaluation results are comparable (spec §10.4).
+    """Compare canonical v3 inputs and evaluator policies, failing closed.
 
-    Returns (comparable: bool, reasons: list[str]).
-
-    Fail-closed rules
-    -----------------
-    - ``reference_effective_sha256`` absent in either → incomparable.
-    - Hashes present but different → incomparable.
-    - ``reference_serialization_version`` absent or different → incomparable.
-    - ``schema_version`` mismatch → incomparable.
-    - ``selected_pages`` mismatch → incomparable.
-    - Legacy ``reference_sha256`` (raw-file hash) is accepted as fallback ONLY
-      when ``reference_effective_sha256`` is absent in BOTH results AND both
-      have the legacy key.  This allows gradual migration without silently
-      accepting None==None.
+    API and CLI use the same validator. Outcomes never change comparability;
+    missing/malformed provenance, legacy schemas and raw-hash fallbacks fail.
+    ``strict`` is retained for call compatibility: False does not bypass checks.
+    Diagnostic CLI bypass remains explicit via --skip-validation.
     """
-    reasons: list[str] = []
-
-    # Schema version must match
-    va = result_a.get("schema_version")
-    vb = result_b.get("schema_version")
-    if va != vb:
-        reasons.append(f"schema_version_mismatch: {va!r} vs {vb!r}")
-
-    ia = result_a.get("inputs", {})
-    ib = result_b.get("inputs", {})
-
-    # Primary: reference_effective_sha256 (protocol-based, Fase 2+)
-    eff_a = ia.get("reference_effective_sha256")
-    eff_b = ib.get("reference_effective_sha256")
-
-    if eff_a is not None or eff_b is not None:
-        # At least one side has the effective hash — require both sides to match.
-        hash_mismatch = (eff_a is None or eff_b is None or eff_a != eff_b)
-        if hash_mismatch:
-            a_disp = (eff_a[:12] + "…") if eff_a else repr(eff_a)
-            b_disp = (eff_b[:12] + "…") if eff_b else repr(eff_b)
-            reasons.append(f"reference_effective_sha256_mismatch: {a_disp} vs {b_disp}")
-
-        # Serialization version must also match when effective hash present
-        sv_a = ia.get("reference_serialization_version")
-        sv_b = ib.get("reference_serialization_version")
-        if sv_a != sv_b:
-            reasons.append(
-                f"reference_serialization_version_mismatch: {sv_a!r} vs {sv_b!r}"
-            )
-    else:
-        # Fallback: legacy reference_sha256 (raw-file hash, pre-Fase-2 results).
-        # A09 fix: None==None is NOT comparable — fail-closed.
-        ref_a = ia.get("reference_sha256")
-        ref_b = ib.get("reference_sha256")
-        hash_mismatch = (ref_a is None or ref_b is None or ref_a != ref_b)
-        if hash_mismatch:
-            a_disp = (ref_a[:12] + "…") if ref_a else repr(ref_a)
-            b_disp = (ref_b[:12] + "…") if ref_b else repr(ref_b)
-            reasons.append(f"reference_sha256_mismatch: {a_disp} vs {b_disp}")
-
-    # Selected pages must match
-    pages_a = set(ia.get("selected_pages") or [])
-    pages_b = set(ib.get("selected_pages") or [])
-    if pages_a != pages_b:
-        reasons.append(f"selected_pages_mismatch: {sorted(pages_a)} vs {sorted(pages_b)}")
-
-    comparable = len(reasons) == 0
-    return comparable, reasons
+    reasons = validate_comparison([("a", result_a), ("b", result_b)])
+    return not reasons, reasons
 
 
 # ---------------------------------------------------------------------------

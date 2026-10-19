@@ -12,6 +12,9 @@ A segunda etapa, voltada a texto e memória, está em
 A terceira etapa corrige perdas de tabelas/células e conteúdo HTML:
 [CORRECOES_ETAPA_3_2026-10-19.md](CORRECOES_ETAPA_3_2026-10-19.md).
 
+A quarta etapa corrige agregação e unifica a comparabilidade entre API e CLI:
+[CORRECOES_ETAPA_4_2026-10-19.md](CORRECOES_ETAPA_4_2026-10-19.md).
+
 ## Estado auditado e escopo
 
 - HEAD: `439bd75` (`fix: não pontuar células vazias de tabelas ausentes`).

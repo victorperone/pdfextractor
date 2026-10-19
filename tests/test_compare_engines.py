@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from evaluation_contract_helpers import comparison_result
 
 from scripts.compare_engines import (
     _comparability_key,
@@ -200,7 +201,7 @@ def _v2_run(engine: str = "test_engine", **overrides) -> dict:
     doc = {
         "schema_version": "evaluation-3.0.0",
         "evaluator": {
-            "metric_definitions_version": "3.0.0",
+            **comparison_result()["evaluator"],
             "engine": engine,
             "run_id": "run001",
         },
