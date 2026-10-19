@@ -54,6 +54,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from structured_pdf_text.evaluation.evaluator import EvaluationRequest, evaluate_document
+from structured_pdf_text.evaluation.artifacts import (
+    Artifact, ArtifactPublicationError, artifact_namespace, json_text,
+    publication_identity, publish_artifacts, reserved_filenames,
+)
 from structured_pdf_text.evaluation.reference_inputs import (
     document_pages, load_reference_text, load_run_metadata, manifest_pages,
     selected_pages_from_run,
@@ -1416,7 +1420,12 @@ def main() -> int:
         print("ERROR: must provide --manifesto or --reference", file=sys.stderr)
         return 1
 
-    run_id = args.run_id or args.hypothesis.stem
+    run_id = args.run_id if args.run_id is not None else args.hypothesis.stem
+    try:
+        namespace = artifact_namespace(args.engine, run_id)
+    except ArtifactPublicationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     args.output_dir.mkdir(parents=True, exist_ok=True)
     engine_slug = args.engine.replace("-", "_")
     metrics_path = args.output_dir / f"metrics_{engine_slug}_{run_id}.json"
@@ -1769,13 +1778,7 @@ def main() -> int:
         "by_condition": _breakdown("conditions"),
     }
 
-    # --- Save metrics JSON ---
-    from structured_pdf_text.atomic_io import atomic_write_json, atomic_write_text
-    atomic_write_json(metrics_path, summary)
-
-    # Canonical output is mandatory and was evaluated before legacy diagnostics.
     canonical_path = args.output_dir / f"metrics_v3_{engine_slug}_{run_id}.json"
-    atomic_write_json(canonical_path, canonical_doc.to_dict())
 
     # --- Build error report for summary ---
     flat_summary = {
@@ -1786,7 +1789,25 @@ def main() -> int:
         **summary["grupo5_dados_criticos"],
     }
     error_report = _build_error_report(args.engine, run_id, per_page_results, flat_summary)
-    atomic_write_text(errors_path, error_report)
+    try:
+        result_dict = canonical_doc.to_dict()
+        published = publish_artifacts(
+            args.output_dir, namespace,
+            publication_identity(result_dict, ref_text=ref_text, hyp_text=hyp_text,
+                                 run_metadata=run_metadata),
+            [Artifact("canonical_metrics", canonical_path.name, json_text(result_dict)),
+             Artifact("legacy_metrics", metrics_path.name, json_text(summary),
+                      f"metrics_legacy_{engine_slug}_{run_id}.json"),
+             Artifact("legacy_errors", errors_path.name, error_report,
+                      f"errors_legacy_{engine_slug}_{run_id}.md")],
+            reserved_names=reserved_filenames(args.engine, run_id),
+        )
+        canonical_path = published["canonical_metrics"]
+        metrics_path = published["legacy_metrics"]
+        errors_path = published["legacy_errors"]
+    except (ArtifactPublicationError, OSError, ValueError) as exc:
+        print(f"ERROR: artifact publication failed: {exc}", file=sys.stderr)
+        return 1
 
     if not args.quiet:
         print()

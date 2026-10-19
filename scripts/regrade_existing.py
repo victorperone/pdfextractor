@@ -42,6 +42,10 @@ if str(_SRC) not in sys.path:
 
 from structured_pdf_text.evaluation import V2DocumentMetrics
 from structured_pdf_text.evaluation.evaluator import EvaluationRequest, evaluate_document
+from structured_pdf_text.evaluation.artifacts import (
+    Artifact, ArtifactPublicationError, artifact_namespace, json_text,
+    publication_identity, publish_artifacts, reserved_filenames,
+)
 from structured_pdf_text.evaluation.reference_inputs import (
     document_pages, load_reference_text, load_run_metadata, manifest_pages,
 )
@@ -370,7 +374,12 @@ def main() -> int:
         print("ERROR: provide --reference or --manifesto", file=sys.stderr)
         return 1
 
-    run_id = args.run_id or uuid.uuid4().hex[:12]
+    run_id = args.run_id if args.run_id is not None else uuid.uuid4().hex[:12]
+    try:
+        namespace = artifact_namespace(args.engine, run_id)
+    except ArtifactPublicationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -389,27 +398,43 @@ def main() -> int:
 
     result_dict = doc.to_dict()
 
-    # Write metrics JSON (canonical name: metrics_{engine}_{run_id}.json)
     metrics_path = args.output_dir / f"metrics_{args.engine}_{run_id}.json"
-    from structured_pdf_text.atomic_io import atomic_write_json, atomic_write_text
-    atomic_write_json(metrics_path, result_dict)
-
-    # Write error report (canonical name: errors_{engine}_{run_id}.md)
     report_text = _generate_error_report(
         doc, run_id=run_id, engine=args.engine,
         ref_path=args.reference, hyp_path=args.hypothesis,
     )
     report_path = args.output_dir / f"errors_{args.engine}_{run_id}.md"
-    atomic_write_text(report_path, report_text)
+    try:
+        slug = args.engine.replace("-", "_")
+        artifacts = [
+            Artifact("canonical_metrics", metrics_path.name, json_text(result_dict),
+                     f"metrics_v3_{slug}_{run_id}.json"),
+            Artifact("canonical_errors", report_path.name, report_text,
+                     f"errors_v3_{slug}_{run_id}.md"),
+        ]
+        if args.v1_metrics is not None:
+            v1_bytes = args.v1_metrics.read_bytes()
+            v1_json = json.loads(v1_bytes)
+            if not isinstance(v1_json, dict):
+                raise ValueError("V1 metrics must be a JSON object")
+            artifacts.append(Artifact(
+                "delta_report", f"delta_v1v2_{args.engine}_{run_id}.md",
+                _delta_report(v1_json, result_dict, run_id=run_id),
+                source_sha256=hashlib.sha256(v1_bytes).hexdigest(),
+            ))
+        published = publish_artifacts(
+            args.output_dir, namespace,
+            publication_identity(result_dict, ref_text=ref_text, hyp_text=hyp_text,
+                                 run_metadata=run_metadata), artifacts,
+            reserved_names=reserved_filenames(args.engine, run_id),
+        )
+        metrics_path, report_path = published["canonical_metrics"], published["canonical_errors"]
+    except (ArtifactPublicationError, OSError, ValueError, TypeError) as exc:
+        print(f"ERROR: artifact publication failed: {exc}", file=sys.stderr)
+        return 1
 
-    # Write delta report if V1 metrics provided
-    if args.v1_metrics and args.v1_metrics.is_file():
-        v1_json = json.loads(args.v1_metrics.read_text(encoding="utf-8"))
-        delta_text = _delta_report(v1_json, result_dict, run_id=run_id)
-        delta_path = args.output_dir / f"delta_v1v2_{args.engine}_{run_id}.md"
-        delta_path.write_text(delta_text, encoding="utf-8")
-        if not args.quiet:
-            print(f"Delta report: {delta_path}")
+    if "delta_report" in published and not args.quiet:
+        print(f"Delta report: {published['delta_report']}")
 
     if not args.quiet:
         print(f"Metrics:      {metrics_path}")

@@ -334,6 +334,22 @@ Parser identity records the installed `markdown-it-py` version; page and paragra
 policies are required by the shared comparison contract. Regrade older artifacts
 before comparing them with definitions `3.0.4`.
 
+Evaluation files are immutable within an engine/run ID/output-directory namespace.
+Repeating identical inputs preserves the original files and timestamps. Changed
+hypotheses, references, scope, evaluator policies or run metadata require a new
+`--run-id` or output directory. This publication identity is stricter than
+benchmark comparability. Existing files without a publication journal are
+preserved and rejected rather than adopted automatically.
+
+Compute and regrade can share a directory for identical inputs. Existing
+canonical/legacy files retain their role: name conflicts use `metrics_legacy_*`,
+`errors_legacy_*`, `metrics_v3_*` or `errors_v3_*` as appropriate. The CLI prints
+the actual output paths. Keep the hidden `.evaluation-*.json` journal with the
+artifacts. A `.evaluation-*.lock` indicates an active or interrupted publication;
+an interrupted lock needs review before reuse. New artifacts use atomic creation
+without replacement, requiring filesystem hard-link support; unsupported
+filesystems fail explicitly. No overwrite option is provided.
+
 Table preservation metrics include missing and extra cells, rows and tables.
 `cell_content_exact_match` divides exact positional pairs by all paired,
 missing and extra cells. `cell_content_exact_match_matched` is the conditional

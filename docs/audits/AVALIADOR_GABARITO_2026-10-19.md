@@ -19,6 +19,9 @@ A quinta etapa corrige fronteiras de parágrafos, ordinais, ordem física,
 marcadores/cercas, offsets e identidade do parser:
 [CORRECOES_ETAPA_5_2026-10-19.md](CORRECOES_ETAPA_5_2026-10-19.md).
 
+A sexta etapa protege a publicação contra sobrescrita e colisões de artefatos:
+[CORRECOES_ETAPA_6_2026-10-19.md](CORRECOES_ETAPA_6_2026-10-19.md).
+
 ## Estado auditado e escopo
 
 - HEAD: `439bd75` (`fix: não pontuar células vazias de tabelas ausentes`).

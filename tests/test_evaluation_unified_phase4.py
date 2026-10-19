@@ -372,6 +372,7 @@ class TestT49RunIdCollision:
         metrics_file = out / "metrics_collision_test_coll01.json"
         first_content = metrics_file.read_text()
         first_data = json.loads(first_content)
+        first_files = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in out.iterdir()}
 
         # Second run with same run-id
         r2 = subprocess.run(
@@ -382,6 +383,7 @@ class TestT49RunIdCollision:
             capture_output=True, text=True, timeout=60,
         )
         assert r2.returncode == 0
+        assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in out.iterdir()} == first_files
         second_data = json.loads(metrics_file.read_text())
 
         # Both runs are deterministic with same inputs → result should be equal

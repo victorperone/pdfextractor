@@ -180,9 +180,13 @@ def test_manifest_and_markdown_reference_produce_identical_quality(tmp_path, scr
     ]}), encoding="utf-8")
     index = args.index("--reference")
     args[index:index + 2] = ["--manifesto", manifesto]
+    # These have different source identities, even though effective ground
+    # truth/quality agree. Each publication needs its own output namespace.
+    manifest_output = tmp_path / "manifest_out"
+    args[args.index("--output-dir") + 1] = manifest_output
     result = cli(script, *args)
     assert result.returncode == 0, result.stderr
-    actual = json.loads(artifact(tmp_path, script).read_text())
+    actual = json.loads((manifest_output / artifact(tmp_path, script).name).read_text())
     assert actual["quality"] == baseline["quality"]
     assert actual["inputs"]["reference_effective_sha256"] == baseline["inputs"]["reference_effective_sha256"]
 
