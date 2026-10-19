@@ -1,7 +1,10 @@
 from structured_pdf_text.assemble.document import (
     _apply_repeated_suppression,
 )
-from structured_pdf_text.assemble.repeated_regions import repeated_line_keys
+from structured_pdf_text.assemble.repeated_regions import (
+    detect_repeated_headers_footers,
+    repeated_line_keys,
+)
 from structured_pdf_text.document import (
     Baseline,
     ContentKind,
@@ -450,3 +453,110 @@ def test_body_content_same_text_not_suppressed_by_collision() -> None:
 
     assert header_block.suppressed is True
     assert body_block.suppressed is False
+
+
+# ── H005: native-stable + OCR-noisy coexistence ───────────────────────────────
+
+def _indexed_page(
+    line: TextLine,
+    *,
+    page_index: int,
+    edge_role: str = "top_candidate",
+    use_ocr_lines: bool = False,
+) -> StructuredPage:
+    """Build a page with the given line in either native or OCR slot."""
+    region = LayoutRegion(
+        region_id=f"region-{page_index}",
+        kind=RegionKind.TEXT,
+        bbox=BBox(0.0, 0.0, 200.0, 841.0),
+        layout_confidence=1.0,
+        native_lines=[] if use_ocr_lines else [line],
+        ocr_lines=[line] if use_ocr_lines else [],
+        ocr_tokens=[],
+        quality=RegionQuality(RegionDecision.KEEP_NATIVE),
+        edge_role=edge_role,
+    )
+    return StructuredPage(
+        page_index=page_index,
+        bbox=BBox(0.0, 0.0, 200.0, 841.0),
+        regions=[region],
+        tables=[],
+        raw_text="",
+        reading_text="",
+        diagnostics=PageDiagnostics(
+            page_index=page_index,
+            strategy=PageStrategy.NATIVE,
+            reasons=[],
+            native_chars=0,
+            native_text_length=0,
+        ),
+    )
+
+
+def test_native_stable_position_confirmed_despite_ocr_positional_noise() -> None:
+    """H005: native observations stable, OCR observations variable → key confirmed.
+
+    Root cause: V3 pages 0-70 (native) have corpus header at constant y=22pt.
+    Pages 72-143 (OCR) detect the same text at variable y positions.  Without
+    the fix, `_stable_edge_position` on the combined set fails (range > 0.035).
+    With the fix, only native observations are used for the stability check.
+    """
+    HEADER_TEXT = "CORPUS INTEGRADO V3 / LABORATORIO SINTETICO"
+    # Two native pages: header at y=22-32 (cy=27, normalized=27/841≈0.032)
+    native_pages = [
+        _indexed_page(
+            _line(HEADER_TEXT, line_id=f"native:{i}:0:43", y=22.0),
+            page_index=i,
+        )
+        for i in range(2)
+    ]
+    # Three OCR pages: same text at varying y positions (variable noise).
+    # Combined range: cy values 27, 37, 57 → range=(57-27)/841≈0.036 > 0.035
+    ocr_y_positions = [22.0, 32.0, 52.0]
+    ocr_pages = [
+        _indexed_page(
+            _line(
+                HEADER_TEXT,
+                line_id=f"ocr:{i+2}:10.000:{y:.3f}:190.000:{y+10.0:.3f}:corpus",
+                y=y,
+            ),
+            page_index=i + 2,
+            use_ocr_lines=True,
+        )
+        for i, y in enumerate(ocr_y_positions)
+    ]
+    all_pages = native_pages + ocr_pages
+
+    confirmed = detect_repeated_headers_footers(all_pages)
+
+    expected_key = "header:corpus integrado v3 / laboratorio sintetico"
+    assert expected_key in confirmed, (
+        f"Key should be confirmed using native-only stability; got keys: {list(confirmed)}"
+    )
+    # All 5 pages (0-4) should be in the confirmed list
+    assert sorted(confirmed[expected_key]) == [0, 1, 2, 3, 4]
+
+
+def test_ocr_only_pages_still_confirmed_without_native_observations() -> None:
+    """When no native observations exist, OCR observations are used as fallback."""
+    HEADER_TEXT = "RELATORIO SINTETICO"
+    # Three OCR pages with consistent positions (cy=27, stable range=0)
+    ocr_pages = [
+        _indexed_page(
+            _line(
+                HEADER_TEXT,
+                line_id=f"ocr:{i}:10.000:22.000:190.000:32.000:relatorio",
+                y=22.0,
+            ),
+            page_index=i,
+            use_ocr_lines=True,
+        )
+        for i in range(3)
+    ]
+
+    confirmed = detect_repeated_headers_footers(ocr_pages)
+
+    expected_key = "header:relatorio sintetico"
+    assert expected_key in confirmed, (
+        f"OCR-only stable observations should still be confirmed; got: {list(confirmed)}"
+    )

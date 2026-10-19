@@ -51,7 +51,14 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
     Both paths produce the same H1/H2/H3 clustering output.
     """
     pages = [_merge_heading_fragments(page) for page in pages]
-    title_font_sizes: list[tuple[int, str, float]] = []
+    # Collect native and OCR sizes separately so the clustering always uses
+    # consistent units.  Native font_size values are in PDF points; OCR bbox
+    # heights come from rendered pixels back-converted to page coordinates and
+    # may carry a different numeric scale.  Mixing them against a body_median
+    # computed from native points would produce spurious large-ratio clusters
+    # that push native headings to H6.
+    title_font_sizes_native: list[tuple[int, str, float]] = []
+    title_font_sizes_ocr: list[tuple[int, str, float]] = []
     body_sizes: list[float] = []
     # Collect OCR line heights for the OCR-aware fallback (§28).
     body_ocr_heights: list[float] = []
@@ -65,9 +72,16 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
                 if token.font_size is not None and token.font_size > 0
             ]
             if region.kind == RegionKind.TITLE and _region_has_alphanumeric_text(region):
-                font_size = statistics.median(sizes) if sizes else _ocr_region_height(region)
-                if font_size is not None and font_size > 0:
-                    title_font_sizes.append((page.page_index, region.region_id, font_size))
+                if sizes:
+                    title_font_sizes_native.append(
+                        (page.page_index, region.region_id, statistics.median(sizes))
+                    )
+                else:
+                    ocr_h = _ocr_region_height(region)
+                    if ocr_h is not None and ocr_h > 0:
+                        title_font_sizes_ocr.append(
+                            (page.page_index, region.region_id, ocr_h)
+                        )
             elif region.kind not in {
                 RegionKind.HEADER,
                 RegionKind.FOOTER,
@@ -104,6 +118,13 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
                 break
 
     use_ocr_path = not has_any_native_font_size and body_ocr_height_median is not None
+
+    # Select the title size list that matches the active path's unit system.
+    # Native path: use only native font sizes (points) to avoid mixing pixel-scale
+    # OCR heights into the clustering against a point-scale body_median.
+    # OCR path: use only OCR bbox heights (page-coord pixels) since no native
+    # font metrics are available.
+    title_font_sizes = title_font_sizes_ocr if use_ocr_path else title_font_sizes_native
 
     valid_scores: dict[str, float] = {}
     title_regions: dict[str, LayoutRegion] = {}
@@ -201,6 +222,17 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
             continue
         cluster = min(range(len(clusters)), key=lambda index: abs(clusters[index] - ratio)) if clusters else 0
         level_map[region_id] = min(6, cluster + 1)
+
+    # Override: headings that carry an explicit markdown prefix (e.g. "### Heading")
+    # encode their level in the prefix count — use that directly instead of the
+    # font-size cluster assignment, which cannot distinguish body-weight headings.
+    for page in pages:
+        for region in page.regions:
+            if region.kind == RegionKind.TITLE:
+                text = " ".join(line.text for line in region.native_lines).strip()
+                m = re.match(r"^(#{1,6})\s+", text)
+                if m:
+                    level_map[region.region_id] = len(m.group(1))
 
     new_pages = []
     for page in pages:
@@ -322,10 +354,11 @@ def _heading_is_accepted(
     )
     text = " ".join(line.text for line in region.native_lines).strip()
     has_numbered_prefix = bool(re.match(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[.)]?\s+", text))
+    has_markdown_prefix = bool(re.match(r"^#{1,6}\s+\S", text))
     size_signal = median_size >= body_font_median * 1.15
     if body_font_p75 is not None:
         size_signal = size_signal or median_size >= body_font_p75 * 1.10
-    return size_signal or is_bold or has_numbered_prefix
+    return size_signal or is_bold or has_numbered_prefix or has_markdown_prefix
 
 
 def _merge_heading_fragments(page: StructuredPage) -> StructuredPage:

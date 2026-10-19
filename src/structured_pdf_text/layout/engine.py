@@ -430,6 +430,10 @@ def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> b
     # marks. They are never semantic headings regardless of their size.
     if not text or not any(character.isalnum() for character in text) or len(text) > 140:
         return False
+    # Explicit markdown heading prefix (e.g. "### Compras") is an unambiguous
+    # semantic signal — accept regardless of position or typography.
+    if re.match(r'^#{1,6}\s+\S', text):
+        return True
     near_top = line.bbox.y0 <= page_bbox.y0 + page_bbox.height * 0.18
     centered = abs(line.bbox.cx - page_bbox.cx) <= page_bbox.width * 0.16
     style_score = _heading_style_score(line, typical_height)

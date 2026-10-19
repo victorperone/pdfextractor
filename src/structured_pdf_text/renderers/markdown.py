@@ -80,7 +80,15 @@ def _render_content_block(
     if block.kind == ContentKind.TITLE:
         level = block.heading_level or 1
         prefix = "#" * max(1, min(level, 6))
-        return f"{prefix} {_escape_inline_text(block.text, context='heading')}" if block.text else ""
+        text = block.text or ""
+        # Strip an explicit markdown heading prefix (e.g. "### Heading") that was
+        # preserved verbatim from the PDF source — the rendered prefix already
+        # encodes the level, so the embedded hashes must not appear in the output.
+        import re as _re
+        _m = _re.match(r"^#{1,6}\s+", text)
+        if _m:
+            text = text[_m.end():]
+        return f"{prefix} {_escape_inline_text(text, context='heading')}" if text else ""
 
     if block.kind == ContentKind.LIST and block.list_items:
         return "\n".join(
@@ -380,8 +388,15 @@ def _escape_inline_text(value: str, *, context: str = "paragraph") -> str:
         if context == "heading" and stripped.startswith("#"):
             line_escaped.add("#")
         if context in {"paragraph", "list"}:
-            if stripped.startswith((">", "#")):
-                line_escaped.add(stripped[0])
+            if stripped.startswith(">"):
+                line_escaped.add(">")
+            elif stripped.startswith("#"):
+                import re as _re
+                # Explicit heading syntax (e.g. "### Compras") should render as
+                # a heading, not be escaped. Only escape lone '#' or patterns
+                # that don't match a valid heading prefix.
+                if not _re.match(r"^#{1,6}\s+\S", stripped):
+                    line_escaped.add("#")
             if stripped.startswith(("- ", "+ ", "* ")):
                 line_escaped.add(stripped[0])
             if len(stripped) > 1 and stripped[0].isdigit():

@@ -37,7 +37,16 @@ def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, li
         if len(by_page) < 2:
             continue
         selected = list(by_page.values())
-        if not _stable_edge_position(selected) or not _stable_style(selected):
+        # When native and OCR observations coexist, OCR positions may be
+        # noisier than native PDF coordinates.  Prefer native-only observations
+        # for stability checks so that variable OCR vertical positions do not
+        # incorrectly discard confirmed furniture keys.
+        native_selected = [
+            (k, l, p) for k, l, p in selected
+            if l.line_id is not None and l.line_id.startswith("native:")
+        ]
+        check_selected = native_selected if len(native_selected) >= 2 else selected
+        if not _stable_edge_position(check_selected) or not _stable_style(check_selected):
             continue
         confirmed[key] = sorted(by_page)
     return confirmed
