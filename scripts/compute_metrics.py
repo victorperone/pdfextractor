@@ -395,34 +395,25 @@ def compute_structure_metrics(hyp: str, ref: str) -> dict:
         level_correct / level_total if level_total > 0 else None
     )
 
-    # Heading Text CER: computed on matched pairs only (same content-matching
-    # as above), with omitted and extra headings contributing to the coverage
-    # counters rather than being silently dropped.
-    # Re-run matching from scratch to obtain paired texts for CER.
-    ref_pool_for_cer: list[tuple[int, str]] = list(ref_headings)
-    matched_pairs: list[tuple[str, str]] = []
-    unmatched_hyp_count = 0
-    for hyp_level, hyp_text in hyp_headings:
-        hyp_norm = _normalize(hyp_text)
-        found = False
-        for idx, (_, ref_text) in enumerate(ref_pool_for_cer):
-            if _normalize(ref_text) == hyp_norm:
-                matched_pairs.append((hyp_text, ref_text))
-                ref_pool_for_cer.pop(idx)
-                found = True
-                break
-        if not found:
-            unmatched_hyp_count += 1
-    unmatched_ref_count = len(ref_pool_for_cer)
-
-    if matched_pairs:
-        heading_text_cer_vals = [_cer_normalized(h, r) for h, r in matched_pairs]
-        # Filter out undefined (nan) values before averaging
-        import math as _math
-        valid_cer = [v for v in heading_text_cer_vals if v is not None and not _math.isnan(v)]
-        heading_text_cer: float | None = sum(valid_cer) / len(valid_cer) if valid_cer else 0.0
+    # Use the canonical aligner/CER instead of matching only equal texts.
+    # Retain legacy coverage counters, but never compute a second CER formula.
+    from structured_pdf_text.evaluation.markdown_parser import parse_document
+    from structured_pdf_text.evaluation.block_alignment import align_blocks, AlignmentResourceLimit
+    from structured_pdf_text.evaluation.structure_metrics import heading_text_cer as canonical_heading_cer
+    from structured_pdf_text.evaluation.models import NodeKind
+    reference_nodes = [n for n in parse_document(ref, origin="reference") if n.kind == NodeKind.HEADING]
+    hypothesis_nodes = [n for n in parse_document(hyp, origin="hypothesis") if n.kind == NodeKind.HEADING]
+    try:
+        heading_pairs = align_blocks(reference_nodes, hypothesis_nodes)
+    except AlignmentResourceLimit:
+        heading_text_cer = None
+        matched_pairs = []
     else:
-        heading_text_cer = None  # no matched pairs → not applicable
+        heading_text_cer = canonical_heading_cer(heading_pairs, reference_nodes, hypothesis_nodes).value
+        matched_pairs = [(pair.reference_id, pair.hypothesis_id) for pair in heading_pairs
+                         if pair.reference_id is not None and pair.hypothesis_id is not None]
+    unmatched_ref_count = len(reference_nodes) - len(matched_pairs)
+    unmatched_hyp_count = len(hypothesis_nodes) - len(matched_pairs)
 
     # Block F1: compare block type sequences as multisets
     ref_seq = _block_type_sequence(ref)
@@ -487,26 +478,19 @@ def compute_structure_metrics(hyp: str, ref: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _parse_md_tables(text: str) -> list[list[list[str]]]:
-    """Parse GFM pipe tables → list of 2D cell arrays (no separator rows)."""
-    tables: list[list[list[str]]] = []
-    current: list[list[str]] = []
-
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("|") and stripped.endswith("|"):
-            cells = [c.strip() for c in stripped[1:-1].split("|")]
-            if all(re.match(r"^[-: ]+$", c) for c in cells if c.strip()):
-                continue  # separator row
-            current.append(cells)
-        else:
-            if len(current) >= 1:
-                tables.append(current)
-            current = []
-
-    if current:
-        tables.append(current)
-
-    return tables
+    """Compatibility table view from canonical GFM/HTML nodes; empty cells remain."""
+    from structured_pdf_text.evaluation.markdown_parser import parse_document
+    from structured_pdf_text.evaluation.models import NodeKind
+    nodes = parse_document(text)
+    rows_by_table: dict[str, list] = {}
+    cells_by_row: dict[str, list[str]] = {}
+    for node in nodes:
+        if node.kind == NodeKind.TABLE_ROW:
+            rows_by_table.setdefault(node.parent_id, []).append(node.node_id)
+        elif node.kind == NodeKind.TABLE_CELL:
+            cells_by_row.setdefault(node.parent_id, []).append(node.visible_text)
+    return [[cells_by_row.get(row, []) for row in rows_by_table.get(table.node_id, [])]
+            for table in nodes if table.kind == NodeKind.TABLE]
 
 
 def _normalize_cell(text: str) -> str:
@@ -1773,6 +1757,8 @@ def main() -> int:
         "grupo3_tabelas": full_table_m,
         "grupo4_ordem_integridade": integrity_m,
         "grupo5_dados_criticos": full_crit_m,
+        "metric_contract": "legacy-diagnostics-only",
+        "canonical_metric_definitions_version": canonical_doc.evaluator_info["metric_definitions_version"],
         "per_page": per_page_results,
         "by_family": _breakdown("family"),
         "by_condition": _breakdown("conditions"),

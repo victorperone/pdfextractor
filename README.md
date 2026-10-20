@@ -311,7 +311,7 @@ text. Invalid inputs or a canonical evaluation failure make the command fail.
 Text metrics use exact Levenshtein S/D/I counts with bounded working memory.
 Raw CER uses the original Markdown bodies; visible text comes from parser
 tokens, preserving literal code. Aligned CER counts terminal text units once.
-The evaluator records metric definitions version `3.0.4` and its resource policy.
+The evaluator records metric definitions version `3.0.5` and its resource policy.
 The default budgets are 8,000,000 DP cells per sequential metric (shared across
 blocks for aligned CER) and 250,000 candidate pairs per alignment. Exceeding a
 budget produces `resource_limit` with a null value; the evaluation is partial
@@ -332,7 +332,7 @@ Physical page order is preserved. Fence validity follows the
 parser's source maps, including backtick/tilde lengths and nested containers.
 Parser identity records the installed `markdown-it-py` version; page and paragraph
 policies are required by the shared comparison contract. Regrade older artifacts
-before comparing them with definitions `3.0.4`.
+before comparing them with definitions `3.0.5`.
 
 Evaluation files are immutable within an engine/run ID/output-directory namespace.
 Repeating identical inputs preserves the original files and timestamps. Changed
@@ -349,6 +349,69 @@ artifacts. A `.evaluation-*.lock` indicates an active or interrupted publication
 an interrupted lock needs review before reuse. New artifacts use atomic creation
 without replacement, requiring filesystem hard-link support; unsupported
 filesystems fail explicitly. No overwrite option is provided.
+
+Canonical results also contain `per_page` diagnostics, identified by
+`evaluator.reporting_policy = canonical-page-diagnostics-v1`. Every selected
+reference page is included, with page-local canonical metrics, evaluation status,
+corpus `family`/`conditions`, and the extraction's recorded page outcomes.
+Missing pages remain missing; an emitted blank page is distinct. Page metrics
+use the same pipeline and independent instances of the recorded resource
+budgets. They add computation and do not replace global metrics for reading
+order or entities moved between pages.
+
+The canonical comparison and regrade error report show run IDs from `inputs`,
+content/evaluation/stability states, recovery counters and reasons, worst pages,
+family/condition macro means with applicable/total page counts, separate
+render/OCR/assembly times, elapsed, parent RSS, sampled process-tree RSS, and
+complete recorded deployment profiles. Defined zero scores enter means; N/A
+and unavailable computations do not. Missing operational information is shown
+as unavailable; evaluating Markdown alone does not establish a valid extraction.
+OCR failure/timeout counts refer to explicit `ocr_outcome` values, with observation
+coverage; they are not a complete history of retries inside a backend.
+
+The evaluation scope and the timed extraction scope are separate:
+`operational.run_selected_pages` preserves the latter. Elapsed per page uses
+that recorded extraction scope, including missing pages, even when evaluation
+selects a subset. Without it, the rate is unavailable. Run recovery totals,
+time and memory are not rescaled for an evaluation subset. Runs of the same
+engine keep separate comparison columns. Metadata is escaped in Markdown tables.
+The comparator validates the complete result before rendering it. Regrade old
+canonical files with a new run ID or output directory. `--skip-validation` can
+display them for diagnosis, with unavailable breakdowns marked explicitly.
+
+Canonical results are checked against the packaged Draft 2020-12 schema
+([documented copy](docs/evaluation-v3.schema.json)) and arithmetic invariants.
+The API exports `validate_result()` and `result_schema()`. Invalid states, values,
+counts, scopes, missing page diagnostics and nonfinite numbers are rejected
+before publication or comparison. The policy is
+`canonical-schema-and-invariants-v1`; runtime validation requires `jsonschema`.
+Definitions 3.0.5 give undefined token coverage denominators an explicit null
+state, keep CER directions constant, and include literal code in integrity
+coverage. Heading/list CER shares the recorded structure edit budget.
+
+Equal normalized block sequences with the same types and pages have an exact
+linear alignment shortcut; arbitrary differences still use the guarded greedy
+alignment. Strict pairwise order counts use an exact O(n log n) algorithm.
+Identical table/row sequences avoid redundant similarity matrices. Legacy
+diagnostics use the canonical table parser and heading CER; the canonical
+evaluation remains the comparison contract.
+
+To save extracted characteristics from one PDF pass, use:
+
+```bash
+.venv/bin/python scripts/evaluate_e2e.py corpus/V5/Document_AI_V5.pdf \
+  --mode balanced --engine rapidocr --provider openvino --language pt-BR \
+  --save-features --retain-native-evidence \
+  --run-id features-v5 --output-dir output/loop/001/V5
+```
+
+Configure the RapidOCR Latin model/dictionary as described below before running
+this command. `--save-features` adds `features_*.json` (structured document) and
+`diagnostics_*.txt` alongside Markdown and the run manifest. All come from the
+same `extract()` call. `--retain-native-evidence` also retains native PDF
+characters and objects and increases memory use. Existing artifact names are
+rejected before extraction; choose a new run ID for another run. A saved partial
+run still exits with code 2 unless `--allow-partial` is supplied.
 
 Table preservation metrics include missing and extra cells, rows and tables.
 `cell_content_exact_match` divides exact positional pairs by all paired,

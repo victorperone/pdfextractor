@@ -33,8 +33,9 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Sequence
-from .edit_distance import DEFAULT_MAX_EDIT_CELLS, EditDistanceBudget, EditDistanceResourceLimit
+from .edit_distance import DEFAULT_MAX_EDIT_CELLS, EditDistanceBudget, EditDistanceResourceLimit, levenshtein_ops
 from .paragraph_boundaries import matching_gaps, paragraph_stream
+from .order_counts import concordance_counts
 
 from structured_pdf_text.evaluation.models import (
     AlignedPair,
@@ -54,20 +55,9 @@ _ORDINAL_RE = re.compile(r"^\s*(\d+)[.)]\s")
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _lev_distance(a: str, b: str) -> int:
-    """O(min(m,n)) space Levenshtein distance."""
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for ch_a in a:
-        curr = [prev[0] + 1]
-        for j, ch_b in enumerate(b):
-            curr.append(min(prev[j] + (0 if ch_a == ch_b else 1),
-                            curr[-1] + 1, prev[j + 1] + 1))
-        prev = curr
-    return prev[-1]
+def _lev_distance(a: str, b: str, *, budget: EditDistanceBudget | None = None) -> int:
+    """Shared exact, bounded edit implementation; equality requires no DP work."""
+    return sum(levenshtein_ops(a, b, budget=budget))
 
 
 def _prf(tp: int, fp: int, fn: int) -> tuple[float | None, float | None, float | None, MetricStatus]:
@@ -195,6 +185,7 @@ def heading_text_cer(
     pairs: Sequence[AlignedPair],
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> MetricResult:
     """MET-S03: CER on matched heading pairs, using visible_text.
 
@@ -206,8 +197,8 @@ def heading_text_cer(
     - Only pairs where both ref and hyp are HEADING nodes are included.
     - Missing ref headings (FN) contribute D-chars to the numerator and their
       length to the denominator, ensuring they are not silently ignored.
-    - Unmatched hyp headings (FP) contribute I-chars tracked separately but
-      not added to the denominator (undefined_denominator for those).
+    - Unmatched hyp headings (FP) contribute insertions to the numerator,
+      also tracked separately. No reference characters means an undefined rate.
     """
     ref_id_to_node: dict[str, MarkdownNode] = {n.node_id: n for n in ref_nodes}
     hyp_id_to_node: dict[str, MarkdownNode] = {n.node_id: n for n in hyp_nodes}
@@ -228,6 +219,7 @@ def heading_text_cer(
     cer_num = 0
     cer_den = 0
     insertion_only_chars = 0
+    budget = EditDistanceBudget(max_edit_cells)
 
     # Matched pairs: compute edit distance
     for rid, hid in ref_to_hyp_heading.items():
@@ -237,7 +229,12 @@ def heading_text_cer(
             continue
         ref_text = rn.visible_text
         hyp_text = hn.visible_text
-        dist = _lev_distance(ref_text, hyp_text)
+        try:
+            dist = _lev_distance(ref_text, hyp_text, budget=budget)
+        except EditDistanceResourceLimit as exc:
+            return MetricResult(value=None, status=MetricStatus.RESOURCE_LIMIT,
+                direction="lower_is_better", definition_id="MET-S03",
+                counts={"max_edit_cells": max_edit_cells}, warnings=[str(exc)])
         if len(ref_text) > 0:
             cer_num += dist
             cer_den += len(ref_text)
@@ -252,15 +249,21 @@ def heading_text_cer(
                 cer_num += len(rn.visible_text)
                 cer_den += len(rn.visible_text)
 
+    # Extra headings must not disappear merely because no reference partner
+    # exists. Their insertions count even when some reference headings match.
+    insertion_only_chars += sum(len(hyp_id_to_node[hid].visible_text)
+                                for hid in hyp_headings - matched_hyp_heading_ids)
+    cer_num += insertion_only_chars
+
     if cer_den == 0 and insertion_only_chars == 0 and not ref_headings:
         return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-S03",
-                            {"matched_pairs": 0, "ref_headings": 0})
+                            {"matched_pairs": 0, "ref_headings": 0}, direction="lower_is_better")
 
     if cer_den == 0:
         # Only FP (unmatched hyp headings) or ref headings all had empty text
         return _make_result(None, MetricStatus.UNDEFINED_DENOMINATOR, "MET-S03",
                             {"edit_distance": cer_num, "ref_chars": 0,
-                             "insertion_only_chars": insertion_only_chars})
+                             "insertion_only_chars": insertion_only_chars}, direction="lower_is_better")
 
     return _make_result(
         cer_num / cer_den,
@@ -373,6 +376,7 @@ def list_metrics(
     pairs: Sequence[AlignedPair],
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
 ) -> dict[str, MetricResult]:
     """MET-S05 through MET-S07 plus additional list metrics (spec §6.4)."""
     ref_lists = {n.node_id for n in ref_nodes if n.kind == NodeKind.LIST}
@@ -408,6 +412,8 @@ def list_metrics(
     depth_total   = 0
 
     # Shared loop for S06 + new P1 metrics on matched item pairs
+    item_budget = EditDistanceBudget(max_edit_cells)
+    item_error: EditDistanceResourceLimit | None = None
     cer_num_items = 0
     cer_den_items = 0
     kind_matched  = 0   # ordered/unordered kind agreement
@@ -441,7 +447,11 @@ def list_metrics(
         hyp_text = hn.visible_text
         ref_len  = len(ref_text)
         if ref_len > 0:
-            cer_num_items += _lev_distance(ref_text, hyp_text)
+            if item_error is None:
+                try:
+                    cer_num_items += _lev_distance(ref_text, hyp_text, budget=item_budget)
+                except EditDistanceResourceLimit as exc:
+                    item_error = exc
             cer_den_items += ref_len
 
         # MET-SL02: list kind accuracy (ordered vs unordered)
@@ -477,14 +487,18 @@ def list_metrics(
         )
 
     # MET-SL01: list_item_text_cer_on_matched
-    if cer_den_items > 0:
+    if item_error is not None:
+        item_cer_result = MetricResult(value=None, status=MetricStatus.RESOURCE_LIMIT,
+            direction="lower_is_better", definition_id="MET-SL01",
+            counts={"max_edit_cells": max_edit_cells}, warnings=[str(item_error)])
+    elif cer_den_items > 0:
         item_cer_result = _make_result(
             cer_num_items / cer_den_items, MetricStatus.OK, "MET-SL01",
             {"edit_distance": cer_num_items, "ref_chars": cer_den_items},
             direction="lower_is_better",
         )
     else:
-        item_cer_result = _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-SL01", {})
+        item_cer_result = _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-SL01", {}, direction="lower_is_better")
 
     # MET-SL02: list_kind_accuracy
     if kind_total > 0:
@@ -504,11 +518,9 @@ def list_metrics(
             continue
         orders_sorted = sorted(orders, key=lambda x: x[0])  # sort by ref order
         hyp_seq = [o[1] for o in orders_sorted]
-        for i in range(n):
-            for j in range(i + 1, n):
-                total_pairs += 1
-                if hyp_seq[i] < hyp_seq[j]:
-                    concordant += 1
+        group_concordant, group_total = concordance_counts(hyp_seq)
+        concordant += group_concordant
+        total_pairs += group_total
 
     if total_pairs == 0:
         order_result = _make_result(
@@ -578,13 +590,7 @@ def pairwise_reading_order_accuracy(
     hyp_orders = [p.hypothesis_order for p in matched_sorted]
 
     # Count concordant pairs: i < j in ref → hyp_order[i] < hyp_order[j]
-    total_pairs = 0
-    concordant  = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            total_pairs += 1
-            if hyp_orders[i] < hyp_orders[j]:  # type: ignore[operator]
-                concordant += 1
+    concordant, total_pairs = concordance_counts(hyp_orders)
 
     accuracy = concordant / total_pairs if total_pairs > 0 else None
     return _make_result(
@@ -671,13 +677,7 @@ def block_order_pairwise_accuracy(
     matched_sorted = sorted(matched, key=lambda p: p.reference_order)  # type: ignore[arg-type]
     hyp_orders = [p.hypothesis_order for p in matched_sorted]
 
-    total_pairs = 0
-    concordant  = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            total_pairs += 1
-            if hyp_orders[i] < hyp_orders[j]:  # type: ignore[operator]
-                concordant += 1
+    concordant, total_pairs = concordance_counts(hyp_orders)
 
     accuracy = concordant / total_pairs if total_pairs > 0 else None
     return _make_result(
@@ -740,9 +740,9 @@ def compute_structure_metrics(
     """
     return StructureMetrics(
         heading        = heading_detection_f1(pairs, ref_nodes, hyp_nodes),
-        heading_cer    = heading_text_cer(pairs, ref_nodes, hyp_nodes),
+        heading_cer    = heading_text_cer(pairs, ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
         paragraph      = paragraph_detection_f1(pairs, ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
-        lists          = list_metrics(pairs, ref_nodes, hyp_nodes),
+        lists          = list_metrics(pairs, ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
         reading_order  = pairwise_reading_order_accuracy(pairs),
         block_order    = block_order_pairwise_accuracy(pairs, ref_nodes, hyp_nodes),
         type_confusion = block_type_confusion(pairs),

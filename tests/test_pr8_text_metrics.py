@@ -335,9 +335,9 @@ class TestTextCoverageRecall:
         assert abs(r.value - 0.5) < 1e-6
 
     def test_T18_ref_empty_hyp_nonempty(self):
-        """T18: ref empty, hyp non-empty → FALSE_POSITIVE_ONLY."""
+        """T18: recall has an undefined denominator when reference is empty."""
         r = text_coverage_recall([], [_node("h1", "word")])
-        assert r.status == MetricStatus.FALSE_POSITIVE_ONLY
+        assert r.status == MetricStatus.UNDEFINED_DENOMINATOR
         assert r.value is None
 
     def test_T19_both_empty(self):
@@ -388,9 +388,9 @@ class TestTextCoveragePrecision:
         assert abs(r.value - 0.5) < 1e-6
 
     def test_T22_hyp_empty(self):
-        """T22: hyp empty, ref non-empty → FALSE_NEGATIVE_ONLY."""
+        """T22: precision has an undefined denominator when hypothesis is empty."""
         r = text_coverage_precision([_node("r1", "word")], [])
-        assert r.status == MetricStatus.FALSE_NEGATIVE_ONLY
+        assert r.status == MetricStatus.UNDEFINED_DENOMINATOR
         assert r.value is None
 
     def test_T23_both_empty(self):

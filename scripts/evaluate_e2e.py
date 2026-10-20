@@ -3,7 +3,8 @@
 E2E benchmark runner.
 
 Runs PdfTextExtractor with the specified OCR engine on a corpus PDF,
-saves the extracted Markdown and a run manifest (schema v2).
+saves the extracted Markdown and a run manifest (schema v2). --save-features
+also saves the structured document and a diagnostic report from the same extraction.
 
 Usage (Windows server):
     python scripts\\evaluate_e2e.py ^
@@ -211,6 +212,21 @@ def _parse_pages_arg(pages_arg: str) -> tuple[int, ...]:
     return tuple(sorted(set(indices)))
 
 
+def _save_features(document, output_dir: Path, engine_slug: str, run_id: str) -> dict[str, str]:
+    """Serialize features already extracted; never opens or extracts the PDF again."""
+    from structured_pdf_text.atomic_io import atomic_create_text
+    from structured_pdf_text.diagnostics.report import document_report
+    paths = {
+        "structured_document": output_dir / f"features_{engine_slug}_{run_id}.json",
+        "diagnostic_report": output_dir / f"diagnostics_{engine_slug}_{run_id}.txt",
+    }
+    payload = json.dumps(document.to_dict(), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    diagnostic = document_report(document) + "\n"
+    atomic_create_text(paths["structured_document"], payload)
+    atomic_create_text(paths["diagnostic_report"], diagnostic)
+    return {key: str(path) for key, path in paths.items()}
+
+
 def main() -> int:
     """Entry point: extract a PDF with one OCR engine and save Markdown + run manifest."""
     ap = argparse.ArgumentParser(
@@ -239,6 +255,10 @@ def main() -> int:
     ap.add_argument("--pages", default=None, help="Page range: '1-10' or '1,5,10'")
     ap.add_argument("--language", default="pt")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--save-features", action="store_true",
+                    help="Save structured JSON and diagnostics from the same extraction")
+    ap.add_argument("--retain-native-evidence", action="store_true",
+                    help="Retain native characters/objects in --save-features JSON (uses more memory)")
     ap.add_argument(
         "--allow-partial",
         action="store_true",
@@ -258,6 +278,17 @@ def main() -> int:
     md_path = args.output_dir / f"extracted_{engine_slug}_{run_id}.md"
     manifest_path = args.output_dir / f"manifesto_e2e_{engine_slug}_{run_id}.json"
 
+    targets = [md_path, manifest_path]
+    if args.save_features:
+        targets.extend(args.output_dir / f"{prefix}_{engine_slug}_{run_id}.{suffix}"
+                       for prefix, suffix in (("features", "json"), ("diagnostics", "txt")))
+    if any(path.exists() for path in targets):
+        print("ERROR: extraction artifacts already exist; choose another run ID or output directory", file=sys.stderr)
+        return 1
+    if args.retain_native_evidence and not args.save_features:
+        print("ERROR: --retain-native-evidence requires --save-features", file=sys.stderr)
+        return 1
+
     if not args.pdf.exists():
         print(f"ERROR: PDF not found: {args.pdf}", file=sys.stderr)
         return 1
@@ -273,6 +304,8 @@ def main() -> int:
 
     try:
         config = _build_config(args.engine, args.mode, args.language, page_indices, args.provider)
+        if args.retain_native_evidence:
+            config = replace(config, retain_native_evidence=True)
     except Exception as exc:
         print(f"ERROR: cannot build config: {exc}", file=sys.stderr)
         return 1
@@ -384,8 +417,8 @@ def main() -> int:
             "page_count": 0,
             "pages": [],
         }
-        from structured_pdf_text.atomic_io import atomic_write_json
-        atomic_write_json(manifest_path, manifest)
+        from structured_pdf_text.atomic_io import atomic_create_text
+        atomic_create_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
         print(f"\nERROR manifest: {manifest_path}")
         return 1
 
@@ -393,8 +426,9 @@ def main() -> int:
     from structured_pdf_text.renderers.markdown import render_markdown
     # This artifact is for page-aligned diagnostics and structural metrics.
     md_text = render_markdown(document, diagnostic=True)
-    from structured_pdf_text.atomic_io import atomic_write_text
-    atomic_write_text(md_path, md_text)
+    from structured_pdf_text.atomic_io import atomic_create_text
+    feature_paths = _save_features(document, args.output_dir, engine_slug, run_id) if args.save_features else {}
+    atomic_create_text(md_path, md_text)
 
     # --- Build per-page entries (schema v2) ---
     page_entries = []
@@ -544,6 +578,8 @@ def main() -> int:
             "warm_page_p95_s": round(sorted(page_times[1:])[int(0.95 * (len(page_times[1:]) - 1))], 4) if len(page_times) > 2 else None,
         },
         "extracted_markdown": str(md_path),
+        **feature_paths,
+        "retain_native_evidence": config.retain_native_evidence,
         "timing_note": (
             "per-page elapsed_s is the wall-clock interval between progress callbacks "
             "(render + OCR + assembly combined). Last page interval is closed immediately "
@@ -552,8 +588,7 @@ def main() -> int:
         "pages": page_entries,
     }
 
-    from structured_pdf_text.atomic_io import atomic_write_json
-    atomic_write_json(manifest_path, manifest)
+    atomic_create_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
 
     if not args.quiet:
         n_pages = len(document.pages)

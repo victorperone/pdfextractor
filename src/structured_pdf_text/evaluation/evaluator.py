@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ from .markdown_syntax import PAGE_SYNTAX_POLICY
 from .paragraph_boundaries import PARAGRAPH_POLICY
 from .html_tables import HTML_TABLE_POLICY
 from .models import MarkdownNode
+from .reporting import REPORTING_POLICY, corpus_page_metadata, run_page_metadata
+from .validation import VALIDATION_POLICY, validate_result
 from .page_scope import build_page_scope
 from .reference_hash import REFERENCE_HASH_PROTOCOL, compute_reference_effective_hash
 from .reference_inputs import document_pages, page_number, pages_markdown, selected_pages_from_run
@@ -100,10 +103,6 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # the hypothesis' observed order so inversions remain measurable.
     ref_scoped = {p: ref_pages[p] for p in sorted(scope.selected_reference)}
     hyp_scoped = {p: text for p, text in hyp_pages.items() if p in scope.selected_reference}
-    ref_nodes = _parse_scoped_pages(ref_scoped, "reference")
-    hyp_nodes = _parse_scoped_pages(hyp_scoped, "hypothesis")
-    ref_text = pages_markdown(ref_scoped)
-    hyp_text = pages_markdown(hyp_scoped)
 
     # --- Reference effective hash (protocol reference-effective-v1) ---
     eff_digest, eff_meta = compute_reference_effective_hash(
@@ -114,12 +113,12 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # --- Provenance ---
     doc.evaluator_info = {
         "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "3.0.4",
+        "metric_definitions_version": "3.0.5",
         "normalization_policy": "unicode_layout",
         "parser": PARSER_VERSION,
         "page_syntax_policy": PAGE_SYNTAX_POLICY,
         "paragraph_policy": PARAGRAPH_POLICY,
-        "alignment_policy": "content-match-v1",
+        "alignment_policy": "content-match-v2-exact-identity",
         "entity_policy": "entities-ptbr-v1",
         "text_projection_policy": "parser-visible-leaves-v2",
         "html_table_policy": HTML_TABLE_POLICY,
@@ -130,9 +129,12 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
         "resource_policy": {
             "max_text_edit_cells": request.max_text_edit_cells,
             "max_table_edit_cells": request.max_text_edit_cells,
+            "max_structure_edit_cells": request.max_text_edit_cells,
             "max_alignment_pairs": request.max_alignment_pairs,
             "max_similarity_text_product": MAX_SIMILARITY_TEXT_PRODUCT,
         },
+        "reporting_policy": REPORTING_POLICY,
+        "validation_policy": VALIDATION_POLICY,
         "created_at_utc": datetime.now(tz=timezone.utc).isoformat(),
     }
     doc.inputs = {
@@ -152,6 +154,67 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     doc.inputs["selected_missing_pages"] = sorted(scope.selected_missing)
     doc.inputs["extra_pages_out_of_scope"] = sorted(scope.selected_extra)
 
+    # --- Operational ---
+    doc.operational = {
+        "benchmark_status": None,
+        "fallback_rate": None,
+        "elapsed_s": None,
+        "memory_mb": None,
+    }
+
+    doc.operational.update({
+        key: deepcopy(value) for key, value in request.run_metadata.items()
+        if key not in {"pages", "selected_pages", "alignment_summary"}
+    })
+    doc.operational["selected_pages"] = effective_selected_pages
+    # Operational time/recovery cover the extraction's scope, even when this
+    # evaluation explicitly selects a smaller subset of its output.
+    doc.operational["run_selected_pages"] = selected_pages_from_run(request.run_metadata)
+    metadata = corpus_page_metadata(request.manifesto_path)
+    run_pages = run_page_metadata(request.run_metadata)
+    _populate_quality(doc, request, ref_scoped, hyp_scoped)
+    for page in effective_selected_pages:
+        page_doc = V2DocumentMetrics()
+        _populate_quality(
+            page_doc, request, {page: ref_scoped[page]},
+            {page: hyp_scoped[page]} if page in hyp_scoped else {},
+        )
+        result = page_doc.to_dict()
+        for group in (*result["quality"].values(), result["integrity"]):
+            for metric in group.values():
+                if isinstance(metric, dict) and "definition_id" in metric:
+                    metric["scope"] = "page"
+        counts = page_doc.text["cer_sequential_visible"]["counts"]
+        doc.per_page.append({
+            "page": page,
+            "family": metadata.get(page, {}).get("family"),
+            "conditions": metadata.get(page, {}).get("conditions", []),
+            "selected_but_missing": page not in hyp_scoped,
+            "reference_empty": counts["ref_chars"] == 0,
+            "hypothesis_empty": counts["hyp_chars"] == 0,
+            "quality": result["quality"],
+            "integrity": result["integrity"],
+            "evaluation": result["evaluation"],
+            "operational": run_pages.get(page, {}),
+        })
+
+    validate_result(doc.to_dict())
+    return doc
+
+
+def _populate_quality(
+    doc: V2DocumentMetrics, request: EvaluationRequest,
+    ref_scoped: dict[int, str], hyp_scoped: dict[int, str],
+) -> None:
+    """Same metric pipeline at document and page scope; no recursive evaluation.
+
+    Page diagnostics have independent budgets and page-local alignment. They do
+    not replace document metrics (e.g. inter-page order or entity displacement).
+    """
+    ref_nodes = _parse_scoped_pages(ref_scoped, "reference")
+    hyp_nodes = _parse_scoped_pages(hyp_scoped, "hypothesis")
+    ref_text = pages_markdown(ref_scoped)
+    hyp_text = pages_markdown(hyp_scoped)
     # --- Block alignment ---
     alignment_error: str | None = None
     try:
@@ -202,28 +265,15 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # --- Integrity metrics ---
     integrity: IntegrityMetrics = compute_integrity_metrics(
         ref_nodes, hyp_nodes,
-        selected_pages=scope.selected_reference,
-        selected_reference=scope.selected_reference,
+        selected_pages=set(ref_scoped),
+        selected_reference=set(ref_scoped),
         hyp_page_nums=set(hyp_scoped),
         hyp_raw_text=hyp_text,
         ref_raw_text=ref_text,
     )
     doc.integrity = integrity.to_dict()
 
-    # --- Operational ---
-    doc.operational = {
-        "benchmark_status": "valid",
-        "fallback_rate": None,
-        "elapsed_s": None,
-        "memory_mb": None,
-        "alignment_summary": alignment_summary.to_dict(),
-    }
-
-    doc.operational.update({
-        key: value for key, value in request.run_metadata.items()
-        if key not in {"pages", "selected_pages", "alignment_summary"}
-    })
-    doc.operational["selected_pages"] = effective_selected_pages
+    doc.operational["alignment_summary"] = alignment_summary.to_dict()
     if alignment_error is not None:
         # Empty pairs above are an unavailable computation, never an extraction
         # with zero matches. Do not publish its empty summary as observed data.
@@ -243,8 +293,6 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
         reasons.append("evaluation_resource_limit")
     doc.rank_eligible = eligible
     doc.rank_ineligibility_reasons = reasons
-
-    return doc
 
 
 def _get_git_sha() -> str | None:

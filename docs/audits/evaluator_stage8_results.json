@@ -1,0 +1,344 @@
+{
+  "stage": 8,
+  "date": "2026-10-19",
+  "base_commit": "9a97a97",
+  "schema_version": "evaluation-3.0.0",
+  "metric_definitions_version": "3.0.5",
+  "validation_policy": "canonical-schema-and-invariants-v1",
+  "alignment_policy": "content-match-v2-exact-identity",
+  "default_suite": {
+    "tests": 2501,
+    "passed": 2491,
+    "failures": 0,
+    "errors": 0,
+    "skips": 6,
+    "xfails": 4
+  },
+  "targeted_suite": {
+    "tests": 256,
+    "passed": 256,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "rapidocr_preflight": {
+    "tests": 2,
+    "passed": 2,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "regression_files": {
+    "test_evaluator_ground_truth_audit": {
+      "tests": 39,
+      "passed": 39
+    },
+    "test_evaluation_reporting_corrections": {
+      "tests": 75,
+      "passed": 75
+    },
+    "test_evaluation_schema_corrections": {
+      "tests": 85,
+      "passed": 85
+    },
+    "test_evaluation_exact_optimizations": {
+      "tests": 53,
+      "passed": 53
+    },
+    "test_evaluate_e2e_features": {
+      "tests": 4,
+      "passed": 4
+    }
+  },
+  "full_reference_controls": [
+    {
+      "corpus": "V3",
+      "pages": 144,
+      "elapsed_s": 2.041,
+      "evaluation": {
+        "status": "ok",
+        "rank_eligible": true,
+        "rank_ineligibility_reasons": [],
+        "applicable_metric_count": 61,
+        "unavailable_metric_count": 8
+      },
+      "nonperfect_metrics": [],
+      "numeric_metrics": 61
+    },
+    {
+      "corpus": "V4",
+      "pages": 224,
+      "elapsed_s": 8.632,
+      "evaluation": {
+        "status": "ok",
+        "rank_eligible": true,
+        "rank_ineligibility_reasons": [],
+        "applicable_metric_count": 61,
+        "unavailable_metric_count": 8
+      },
+      "nonperfect_metrics": [],
+      "numeric_metrics": 61
+    },
+    {
+      "corpus": "V5",
+      "pages": 42,
+      "elapsed_s": 0.758,
+      "evaluation": {
+        "status": "ok",
+        "rank_eligible": true,
+        "rank_ineligibility_reasons": [],
+        "applicable_metric_count": 67,
+        "unavailable_metric_count": 2
+      },
+      "nonperfect_metrics": [],
+      "numeric_metrics": 67
+    }
+  ],
+  "wheel_schema_and_dependency_verified": true,
+  "git_diff_check_passed": true,
+  "extractions_in_progress": false,
+  "commit_or_push_executed": false,
+  "performance_diagnostics": {
+    "corpus": "V4",
+    "input": "saved Markdown only; no PDF extraction",
+    "table_metrics_sample_elapsed_s": 18.4995,
+    "page_scope_api_sample_elapsed_s": {
+      "1": 2.347,
+      "5": 0.642,
+      "20": 18.129,
+      "50": 0.647
+    },
+    "page_sample_includes_document_and_page_pipeline": true,
+    "page_sample_cutoff_s": 25,
+    "page_sample_exit_code": 124,
+    "page_sample_cutoff_intentional": true
+  },
+  "corpus_pdf_extraction_executed": true,
+  "requested_single_extractions": [
+    {
+      "corpus": "V3",
+      "extraction_invocations": 1,
+      "pages": 144,
+      "extraction_status": "valid",
+      "document_status": "success",
+      "elapsed_s": 47.775,
+      "evaluation": {
+        "status": "partial",
+        "rank_eligible": false,
+        "rank_ineligibility_reasons": [
+          "evaluation_resource_limit"
+        ],
+        "applicable_metric_count": 32,
+        "unavailable_metric_count": 37
+      },
+      "page_evaluation_status_counts": {
+        "ok": 144
+      },
+      "page_aggregates": {
+        "cer_markdown_raw": {
+          "definition_id": "MET-TX01",
+          "direction": "lower_is_better",
+          "n_applicable": 144,
+          "n_total": 144,
+          "micro": 0.567769,
+          "macro": 0.68343,
+          "worst": 1.839161,
+          "median": 0.676016,
+          "min": 0.090696,
+          "max": 1.839161,
+          "coverage": 1.0
+        },
+        "cer_sequential_normalized": {
+          "definition_id": "MET-TX02",
+          "direction": "lower_is_better",
+          "n_applicable": 144,
+          "n_total": 144,
+          "micro": 0.600356,
+          "macro": 0.747378,
+          "worst": 3.568182,
+          "median": 0.765379,
+          "min": 0.107221,
+          "max": 3.568182,
+          "coverage": 1.0
+        },
+        "wer_sequential": {
+          "definition_id": "MET-TX04",
+          "direction": "lower_is_better",
+          "n_applicable": 144,
+          "n_total": 144,
+          "micro": 0.685969,
+          "macro": 0.862757,
+          "worst": 5.4,
+          "median": 0.797059,
+          "min": 0.118227,
+          "max": 5.4,
+          "coverage": 1.0
+        }
+      },
+      "selected_missing_pages": [],
+      "extra_pages_out_of_scope": [],
+      "verification_passed": true,
+      "degraded_pages": [],
+      "failed_ocr_pages": [],
+      "document_warnings": [
+        "page 119: table_structure_uncertain",
+        "page 123: table_structure_uncertain",
+        "page 124: table_structure_uncertain",
+        "page 125: table_structure_uncertain",
+        "page 126: table_structure_uncertain"
+      ]
+    },
+    {
+      "corpus": "V4",
+      "extraction_invocations": 1,
+      "pages": 224,
+      "extraction_status": "valid",
+      "document_status": "success",
+      "elapsed_s": 291.621,
+      "evaluation": {
+        "status": "partial",
+        "rank_eligible": false,
+        "rank_ineligibility_reasons": [
+          "evaluation_resource_limit"
+        ],
+        "applicable_metric_count": 32,
+        "unavailable_metric_count": 37
+      },
+      "page_evaluation_status_counts": {
+        "ok": 148,
+        "partial": 76
+      },
+      "page_aggregates": {
+        "cer_markdown_raw": {
+          "definition_id": "MET-TX01",
+          "direction": "lower_is_better",
+          "n_applicable": 148,
+          "n_total": 224,
+          "micro": null,
+          "macro": 0.394352,
+          "worst": 1.233533,
+          "median": 0.35379,
+          "min": 0.044776,
+          "max": 1.233533,
+          "coverage": 0.6607
+        },
+        "cer_sequential_normalized": {
+          "definition_id": "MET-TX02",
+          "direction": "lower_is_better",
+          "n_applicable": 150,
+          "n_total": 224,
+          "micro": null,
+          "macro": 0.447729,
+          "worst": 2.088889,
+          "median": 0.319047,
+          "min": 0.01973,
+          "max": 2.088889,
+          "coverage": 0.6696
+        },
+        "wer_sequential": {
+          "definition_id": "MET-TX04",
+          "direction": "lower_is_better",
+          "n_applicable": 222,
+          "n_total": 224,
+          "micro": 0.309186,
+          "macro": 0.478971,
+          "worst": 2.117647,
+          "median": 0.335892,
+          "min": 0.02452,
+          "max": 2.117647,
+          "coverage": 0.9911
+        }
+      },
+      "selected_missing_pages": [],
+      "extra_pages_out_of_scope": [],
+      "verification_passed": true,
+      "degraded_pages": [],
+      "failed_ocr_pages": [],
+      "document_warnings": []
+    },
+    {
+      "corpus": "V5",
+      "extraction_invocations": 1,
+      "pages": 42,
+      "extraction_status": "partial",
+      "document_status": "success",
+      "elapsed_s": 19.781,
+      "evaluation": {
+        "status": "partial",
+        "rank_eligible": false,
+        "rank_ineligibility_reasons": [
+          "evaluation_resource_limit"
+        ],
+        "applicable_metric_count": 38,
+        "unavailable_metric_count": 31
+      },
+      "page_evaluation_status_counts": {
+        "ok": 42
+      },
+      "page_aggregates": {
+        "cer_markdown_raw": {
+          "definition_id": "MET-TX01",
+          "direction": "lower_is_better",
+          "n_applicable": 42,
+          "n_total": 42,
+          "micro": 0.348145,
+          "macro": 0.347979,
+          "worst": 0.770925,
+          "median": 0.324064,
+          "min": 0.076923,
+          "max": 0.770925,
+          "coverage": 1.0
+        },
+        "cer_sequential_normalized": {
+          "definition_id": "MET-TX02",
+          "direction": "lower_is_better",
+          "n_applicable": 42,
+          "n_total": 42,
+          "micro": 0.335879,
+          "macro": 0.323417,
+          "worst": 0.758294,
+          "median": 0.297339,
+          "min": 0.077455,
+          "max": 0.758294,
+          "coverage": 1.0
+        },
+        "wer_sequential": {
+          "definition_id": "MET-TX04",
+          "direction": "lower_is_better",
+          "n_applicable": 42,
+          "n_total": 42,
+          "micro": 0.367757,
+          "macro": 0.353623,
+          "worst": 0.915493,
+          "median": 0.333333,
+          "min": 0.082474,
+          "max": 0.915493,
+          "coverage": 1.0
+        }
+      },
+      "selected_missing_pages": [],
+      "extra_pages_out_of_scope": [],
+      "verification_passed": true,
+      "degraded_pages": [
+        21,
+        31
+      ],
+      "failed_ocr_pages": [],
+      "document_warnings": [
+        "page 17: unaccounted_content: 2 line(s) recovered by text fallback",
+        "page 26: unaccounted_content: 2 line(s) recovered by text fallback"
+      ],
+      "ocr_degradation_details": {
+        "pages": [
+          21,
+          31
+        ],
+        "reason": "no_usable_tokens",
+        "scope": "figure region OCR"
+      }
+    }
+  ],
+  "artifact_verification": "output/loop/001/verification.json"
+}

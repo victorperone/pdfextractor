@@ -23,6 +23,8 @@ MET-T11  table_page_location_accuracy fraction of matched tables where hyp page 
 """
 from __future__ import annotations
 
+from .order_counts import concordance_counts
+
 import difflib
 from collections import Counter
 from dataclasses import dataclass, field
@@ -55,7 +57,7 @@ def _norm(text: str) -> str:
 
 def _text_sim(a: str, b: str) -> float:
     na, nb = _norm(a), _norm(b)
-    if not na and not nb:
+    if na == nb:
         return 1.0
     if not na or not nb:
         return 0.0
@@ -122,6 +124,12 @@ def _build_parent_map(nodes: Sequence[MarkdownNode]) -> dict[str | None, list[Ma
 # Table similarity score used for 1:1 matching
 # ---------------------------------------------------------------------------
 
+def _table_cell_texts(table: MarkdownNode, parent_map: dict) -> tuple[str, ...]:
+    return tuple(_norm(cell.visible_text)
+                 for row in _children_of_kind(table, parent_map, NodeKind.TABLE_ROW)
+                 for cell in _children_of_kind(row, parent_map, NodeKind.TABLE_CELL))
+
+
 def _table_similarity(
     ref_table: MarkdownNode,
     hyp_table: MarkdownNode,
@@ -129,17 +137,8 @@ def _table_similarity(
     hyp_map: dict[str | None, list[MarkdownNode]],
 ) -> float:
     """Content-based similarity between two table nodes [0, 1]."""
-    # Combine visible texts of all descendant cells
-    def _cell_texts(table: MarkdownNode, pmap: dict) -> list[str]:
-        rows = _children_of_kind(table, pmap, NodeKind.TABLE_ROW)
-        texts = []
-        for row in rows:
-            cells = _children_of_kind(row, pmap, NodeKind.TABLE_CELL)
-            texts.extend(_norm(c.visible_text) for c in cells)
-        return texts
-
-    ref_texts = _cell_texts(ref_table, ref_map)
-    hyp_texts = _cell_texts(hyp_table, hyp_map)
+    ref_texts = _table_cell_texts(ref_table, ref_map)
+    hyp_texts = _table_cell_texts(hyp_table, hyp_map)
 
     # Page consistency bonus
     page_ok = (ref_table.page == hyp_table.page) if (ref_table.page and hyp_table.page) else None
@@ -151,7 +150,8 @@ def _table_similarity(
 
     combined_ref = " ".join(ref_texts)
     combined_hyp = " ".join(hyp_texts)
-    text_sim = difflib.SequenceMatcher(None, combined_ref, combined_hyp, autojunk=False).ratio()
+    text_sim = (1.0 if combined_ref == combined_hyp else
+                difflib.SequenceMatcher(None, combined_ref, combined_hyp, autojunk=False).ratio())
     page_bonus = 0.1 if page_ok else 0.0
     return min(1.0, text_sim + page_bonus)
 
@@ -170,6 +170,10 @@ def _match_tables(
     """Greedy 1:1 matching; returns list of (ref, hyp, score)."""
     if not ref_tables or not hyp_tables:
         return []
+    if (threshold <= 1 and len(ref_tables) == len(hyp_tables)
+            and all(rt.page == ht.page and _table_cell_texts(rt, ref_map) == _table_cell_texts(ht, hyp_map)
+                    for rt, ht in zip(ref_tables, hyp_tables))):
+        return [(rt, ht, 1.0) for rt, ht in zip(ref_tables, hyp_tables)]
 
     # Build score matrix
     scores: list[tuple[float, int, int]] = []
@@ -301,6 +305,9 @@ def _match_rows(
     """Greedy 1:1 row matching by combined cell text similarity."""
     if not ref_rows or not hyp_rows:
         return []
+    if (threshold <= 1 and len(ref_rows) == len(hyp_rows)
+            and all(_norm(r.visible_text) == _norm(h.visible_text) for r, h in zip(ref_rows, hyp_rows))):
+        return list(zip(ref_rows, hyp_rows))
     scores: list[tuple[float, int, int]] = []
     for ri, rr in enumerate(ref_rows):
         for hi, hr in enumerate(hyp_rows):
@@ -463,14 +470,7 @@ def _pairwise_order_accuracy(indices: list[tuple[int, int]]) -> tuple[int, int]:
         return 0, 0
     ordered = sorted(indices, key=lambda x: x[0])
     hyp_seq = [o[1] for o in ordered]
-    n = len(hyp_seq)
-    concordant = total = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            total += 1
-            if hyp_seq[i] < hyp_seq[j]:
-                concordant += 1
-    return concordant, total
+    return concordance_counts(hyp_seq)
 
 
 def table_row_order_accuracy(

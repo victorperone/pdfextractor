@@ -15,6 +15,7 @@ dependencies = [
     "pypdfium2>=5.0",
     "Pillow>=10.0",
     "markdown-it-py>=3.0",  # CommonMark+GFM parser for the V2 evaluation module
+    "jsonschema>=4.18,<5",  # Draft 2020-12 validation of canonical evaluation results
 ]
 
 [project.optional-dependencies]
@@ -50,6 +51,9 @@ pdftext = "structured_pdf_text.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"structured_pdf_text.evaluation" = ["schema_v3.json"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

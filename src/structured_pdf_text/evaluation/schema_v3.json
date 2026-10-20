@@ -1,0 +1,2656 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pdfextractor.local/schemas/evaluation-3.0.0.json",
+  "title": "Canonical PDFExtractor evaluation result",
+  "description": "Canonical result with page diagnostics. Arithmetic, finitude and cross-field invariants are additionally enforced by validation.py.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "evaluation-3.0.0"
+    },
+    "evaluator": {
+      "type": "object",
+      "properties": {
+        "metric_definitions_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "normalization_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parser": {
+          "type": "string",
+          "minLength": 1
+        },
+        "page_syntax_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "paragraph_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "alignment_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entity_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_projection_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "html_table_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_metric_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregation_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "comparability_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "edit_distance_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reporting_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "implementation_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at_utc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resource_policy": {
+          "type": "object",
+          "properties": {
+            "max_text_edit_cells": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_table_edit_cells": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_structure_edit_cells": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_alignment_pairs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_similarity_text_product": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "max_text_edit_cells",
+            "max_table_edit_cells",
+            "max_structure_edit_cells",
+            "max_alignment_pairs",
+            "max_similarity_text_product"
+          ],
+          "additionalProperties": false
+        },
+        "validation_policy": {
+          "const": "canonical-schema-and-invariants-v1"
+        }
+      },
+      "required": [
+        "metric_definitions_version",
+        "normalization_policy",
+        "parser",
+        "page_syntax_policy",
+        "paragraph_policy",
+        "alignment_policy",
+        "entity_policy",
+        "text_projection_policy",
+        "html_table_policy",
+        "table_metric_policy",
+        "aggregation_policy",
+        "comparability_policy",
+        "edit_distance_policy",
+        "reporting_policy",
+        "implementation_commit",
+        "created_at_utc",
+        "resource_policy",
+        "validation_policy"
+      ],
+      "additionalProperties": false
+    },
+    "inputs": {
+      "type": "object",
+      "properties": {
+        "reference_effective_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "reference_serialization_version": {
+          "const": "reference-effective-v1"
+        },
+        "reference_source_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "hypothesis_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "manifest_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "pdf_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engine": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "total_pages_in_reference": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "selected_missing_pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "uniqueItems": true
+        },
+        "extra_pages_out_of_scope": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "reference_effective_sha256",
+        "reference_serialization_version",
+        "reference_source_sha256",
+        "hypothesis_sha256",
+        "manifest_sha256",
+        "pdf_sha256",
+        "mode",
+        "engine",
+        "run_id",
+        "selected_pages",
+        "total_pages_in_reference",
+        "selected_missing_pages",
+        "extra_pages_out_of_scope"
+      ],
+      "additionalProperties": false
+    },
+    "quality": {
+      "$ref": "#/$defs/quality"
+    },
+    "integrity": {
+      "$ref": "#/$defs/integrity"
+    },
+    "operational": {
+      "type": "object",
+      "properties": {
+        "benchmark_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fallback_rate": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "elapsed_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "memory_mb": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "selected_pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "uniqueItems": true
+        },
+        "run_selected_pages": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "uniqueItems": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "alignment_summary": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "benchmark_status",
+        "fallback_rate",
+        "elapsed_s",
+        "memory_mb",
+        "selected_pages",
+        "run_selected_pages",
+        "alignment_summary"
+      ],
+      "additionalProperties": true
+    },
+    "per_page": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "family": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "conditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "selected_but_missing": {
+            "type": "boolean"
+          },
+          "reference_empty": {
+            "type": "boolean"
+          },
+          "hypothesis_empty": {
+            "type": "boolean"
+          },
+          "quality": {
+            "$ref": "#/$defs/quality"
+          },
+          "integrity": {
+            "$ref": "#/$defs/integrity"
+          },
+          "evaluation": {
+            "$ref": "#/$defs/evaluation"
+          },
+          "operational": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "page",
+          "family",
+          "conditions",
+          "selected_but_missing",
+          "reference_empty",
+          "hypothesis_empty",
+          "quality",
+          "integrity",
+          "evaluation",
+          "operational"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "evaluation": {
+      "$ref": "#/$defs/evaluation"
+    }
+  },
+  "required": [
+    "schema_version",
+    "evaluator",
+    "inputs",
+    "quality",
+    "integrity",
+    "operational",
+    "per_page",
+    "evaluation"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "not_applicable",
+            "undefined_denominator",
+            "unavailable_alignment",
+            "insufficient_reference_evidence",
+            "resource_limit",
+            "invalid_input",
+            "partial_evaluation",
+            "false_positive_only",
+            "false_negative_only"
+          ]
+        },
+        "direction": {
+          "enum": [
+            "higher_is_better",
+            "lower_is_better",
+            "descriptive_only"
+          ]
+        },
+        "unit": {
+          "const": "ratio"
+        },
+        "definition_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "counts": {
+          "type": "object"
+        },
+        "scope": {
+          "enum": [
+            "document",
+            "page"
+          ]
+        },
+        "normalization_profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "coverage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "value",
+        "status",
+        "direction",
+        "unit",
+        "definition_id",
+        "counts",
+        "scope",
+        "normalization_profile",
+        "warnings",
+        "coverage"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "ok",
+                  "false_positive_only",
+                  "false_negative_only"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "quality": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "object",
+          "properties": {
+            "cer_markdown_raw": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-TX01"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": "raw"
+                    }
+                  }
+                }
+              ]
+            },
+            "cer_sequential_normalized": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-TX02"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": "unicode_layout"
+                    }
+                  }
+                }
+              ]
+            },
+            "cer_sequential_visible": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-TX03"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": "visible_text"
+                    }
+                  }
+                }
+              ]
+            },
+            "wer_sequential": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-TX04"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": "unicode_layout"
+                    }
+                  }
+                }
+              ]
+            },
+            "aligned_block_text_cer": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-TX05"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": "unicode_layout"
+                    }
+                  }
+                }
+              ]
+            },
+            "text_coverage_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-TX06"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": "unicode_layout"
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "text_coverage_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-TX07"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": "unicode_layout"
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "cer_markdown_raw",
+            "cer_sequential_normalized",
+            "cer_sequential_visible",
+            "wer_sequential",
+            "aligned_block_text_cer",
+            "text_coverage_recall",
+            "text_coverage_precision"
+          ],
+          "additionalProperties": false
+        },
+        "structure": {
+          "type": "object",
+          "properties": {
+            "heading_detection_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S01"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "heading_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S01.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "heading_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S01.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "heading_level_match_rate": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S02"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "heading_text_cer": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S03"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    }
+                  }
+                }
+              ]
+            },
+            "paragraph_detection_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S04"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "paragraph_detection_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S04.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "paragraph_detection_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S04.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "paragraph_boundary_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S11"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "paragraph_boundary_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S11.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "paragraph_boundary_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S11.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_group_detection_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S05"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_group_detection_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S05.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_group_detection_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S05.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_item_detection_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S06"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_item_detection_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S06.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_item_detection_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S06.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_hierarchy_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S07"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_item_text_cer_on_matched": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-SL01"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    }
+                  }
+                }
+              ]
+            },
+            "list_kind_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-SL02"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "list_item_order_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-SL03"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "ordered_list_ordinal_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-SL04"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "block_order_pairwise_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S10"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "heading_detection_f1",
+            "heading_precision",
+            "heading_recall",
+            "heading_level_match_rate",
+            "heading_text_cer",
+            "paragraph_detection_f1",
+            "paragraph_detection_precision",
+            "paragraph_detection_recall",
+            "paragraph_boundary_f1",
+            "paragraph_boundary_precision",
+            "paragraph_boundary_recall",
+            "list_group_detection_f1",
+            "list_group_detection_precision",
+            "list_group_detection_recall",
+            "list_item_detection_f1",
+            "list_item_detection_precision",
+            "list_item_detection_recall",
+            "list_hierarchy_accuracy",
+            "list_item_text_cer_on_matched",
+            "list_kind_accuracy",
+            "list_item_order_accuracy",
+            "ordered_list_ordinal_accuracy",
+            "block_order_pairwise_accuracy"
+          ],
+          "additionalProperties": false
+        },
+        "reading_order": {
+          "type": "object",
+          "properties": {
+            "pairwise_reading_order_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-S08"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "pairwise_reading_order_accuracy"
+          ],
+          "additionalProperties": false
+        },
+        "tables": {
+          "type": "object",
+          "properties": {
+            "table_detection_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T01"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_detection_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T01.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_detection_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T01.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_row_detection_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T02"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_row_detection_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T02.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_row_detection_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T02.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_column_count_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T03"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_detection_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T04"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_detection_precision": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T04.precision"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_detection_recall": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T04.recall"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_content_exact_match": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T05"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_content_exact_match_matched": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T05.matched"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_alignment_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T06"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_span_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T12"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cell_cer": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T07"
+                    },
+                    "direction": {
+                      "const": "lower_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    }
+                  }
+                }
+              ]
+            },
+            "table_content_f1": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T08"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_row_order_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T09"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_column_order_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T10"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "table_page_location_accuracy": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-T11"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "table_detection_f1",
+            "table_detection_precision",
+            "table_detection_recall",
+            "table_row_detection_f1",
+            "table_row_detection_precision",
+            "table_row_detection_recall",
+            "table_column_count_accuracy",
+            "cell_detection_f1",
+            "cell_detection_precision",
+            "cell_detection_recall",
+            "cell_content_exact_match",
+            "cell_content_exact_match_matched",
+            "cell_alignment_accuracy",
+            "cell_span_accuracy",
+            "cell_cer",
+            "table_content_f1",
+            "table_row_order_accuracy",
+            "table_column_order_accuracy",
+            "table_page_location_accuracy"
+          ],
+          "additionalProperties": false
+        },
+        "critical_data": {
+          "type": "object",
+          "properties": {
+            "numeric": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD01"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "currency": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD02"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "percent": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD08"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "dates": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD03"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cpf": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD04"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cnpj": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD05"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "process_numbers": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD06"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "identifiers_combined": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD07"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "numeric_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD01-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "currency_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD02-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "percent_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD08-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "dates_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD03-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cpf_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD04-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "cnpj_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD05-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "process_numbers_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD06-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "identifiers_combined_page": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/metric"
+                },
+                {
+                  "properties": {
+                    "definition_id": {
+                      "const": "MET-CD07-page"
+                    },
+                    "direction": {
+                      "const": "higher_is_better"
+                    },
+                    "normalization_profile": {
+                      "const": null
+                    },
+                    "value": {
+                      "maximum": 1
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "numeric",
+            "currency",
+            "percent",
+            "dates",
+            "cpf",
+            "cnpj",
+            "process_numbers",
+            "identifiers_combined",
+            "numeric_page",
+            "currency_page",
+            "percent_page",
+            "dates_page",
+            "cpf_page",
+            "cnpj_page",
+            "process_numbers_page",
+            "identifiers_combined_page"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "text",
+        "structure",
+        "reading_order",
+        "tables",
+        "critical_data"
+      ],
+      "additionalProperties": false
+    },
+    "integrity": {
+      "type": "object",
+      "properties": {
+        "duplicate_excess_rate": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/metric"
+            },
+            {
+              "properties": {
+                "definition_id": {
+                  "const": "MET-I01"
+                },
+                "direction": {
+                  "const": "lower_is_better"
+                },
+                "normalization_profile": {
+                  "const": null
+                },
+                "value": {
+                  "maximum": 1
+                }
+              }
+            }
+          ]
+        },
+        "missing_page_rate": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/metric"
+            },
+            {
+              "properties": {
+                "definition_id": {
+                  "const": "MET-I02"
+                },
+                "direction": {
+                  "const": "lower_is_better"
+                },
+                "normalization_profile": {
+                  "const": null
+                },
+                "value": {
+                  "maximum": 1
+                }
+              }
+            }
+          ]
+        },
+        "page_content_coverage_recall": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/metric"
+            },
+            {
+              "properties": {
+                "definition_id": {
+                  "const": "MET-I03"
+                },
+                "direction": {
+                  "const": "higher_is_better"
+                },
+                "normalization_profile": {
+                  "const": null
+                },
+                "value": {
+                  "maximum": 1
+                }
+              }
+            }
+          ]
+        },
+        "markdown_validity": {
+          "type": "object",
+          "properties": {
+            "parse_errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unclosed_fences": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "page_marker_errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "duplicate_page_markers": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unsupported_constructs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "validity_status": {
+              "enum": [
+                "valid",
+                "warnings",
+                "invalid"
+              ]
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "parse_errors",
+            "unclosed_fences",
+            "page_marker_errors",
+            "duplicate_page_markers",
+            "unsupported_constructs",
+            "validity_status",
+            "warnings"
+          ],
+          "additionalProperties": false
+        },
+        "edge_content_heuristic_v1": {
+          "type": "object",
+          "properties": {
+            "suspected_header_lines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "suspected_footer_lines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "suspected_page_number_lines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "policy": {
+              "const": "report_only"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "suspected_header_lines",
+            "suspected_footer_lines",
+            "suspected_page_number_lines",
+            "policy",
+            "note"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "duplicate_excess_rate",
+        "missing_page_rate",
+        "page_content_coverage_recall",
+        "markdown_validity",
+        "edge_content_heuristic_v1"
+      ],
+      "additionalProperties": false
+    },
+    "evaluation": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "rank_eligible": {
+          "type": "boolean"
+        },
+        "rank_ineligibility_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "applicable_metric_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unavailable_metric_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status",
+        "rank_eligible",
+        "rank_ineligibility_reasons",
+        "applicable_metric_count",
+        "unavailable_metric_count"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "x-metric-registry": {
+    "text.cer_markdown_raw": {
+      "definition_id": "MET-TX01",
+      "direction": "lower_is_better",
+      "normalization_profile": "raw"
+    },
+    "text.cer_sequential_normalized": {
+      "definition_id": "MET-TX02",
+      "direction": "lower_is_better",
+      "normalization_profile": "unicode_layout"
+    },
+    "text.cer_sequential_visible": {
+      "definition_id": "MET-TX03",
+      "direction": "lower_is_better",
+      "normalization_profile": "visible_text"
+    },
+    "text.wer_sequential": {
+      "definition_id": "MET-TX04",
+      "direction": "lower_is_better",
+      "normalization_profile": "unicode_layout"
+    },
+    "text.aligned_block_text_cer": {
+      "definition_id": "MET-TX05",
+      "direction": "lower_is_better",
+      "normalization_profile": "unicode_layout"
+    },
+    "text.text_coverage_recall": {
+      "definition_id": "MET-TX06",
+      "direction": "higher_is_better",
+      "normalization_profile": "unicode_layout"
+    },
+    "text.text_coverage_precision": {
+      "definition_id": "MET-TX07",
+      "direction": "higher_is_better",
+      "normalization_profile": "unicode_layout"
+    },
+    "structure.heading_detection_f1": {
+      "definition_id": "MET-S01",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.heading_precision": {
+      "definition_id": "MET-S01.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.heading_recall": {
+      "definition_id": "MET-S01.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.heading_level_match_rate": {
+      "definition_id": "MET-S02",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.heading_text_cer": {
+      "definition_id": "MET-S03",
+      "direction": "lower_is_better",
+      "normalization_profile": null
+    },
+    "structure.paragraph_detection_f1": {
+      "definition_id": "MET-S04",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.paragraph_detection_precision": {
+      "definition_id": "MET-S04.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.paragraph_detection_recall": {
+      "definition_id": "MET-S04.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.paragraph_boundary_f1": {
+      "definition_id": "MET-S11",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.paragraph_boundary_precision": {
+      "definition_id": "MET-S11.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.paragraph_boundary_recall": {
+      "definition_id": "MET-S11.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_group_detection_f1": {
+      "definition_id": "MET-S05",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_group_detection_precision": {
+      "definition_id": "MET-S05.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_group_detection_recall": {
+      "definition_id": "MET-S05.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_item_detection_f1": {
+      "definition_id": "MET-S06",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_item_detection_precision": {
+      "definition_id": "MET-S06.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_item_detection_recall": {
+      "definition_id": "MET-S06.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_hierarchy_accuracy": {
+      "definition_id": "MET-S07",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_item_text_cer_on_matched": {
+      "definition_id": "MET-SL01",
+      "direction": "lower_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_kind_accuracy": {
+      "definition_id": "MET-SL02",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.list_item_order_accuracy": {
+      "definition_id": "MET-SL03",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.ordered_list_ordinal_accuracy": {
+      "definition_id": "MET-SL04",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "structure.block_order_pairwise_accuracy": {
+      "definition_id": "MET-S10",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "reading_order.pairwise_reading_order_accuracy": {
+      "definition_id": "MET-S08",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_detection_f1": {
+      "definition_id": "MET-T01",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_detection_precision": {
+      "definition_id": "MET-T01.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_detection_recall": {
+      "definition_id": "MET-T01.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_row_detection_f1": {
+      "definition_id": "MET-T02",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_row_detection_precision": {
+      "definition_id": "MET-T02.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_row_detection_recall": {
+      "definition_id": "MET-T02.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_column_count_accuracy": {
+      "definition_id": "MET-T03",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_detection_f1": {
+      "definition_id": "MET-T04",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_detection_precision": {
+      "definition_id": "MET-T04.precision",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_detection_recall": {
+      "definition_id": "MET-T04.recall",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_content_exact_match": {
+      "definition_id": "MET-T05",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_content_exact_match_matched": {
+      "definition_id": "MET-T05.matched",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_alignment_accuracy": {
+      "definition_id": "MET-T06",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_span_accuracy": {
+      "definition_id": "MET-T12",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.cell_cer": {
+      "definition_id": "MET-T07",
+      "direction": "lower_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_content_f1": {
+      "definition_id": "MET-T08",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_row_order_accuracy": {
+      "definition_id": "MET-T09",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_column_order_accuracy": {
+      "definition_id": "MET-T10",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "tables.table_page_location_accuracy": {
+      "definition_id": "MET-T11",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.numeric": {
+      "definition_id": "MET-CD01",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.currency": {
+      "definition_id": "MET-CD02",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.percent": {
+      "definition_id": "MET-CD08",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.dates": {
+      "definition_id": "MET-CD03",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.cpf": {
+      "definition_id": "MET-CD04",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.cnpj": {
+      "definition_id": "MET-CD05",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.process_numbers": {
+      "definition_id": "MET-CD06",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.identifiers_combined": {
+      "definition_id": "MET-CD07",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.numeric_page": {
+      "definition_id": "MET-CD01-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.currency_page": {
+      "definition_id": "MET-CD02-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.percent_page": {
+      "definition_id": "MET-CD08-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.dates_page": {
+      "definition_id": "MET-CD03-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.cpf_page": {
+      "definition_id": "MET-CD04-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.cnpj_page": {
+      "definition_id": "MET-CD05-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.process_numbers_page": {
+      "definition_id": "MET-CD06-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "critical_data.identifiers_combined_page": {
+      "definition_id": "MET-CD07-page",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    },
+    "integrity.duplicate_excess_rate": {
+      "definition_id": "MET-I01",
+      "direction": "lower_is_better",
+      "normalization_profile": null
+    },
+    "integrity.missing_page_rate": {
+      "definition_id": "MET-I02",
+      "direction": "lower_is_better",
+      "normalization_profile": null
+    },
+    "integrity.page_content_coverage_recall": {
+      "definition_id": "MET-I03",
+      "direction": "higher_is_better",
+      "normalization_profile": null
+    }
+  }
+}

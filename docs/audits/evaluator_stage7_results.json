@@ -1,0 +1,73 @@
+{
+  "stage": 7,
+  "date": "2026-10-19",
+  "base_commit": "9a97a97",
+  "resolved_findings": [
+    "A13"
+  ],
+  "metric_definitions_version": "3.0.4",
+  "schema_version": "evaluation-3.0.0",
+  "reporting_policy": "canonical-page-diagnostics-v1",
+  "default_suite": {
+    "tests": 2359,
+    "passed": 2349,
+    "failures": 0,
+    "errors": 0,
+    "skips": 6,
+    "xfails": 4
+  },
+  "new_regression_suite": {
+    "tests": 75,
+    "passed": 75,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "targeted_suite": {
+    "tests": 342,
+    "passed": 342,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "explicit_audit_suite": {
+    "tests": 39,
+    "passed": 36,
+    "failures": 3,
+    "errors": 0,
+    "skips": 0,
+    "xfails": 0
+  },
+  "remaining_failing_probes": [
+    "test_legacy_parser_keeps_empty_structural_table_row",
+    "test_legacy_parser_keeps_escaped_pipe_inside_one_cell",
+    "test_legacy_heading_cer_sees_text_error"
+  ],
+  "remaining_findings": [
+    "A18 (formal schema)",
+    "A20",
+    "A06 and final corpus/platform validation"
+  ],
+  "real_corpus_controls": {
+    "V3": {
+      "tests": 1,
+      "passed": 1,
+      "failures": 0,
+      "errors": 0,
+      "skips": 0,
+      "xfails": 0
+    },
+    "V5": {
+      "tests": 1,
+      "passed": 1,
+      "failures": 0,
+      "errors": 0,
+      "skips": 0,
+      "xfails": 0
+    }
+  },
+  "corpus_pdf_extraction_executed": false,
+  "commit_or_push_executed": false
+}

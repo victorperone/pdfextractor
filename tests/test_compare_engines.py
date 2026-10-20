@@ -120,10 +120,14 @@ def test_canonical_comparator_rejects_different_benchmark_protocol():
 
 
 def test_compare_engines_cli_routes_evaluation_3_to_canonical_comparison(tmp_path):
+    from structured_pdf_text.evaluation import EvaluationRequest, evaluate
+
     runs = []
     for engine in ("engine-a", "engine-b"):
-        run = _v2_run(engine)
-        run["inputs"]["selected_pages"] = [1, 2]
+        body = "## Página 1\n\nAlfa\n\n## Página 2\n\nBeta"
+        run = evaluate(EvaluationRequest(body, body, engine=engine, mode="balanced",
+            pdf_sha256="b" * 64, run_metadata={"benchmark_protocol_id": "protocol-v1"}))
+        run["inputs"]["manifest_sha256"] = "c" * 64
         path = tmp_path / f"{engine}.json"
         path.write_text(json.dumps(run), encoding="utf-8")
         runs.append(path)

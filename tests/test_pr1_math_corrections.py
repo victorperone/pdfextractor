@@ -232,14 +232,13 @@ class TestHeadingMetrics:
         # level_total should be 2 matched pairs, one correct, one wrong
         assert m["heading_level_accuracy"] == 0.5
 
-    def test_heading_text_cer_none_when_no_matched_pairs(self):
-        """No shared headings → heading_text_cer is None."""
+    def test_heading_text_cer_measures_different_text_at_same_position(self):
+        """A structurally matched heading must expose its actual text error."""
         ref = "# Alpha\n\nTexto."
         hyp = "# Beta\n\nTexto."
         m = compute_structure_metrics(hyp, ref)
-        # 'Alpha' ≠ 'Beta' normalized → no exact match pair → None
-        assert m["heading_text_cer"] is None
-        assert m["heading_matched_count"] == 0
+        assert m["heading_text_cer"] == 0.8
+        assert m["heading_matched_count"] == 1
 
     def test_heading_text_cer_zero_on_perfect_match(self):
         """Identical heading → heading_text_cer=0."""

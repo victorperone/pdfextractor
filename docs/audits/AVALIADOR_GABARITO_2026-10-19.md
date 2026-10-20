@@ -22,6 +22,13 @@ marcadores/cercas, offsets e identidade do parser:
 A sexta etapa protege a publicação contra sobrescrita e colisões de artefatos:
 [CORRECOES_ETAPA_6_2026-10-19.md](CORRECOES_ETAPA_6_2026-10-19.md).
 
+A sétima etapa completa o relatório canônico e os diagnósticos por página:
+[CORRECOES_ETAPA_7_2026-10-19.md](CORRECOES_ETAPA_7_2026-10-19.md).
+
+A oitava etapa valida formalmente o schema, corrige adaptadores legados e
+otimiza cálculos exatos; registra também a execução autorizada de V3/V4/V5:
+[CORRECOES_ETAPA_8_2026-10-19.md](CORRECOES_ETAPA_8_2026-10-19.md).
+
 ## Estado auditado e escopo
 
 - HEAD: `439bd75` (`fix: não pontuar células vazias de tabelas ausentes`).

@@ -100,9 +100,11 @@ from structured_pdf_text.evaluation.aggregation import (
 )
 
 from structured_pdf_text.evaluation.evaluator import EvaluationRequest, evaluate
+from structured_pdf_text.evaluation.validation import validate_result, result_schema, EvaluationValidationError
 
 __all__ = [
     "EvaluationRequest", "evaluate",
+    "validate_result", "result_schema", "EvaluationValidationError",
     "MarkdownNode", "NodeKind", "NormProfile", "MetricStatus",
     "MetricResult", "AlignedPair", "AlignmentStatus", "PageScope",
     "normalize", "parse_document", "PARSER_VERSION", "build_page_scope",

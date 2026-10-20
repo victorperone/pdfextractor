@@ -227,13 +227,14 @@ def test_text_resource_failure_is_explicit_and_prevents_ranking():
     assert result["evaluation"]["status"] == "partial"
     assert not result["evaluation"]["rank_eligible"]
     assert "evaluation_resource_limit" in result["evaluation"]["rank_ineligibility_reasons"]
-    assert result["operational"]["benchmark_status"] == "valid"
+    # Evaluation availability does not establish an observed extraction status.
+    assert result["operational"]["benchmark_status"] is None
     assert result["evaluator"]["resource_policy"]["max_text_edit_cells"] == 10
 
 
 def test_alignment_budget_is_not_reported_as_all_blocks_missing():
     body = "Alfa\n\nBeta"
-    result = evaluate(EvaluationRequest(body, body, max_alignment_pairs=1))
+    result = evaluate(EvaluationRequest(body, body.replace("Alfa", "# Alfa"), max_alignment_pairs=1))
     assert result["quality"]["text"]["cer_sequential_normalized"]["value"] == 0
     assert result["quality"]["text"]["aligned_block_text_cer"]["status"] == "resource_limit"
     for group in ("structure", "reading_order"):

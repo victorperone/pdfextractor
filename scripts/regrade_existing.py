@@ -217,6 +217,8 @@ def _generate_error_report(
         lines.append(f"- Content coverage recall: {val2:.4f}" if val2 is not None else "- Content coverage recall: N/A")
         lines.append("")
 
+    from structured_pdf_text.evaluation.report_renderer import render_run_sections
+    lines += ["", *render_run_sections([(engine, doc.to_dict())])]
     return "\n".join(lines)
 
 

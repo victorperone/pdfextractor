@@ -221,6 +221,36 @@ def _detect_merge(
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _identity_pairs(R: list[MarkdownNode], H: list[MarkdownNode], min_score: float,
+                    ambiguity_margin: float) -> list[AlignedPair] | None:
+    """Exact greedy result for equal normalized sequences, without an N² matrix.
+
+    Each diagonal has maximal text/kind/page/order score for its row, and a
+    strictly better order score than any competing column. No unmatched nodes
+    remain for provenance detection. Raw text/ordinal errors are still graded
+    by the metric pipeline; this shortcut changes no content normalization.
+    """
+    if not R or len(R) != len(H):
+        return None
+    if any((r.kind, r.page, normalize(r.visible_text, NormProfile.UNICODE_LAYOUT)) !=
+           (h.kind, h.page, normalize(h.visible_text, NormProfile.UNICODE_LAYOUT))
+           for r, h in zip(R, H)):
+        return None
+    result = []
+    for index, (ref, hyp) in enumerate(zip(R, H)):
+        score, reasons = compute_pair_score(ref, hyp, index, len(R), index, len(H))
+        if not score >= min_score or (min_score <= 0 and ambiguity_margin >= score):
+            return None
+        result.append(AlignedPair(
+            reference_id=ref.node_id, hypothesis_id=hyp.node_id,
+            status=AlignmentStatus.MATCHED, alignment_score=round(score, 4), text_similarity=1.0,
+            type_expected=ref.kind, type_observed=hyp.kind, page_expected=ref.page, page_observed=hyp.page,
+            reference_order=ref.order_index, hypothesis_order=hyp.order_index,
+            ambiguity=False, reasons=reasons,
+        ))
+    return result
+
+
 def align_blocks(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
@@ -253,6 +283,9 @@ def align_blocks(
     if (isinstance(max_candidate_pairs, bool) or not isinstance(max_candidate_pairs, int)
             or max_candidate_pairs < 1):
         raise ValueError("max_candidate_pairs must be a positive integer")
+    identity = _identity_pairs(R, H, min_score, ambiguity_margin)
+    if identity is not None:
+        return identity
     if nr * nh > max_candidate_pairs:
         raise AlignmentResourceLimit(
             f"Block alignment requires {nr * nh} pairs; budget is {max_candidate_pairs}"

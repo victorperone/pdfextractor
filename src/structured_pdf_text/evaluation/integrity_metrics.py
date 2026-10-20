@@ -4,7 +4,7 @@ Metrics
 -------
 MET-I01  duplicate_excess_rate      fraction of content blocks exceeding ref multiplicity
 MET-I02  missing_page_rate          fraction of selected pages absent from hypothesis
-MET-I03  page_content_coverage_recall  page-level text coverage (ref chars recovered)
+MET-I03  page_content_coverage_recall  multiset token recall of canonical visible text
 MET-I04  markdown_validity          parse error and construct counts (descriptive)
 MET-I05  header_footer_heuristic    edge-content repetition (diagnostic only, not in score)
 
@@ -78,12 +78,11 @@ def duplicate_excess_rate(
     rate = Σ excess / total_hyp_blocks_evaluated
     """
     def _fingerprints(nodes: Sequence[MarkdownNode]) -> list[str]:
+        from .canonical_document import CanonicalDocument
         return [
             _norm(n.visible_text)
-            for n in nodes
-            if n.kind in (NodeKind.PARAGRAPH, NodeKind.HEADING,
-                          NodeKind.LIST_ITEM, NodeKind.TABLE_CELL)
-            and len(_norm(n.visible_text)) >= min_text_len
+            for n in CanonicalDocument.from_nodes(nodes).leaf_nodes
+            if len(_norm(n.visible_text)) >= min_text_len
         ]
 
     ref_fps = _fingerprints(ref_nodes)
@@ -147,28 +146,23 @@ def page_content_coverage_recall(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
 ) -> MetricResult:
-    """MET-I03: Character-level recall of visible content across all pages.
+    """MET-I03: Multiset word-token recall of canonical visible text.
 
-    Uses visible_text of matched structural blocks (paragraph + heading +
-    list_item + table_cell) as a proxy for text coverage.
-
-    recall = chars_recovered / chars_in_reference
+    Includes literal code and counts each terminal text unit once. Text is
+    normalized and lowercased; token multiplicity matters, order does not.
+    Character counts are diagnostic; recall = recovered tokens / reference tokens.
     """
-    _TEXT_KINDS = frozenset({
-        NodeKind.PARAGRAPH, NodeKind.HEADING,
-        NodeKind.LIST_ITEM, NodeKind.TABLE_CELL,
-    })
-
-    ref_text = " ".join(_norm(n.visible_text) for n in ref_nodes if n.kind in _TEXT_KINDS)
-    hyp_text = " ".join(_norm(n.visible_text) for n in hyp_nodes if n.kind in _TEXT_KINDS)
+    from .canonical_document import CanonicalDocument
+    ref_text = _norm(CanonicalDocument.from_nodes(ref_nodes).visible_text)
+    hyp_text = _norm(CanonicalDocument.from_nodes(hyp_nodes).visible_text)
 
     ref_len = len(ref_text)
     if ref_len == 0:
         if len(hyp_text) == 0:
             return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-I03",
-                                {"ref_chars": 0, "hyp_chars": 0, "correct_absence": True})
+                                {"ref_chars": 0, "hyp_chars": 0, "correct_absence": True}, direction="higher_is_better")
         return _make_result(0.0, MetricStatus.FALSE_POSITIVE_ONLY, "MET-I03",
-                            {"ref_chars": 0, "hyp_chars": len(hyp_text)})
+                            {"ref_chars": 0, "hyp_chars": len(hyp_text)}, direction="higher_is_better")
 
     # Token-level multiset recall (word tokens)
     ref_tokens = Counter(ref_text.split())
@@ -356,8 +350,8 @@ def compute_integrity_metrics(
     selected_pages: set[int] | None = None,
     selected_reference: set[int] | None = None,
     hyp_page_nums: set[int] | None = None,
-    hyp_raw_text: str = "",
-    ref_raw_text: str = "",
+    hyp_raw_text: str | None = None,
+    ref_raw_text: str | None = None,
 ) -> IntegrityMetrics:
     """Compute all integrity metrics.
 
@@ -382,11 +376,11 @@ def compute_integrity_metrics(
     cov = page_content_coverage_recall(ref_nodes, hyp_nodes)
 
     validity: MarkdownValidityReport | None = None
-    if hyp_raw_text:
+    if hyp_raw_text is not None:
         validity = markdown_validity_report(hyp_raw_text)
 
     edge: EdgeContentDiagnostic | None = None
-    if hyp_raw_text and ref_raw_text:
+    if hyp_raw_text is not None and ref_raw_text is not None:
         edge = edge_content_diagnostic(hyp_raw_text, ref_raw_text)
 
     return IntegrityMetrics(

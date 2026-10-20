@@ -378,7 +378,10 @@ def cli(tmp_path, docs, *options):
 
 @pytest.mark.parametrize("case", ["pdf", "protocol", "missing_policy", "duplicate_pages", "resource"])
 def test_cli_rejects_same_failures_and_preserves_prior_report(tmp_path, case):
-    a, b = comparison_result(), comparison_result()
+    body = "## Página 1\n\nAlfa\n\n## Página 2\n\nBeta"
+    a = evaluate(EvaluationRequest(body, body, mode="balanced", pdf_sha256="b" * 64,
+        run_metadata={"benchmark_protocol_id": "protocol-v1"}))
+    b = copy.deepcopy(a)
     if case == "pdf":
         b["inputs"]["pdf_sha256"] = "d" * 64
     elif case == "protocol":
@@ -393,7 +396,7 @@ def test_cli_rejects_same_failures_and_preserves_prior_report(tmp_path, case):
     (tmp_path / "comparison.md").write_text("prior report", encoding="utf-8")
     completed, output = cli(tmp_path, [a, b])
     assert completed.returncode != 0
-    assert "not comparable" in completed.stderr
+    assert ("not comparable" in completed.stderr or "invalid canonical result" in completed.stderr)
     assert output.read_text() == "prior report"
 
 
@@ -406,7 +409,7 @@ def test_real_evaluator_documents_obey_shared_contract(tmp_path):
     a = evaluate(request)
     b = evaluate(replace(request, hyp_text="## Página 1\n\nTexto R$ 10,00",
                          engine="different", run_id="partial"))
-    assert a["evaluator"]["metric_definitions_version"] == "3.0.4"
+    assert a["evaluator"]["metric_definitions_version"] == "3.0.5"
     assert a["evaluator"]["aggregation_policy"] == "finite-numeric-outcomes-v1"
     assert compare(a, b) == (True, [])
     completed, output = cli(tmp_path, [a, b])

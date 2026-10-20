@@ -460,7 +460,7 @@ def text_coverage_recall(
                             profile)
 
     if n_ref == 0:
-        return _make_result(None, MetricStatus.FALSE_POSITIVE_ONLY, "MET-TX06",
+        return _make_result(None, MetricStatus.UNDEFINED_DENOMINATOR, "MET-TX06",
                             "higher_is_better",
                             {"tp_tokens": 0, "ref_tokens": 0, "hyp_tokens": n_hyp},
                             profile)
@@ -498,7 +498,7 @@ def text_coverage_precision(
                             profile)
 
     if n_hyp == 0:
-        return _make_result(None, MetricStatus.FALSE_NEGATIVE_ONLY, "MET-TX07",
+        return _make_result(None, MetricStatus.UNDEFINED_DENOMINATOR, "MET-TX07",
                             "higher_is_better",
                             {"tp_tokens": 0, "ref_tokens": n_ref, "hyp_tokens": 0},
                             profile)

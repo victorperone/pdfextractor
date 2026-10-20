@@ -552,31 +552,11 @@ def _get_value_v2(data: dict, dot_path: str) -> float | None:
 
     For quality metrics the path is 'section.key' inside data['quality'].
     For integrity metrics the path is 'integrity.key' at the top level.
-    The terminal node is either a MetricResult dict (has 'value' key) or a
-    plain float.
+    The terminal node is a canonical MetricResult dict. Only finite values
+    with an applicable status may enter the comparison.
     """
-    if dot_path.startswith("integrity."):
-        root = data.get("integrity") or {}
-        key = dot_path[len("integrity."):]
-        node = root.get(key)
-    else:
-        quality = data.get("quality") or {}
-        parts = dot_path.split(".", 1)
-        if len(parts) != 2:
-            return None
-        section, key = parts
-        section_data = quality.get(section) or {}
-        node = section_data.get(key)
-
-    if node is None:
-        return None
-    if isinstance(node, dict):
-        v = node.get("value")
-        return float(v) if v is not None else None
-    try:
-        return float(node)
-    except (TypeError, ValueError):
-        return None
+    from structured_pdf_text.evaluation.reporting import metric_value
+    return metric_value(data, dot_path)
 
 
 def _best_engines_v2(
@@ -584,7 +564,8 @@ def _best_engines_v2(
     direction: str,
     tol: float = 1e-6,
 ) -> set[str]:
-    valid = {eng: v for eng, v in values.items() if v is not None}
+    from structured_pdf_text.evaluation.reporting import finite_number
+    valid = {eng: v for eng, v in values.items() if finite_number(v)}
     if not valid:
         return set()
     if direction == "lower":
@@ -596,9 +577,11 @@ def _best_engines_v2(
 
 
 def _render_comparison_table_v2(all_data: list[tuple[str, dict]]) -> str:
-    """Render a Markdown comparison table from V2 metrics documents."""
+    """Render canonical metrics and the operational/page diagnostic sections."""
+    from structured_pdf_text.evaluation.report_renderer import cell as escape_cell, render_run_sections, unique_run_labels
+    all_data = unique_run_labels(all_data)
     engines = [name for name, _ in all_data]
-    engine_headers = " | ".join(f"**{e}**" for e in engines)
+    engine_headers = " | ".join(f"**{escape_cell(e)}**" for e in engines)
 
     _SECTIONS = {
         "text":          "Grupo 1 — Texto (MET-TX01–TX07)",
@@ -614,9 +597,9 @@ def _render_comparison_table_v2(all_data: list[tuple[str, dict]]) -> str:
         "",
         f"Métricas do avaliador (`schema_version: {_V3_SCHEMA}`).",
         "",
-        f"Engines avaliadas: {', '.join(f'`{e}`' for e in engines)}",
+        f"Engines avaliadas: {', '.join(escape_cell(e) for e in engines)}",
         "",
-        "Legenda: **negrito** = melhor valor na linha  |  ↓ menor é melhor  |  ↑ maior é melhor  |  — = N/A",
+        "Legenda: **negrito** = melhor valor na linha  |  ↓ menor é melhor  |  ↑ maior é melhor  |  — = N/A ou indisponível; consulte os estados e a cobertura.",
         "",
     ]
 
@@ -658,27 +641,8 @@ def _render_comparison_table_v2(all_data: list[tuple[str, dict]]) -> str:
             f"| {display_name} {arrow} | " + " | ".join(row_cells) + " |"
         )
 
-    # --- Metadata table ---
-    lines += [
-        "",
-        "---",
-        "",
-        "## Metadados dos Runs",
-        "",
-        "| Engine | Run ID | Schema | Status | Rank Eligible | Métricas aplicáveis | Métricas indisponíveis |",
-        "|---|---|---|---|---|---:|---:|",
-    ]
-    for eng, data in all_data:
-        evaluation = data.get("evaluation") or {}
-        run_id = (data.get("evaluator") or {}).get("run_id", "—")
-        schema = data.get("schema_version", "—")
-        status = evaluation.get("status", "—")
-        rank_eligible = "sim" if evaluation.get("rank_eligible") else "não"
-        applicable = evaluation.get("applicable_metric_count", "—")
-        unavailable = evaluation.get("unavailable_metric_count", "—")
-        lines.append(
-            f"| `{eng}` | {run_id} | `{schema}` | {status} | {rank_eligible} | {applicable} | {unavailable} |"
-        )
+    lines += ["", "---", ""]
+    lines += render_run_sections(all_data)
 
     lines += ["", ""]
     return "\n".join(lines)
@@ -754,7 +718,8 @@ def main() -> int:
                 raise ValueError("metrics JSON must be an object")
             # V2 stores engine under evaluator.engine; V1 stores it at top level.
             engine = (
-                data.get("engine")
+                (data.get("inputs") or {}).get("engine")
+                or data.get("engine")
                 or (data.get("evaluator") or {}).get("engine")
                 or p.stem
             )
@@ -784,6 +749,17 @@ def main() -> int:
         print("  WARNING: mixed schema versions (--skip-validation active)")
 
     is_v3 = all(_detect_schema(data) == "v3" for _, data in all_data)
+    if is_v3:
+        from structured_pdf_text.evaluation.report_renderer import unique_run_labels
+        all_data = unique_run_labels(all_data)
+        if not args.skip_validation:
+            from structured_pdf_text.evaluation.validation import validate_result, EvaluationValidationError
+            for label, data in all_data:
+                try:
+                    validate_result(data)
+                except EvaluationValidationError as exc:
+                    print(f"ERROR: invalid canonical result '{label}': {exc}. Re-evaluate with regrade_existing.py.", file=sys.stderr)
+                    return 1
 
     # --- Comparability validation ---
     if not args.skip_validation:

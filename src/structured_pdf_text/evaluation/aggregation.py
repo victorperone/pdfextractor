@@ -231,6 +231,7 @@ class V2DocumentMetrics:
     evaluator_info: dict = field(default_factory=dict)
     inputs:         dict = field(default_factory=dict)
     operational:    dict = field(default_factory=dict)
+    per_page:       list[dict] = field(default_factory=list)
 
     # Evaluation status
     evaluation_status:        str = "ok"  # ok | partial | unavailable
@@ -277,6 +278,7 @@ class V2DocumentMetrics:
             },
             "integrity":      self.integrity,
             "operational":    self.operational,
+            "per_page":       self.per_page,
             "evaluation": {
                 "status":                  self.evaluation_status,
                 "rank_eligible":           self.rank_eligible,
