@@ -2,7 +2,9 @@
 
 PDFium's integer crop rounding is modelled explicitly. Border pixels whose
 footprint crosses the requested boundary are whitened, rather than granting
-extra reading area. Original embedded bitmaps are never exposed: without a
+extra reading area. A local pipeline may instead request removal of these
+synthetic border pixels, with a new frame confined to the same authorization.
+Original embedded bitmaps are never exposed: without a
 visibility proof the service uses the visible PDF composition.
 """
 from __future__ import annotations
@@ -175,8 +177,11 @@ origin is translated here. Operations are serialized per service instance.
         actual_box = full_frame.bbox_to_page(BBox(left, top, left+width, top+height))
         return local, local_page, width, height, actual_box
 
-    def render(self, request: OCRWorkRequest, authorization_id: str, bbox: BBox, *, scale: float = 1.0) -> RasterLease:
+    def render(self, request: OCRWorkRequest, authorization_id: str, bbox: BBox, *, scale: float = 1.0,
+               boundary_policy: str = "mask") -> RasterLease:
         with self._lock:
+            if boundary_policy not in ("mask", "trim"):
+                raise ValueError("Raster boundary policy must be mask or trim")
             pool = self._request_pool(request)
             box = valid_bbox(bbox)
             self._registry.validate(request, authorization_id, box)
@@ -205,20 +210,36 @@ origin is translated here. Operations are serialized per service instance.
                 safe = frame.page_bbox_to_pixel(box)
                 x0, y0 = max(0, math.ceil(safe.x0)), max(0, math.ceil(safe.y0))
                 x1, y1 = min(image.width, math.floor(safe.x1)), min(image.height, math.floor(safe.y1))
-                draw = ImageDraw.Draw(image)
-                if x1 <= x0 or y1 <= y0:
-                    draw.rectangle((0, 0, image.width, image.height), fill="white")
+                discarded_border = (0, 0, 0, 0)
+                if boundary_policy == "trim":
+                    if x1 <= x0 or y1 <= y0:
+                        raise ValueError("Region contains no fully authorized pixel at this scale")
+                    retained_box = frame.bbox_to_page(BBox(x0, y0, x1, y1))
+                    # Validate before publishing; neither tolerance nor clipping
+                    # of recognized tokens may expand the authorization.
+                    self._registry.validate(request, authorization_id, retained_box)
+                    discarded_border = (x0, y0, image.width-x1, image.height-y1)
+                    if any(discarded_border):
+                        trimmed = image.crop((x0, y0, x1, y1))
+                        image.close()
+                        image = trimmed
+                        frame = RasterFrame(retained_box, *image.size)
                 else:
-                    if x0: draw.rectangle((0, 0, x0-1, image.height), fill="white")
-                    if y0: draw.rectangle((0, 0, image.width, y0-1), fill="white")
-                    if x1 < image.width: draw.rectangle((x1, 0, image.width, image.height), fill="white")
-                    if y1 < image.height: draw.rectangle((0, y1, image.width, image.height), fill="white")
+                    draw = ImageDraw.Draw(image)
+                    if x1 <= x0 or y1 <= y0:
+                        draw.rectangle((0, 0, image.width, image.height), fill="white")
+                    else:
+                        if x0: draw.rectangle((0, 0, x0-1, image.height), fill="white")
+                        if y0: draw.rectangle((0, 0, image.width, y0-1), fill="white")
+                        if x1 < image.width: draw.rectangle((x1, 0, image.width, image.height), fill="white")
+                        if y1 < image.height: draw.rectangle((0, y1, image.width, image.height), fill="white")
                 self.check_cancelled()
                 self.emit(request, "raster", {"authorization_id": authorization_id, "requested_scale": scale,
                                                "width_px": frame.width_px, "height_px": frame.height_px,
                                                "effective_scale_x": frame.width_px/frame.bbox.width,
                                                "effective_scale_y": frame.height_px/frame.bbox.height,
-                                               "boundary_policy": "white_partial_pixel_footprints"})
+                                               "boundary_policy": "trim_partial_pixel_footprints" if boundary_policy == "trim" else "white_partial_pixel_footprints",
+                                               **({"discarded_border_px": discarded_border} if boundary_policy == "trim" else {})})
                 lease = self._publish(request, authorization_id, image, frame, reservation)
                 image = None
                 return lease

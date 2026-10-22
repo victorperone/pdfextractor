@@ -2,6 +2,7 @@
 from structured_pdf_text.ocr.pipeline.policies import CellRecoveryPolicy, ConservativeIntegrationPolicy, RegionalCandidatePolicy, RegionalRecoveryProfile, TokenRefinementPolicy
 from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
 from structured_pdf_text.ocr.pipeline.policies import FigureSegmentationPolicy
+from structured_pdf_text.ocr.pipeline.policies import RasterBoundaryPolicy
 
 # Kept local so future EasyOCR tuning cannot alter another engine. Values
 # capture the common legacy schedule; changing them is a separate experiment.
@@ -24,6 +25,7 @@ CELL_POLICY = CellRecoveryPolicy()
 
 TOKEN_REFINEMENT_POLICY = TokenRefinementPolicy()
 FIGURE_SEGMENTATION_POLICY = FigureSegmentationPolicy()
+RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy()
 
 FUSION_POLICY = CandidateFusionPolicy(
     detector_families=("craft_greedy", "craft_beam", "dbnet"),

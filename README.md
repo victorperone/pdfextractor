@@ -871,6 +871,11 @@ A migração conecta os quatro pipelines ao contrato de trabalho autorizado,
 mantém integração e conservação no núcleo e fixa identidades de modelos e
 providers. Consulte [o estado de implementação e os gates pendentes](docs/OCR_Decoupling_Implementation_Status.md).
 
+RapidOCR usa uma policy local que remove bordas sintéticas do raster e mantém
+o frame dentro da autorização original. Essa correção passou nos testes de
+geometria e nos controles operacionais; falsos positivos em figuras sem texto
+continuam bloqueando a homologação de qualidade.
+
 A seleção regional, células, notas, linhas fracas, dados críticos e refinamentos
 dedicados de figuras/tabelas visuais aplicam candidatas por propostas tipadas,
 com conservação central. Dados críticos preservam a posição e a linhagem dos

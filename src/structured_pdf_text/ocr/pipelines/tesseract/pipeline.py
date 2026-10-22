@@ -4,7 +4,7 @@ import structured_pdf_text.ocr.factory as factory
 from structured_pdf_text.ocr.pipeline.adapters import AuthorizedBackendPipeline
 from structured_pdf_text.ocr.pipeline.contracts import EngineSelection
 from structured_pdf_text.ocr.registry import get_entry
-from .policy import CELL_POLICY, FIGURE_SEGMENTATION_POLICY, FUSION_POLICY, INTEGRATION_POLICY, RECOVERY_POLICY, TOKEN_REFINEMENT_POLICY
+from .policy import CELL_POLICY, FIGURE_SEGMENTATION_POLICY, FUSION_POLICY, INTEGRATION_POLICY, RASTER_BOUNDARY_POLICY, RECOVERY_POLICY, TOKEN_REFINEMENT_POLICY
 
 
 class TesseractPipeline(AuthorizedBackendPipeline):
@@ -14,6 +14,7 @@ class TesseractPipeline(AuthorizedBackendPipeline):
     token_refinement_policy = TOKEN_REFINEMENT_POLICY
     fusion_policy = FUSION_POLICY
     figure_segmentation_policy = FIGURE_SEGMENTATION_POLICY
+    raster_boundary_policy = RASTER_BOUNDARY_POLICY
 
     def __init__(self, resolved, backend):
         entry = get_entry(resolved.engine)

@@ -13,7 +13,7 @@ from .contracts import (
 )
 from .converters import from_domain
 from .diagnostics import LegacyDiagnosticsProjector
-from .policies import LEGACY_CELL_POLICY, LEGACY_COMPATIBILITY_RECOVERY_PROFILE, LEGACY_INTEGRATION_POLICY
+from .policies import LEGACY_CELL_POLICY, LEGACY_COMPATIBILITY_RECOVERY_PROFILE, LEGACY_INTEGRATION_POLICY, LEGACY_RASTER_BOUNDARY_POLICY
 
 
 class AuthorizedBackendPipeline:
@@ -25,6 +25,7 @@ No other engine or readiness probe is loaded by the execution adapter.
 """
     integration_policy = LEGACY_INTEGRATION_POLICY
     cell_policy = LEGACY_CELL_POLICY
+    raster_boundary_policy = LEGACY_RASTER_BOUNDARY_POLICY
 
     def __init__(self, engine, *, selection: EngineSelection | None = None, render_scale: float = 1.0,
                  capabilities: tuple[str, ...] = ("page", "region"), settings=None,
@@ -210,6 +211,7 @@ No other engine or readiness probe is loaded by the execution adapter.
                         with ExitStack() as stack:
                             lease = stack.enter_context(services.render(
                                 request, auth.authorization_id, box, scale=request.render_scale,
+                                boundary_policy=self.raster_boundary_policy.mode,
                             ))
                             if request.preprocessing_rotation % 360:
                                 lease = stack.enter_context(services.rotate(lease, request.preprocessing_rotation))

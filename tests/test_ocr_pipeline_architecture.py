@@ -92,6 +92,8 @@ def test_each_builtin_pipeline_owns_a_local_recovery_profile():
     assert len({id(pipeline.token_refinement_policy) for pipeline in pipelines}) == 4
     assert len({id(pipeline.fusion_policy) for pipeline in pipelines}) == 4
     assert len({id(pipeline.figure_segmentation_policy) for pipeline in pipelines}) == 4
+    assert len({id(pipeline.raster_boundary_policy) for pipeline in pipelines}) == 4
+    assert tuple(pipeline.raster_boundary_policy.mode for pipeline in pipelines) == ("mask", "mask", "trim", "mask")
     assert all(profile.scale_factors("region", quality_policy="baseline") == (1.0,) for profile in profiles)
     assert all(profile.scale_factors("critical_data") == (1.5, 2.0, 3.0) for profile in profiles)
 

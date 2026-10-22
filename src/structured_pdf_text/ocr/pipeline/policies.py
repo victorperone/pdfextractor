@@ -47,6 +47,20 @@ LEGACY_INTEGRATION_POLICY = ConservativeIntegrationPolicy("legacy-compat-v1")
 
 
 @dataclass(frozen=True, slots=True)
+class RasterBoundaryPolicy:
+    """Local choice of authorized raster boundary representation."""
+
+    mode: str = "mask"
+
+    def __post_init__(self):
+        if self.mode not in ("mask", "trim"):
+            raise ValueError("Raster boundary policy must be mask or trim")
+
+
+LEGACY_RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy()
+
+
+@dataclass(frozen=True, slots=True)
 class CellRecoveryPolicy:
     """Candidate selection values owned independently by each engine pipeline."""
 

@@ -53,7 +53,7 @@ from structured_pdf_text.ocr.pipeline.adapters import AuthorizedBackendPipeline
 from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
 from structured_pdf_text.ocr.pipeline.policies import (
     CellRecoveryPolicy, ConservativeIntegrationPolicy, FigureSegmentationPolicy,
-    RegionalRecoveryProfile, TokenRefinementPolicy,
+    RasterBoundaryPolicy, RegionalRecoveryProfile, TokenRefinementPolicy,
 )
 
 class MinhaPipeline(AuthorizedBackendPipeline):
@@ -63,6 +63,7 @@ class MinhaPipeline(AuthorizedBackendPipeline):
     token_refinement_policy = TokenRefinementPolicy()
     fusion_policy = CandidateFusionPolicy()
     figure_segmentation_policy = FigureSegmentationPolicy()
+    raster_boundary_policy = RasterBoundaryPolicy()
 
 def build_pipeline(resolved):
     backend = build_ocr_backend(replace(
@@ -96,6 +97,15 @@ validável para o request original. Preserve IDs de autorizações, tokens e
 tentativas; propostas se referem a evidência realmente observada. `no_text`
 não carrega tokens, incidentes recuperados continuam nos diagnósticos e
 cancelamento não produz sucesso parcial silencioso.
+
+O modo de borda padrão `mask` substitui por branco pixels cujo footprint
+ultrapassa a área autorizada. Uma engine pode escolher
+`RasterBoundaryPolicy("trim")`: o serviço remove essas bordas sintéticas,
+valida o retângulo restante contra a autorização original e recalcula o frame.
+Não há tolerância adicional nem clipping de tokens inválidos. Sem pixel
+inteiramente autorizado, `trim` falha antes da inferência. RapidOCR usa essa
+opção; as demais engines preservam `mask`. Isso é uma mudança funcional local
+e precisa de nova captura, sem substituir o baseline histórico.
 
 ## Integração e validação
 

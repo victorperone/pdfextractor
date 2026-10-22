@@ -16,13 +16,63 @@ como aprovadas.
 | PR-04 — registry/factory | Registry, settings lazy, configuração por engine/provider, factories e CLI. | Integrado; o registry aponta para resolvers dentro de cada pipeline (`easyocr`, `paddle`, `rapidocr`, `tesseract`) e readiness estática não carrega runtimes. A quinta engine fake continua usando resolver genérico. |
 | PR-05 — orquestração | `PdfTextExtractor` usa `PageCoordinator` e `OCRPageFacade`; cada inferência passa pelo serviço. Escala/rotação e tiles constam no request autorizado. | Caminho de produção conectado; quinta engine fake percorre CLI, factory, render, autorização e saída. Comparações reais V5 EasyOCR/Tesseract foram executadas e não são equivalentes; detalhes abaixo. |
 | PR-06 — policies/integrador | Policies locais de ranking/filtro/consenso numérico, fusão de candidatas, células, tokens e segmentação de figuras. `ProposalIntegrator` aplica regiões, células, dados críticos, figuras e tabelas visuais com snapshots, conservação, ownership, linhagem e replay. Tiles mantêm autorizações distintas e aplicação conjunta. | Os fluxos tipados previstos estão conectados à produção, incluindo os refinamentos dedicados. Somente seleções aceitas alteram os alvos; o helper público `ocr_table_cells(..., ocr_facade=...)` conserva o objeto original. Homologação por corpus continua pendente; isso não aprova equivalência com o legado. |
-| PR-07–10 — pipelines | Pipelines/settings/policies locais nas quatro engines; cada engine possui objetos independentes para recuperação, candidatos, integração, células, tokens, fusão e figuras. Estratégias maduras continuam nos backends específicos. Paddle worker usa protocolo 5 negociado com polígonos, proveniência, diagnósticos e falhas tipadas. | Código integrado. EasyOCR, Paddle e Tesseract concluíram os quatro controles V5; RapidOCR medium produziu parcialidade por detecção fora da autorização em V5-21. Equivalência com o legado e homologação das plataformas continuam abertas. |
+| PR-07–10 — pipelines | Pipelines/settings/policies locais nas quatro engines; cada engine possui objetos independentes para recuperação, candidatos, integração, células, tokens, fusão, figuras e representação da borda do raster. Estratégias maduras continuam nos backends específicos. Paddle worker usa protocolo 5 negociado com polígonos, proveniência, diagnósticos e falhas tipadas. | Código integrado. As quatro engines concluíram os controles V5. RapidOCR passou operacionalmente após remover bordas sintéticas antes da inferência, mas ainda produz falsos positivos em figuras sem texto. Equivalência com o legado, qualidade e homologação das plataformas continuam abertas. |
 | PR-11 — cancelamento | API aceita `cancellation_token`; Paddle e Tesseract podem interromper subprocessos sem deadline de inferência; trata corridas entre cancelamento e criação de processo. Os probes de identidade/healthcheck do backend Tesseract não impõem timeout. O `--list-langs` do preflight estático mantém orçamento diagnóstico opcional de 10 s e retorna `UNKNOWN`; não participa da extração. | Código e testes com executáveis/workers controlados implementados. Windows nativo e limitação de cancelamento durante chamadas EasyOCR/RapidOCR in-process continuam sem validação de plataforma. Prazos curtos de limpeza após kill permanecem. |
 | PR-12 — Paddle v6 | Somente `pt`, `pt-v6-medium` e `pt-v6-small` ativos; `pt-v5` rejeitado. Worker deixa de importar o arquivo local `ocr/paddle.py` como se fosse o pacote Paddle, corrigindo sua inicialização por filename. | Testes e E2E medium válidos. Smoke de célula real passou em valor negativo, identificador, integração e linhagem; falhou em acento porque reconhece `ÃO` em lugar de `AÇÃO`, tanto direto quanto worker. Paridade em células foi comprovada por smokes reais direto/worker e teste do protocolo com runtime substituído; relatórios e falhas semânticas ficam preservados. Windows continua sem homologação. |
 | PR-13 — RapidOCR v6 | Resolução explícita medium/small, manifesto/hash por estágio, setup, verificador, smoke e runners Bash/PowerShell atualizados. | Hashes dos quatro artefatos por tamanho verificados e charset português presente. Smokes medium e small passaram com ONNX Runtime e OpenVINO 2026.4.1 nos controles de acentos, valor, identificador e número. E2E real em V5 página 19 passou nas quatro combinações: medium/small × ONNX/OpenVINO; todos `valid`/`success`, com artefatos e providers identificados por hash/versão durante a execução. OpenVINO 2024.4.0 falhou ao importar o reconhecedor v6 (erro ONNX `Reshape`), validando a necessidade do novo pin. A [documentação upstream de suporte v6](https://github.com/RapidAI/RapidOCRDocs/blob/main/docs/blog/posts/inference_engine/support_PP-OCRv6_rec_engines.md) demonstra OpenVINO 2026.2.1. Instalação limpa Windows, comparação controlada de modelo e geometria/corpus ainda pendentes. |
 | PR-14 — aceite | Gate AST inclui também os consumidores fora de `ocr/`; quinta engine exercitada via CLI, guia de extensão e ADR publicados. | Consolidação de código avançou; aceite permanece pendente por divergências de corpus, smokes, dependências, defeitos P0 e plataformas. Não declarar release aceita antes disso. |
 
-## Validação e consolidação — 22/10/2026
+## Política de bordas do raster — 22/10/2026
+
+O incidente de geometria RapidOCR foi tratado com uma mudança funcional local,
+sem alterar o extrator nativo nem afrouxar a autorização. Cada engine possui
+`RasterBoundaryPolicy` própria. EasyOCR, Paddle e Tesseract preservam `mask`;
+RapidOCR seleciona `trim`.
+
+Em `trim`, o serviço conserva somente pixels cujo footprint inteiro pertence
+ao crop autorizado, remove a borda que antes era branca e recalcula o frame
+para o retângulo efetivamente entregue. Valida esse retângulo antes da
+publicação. Sem pixel completo, a operação falha antes da inferência. Tokens
+externos continuam rejeitados; não há clipping de saída nem tolerância extra.
+O custo do raster original e das cópias continua reservado antes da alocação;
+o lease final libera a diferença de memória.
+
+- **222 testes focados passaram**, incluindo detecções na borda, negativas de
+  output externo, quatro rotações, origem deslocada, CropBox real, igualdade
+  dos pixels conservados, roundtrip de coordenadas, pixel insuficiente e
+  liberação de reservas. XML: `pytest-raster-boundary-11.xml`.
+- Suíte integral: **2.775 passed, 5 skipped e 4 xfailed**, em **247,043 s**.
+  XML: `outputs/validation-ocr-decoupling-20261022/pytest-raster-boundary-full-12.xml`.
+  Gate de imports, `compileall` e `git diff --check` passaram.
+- RapidOCR medium ONNX, V5 **19/21/24/31**, run
+  `v5-rapidocr-medium-trim-20261022-11`: `valid` em **208,9 s**, sem falhas de
+  autorização. Medium OpenVINO, V5 **21**, run
+  `v5-rapidocr-medium-openvino-trim-20261022-11`: `valid` em **16,1 s**, também
+  sem falhas de autorização. Fontes/hashes: `source-raster-boundary-11/`.
+- A correção geométrica **não aprova qualidade**: ambos os providers reconhecem
+  `D` com confiança aproximada de **0,612** na figura sem texto V5-21. ONNX
+  também produz texto espúrio em V5-31. O controle negativo permanece
+  **reprovado** em `rapidocr-negative-figure-control-11.json`.
+- A comparação RapidOCR anterior/posterior registra **509 diferenças**,
+  Markdown distinto e zero erros de identidade. É uma mudança funcional de
+  raster, não uma equivalência estrutural aprovada. Linhas nativas por região
+  permanecem idênticas nos quatro controles. Relatório:
+  `comparisons/rapidocr-raster-boundary-11.json`.
+- Os smokes de célula RapidOCR passaram nas quatro combinações
+  **medium/small × ONNX Runtime/OpenVINO**, verificando acentos, valor negativo,
+  identificador, integração e linhagem. Relatórios: `cells/*-trim-11.json`.
+- O controle Tesseract, run `v5-tesseract-boundary-regression-20261022-11`,
+  terminou `valid` em **4,8 s**. Comparado com `figure-local-policies-05`, mantém
+  Markdown, conteúdo, geometria, estrutura e linhas nativas; as **84**
+  diferenças são somente diagnósticas, sem erro de identidade.
+- A auditoria de dependências preserva as exigências efetivas dos pacotes:
+  EasyOCR 1.7.2 exige `opencv-python-headless`, RapidOCR 3.9.2 exige
+  `opencv_python` e PaddleX 3.7.2 com extra OCR exige `opencv-contrib-python`.
+  Só a distribuição contrib 4.10.0.84 está instalada. `pip check` continua
+  reprovado; não foi alterado metadata upstream nem instalado outro pacote
+  sobre o mesmo módulo `cv2`. Evidência: `opencv-dependency-audit-11.json`.
+
+## Validação e consolidação anterior — 22/10/2026
 
 - Dados críticos usam `TokenTarget` e composição explícita `join_critical`.
   O integrador valida a ordem das evidências selecionadas, conserva sinais e
@@ -293,8 +343,9 @@ como aprovadas.
    artefatos originais. A amostra EasyOCR V5 (páginas 19/24/31) já comprova
    divergências e mantém bloqueio de qualidade até análise e correção.
 3. Homologar os fluxos tipados de dados críticos e refinamentos dedicados de
-   figuras/tabelas visuais em corpus real e fechar o incidente de geometria
-   RapidOCR V5-21. O código desses fluxos está integrado, mas os testes
+   figuras/tabelas visuais em corpus real e corrigir falsos positivos RapidOCR
+   nas figuras sem texto V5-21/V5-31. O incidente de autorização foi resolvido,
+   mas o controle semântico permanece reprovado. O código está integrado; testes
    sintéticos e a conclusão operacional de uma extração não aprovam qualidade.
 4. Executar gates de corpus/endurance e revisar skips/xfails. Os problemas
    anteriores de conteúdo coberto V3 e CNPJ nativo V5 continuam registrados;

@@ -2,6 +2,7 @@
 from structured_pdf_text.ocr.pipeline.policies import CellRecoveryPolicy, ConservativeIntegrationPolicy, RegionalCandidatePolicy, RegionalRecoveryProfile, TokenRefinementPolicy
 from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
 from structured_pdf_text.ocr.pipeline.policies import FigureSegmentationPolicy
+from structured_pdf_text.ocr.pipeline.policies import RasterBoundaryPolicy
 
 # Paddle can evolve this profile independently after its own equivalence gate.
 CANDIDATE_POLICY = RegionalCandidatePolicy()
@@ -23,5 +24,6 @@ CELL_POLICY = CellRecoveryPolicy()
 
 TOKEN_REFINEMENT_POLICY = TokenRefinementPolicy()
 FIGURE_SEGMENTATION_POLICY = FigureSegmentationPolicy()
+RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy()
 
 FUSION_POLICY = CandidateFusionPolicy()

@@ -23,8 +23,9 @@ leaderboard claims describe their recorded model configurations; PP-OCRv6 must
 be benchmarked in a new namespace before those comparisons are updated.
 
 The authorized pipeline migration is still being validated. Reduced V5 controls
-show differences from legacy outputs, and RapidOCR has an out-of-scope detection
-rejected in page 21. These results do not replace the historical leaderboard or
+show differences from legacy outputs. RapidOCR's raster boundary correction
+removed the authorization error in page 21, but negative controls still contain
+spurious figure text. These results do not replace the historical leaderboard or
 establish release acceptance. See the
 [implementation status](OCR_Decoupling_Implementation_Status.md) for run IDs,
 model/provider evidence and remaining gates, and the

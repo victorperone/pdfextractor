@@ -21,6 +21,12 @@ O núcleo escolhe objetivos e escopos. `PageCoordinator` emite requests imutáve
 com orçamentos finitos de trabalho e raster. Resultados são conferidos contra
 a união exata das autorizações, sem tolerância que amplie acesso.
 
+A representação de borda é uma policy local: `mask` mantém pixels parciais
+brancos; `trim` remove esses pixels e valida um novo frame estritamente
+contido na autorização original. RapidOCR usa `trim`; as outras engines
+mantêm `mask`. Essa alteração funcional exige captura própria e não permite
+aprovar reconhecimento espúrio apenas porque o resultado ficou dentro do escopo.
+
 Policies propõem operações; `ProposalIntegrator` valida conservação,
 visibilidade, estado do alvo, ownership e linhagem antes de aplicar. Composição
 de evidências para dados críticos exige ordem explícita e preserva a posição

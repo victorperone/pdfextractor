@@ -1159,6 +1159,93 @@ def test_real_one_pixel_crop_is_nonempty_and_keeps_geometry(tmp_path):
                 assert lease.frame.bbox == box
 
 
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+@pytest.mark.parametrize("shift", [0, 17])
+@pytest.mark.parametrize("outside", [False, True])
+def test_rapidocr_boundary_policy_keeps_edge_detections_in_exact_scope(rotation, shift, outside):
+    from structured_pdf_text.ocr.pipelines.rapidocr.pipeline import RapidOCRPipeline
+
+    page = BBox(shift, shift, 595.2755737304688+shift, 841.8897705078125+shift)
+    box = BBox(148.8188934326172+shift, 280.6300048828125+shift,
+               319.9439656985153+shift, 451.7550683757603+shift)
+    registry, request, auth = make_work(page_bbox=page, rotation=rotation, regions=(box,),
+                                       selection=EngineSelection("rapidocr", "onnxruntime"), render_scale=6.,
+                                       resource_allocation=ResourceAllocation(max_live_raster_bytes=64*1024*1024))
+    class EdgeDetector:
+        def recognize_page(self, image, page_index, page_bbox=None, **kwargs):
+            assert page_bbox is None
+            assert image.getpixel((0, 0)) == (255, 0, 0)
+            top = -image.height if outside else 0
+            corners = (Point(0, top), Point(image.width, top),
+                       Point(image.width, image.height), Point(0, image.height))
+            return [OcrToken("edge", BBox(0, top, image.width, image.height), .9,
+                             "pt-BR", SourceKind.OCR_REGION, polygon=corners)]
+        def close(self):
+            pass
+    pipeline = RapidOCRPipeline(SimpleNamespace(engine="rapidocr", provider="onnxruntime",
+                                settings=SimpleNamespace(render_scale=6.)), EdgeDetector())
+    try:
+        with AuthorizedOCRServices(SpySource(), registry, request.selection,
+                                   allocation=request.resource_allocation) as services:
+            result = pipeline.execute(request, services)
+            if outside:
+                assert result.status is WorkStatus.INVALID_REGION and result.failures
+                assert not result.tokens
+            else:
+                assert result.status is WorkStatus.OK and not result.failures, result.failures
+                assert len(result.tokens) == 1
+                assert union_contains(auth.regions, result.tokens[0].bbox)
+            assert services.observations()["live_raster_bytes"] == 0
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+@pytest.mark.parametrize("crop", [False, True])
+def test_real_source_trim_removes_only_synthetic_pixels_and_keeps_transforms(tmp_path, rotation, crop):
+    path = pdf_with_markers(tmp_path/"trim-markers.pdf", rotation=rotation, crop=crop)
+    with PdfiumNativeEvidenceSource(path) as source:
+        page = source.extract_page(0)
+        box = BBox(2.1, 15.3, 27.9, 74.8) if crop else BBox(12.1, 20.3, 37.9, 79.8)
+        registry, request, auth = make_work(page_bbox=page.bbox, rotation=rotation, regions=(box,))
+        with AuthorizedOCRServices(source, registry, request.selection) as services:
+            with services.render(request, auth.authorization_id, box, scale=1.375) as masked:
+                original = masked.image.copy()
+                original_frame = masked.frame
+            try:
+                with services.render(request, auth.authorization_id, box, scale=1.375, boundary_policy="trim") as trimmed:
+                    assert union_contains(auth.regions, trimmed.frame.bbox)
+                    offset = original_frame.page_point_to_pixel(Point(trimmed.frame.bbox.x0, trimmed.frame.bbox.y0))
+                    left, top = round(offset.x), round(offset.y)
+                    expected = original.crop((left, top, left+trimmed.image.width, top+trimmed.image.height))
+                    try:
+                        assert trimmed.image.tobytes() == expected.tobytes()
+                    finally:
+                        expected.close()
+                    for point in (Point(0, 0), Point(trimmed.image.width, trimmed.image.height)):
+                        mapped = trimmed.frame.point_to_page(point)
+                        assert box.x0 <= mapped.x <= box.x1 and box.y0 <= mapped.y <= box.y1
+                        recovered = trimmed.frame.page_point_to_pixel(mapped)
+                        assert (recovered.x, recovered.y) == pytest.approx((point.x, point.y))
+            finally:
+                original.close()
+            assert services.observations()["live_raster_bytes"] == 0
+
+
+def test_trim_with_no_complete_pixel_and_unknown_boundary_policy_are_rejected():
+    box = BBox(10.1, 20, 11.1, 22)
+    registry, request, auth = make_work(page_bbox=BBox(0, 0, 200.5, 100), regions=(box,))
+    source = SpySource()
+    with AuthorizedOCRServices(source, registry, request.selection) as services:
+        with pytest.raises(ValueError, match="Raster boundary policy"):
+            services.render(request, auth.authorization_id, box, boundary_policy="unknown")
+        assert not source.calls
+        with pytest.raises(ValueError, match="fully authorized pixel"):
+            services.render(request, auth.authorization_id, box, scale=1.25, boundary_policy="trim")
+        assert len(source.calls) == 1
+        assert services.observations()["live_raster_bytes"] == 0
+
+
 def test_real_fractional_page_does_not_deliver_color_from_outside_boundary(tmp_path):
     from reportlab.pdfgen import canvas
     path = tmp_path/"fractional-boundary.pdf"
