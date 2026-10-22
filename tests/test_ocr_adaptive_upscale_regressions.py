@@ -103,55 +103,62 @@ def test_2x_scale_remains_subject_to_the_existing_rgb_budget_gate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# §18 — Engine-specific RGB budget
+# §18 — Pipeline-owned RGB budget
 # ---------------------------------------------------------------------------
 
-from structured_pdf_text.ocr.recovery import _ocr_rgb_budget_for_engine  # noqa: E402
-import math
+from types import SimpleNamespace
+from structured_pdf_text.ocr.recovery import _ocr_rgb_budget_from_settings  # noqa: E402
 
 
-def test_easyocr_has_finite_budget_by_default(monkeypatch) -> None:
-    """EasyOCR default budget is now 32 MiB — CRAFT/PyTorch can OOM on large crops."""
+def test_easyocr_settings_capture_finite_rgb_budget_by_default(monkeypatch) -> None:
+    """The EasyOCR resolver owns its configured 32 MiB default."""
     monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", raising=False)
-    from structured_pdf_text.ocr.recovery import _EASYOCR_RGB_BUDGET_MIB_DEFAULT
-    budget = _ocr_rgb_budget_for_engine("easyocr")
-    assert math.isfinite(budget), "EasyOCR budget must be finite to guard against OOM"
-    assert budget == _EASYOCR_RGB_BUDGET_MIB_DEFAULT
+    from structured_pdf_text.config import ExtractorConfig
+    from structured_pdf_text.ocr.pipelines.easyocr.settings import resolve_settings
+    settings = resolve_settings(ExtractorConfig())
+    assert settings.rgb_budget_mib == 32.0
 
 
-def test_paddle_budget_uses_shared_default(monkeypatch) -> None:
+def test_paddle_settings_capture_its_default_rgb_budget(monkeypatch) -> None:
     monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", raising=False)
-    budget = _ocr_rgb_budget_for_engine("paddle")
-    assert budget == 8.0
+    from structured_pdf_text.config import ExtractorConfig
+    from structured_pdf_text.ocr.pipelines.paddle.settings import resolve_settings
+    settings = resolve_settings(ExtractorConfig())
+    assert settings.rgb_budget_mib == 8.0
 
 
-def test_easyocr_budget_respects_env_override(monkeypatch) -> None:
+def test_easyocr_settings_capture_environment_override(monkeypatch) -> None:
     monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "32.0")
-    budget = _ocr_rgb_budget_for_engine("easyocr")
-    assert budget == 32.0
+    from structured_pdf_text.config import ExtractorConfig
+    from structured_pdf_text.ocr.pipelines.easyocr.settings import resolve_settings
+    settings = resolve_settings(ExtractorConfig())
+    assert settings.rgb_budget_mib == 32.0
 
 
-def test_easyocr_budget_env_override_to_large_value(monkeypatch) -> None:
+def test_easyocr_settings_allow_large_budget_override(monkeypatch) -> None:
     """An explicit large env override is honoured without restriction."""
     monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "512.0")
-    budget = _ocr_rgb_budget_for_engine("easyocr")
-    assert budget == 512.0
+    from structured_pdf_text.config import ExtractorConfig
+    from structured_pdf_text.ocr.pipelines.easyocr.settings import resolve_settings
+    settings = resolve_settings(ExtractorConfig())
+    assert settings.rgb_budget_mib == 512.0
+
+
+def test_recovery_consumes_settings_without_engine_name_branching() -> None:
+    assert _ocr_rgb_budget_from_settings(SimpleNamespace(rgb_budget_mib=0.05)) == 0.05
 
 
 def test_easyocr_budget_tiling_used_for_large_crop(monkeypatch) -> None:
     """A large EasyOCR crop that exceeds the default budget is tiled instead of blocked."""
     monkeypatch.delenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", raising=False)
 
-    class _FakeIdentity:
-        engine = "easyocr"
-
     class _FakeEasyOCREngine(_RecordingEngine):
-        identity = _FakeIdentity()
+        settings = SimpleNamespace(rgb_budget_mib=32.0)
 
     engine = _FakeEasyOCREngine(calls=[])
     page_bbox = BBox(0.0, 0.0, 1000.0, 1000.0)
-    # A 1000×1000 crop at 4× → ~11.4 MiB, which exceeds the 32 MiB budget only
-    # at 4×. At 1× it should still work. Tiling should be invoked for 4×.
+    # A 1000×1000 crop at 4× is ~45.8 MiB, above the captured 32 MiB limit.
+    # Tiling should keep the work available without an engine-name lookup.
     result = OcrRegionRefiner(engine).refine(
         Image.new("RGB", (1000, 1000), "white"),
         page_index=0,

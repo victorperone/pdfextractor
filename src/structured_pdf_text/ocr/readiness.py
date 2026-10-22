@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import ast
 import importlib.util
 import os
 from pathlib import Path
@@ -36,7 +37,22 @@ class ReadinessResult:
 
 def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = None) -> ReadinessResult:
     """Inspect readiness without loading an OCR model or inference runtime."""
-    engine = config.ocr_engine
+    from structured_pdf_text.ocr.factory import import_object
+    from structured_pdf_text.ocr.registry import ENGINE_REGISTRY
+
+    try:
+        entry, _ = ENGINE_REGISTRY.resolve(config.ocr_engine, warn_alias=False)
+    except KeyError as exc:
+        return ReadinessResult(ReadinessStatus.UNKNOWN, "unsupported_engine", {"engine": config.ocr_engine, "message": str(exc)})
+    if not entry.static_probe:
+        return ReadinessResult(ReadinessStatus.UNKNOWN, "probe_unavailable", {"engine": entry.name})
+    return import_object(entry.static_probe)(config, cache_home=cache_home)
+
+
+def _probe_static_builtin(config: ExtractorConfig, engine: str, *, cache_home: str | Path | None = None) -> ReadinessResult:
+    """Static implementation shared by the project-owned builtin probes."""
+    if config.ocr_engine != engine:
+        return ReadinessResult(ReadinessStatus.UNKNOWN, "engine_selection_mismatch", {"engine": config.ocr_engine})
     if engine == "paddle":
         from structured_pdf_text.ocr.paddle import validate_local_ocr_models
         from structured_pdf_text.errors import PaddleOcrUnavailable
@@ -92,37 +108,33 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
         provider_module = "onnxruntime" if (config.ocr_provider or "onnxruntime") == "onnxruntime" else "openvino"
         if importlib.util.find_spec(provider_module) is None:
             return ReadinessResult(ReadinessStatus.MISSING, "provider_missing", {"provider": provider_module})
-        det = os.environ.get("RAPIDOCR_DET_MODEL")
-        configured_cache = cache_home or config.ocr_cache_home
-        cache = (
-            Path(configured_cache).expanduser() / "rapidocr"
-            if configured_cache
-            else Path.home() / ".cache" / "pdfextractor" / "rapidocr"
+        from structured_pdf_text.ocr.pipelines.rapidocr.models import (
+            PROFILES, selected_paths, verify_artifacts,
         )
-        configured_rec = os.environ.get("RAPIDOCR_REC_MODEL")
-        configured_keys = os.environ.get("RAPIDOCR_REC_KEYS")
-        if configured_rec or configured_keys:
-            rec, keys = configured_rec, configured_keys
-        else:
-            rec = str(cache / "latin_PP-OCRv5_rec_mobile.onnx")
-            keys = str(cache / "ppocrv5_latin_dict.txt")
-        if bool(rec) != bool(keys):
-            return ReadinessResult(ReadinessStatus.INCOMPLETE, "model_configuration_incomplete")
-        if rec and keys:
-            configured_paths = [rec, keys] + ([det] if det else [])
-            missing_files = [item for item in configured_paths if not Path(item).is_file()]
-            if missing_files:
-                return ReadinessResult(ReadinessStatus.INCOMPLETE, "model_file_missing", {"paths": missing_files})
-            from structured_pdf_text.ocr.backends.rapidocr import portuguese_dictionary_profile
-            profile, missing_chars = portuguese_dictionary_profile(keys)
-            if config.language == "pt-BR" and profile != "latin/pt-compatible":
-                return ReadinessResult(
-                    ReadinessStatus.INCOMPLETE, "pt_br_dictionary_incomplete",
-                    {"missing_characters": "".join(missing_chars)},
-                )
-        elif config.language == "pt-BR":
-            return ReadinessResult(ReadinessStatus.INCOMPLETE, "pt_br_model_not_configured")
-        return ReadinessResult(ReadinessStatus.READY, details={"provider": provider_module})
+        size = config.rapidocr_model_size or "medium"
+        try:
+            paths = selected_paths(size, cache_home or config.ocr_cache_home)
+        except ValueError as exc:
+            return ReadinessResult(ReadinessStatus.INCOMPLETE, "model_configuration_incomplete", {"message": str(exc)})
+        missing_files = [str(path) for path in paths if not path.is_file()]
+        if missing_files:
+            return ReadinessResult(
+                ReadinessStatus.INCOMPLETE, "model_file_missing",
+                {"profile": PROFILES[size].profile, "paths": missing_files},
+            )
+        try:
+            hashes = verify_artifacts(size, paths)
+        except (OSError, UnicodeError, ValueError) as exc:
+            return ReadinessResult(
+                ReadinessStatus.CORRUPT, "model_artifact_invalid",
+                {"profile": PROFILES[size].profile, "message": str(exc)},
+            )
+        return ReadinessResult(
+            ReadinessStatus.READY,
+            details={"provider": provider_module, "profile": PROFILES[size].profile,
+                     "artifacts": dict(zip(("detector", "recognizer", "dictionary", "classifier"), map(str, paths))),
+                     "sha256": hashes, "classifier_inference": False},
+        )
 
     if engine == "easyocr":
         if importlib.util.find_spec("easyocr") is None:
@@ -139,15 +151,8 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
         from structured_pdf_text.ocr.languages import easyocr_recognition_model
         recog_name = easyocr_recognition_model(config.language, os.environ.get("EASYOCR_RECOG_NETWORK"))
         recog_ok = (cache / f"{recog_name}.pth").is_file()
-        dbnet_name: str | None = None
-        dbnet_ok = False
-        try:
-            import easyocr.config as easy_config  # type: ignore
-            model = easy_config.detection_models.get("dbnet18", {})
-            dbnet_name = model.get("filename")
-            dbnet_ok = bool(dbnet_name and (cache / dbnet_name).is_file())
-        except Exception:
-            pass
+        dbnet_name = _easyocr_detector_filename("dbnet18")
+        dbnet_ok = bool(dbnet_name and (cache / dbnet_name).is_file())
         details = {
             "cache": str(cache), "language": config.language,
             "models": {
@@ -168,7 +173,46 @@ def probe_static(config: ExtractorConfig, *, cache_home: str | Path | None = Non
             return ReadinessResult(ReadinessStatus.DEGRADED, "dbnet18_missing", details)
         return ReadinessResult(ReadinessStatus.READY, details=details)
 
-    return ReadinessResult(ReadinessStatus.UNKNOWN, "unsupported_engine", {"engine": engine})
+    return ReadinessResult(ReadinessStatus.UNKNOWN, "probe_unavailable", {"engine": engine})
+
+
+def probe_static_easyocr(config: ExtractorConfig, *, cache_home: str | Path | None = None) -> ReadinessResult:
+    return _probe_static_builtin(config, "easyocr", cache_home=cache_home)
+
+
+def probe_static_paddle(config: ExtractorConfig, *, cache_home: str | Path | None = None) -> ReadinessResult:
+    return _probe_static_builtin(config, "paddle", cache_home=cache_home)
+
+
+def probe_static_rapidocr(config: ExtractorConfig, *, cache_home: str | Path | None = None) -> ReadinessResult:
+    return _probe_static_builtin(config, "rapidocr", cache_home=cache_home)
+
+
+def probe_static_tesseract(config: ExtractorConfig, *, cache_home: str | Path | None = None) -> ReadinessResult:
+    return _probe_static_builtin(config, "tesseract", cache_home=cache_home)
+
+
+def _easyocr_detector_filename(detector: str) -> str | None:
+    """Read the pure-literal model filename without importing EasyOCR/Torch."""
+    spec = importlib.util.find_spec("easyocr")
+    locations = getattr(spec, "submodule_search_locations", None) if spec is not None else None
+    if not locations:
+        return None
+    config_path = Path(next(iter(locations))) / "config.py"
+    try:
+        tree = ast.parse(config_path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "detection_models"
+                for target in node.targets
+            ):
+                models = ast.literal_eval(node.value)
+                model = models.get(detector, {})
+                filename = model.get("filename")
+                return filename if isinstance(filename, str) else None
+    except (OSError, SyntaxError, ValueError):
+        return None
+    return None
 
 
 _SMOKE_LINES: list[str] = [

@@ -9,19 +9,8 @@ recognised token back to the original page coordinate system.
 **RGB budget gate** — to prevent OOM and runtime crashes when upscaled variants
 produce very large images, :func:`plan_ocr_scales` partitions the requested
 scale factors into *allowed* and *blocked* groups before any image is created.
-
-The budget is engine-specific:
-
-- **Paddle**: default 8 MiB, controlled by ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB``.
-  This limit is a hard operational guard against the Paddle runtime crash
-  documented in ``docs/ocr-rgb-budget-crash-fix.md``.
-- **EasyOCR**: default 32 MiB, controlled by
-  ``PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR``.  CRAFT/PyTorch intermediate
-  tensors can exceed the raw RGB estimate significantly; the 32 MiB guard
-  prevents large crops from triggering DefaultCPUAllocator OOM.  When a scale
-  variant is blocked, :class:`OcrRegionRefiner` automatically attempts regional
-  tiling at that scale so the content is not silently discarded.
-- **Other engines**: use the shared Paddle-era 8 MiB default.
+The configured value is captured in immutable engine settings and consumed by
+the refiner as data; this mechanism never infers a budget from an engine name.
 
 **Regional tiling** — when a scale variant is blocked by the budget gate,
 the refiner partitions the base crop into an N×N grid and OCRs each tile
@@ -54,6 +43,7 @@ from structured_pdf_text.errors import (
     raise_if_resource_exhausted,
 )
 from structured_pdf_text.geometry import BBox, Point
+from structured_pdf_text.ocr.pipeline.policies import LEGACY_CANDIDATE_POLICY, RegionalCandidatePolicy
 
 # ---------------------------------------------------------------------------
 # OCR RGB budget — configurable upper bound on the estimated uncompressed size
@@ -69,33 +59,11 @@ def _ocr_rgb_budget_mib() -> float:
     return env_float("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", 8.0, minimum=0.01)
 
 
-_EASYOCR_RGB_BUDGET_MIB_DEFAULT = 32.0
-
-
-def _ocr_rgb_budget_for_engine(engine_name: str) -> float:
-    """Return the RGB budget (in MiB) appropriate for the given engine.
-
-    Paddle uses a conservative 8 MiB default to prevent STATUS_ACCESS_VIOLATION
-    in its C++ runtime.  EasyOCR defaults to 32 MiB — CRAFT/PyTorch intermediate
-    tensors can far exceed the raw RGB estimate, so an operational guard is needed
-    to prevent DefaultCPUAllocator OOM on large crops.  When a scale is blocked,
-    the refiner automatically applies regional tiling so content is not discarded.
-
-    Override per-engine via environment variables:
-      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB          — Paddle (and legacy default)
-      PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR  — EasyOCR (default: 32 MiB)
-    """
-    if engine_name == "paddle":
-        return _ocr_rgb_budget_mib()
-    if engine_name == "easyocr":
-        from structured_pdf_text.ocr.env import env_float
-        return env_float(
-            "PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR",
-            _EASYOCR_RGB_BUDGET_MIB_DEFAULT,
-            minimum=0.01,
-        )
-    # All other engines: use the shared Paddle-era limit as a safe default
-    # until they are individually characterised.
+def _ocr_rgb_budget_from_settings(settings=None) -> float:
+    """Return the captured engine budget without branching on engine identity."""
+    captured = getattr(settings, "rgb_budget_mib", None)
+    if isinstance(captured, (int, float)) and math.isfinite(captured) and captured > 0:
+        return float(captured)
     return _ocr_rgb_budget_mib()
 
 
@@ -275,6 +243,9 @@ class RegionRefinementRequest:
     page_rotation: int = 0
     quality_policy: str | None = None
     quality_reasons: tuple[str, ...] = ()
+    # Core-owned target bindings are forwarded only by the production facade.
+    # Candidate variants defer mutation until this refiner has selected one.
+    integration_targets: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,6 +384,44 @@ def _plan_tile_grid_n(
     return 0
 
 
+def _tile_region_bbox(tx0, ty0, tx1, ty1, crop_w, crop_h, region_bbox, page_bbox, page_rotation):
+    """Convert a tile in the rendered crop to its canonical PDF authorization."""
+    visual_region = region_bbox.rotate_to_visual(
+        page_rotation, page_bbox.width, page_bbox.height,
+    )
+    visual_tile = BBox(
+        visual_region.x0 + tx0 / max(crop_w, 1) * visual_region.width,
+        visual_region.y0 + ty0 / max(crop_h, 1) * visual_region.height,
+        visual_region.x0 + tx1 / max(crop_w, 1) * visual_region.width,
+        visual_region.y0 + ty1 / max(crop_h, 1) * visual_region.height,
+    )
+    if page_rotation % 360 == 0:
+        return visual_tile
+    visual_width, visual_height = (
+        (page_bbox.height, page_bbox.width)
+        if page_rotation % 180 else (page_bbox.width, page_bbox.height)
+    )
+    return visual_tile.rotate_to_visual(
+        (-page_rotation) % 360, visual_width, visual_height,
+    )
+
+
+def _engine_metric(engine, name: str) -> int:
+    metrics = getattr(engine, "operation_metrics", None)
+    if callable(metrics):
+        metrics = metrics()
+    if isinstance(metrics, dict) and name in metrics:
+        try:
+            return int(metrics[name] or 0)
+        except (TypeError, ValueError):
+            return 0
+    legacy_name = {"passes": "last_pass_count", "batches": "last_batch_count"}.get(name)
+    try:
+        return int(getattr(engine, legacy_name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _run_tiled_regional_ocr(
     engine: Any,
     base_crop: Any,
@@ -456,6 +465,7 @@ def _run_tiled_regional_ocr(
         in budget_mib (planned_grid == 0); the caller handles that case.
     """
     crop_w, crop_h = image_size(base_crop)
+    canonical_output = bool(getattr(engine, "canonical_page_output", False))
     planned_grid = _plan_tile_grid_n(crop_w, crop_h, scale, budget_mib)
     if planned_grid == 0:
         # No N×N grid up to _TILE_MAX_GRID keeps all tiles within budget.
@@ -483,51 +493,68 @@ def _run_tiled_regional_ocr(
                 import numpy as _np
                 tile = _np.asarray(base_crop)[ty0:ty1, tx0:tx1]
 
-            try:
-                scaled_tile = resize_image(tile, scale)
-            except ResourceExhaustedExtractionError:
-                grid_oom = True
-                all_attempts.append(RegionRefinementAttempt(
-                    scale_factor=scale, rotation=rotation, token_count=0,
-                    score=-math.inf, average_confidence=0.0,
-                    error="ResourceExhausted: tile resize",
-                ))
-                break  # Discard this grid and try a finer one.
-            except Exception as exc:
-                raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_region_tile_resize")
-                grid_attempts.append(RegionRefinementAttempt(
-                    scale_factor=scale, rotation=rotation, token_count=0,
-                    score=-math.inf, average_confidence=0.0,
-                    error=f"{type(exc).__name__}: {exc}",
-                ))
-                continue
+            tile_region_bbox = _tile_region_bbox(
+                tx0, ty0, tx1, ty1, crop_w, crop_h, region_bbox, page_bbox,
+                request.page_rotation,
+            )
+            if canonical_output:
+                # The coordinator renders and transforms from the trusted source;
+                # the temporary crop only supplies dimensions for budget planning.
+                transformed_tile = tile
+                tile_inverse = None
+                scaled_tile_w, scaled_tile_h = image_size(tile)
+                virtual_bbox = tile_region_bbox
+            else:
+                try:
+                    scaled_tile = resize_image(tile, scale)
+                except ResourceExhaustedExtractionError:
+                    grid_oom = True
+                    all_attempts.append(RegionRefinementAttempt(
+                        scale_factor=scale, rotation=rotation, token_count=0,
+                        score=-math.inf, average_confidence=0.0,
+                        error="ResourceExhausted: tile resize",
+                    ))
+                    break  # Discard this grid and try a finer one.
+                except Exception as exc:
+                    raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_region_tile_resize")
+                    grid_attempts.append(RegionRefinementAttempt(
+                        scale_factor=scale, rotation=rotation, token_count=0,
+                        score=-math.inf, average_confidence=0.0,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ))
+                    continue
 
-            scaled_tile_w, scaled_tile_h = image_size(scaled_tile)
+                scaled_tile_w, scaled_tile_h = image_size(scaled_tile)
+                try:
+                    transformed_tile, tile_inverse = rotate_image_expanded(scaled_tile, rotation)
+                except Exception as exc:
+                    raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_region_tile_rotate")
+                    grid_attempts.append(RegionRefinementAttempt(
+                        scale_factor=scale, rotation=rotation, token_count=0,
+                        score=-math.inf, average_confidence=0.0,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ))
+                    continue
 
-            # Apply rotation per tile.  rotate_image_expanded returns the identity
-            # transform for angle ≈ 0 without importing cv2, so 0° is always safe.
-            try:
-                transformed_tile, tile_inverse = rotate_image_expanded(scaled_tile, rotation)
-            except Exception as exc:
-                raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_region_tile_rotate")
-                grid_attempts.append(RegionRefinementAttempt(
-                    scale_factor=scale, rotation=rotation, token_count=0,
-                    score=-math.inf, average_confidence=0.0,
-                    error=f"{type(exc).__name__}: {exc}",
-                ))
-                continue
-
-            transformed_w, transformed_h = image_size(transformed_tile)
-            virtual_bbox = BBox(0.0, 0.0, float(transformed_w), float(transformed_h))
+                transformed_w, transformed_h = image_size(transformed_tile)
+                virtual_bbox = BBox(0.0, 0.0, float(transformed_w), float(transformed_h))
 
             try:
                 tokens = _recognize(
                     engine, transformed_tile, page_index, virtual_bbox,
                     quality_variants=request.quality_variants,
                     quality_policy=request.quality_policy,
+                    requested_scale=(float(getattr(engine, "render_scale", 1.0)) * scale)
+                    if canonical_output else None,
+                    preprocessing_rotation=rotation if canonical_output else None,
+                    target_bbox=tile_region_bbox if canonical_output else None,
+                    selection_stage="tile" if canonical_output else None,
+                    decision_reason="regional_tile_recovery" if canonical_output else None,
+                    integration_targets=request.integration_targets if canonical_output else (),
+                    defer_integration=bool(request.integration_targets and canonical_output),
                 )
-                grid_passes += getattr(engine, "last_pass_count", 0) or 0
-                grid_batches += getattr(engine, "last_batch_count", 0) or 0
+                grid_passes += _engine_metric(engine, "passes")
+                grid_batches += _engine_metric(engine, "batches")
             except ResourceExhaustedExtractionError:
                 grid_oom = True
                 all_attempts.append(RegionRefinementAttempt(
@@ -545,25 +572,19 @@ def _run_tiled_regional_ocr(
                 ))
                 continue
 
-            # Map tokens: rotated-tile space → scaled-tile space → page coordinates.
-            # tile_region_bbox is the proportional canonical-PDF-space region covered
-            # by this tile (same coordinate system as region_bbox).
-            tile_region_bbox = BBox(
-                region_bbox.x0 + tx0 / max(crop_w, 1) * region_bbox.width,
-                region_bbox.y0 + ty0 / max(crop_h, 1) * region_bbox.height,
-                region_bbox.x0 + tx1 / max(crop_w, 1) * region_bbox.width,
-                region_bbox.y0 + ty1 / max(crop_h, 1) * region_bbox.height,
-            )
-            for token in tokens:
-                mapped = _map_token_to_page(
-                    token,
-                    tile_inverse,
-                    (scaled_tile_w, scaled_tile_h),
-                    tile_region_bbox,
-                    page_bbox=page_bbox,
-                    page_rotation=request.page_rotation,
-                )
-                grid_tokens.append(mapped)
+            if canonical_output:
+                grid_tokens.extend(tokens)
+            else:
+                for token in tokens:
+                    mapped = _map_token_to_page(
+                        token,
+                        tile_inverse,
+                        (scaled_tile_w, scaled_tile_h),
+                        tile_region_bbox,
+                        page_bbox=page_bbox,
+                        page_rotation=request.page_rotation,
+                    )
+                    grid_tokens.append(mapped)
 
             grid_attempts.append(RegionRefinementAttempt(
                 scale_factor=scale, rotation=rotation,
@@ -658,6 +679,8 @@ class OcrRegionRefiner:
 
     def __init__(self, engine: Any) -> None:
         self.engine = engine
+        candidates = getattr(getattr(engine, "recovery_policy", None), "candidates", None)
+        self.candidate_policy = candidates if isinstance(candidates, RegionalCandidatePolicy) else LEGACY_CANDIDATE_POLICY
 
     def refine(
         self,
@@ -731,6 +754,13 @@ class OcrRegionRefiner:
         total_passes = 0
         total_batches = 0
         any_resource_exhausted = False
+        canonical_output = bool(getattr(self.engine, "canonical_page_output", False))
+        try:
+            base_render_scale = float(getattr(self.engine, "render_scale", 1.0))
+        except (TypeError, ValueError):
+            base_render_scale = 1.0
+        if not math.isfinite(base_render_scale) or base_render_scale <= 0:
+            base_render_scale = 1.0
 
         scales_raw = tuple(
             dict.fromkeys(max(1.0, float(value)) for value in request.scale_factors)
@@ -751,13 +781,9 @@ class OcrRegionRefiner:
             f" quality_reasons=[{reasons_str}]"
         )
 
-        # Resolve engine-specific budget (EasyOCR: unlimited by default)
-        _engine_name: str = ""
-        try:
-            _engine_name = str(getattr(getattr(self.engine, "identity", None), "engine", ""))
-        except Exception:
-            pass
-        rgb_budget_mib = _ocr_rgb_budget_for_engine(_engine_name)
+        # Pipeline settings own this value. The shared recovery mechanism sees
+        # only a numeric resource limit, never an engine-specific branch.
+        rgb_budget_mib = _ocr_rgb_budget_from_settings(getattr(self.engine, "settings", None))
         # plan_ocr_scales requires a finite positive limit; translate math.inf
         # to a very large but finite sentinel so the function's type contract is met.
         budget_for_plan = 1e12 if not math.isfinite(rgb_budget_mib) else rgb_budget_mib
@@ -767,7 +793,6 @@ class OcrRegionRefiner:
         _budget_label = "unlimited" if not math.isfinite(rgb_budget_mib) else f"{rgb_budget_mib:.1f}"
         _recovery_debug(
             f"OCR_SCALE_PLAN page={page_index}"
-            f" engine={_engine_name or 'unknown'}"
             f" limit_rgb_mib={_budget_label}"
             f" allowed_scales={','.join(str(p.scale) for p in allowed_plans) or 'none'}"
             f" blocked_scales={','.join(str(p.scale) for p in blocked_plans) or 'none'}"
@@ -806,8 +831,8 @@ class OcrRegionRefiner:
                 if tile_oom_r:
                     any_resource_exhausted = True
                 if tile_tokens_r:
-                    filtered = _filter_tokens(tile_tokens_r, request)
-                    score, confidence = _candidate_score(filtered, request.goal)
+                    filtered = _filter_tokens(tile_tokens_r, request, policy=self.candidate_policy)
+                    score, confidence = _candidate_score(filtered, request.goal, policy=self.candidate_policy)
                     if filtered:
                         candidates.append((score, 1.0, rotation, filtered))
             if not any_tiles_tried:
@@ -830,7 +855,7 @@ class OcrRegionRefiner:
             # Return immediately — don't fall through to the scale/blocked loops.
             return _build_refinement_result(
                 region_bbox, candidates, attempts, total_passes, total_batches,
-                request, any_resource_exhausted,
+                request, any_resource_exhausted, candidate_policy=self.candidate_policy,
             )
 
         allowed_scale_set = frozenset(p.scale for p in allowed_plans)
@@ -839,7 +864,7 @@ class OcrRegionRefiner:
 
         for scale_factor in scales:
             try:
-                scaled = resize_image(crop, scale_factor)
+                scaled = crop if canonical_output else resize_image(crop, scale_factor)
                 scaled_size = image_size(scaled)
             except ResourceExhaustedExtractionError:
                 # Unexpected OOM during resize: attempt tiling for each rotation.
@@ -855,8 +880,8 @@ class OcrRegionRefiner:
                     total_passes += tile_passes_r
                     total_batches += tile_batches_r
                     if tile_tokens_r:
-                        filtered = _filter_tokens(tile_tokens_r, request)
-                        score, confidence = _candidate_score(filtered, request.goal)
+                        filtered = _filter_tokens(tile_tokens_r, request, policy=self.candidate_policy)
+                        score, confidence = _candidate_score(filtered, request.goal, policy=self.candidate_policy)
                         if filtered:
                             candidates.append((score, scale_factor, rotation, filtered))
                 continue
@@ -871,32 +896,47 @@ class OcrRegionRefiner:
                 raise
             for rotation in rotations:
                 try:
-                    transformed, inverse = rotate_image_expanded(scaled, rotation)
-                    width, height = image_size(transformed)
-                    virtual_bbox = BBox(0.0, 0.0, float(width), float(height))
-                    tokens = _recognize(
-                        self.engine,
-                        transformed,
-                        page_index,
-                        virtual_bbox,
-                        quality_variants=request.quality_variants,
-                        quality_policy=request.quality_policy,
-                    )
-                    total_passes += getattr(self.engine, "last_pass_count", 0) or 0
-                    total_batches += getattr(self.engine, "last_batch_count", 0) or 0
-                    mapped = [
-                        _map_token_to_page(
-                            token,
-                            inverse,
-                            scaled_size,
-                            region_bbox,
-                            page_bbox=page_bbox,
-                            page_rotation=request.page_rotation,
+                    if canonical_output:
+                        tokens = _recognize(
+                            self.engine, crop, page_index, region_bbox,
+                            quality_variants=request.quality_variants,
+                            quality_policy=request.quality_policy,
+                            requested_scale=base_render_scale * scale_factor,
+                            preprocessing_rotation=rotation,
+                            target_bbox=region_bbox,
+                            selection_stage=("critical_data" if request.goal == RegionRefinementGoal.NUMERIC else "region"),
+                            decision_reason="critical_data_refinement" if request.goal == RegionRefinementGoal.NUMERIC else "quality_region_refinement",
+                            integration_targets=request.integration_targets,
+                            defer_integration=bool(request.integration_targets),
                         )
-                        for token in tokens
-                    ]
-                    mapped = _filter_tokens(mapped, request)
-                    score, confidence = _candidate_score(mapped, request.goal)
+                        mapped = tokens
+                    else:
+                        transformed, inverse = rotate_image_expanded(scaled, rotation)
+                        width, height = image_size(transformed)
+                        virtual_bbox = BBox(0.0, 0.0, float(width), float(height))
+                        tokens = _recognize(
+                            self.engine,
+                            transformed,
+                            page_index,
+                            virtual_bbox,
+                            quality_variants=request.quality_variants,
+                            quality_policy=request.quality_policy,
+                        )
+                        mapped = [
+                            _map_token_to_page(
+                                token,
+                                inverse,
+                                scaled_size,
+                                region_bbox,
+                                page_bbox=page_bbox,
+                                page_rotation=request.page_rotation,
+                            )
+                            for token in tokens
+                        ]
+                    total_passes += _engine_metric(self.engine, "passes")
+                    total_batches += _engine_metric(self.engine, "batches")
+                    mapped = _filter_tokens(mapped, request, policy=self.candidate_policy)
+                    score, confidence = _candidate_score(mapped, request.goal, policy=self.candidate_policy)
                     attempts.append(
                         RegionRefinementAttempt(
                             scale_factor=scale_factor,
@@ -932,8 +972,8 @@ class OcrRegionRefiner:
                     total_passes += tile_passes_r
                     total_batches += tile_batches_r
                     if tile_tokens_r:
-                        filtered = _filter_tokens(tile_tokens_r, request)
-                        score, confidence = _candidate_score(filtered, request.goal)
+                        filtered = _filter_tokens(tile_tokens_r, request, policy=self.candidate_policy)
+                        score, confidence = _candidate_score(filtered, request.goal, policy=self.candidate_policy)
                         if filtered:
                             candidates.append((score, scale_factor, rotation, filtered))
                 except FatalExtractionError:
@@ -977,14 +1017,14 @@ class OcrRegionRefiner:
                 total_passes += tile_passes_r
                 total_batches += tile_batches_r
                 if tile_tokens_r:
-                    filtered = _filter_tokens(tile_tokens_r, request)
-                    score, confidence = _candidate_score(filtered, request.goal)
+                    filtered = _filter_tokens(tile_tokens_r, request, policy=self.candidate_policy)
+                    score, confidence = _candidate_score(filtered, request.goal, policy=self.candidate_policy)
                     if filtered:
                         candidates.append((score, bp.scale, rotation, filtered))
 
         return _build_refinement_result(
             region_bbox, candidates, attempts, total_passes, total_batches,
-            request, any_resource_exhausted,
+            request, any_resource_exhausted, candidate_policy=self.candidate_policy,
         )
 
     def refine_many(
@@ -1014,11 +1054,11 @@ def _build_refinement_result(
     total_batches: int,
     request: RegionRefinementRequest,
     any_resource_exhausted: bool,
+    candidate_policy=None,
 ) -> RegionRefinementResult:
     """Build the final RegionRefinementResult from collected candidates and attempts."""
     if not candidates:
         errors = [attempt.error or "" for attempt in attempts if attempt.error]
-        timed_out = any("timeout" in error.casefold() for error in errors)
         resource_exhausted_only = any_resource_exhausted and all(
             "ResourceExhausted" in (attempt.error or "") for attempt in attempts if attempt.error
         )
@@ -1026,9 +1066,6 @@ def _build_refinement_result(
         if any_resource_exhausted and not attempts or resource_exhausted_only:
             status = "resource_exhausted"
             reason_code = "ocr_region_resource_exhausted"
-        elif timed_out:
-            status = "timeout"
-            reason_code = "ocr_timeout"
         elif failed:
             status = "runtime_error"
             reason_code = "ocr_runtime_error"
@@ -1046,9 +1083,8 @@ def _build_refinement_result(
             status=status if attempts else "budget_blocked",
             reason_code=reason_code if attempts else "ocr_no_scale_within_budget",
         )
-    _, scale_factor, rotation, tokens = max(candidates, key=lambda item: item[0])
-    if request.goal == RegionRefinementGoal.NUMERIC and len(candidates) > 1:
-        tokens = _merge_numeric_candidates(candidates)
+    policy = candidate_policy or LEGACY_CANDIDATE_POLICY
+    _, scale_factor, rotation, tokens = policy.select(candidates, request.goal)
     return RegionRefinementResult(
         bbox=region_bbox,
         tokens=tuple(tokens),
@@ -1208,6 +1244,13 @@ def _recognize(
     *,
     quality_variants: bool,
     quality_policy: str | None = None,
+    requested_scale: float | None = None,
+    preprocessing_rotation: float | None = None,
+    target_bbox: BBox | None = None,
+    selection_stage: str | None = None,
+    decision_reason: str | None = None,
+    integration_targets: tuple[object, ...] = (),
+    defer_integration: bool = False,
 ) -> list[OcrToken]:
     """Call the OCR engine with only the keyword args its signature declares.
 
@@ -1221,10 +1264,29 @@ def _recognize(
         params = set()
 
     kwargs: dict[str, Any] = {}
+    try:
+        parameters = inspect.signature(engine.recognize_page).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
     if "quality_variants" in params:
         kwargs["quality_variants"] = quality_variants
     if "quality_policy" in params:
         kwargs["quality_policy"] = quality_policy
+    if requested_scale is not None and ("render_scale" in parameters or accepts_kwargs):
+        kwargs["render_scale"] = requested_scale
+    if preprocessing_rotation is not None and ("preprocessing_rotation" in parameters or accepts_kwargs):
+        kwargs["preprocessing_rotation"] = preprocessing_rotation
+    if target_bbox is not None and ("target_bbox" in parameters or accepts_kwargs):
+        kwargs["target_bbox"] = target_bbox
+    if selection_stage is not None and ("selection_stage" in parameters or accepts_kwargs):
+        kwargs["selection_stage"] = selection_stage
+    if decision_reason is not None and ("decision_reason" in parameters or accepts_kwargs):
+        kwargs["decision_reason"] = decision_reason
+    if integration_targets and ("integration_targets" in parameters or accepts_kwargs):
+        kwargs["integration_targets"] = integration_targets
+    if defer_integration and ("defer_integration" in parameters or accepts_kwargs):
+        kwargs["defer_integration"] = True
 
     if "page_bbox" in params or len(params) >= 4:
         return engine.recognize_page(image, page_index, bbox, **kwargs)
@@ -1301,27 +1363,9 @@ def _map_token_to_page(
     return replace(token, bbox=bbox, polygon=mapped_polygon, source=SourceKind.OCR_REGION, provenance="targeted_region_recovery")
 
 
-def _filter_tokens(
-    tokens: list[OcrToken],
-    request: RegionRefinementRequest,
-) -> list[OcrToken]:
-    """Apply goal-specific and confidence filtering to a list of OCR tokens."""
-    filtered = [
-        token
-        for token in tokens
-        if token.text.strip()
-        and (token.confidence is None or token.confidence >= request.min_confidence)
-    ]
-    if request.goal == RegionRefinementGoal.NUMERIC:
-        return [token for token in filtered if _contains_numeric_content(token.text)]
-    if request.goal == RegionRefinementGoal.TEXTUAL:
-        return [
-            token
-            for token in filtered
-            if len(token.text.strip()) >= 2
-            and any(character.isalpha() for character in token.text)
-        ]
-    return filtered
+def _filter_tokens(tokens, request, *, policy=None):
+    """Compatibility wrapper; the selected pipeline owns filtering values."""
+    return (policy or LEGACY_CANDIDATE_POLICY).filter(tokens, request)
 
 
 def _contains_numeric_content(value: str) -> bool:
@@ -1329,75 +1373,18 @@ def _contains_numeric_content(value: str) -> bool:
     return any(character.isdigit() for character in text) or "%" in text
 
 
-def _candidate_score(
-    tokens: list[OcrToken],
-    goal: RegionRefinementGoal,
-) -> tuple[float, float]:
-    """Score a list of filtered tokens for variant selection.
-
-    Returns ``(score, average_confidence)``.  Score is ``-inf`` for empty
-    lists.  Otherwise it combines mean confidence, a log-capped character
-    count bonus, a horizontal-orientation bonus, and a small token-count
-    bonus for NUMERIC goals.
-    """
-    if not tokens:
-        return -math.inf, 0.0
-    confidences = [token.confidence for token in tokens if token.confidence is not None]
-    average = sum(confidences) / len(confidences) if confidences else 0.0
-    characters = sum(len("".join(token.text.split())) for token in tokens)
-    horizontal = sum(token.bbox.width >= token.bbox.height for token in tokens) / len(tokens)
-    score = average + min(0.08, math.log1p(characters) * 0.012) + horizontal * 0.02
-    if goal == RegionRefinementGoal.NUMERIC:
-        score += min(0.05, len(tokens) * 0.005)
-    return score, average
+def _candidate_score(tokens, goal, *, policy=None):
+    """Compatibility wrapper for the versioned local ranking policy."""
+    return (policy or LEGACY_CANDIDATE_POLICY).score(tokens, goal)
 
 
-def _merge_numeric_candidates(
-    candidates: list[tuple[float, float, float, list[OcrToken]]],
-) -> list[OcrToken]:
-    """Union numeric hypotheses by position while resolving local conflicts."""
-    merged: list[OcrToken] = []
-    for _, _, _, tokens in sorted(candidates, key=lambda item: item[0], reverse=True):
-        for token in tokens:
-            overlaps = [
-                index
-                for index, existing in enumerate(merged)
-                if _same_token_position(existing, token)
-            ]
-            if not overlaps:
-                merged.append(token)
-                continue
-            best_index = max(overlaps, key=lambda index: _numeric_token_score(merged[index]))
-            if _numeric_token_score(token) > _numeric_token_score(merged[best_index]):
-                merged[best_index] = token
-    return sorted(merged, key=lambda token: (token.bbox.y0, token.bbox.x0))
+def _merge_numeric_candidates(candidates):
+    return LEGACY_CANDIDATE_POLICY.merge_numeric(candidates)
 
 
-def _same_token_position(first: OcrToken, second: OcrToken) -> bool:
-    """Return True when two tokens overlap enough to be considered the same position.
-
-    Uses IoU ≥ 0.25 or one-sided intersection coverage ≥ 0.50 as criteria.
-    """
-    if first.bbox.iou(second.bbox) >= 0.25:
-        return True
-    intersection = first.bbox.intersection(second.bbox)
-    if intersection is None:
-        return False
-    return (
-        intersection.area / max(first.bbox.area, 1.0) >= 0.50
-        or intersection.area / max(second.bbox.area, 1.0) >= 0.50
-    )
+def _same_token_position(first, second):
+    return LEGACY_CANDIDATE_POLICY.same_position(first, second)
 
 
-def _numeric_token_score(token: OcrToken) -> float:
-    """Score a single token for numeric-merge conflict resolution.
-
-    Higher score wins.  Combines OCR confidence with a syntax ratio (fraction
-    of characters that are digits or common numeric punctuation) and a small
-    bonus for each digit up to six.
-    """
-    text = "".join(token.text.split())
-    digits = sum(character.isdigit() for character in text)
-    accepted = sum(character.isdigit() or character in ".,%+-/R$" for character in text)
-    syntax_ratio = accepted / max(len(text), 1)
-    return (token.confidence or 0.0) + syntax_ratio * 0.03 + min(digits, 6) * 0.002
+def _numeric_token_score(token):
+    return LEGACY_CANDIDATE_POLICY.numeric_score(token)

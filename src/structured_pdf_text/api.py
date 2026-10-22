@@ -10,12 +10,9 @@ import inspect
 import math
 import re
 import time
-import unicodedata
-from collections import Counter
+from uuid import uuid4
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from decimal import Decimal
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +32,6 @@ from .document import (
     EvidenceRef,
     LayoutRegion,
     OcrToken,
-    OcrProvenance,
     PageDiagnostics,
     PageStrategy,
     RegionDecision,
@@ -49,6 +45,7 @@ from .document import (
     WritingDirection,
 )
 from .errors import (
+    ExtractionCancelled,
     FatalExtractionError,
     raise_if_resource_exhausted,
 )
@@ -56,6 +53,25 @@ from .evidence.complexity import ComplexityAnalyzer
 from .memory import process_memory_snapshot
 from .ocr.models import get_profile
 from .evidence.decision import assess_region_recovery
+from .fusion.conservation import (
+    _collect_token_critical_fingerprint,
+    _critical_surface_preserved,
+    _emit_conservation_warning,
+    _extract_protected_semantic_tokens,
+    _extract_signed_numeric_critical_values,
+    _extract_structural_critical_values,
+    _refinement_conserves_content,
+    _similarity_key,
+)
+from .fusion.integrator import (
+    IntegrationRejected,
+    NativeOCRIntegrator,
+    best_figure_region as _best_figure_region,
+    cell_evidence_snapshot,
+    merge_ocr_region_tokens_into_table_cells as _merge_regions_into_table_cells,
+    ocr_tokens_snapshot,
+    replace_tokens_in_box as _replace_tokens_in_box,
+)
 from .fusion.token_fusion import fuse_native_and_ocr
 from .layout.engine import NativeHeuristicLayoutEngine
 from .layout.regions import full_page_text_region, regions_from_predictions
@@ -65,6 +81,11 @@ from .ocr.engine import OcrEngine
 from .ocr.candidate_fusion import recognize_page_with_tiles
 from .ocr.candidate_fusion import OcrCandidateFusionEngine, OcrCandidateResult
 from .ocr.reconstruct import reconstruct_ocr_lines
+from .ocr.pipeline.contracts import WorkGoal
+from .ocr.pipeline.coordinator import OCRPageFacade, PageCoordinator
+from .ocr.pipeline.diagnostics import LegacyDiagnosticsProjector
+from .ocr.pipeline.policies import LEGACY_COMPATIBILITY_RECOVERY_PROFILE
+from .ocr.pipeline.cancellation import CancellationToken
 from .ocr.critical_data import CriticalDataRefiner
 from .ocr.recovery import (
     OcrRegionRefiner,
@@ -95,29 +116,89 @@ class PdfTextExtractor:
         config: ExtractorConfig | None = None,
         layout_engine: Any | None = None,
         ocr_engine: OcrEngine | None = None,
+        *,
+        ocr_pipeline: Any | None = None,
     ) -> None:
+        if ocr_engine is not None and ocr_pipeline is not None:
+            raise ValueError("Pass either ocr_engine or ocr_pipeline, never both")
         self.config = config or ExtractorConfig()
         self.complexity_analyzer = ComplexityAnalyzer()
         self.layout_engine = layout_engine or NativeHeuristicLayoutEngine()
-        self.ocr_engine = ocr_engine
-        self._ocr_factory_pending = ocr_engine is None and _ocr_enabled(self.config)
+        self.ocr_engine = None
+        from .ocr.pipeline.adapters import adapt_injection
+        self._ocr_pipeline = adapt_injection(
+            pipeline=ocr_pipeline, ocr_engine=ocr_engine, config=self.config,
+        )
+        self._provided_pipeline = ocr_pipeline is not None
+        self._ocr_factory_pending = self._ocr_pipeline is None and _ocr_enabled(self.config)
+        self._page_coordinator: PageCoordinator | None = None
+        self._extraction_id = uuid4().hex
+        self._document_id = uuid4().hex
         self._closed = False
+        self._active_cancellation_token: CancellationToken | None = None
 
     def _ensure_ocr_engine(self) -> None:
         if self._closed:
             raise RuntimeError("PdfTextExtractor is closed")
-        if self.ocr_engine is None and self._ocr_factory_pending:
-            from .ocr.factory import build_ocr_backend
-            self.ocr_engine = build_ocr_backend(self.config)
+        if self._ocr_pipeline is not None:
+            return
+        if self._ocr_factory_pending:
+            from .ocr.factory import build_ocr_pipeline
+            self._ocr_pipeline = build_ocr_pipeline(self.config)
             self._ocr_factory_pending = False
+
+    def _ensure_page_ocr(self, source, native_page, page_index: int) -> None:
+        if self._active_cancellation_token is not None:
+            self._active_cancellation_token.check()
+        self._ensure_ocr_engine()
+        if self._ocr_pipeline is None:
+            return
+        if self._page_coordinator is not None:
+            same_page = self._page_coordinator.page_index == page_index
+            if not same_page:
+                self._page_coordinator.close()
+                self._page_coordinator = None
+        if self._page_coordinator is None:
+            descriptor = self._ocr_pipeline.descriptor
+            reset_diagnostics = getattr(self._ocr_pipeline, "reset_page_diagnostics", None)
+            if callable(reset_diagnostics):
+                reset_diagnostics()
+            reset_cancellation = getattr(self._ocr_pipeline, "reset_cancellation", None)
+            if callable(reset_cancellation):
+                reset_cancellation()
+            self._page_coordinator = PageCoordinator(
+                self._ocr_pipeline,
+                source,
+                extraction_id=self._extraction_id,
+                document_id=self._document_id,
+                selection=descriptor.selection,
+                page_index=page_index,
+                page_bbox=native_page.bbox,
+                rotation=native_page.objects.rotation,
+                quality_policy=effective_ocr_quality_policy(self.config),
+                security_limits=self.config.security_limits,
+                cancellation_token=self._active_cancellation_token,
+            )
+        self.ocr_engine = OCRPageFacade(self._page_coordinator)
+
+    def _close_page_coordinator(self) -> None:
+        if self._page_coordinator is not None:
+            self._page_coordinator.close()
+            self._page_coordinator = None
 
     def close(self) -> None:
         """Release resources held by the OCR backend (e.g. the Paddle subprocess)."""
         if self._closed:
             return
-        if self.ocr_engine is not None and hasattr(self.ocr_engine, "close"):
-            self.ocr_engine.close()
+        cancel = getattr(self._ocr_pipeline, "cancel", None)
+        if callable(cancel):
+            cancel()
+        self._close_page_coordinator()
+        close_target = self._ocr_pipeline
+        if close_target is not None and hasattr(close_target, "close"):
+            close_target.close()
         self.ocr_engine = None
+        self._ocr_pipeline = None
         self._ocr_factory_pending = False
         self._closed = True
 
@@ -133,13 +214,19 @@ class PdfTextExtractor:
         password: str | None = None,
         *,
         progress_callback: Callable[[int, int], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> StructuredDocument:
         """Extract a document and classify resource failures at the API boundary."""
+        if cancellation_token is not None and not isinstance(cancellation_token, CancellationToken):
+            raise TypeError("cancellation_token must be a CancellationToken or None")
+        token = cancellation_token or CancellationToken()
+        self._active_cancellation_token = token
         try:
             return self._extract_impl(
                 path,
                 password=password,
                 progress_callback=progress_callback,
+                cancellation_token=token,
             )
         except FatalExtractionError:
             raise
@@ -150,6 +237,9 @@ class PdfTextExtractor:
                 details=_process_memory_snapshot(),
             )
             raise
+        finally:
+            self._close_page_coordinator()
+            self._active_cancellation_token = None
 
     def _extract_impl(
         self,
@@ -157,9 +247,14 @@ class PdfTextExtractor:
         password: str | None = None,
         *,
         progress_callback: Callable[[int, int], None] | None = None,
+        cancellation_token: CancellationToken,
     ) -> StructuredDocument:
         if self._closed:
             raise RuntimeError("PdfTextExtractor is closed")
+        cancellation_token.check()
+        self._close_page_coordinator()
+        self._extraction_id = uuid4().hex
+        self._document_id = uuid4().hex
         pages = []
         document_start = time.perf_counter()
         memory_start = _process_memory_snapshot()
@@ -173,6 +268,7 @@ class PdfTextExtractor:
                 raise RuntimeError("source.open() did not return a DocumentContext")
             page_indices = _selected_page_indices(self.config.page_indices, context.page_count)
             for page_index in page_indices:
+                cancellation_token.check()
                 start = time.perf_counter()
                 if progress_callback is not None:
                     progress_callback(len(pages) + 1, len(page_indices))
@@ -180,8 +276,6 @@ class PdfTextExtractor:
                 ocr_render_scale = self.config.effective_ocr_render_scale()
                 source_metrics_start = source.metrics_snapshot()
                 timings: dict[str, float] = {}
-                if self.ocr_engine is not None and hasattr(self.ocr_engine, "reset_page_diagnostics"):
-                    self.ocr_engine.reset_page_diagnostics()
                 native_start = time.perf_counter()
                 try:
                     native_page = source.extract_page(page_index)
@@ -197,6 +291,7 @@ class PdfTextExtractor:
                     elapsed_ms = (time.perf_counter() - start) * 1000
                     pages.append(_failed_page(page_index, exc, elapsed_ms))
                     continue
+                cancellation_token.check()
                 timings["native_extract_ms"] = (time.perf_counter() - native_start) * 1000
                 warnings: list[str] = []
                 partial_reasons: list[str] = []
@@ -400,7 +495,7 @@ class PdfTextExtractor:
                 figure_ocr_requested = bool(_figures_pending_ocr)
                 if ocr_requested or figure_ocr_requested:
                     try:
-                        self._ensure_ocr_engine()
+                        self._ensure_page_ocr(source, native_page, page_index)
                     except FatalExtractionError:
                         raise
                     except Exception as exc:
@@ -499,15 +594,10 @@ class PdfTextExtractor:
                                             overlap=self.config.ocr_tile_overlap,
                                             page_rotation=native_page.objects.rotation,
                                         )
-                                    ocr_passes_total = getattr(
-                                        self.ocr_engine, "last_pass_count", None
-                                    )
-                                    ocr_batches_total = getattr(
-                                        self.ocr_engine, "last_batch_count", None
-                                    )
-                                    ocr_attempt_errors = list(
-                                        getattr(self.ocr_engine, "last_attempt_errors", [])
-                                    )
+                                    operation_metrics = self.ocr_engine.operation_metrics
+                                    ocr_passes_total = operation_metrics.get("passes")
+                                    ocr_batches_total = operation_metrics.get("batches")
+                                    ocr_attempt_errors = list(operation_metrics.get("attempt_errors", []))
                                 else:
                                     (
                                         ocr_tokens,
@@ -601,10 +691,13 @@ class PdfTextExtractor:
                         page_rotation=native_page.objects.rotation,
                         warnings=warnings,
                         images=_figures_pending_ocr,
+                        integration_tokens=ocr_tokens,
+                        integration_regions=regions,
                     )
                     if any(item.startswith("figure_ocr_failed:") for item in warnings):
                         partial_reasons.append("figure_ocr_unavailable")
                     if figure_refinements:
+                        figure_integrator = NativeOCRIntegrator()
                         for (
                             box,
                             all_lines,
@@ -614,15 +707,20 @@ class PdfTextExtractor:
                             passes,
                             batches,
                         ) in figure_refinements:
-                            ocr_tokens = _replace_tokens_in_box(ocr_tokens, box, all_tokens)
-                            figure_ocr_bindings.append((box, figure_lines, figure_tokens))
-                            _bind_figure_ocr_to_regions(
-                                regions,
-                                box,
-                                figure_lines,
-                                figure_tokens,
-                            )
-                            ocr_figure_tokens += len(all_tokens)
+                            if isinstance(self.ocr_engine, OCRPageFacade):
+                                figure_applied = bool(all_tokens)
+                            else:
+                                ocr_tokens, figure_applied = figure_integrator.apply_figure_refinement(
+                                    tokens=ocr_tokens,
+                                    box=box,
+                                    replacement_tokens=all_tokens,
+                                    regions=regions,
+                                    figure_lines=figure_lines,
+                                    figure_tokens=figure_tokens,
+                                )
+                            if figure_applied:
+                                figure_ocr_bindings.append((box, figure_lines, figure_tokens))
+                                ocr_figure_tokens += len(all_tokens)
                             ocr_passes_total = (ocr_passes_total or 0) + passes
                             ocr_batches_total = (ocr_batches_total or 0) + batches
                         ocr_tokens = _deduplicate_region_ocr_tokens(ocr_tokens)
@@ -646,7 +744,7 @@ class PdfTextExtractor:
                     if not blank_page_ocr:
                         partial_reasons.append("ocr_no_text")
 
-                if region_ocr_requested:
+                if region_ocr_requested and not isinstance(self.ocr_engine, OCRPageFacade):
                     for region in selected_regions:
                         region.ocr_tokens = [
                             token for token in ocr_tokens if _line_in_box(token, region.bbox)
@@ -665,9 +763,10 @@ class PdfTextExtractor:
                             )
                             if original_candidate:
                                 embedded_image_tokens = len(original_candidate)
-                                ocr_tokens = list(OcrCandidateFusionEngine().fuse([
-                                    OcrCandidateResult("full-page", "full-page", tuple(ocr_tokens), _ocr_token_score(ocr_tokens), type(self.ocr_engine).__name__),
-                                    OcrCandidateResult("embedded-image", "embedded-image", tuple(original_candidate), _ocr_token_score(original_candidate), type(self.ocr_engine).__name__),
+                                score = self.ocr_engine.token_refinement_policy.token_score
+                                ocr_tokens = list(OcrCandidateFusionEngine(self.ocr_engine.fusion_policy).fuse([
+                                    OcrCandidateResult("full-page", "full-page", tuple(ocr_tokens), score(ocr_tokens), self.ocr_engine.identity.engine),
+                                    OcrCandidateResult("embedded-image", "embedded-image", tuple(original_candidate), score(original_candidate), self.ocr_engine.identity.engine),
                                 ]).tokens)
                         except FatalExtractionError:
                             raise
@@ -783,7 +882,6 @@ class PdfTextExtractor:
                 # Recompute alignment after refinements so diagnostics and
                 # supplemental text describe the final OCR evidence.
                 if ocr_tokens:
-                    ocr_tokens = _attach_ocr_provenance(ocr_tokens, self.ocr_engine)
                     ocr_lines = reconstruct_ocr_lines(
                         ocr_tokens,
                         page_index,
@@ -1020,14 +1118,16 @@ class PdfTextExtractor:
                 table_cell_refinements = 0
                 if self.config.enable_table_cell_ocr and _ocr_enabled(self.config) and tables:
                     try:
-                        self._ensure_ocr_engine()
+                        self._ensure_page_ocr(source, native_page, page_index)
                         cell_image = ocr_image if ocr_image is not None else rendered_page
-                        if cell_image is None:
+                        if cell_image is None and not isinstance(self.ocr_engine, OCRPageFacade):
                             cell_image = source.render_page(
                                 page_index,
                                 scale=safe_render_scale("table_cell_ocr", ocr_render_scale),
                             )
-                        if self.ocr_engine is not None and cell_image is not None:
+                        if self.ocr_engine is not None and (
+                            isinstance(self.ocr_engine, OCRPageFacade) or cell_image is not None
+                        ):
                             table_cell_refinements = _refine_table_cells_ocr(
                                 engine=self.ocr_engine,
                                 page_image=cell_image,
@@ -1107,16 +1207,28 @@ class PdfTextExtractor:
                     actual_strategy = PageStrategy.OCR_CANDIDATE
                 elif (region_ocr_requested or figure_ocr_requested) and ocr_tokens:
                     actual_strategy = PageStrategy.MIXED
-                ocr_any_requested = ocr_requested or figure_ocr_requested
-                easyocr_page_diagnostics = (
+                pipeline_work = (
+                    self._page_coordinator.diagnostics()
+                    if self._page_coordinator is not None
+                    and self._page_coordinator.page_index == page_index
+                    else None
+                )
+                work_summary = pipeline_work["summary"] if pipeline_work is not None else None
+                cell_tokens_added = work_summary["cell_tokens_added"] if work_summary else 0
+                ocr_any_requested = bool(
+                    ocr_requested or figure_ocr_requested
+                    or (work_summary and work_summary["requested"])
+                )
+                if cell_tokens_added and not page_ocr_requested:
+                    actual_strategy = PageStrategy.MIXED
+                ocr_backend_diagnostics = (
                     self.ocr_engine.consume_page_diagnostics()
                     if self.ocr_engine is not None
                     and hasattr(self.ocr_engine, "consume_page_diagnostics")
                     else {
-                        "easyocr_calls": 0,
-                        "easyocr_fallback_count": 0,
-                        "easyocr_fallback_rate": 0.0,
-                        "easyocr_fallback_reasons": [],
+                        "fallback_count": 0,
+                        "fallback_rate": 0.0,
+                        "fallback_reasons": [],
                     }
                 )
                 if not ocr_any_requested:
@@ -1127,15 +1239,29 @@ class PdfTextExtractor:
                     ocr_outcome = "blank_page"
                     ocr_degraded = False
                     ocr_degraded_reasons = []
+                elif _is_successful_empty_optional_figure_ocr(
+                    page_ocr_requested=page_ocr_requested,
+                    region_ocr_requested=region_ocr_requested,
+                    figure_ocr_requested=figure_ocr_requested,
+                    ocr_tokens=ocr_tokens,
+                    region_ocr_stats=ocr_region_stats,
+                    warnings=warnings,
+                    partial_reasons=partial_reasons,
+                ):
+                    # A figure is an optional text source.  A clean empty read
+                    # must not turn an otherwise good native page into a
+                    # degraded OCR result.
+                    ocr_outcome = "no_text"
+                    ocr_degraded = False
+                    ocr_degraded_reasons = []
                 elif ocr_tokens:
-                    # Check if EasyOCR used its readtext() fallback path.
-                    _easyocr_fallback = easyocr_page_diagnostics["easyocr_fallback_count"] > 0
-                    if _easyocr_fallback:
+                    fallback_count = ocr_backend_diagnostics.get("fallback_count", 0)
+                    if fallback_count:
                         ocr_outcome = "recovered"
                         ocr_degraded = True
                         ocr_degraded_reasons = [
-                            "easyocr_readtext_fallback:"
-                            + "; ".join(easyocr_page_diagnostics["easyocr_fallback_reasons"])
+                            "engine_fallback: "
+                            + "; ".join(ocr_backend_diagnostics.get("fallback_reasons", []))
                         ]
                     else:
                         ocr_outcome = "success"
@@ -1149,14 +1275,26 @@ class PdfTextExtractor:
                         if self.ocr_engine is not None and ocr_image is not None
                         else "ocr_unavailable"
                     ]
-                ocr_diag_engine = self.ocr_engine if ocr_any_requested else None
+                if work_summary and work_summary["requested"]:
+                    if not (ocr_requested or figure_ocr_requested):
+                        ocr_outcome = work_summary["outcome"]
+                        ocr_degraded = work_summary["degraded"]
+                        ocr_degraded_reasons = list(work_summary["reasons"])
+                    elif work_summary["degraded"]:
+                        ocr_degraded = True
+                        ocr_degraded_reasons.extend(work_summary["reasons"])
+                        if ocr_outcome == "success":
+                            ocr_outcome = "recovered"
+                    if work_summary["mandatory_failures"]:
+                        partial_reasons.append("ocr_mandatory_work_failed")
+                        warnings.append("Mandatory OCR work failed; see ocr_pipeline_work.summary")
                 diagnostics = PageDiagnostics(
                     page_index=page_index,
                     strategy=actual_strategy,
                     reasons=sorted(complexity.reasons, key=lambda item: item.value),
                     native_chars=len(native_page.characters),
                     native_text_length=len(native_page.extracted_text or ""),
-                    ocr_tokens_added=len(ocr_tokens),
+                    ocr_tokens_added=len(ocr_tokens) + cell_tokens_added,
                     conflicts=len(fusion.conflicts) if fusion else 0,
                     tables=len(tables),
                     processing_time_ms=elapsed_ms,
@@ -1181,46 +1319,50 @@ class PdfTextExtractor:
                         "ocr_outcome": ocr_outcome,
                         "ocr_degraded": ocr_degraded,
                         "ocr_degraded_reasons": ocr_degraded_reasons,
+                        "ocr_optional_empty": ocr_outcome == "no_text",
                         "ocr_attempt_errors": ocr_attempt_errors,
                         "ocr_quality_policy": effective_ocr_quality_policy(self.config).value,
-                        "ocr_baseline_quality": _quality_to_dict(getattr(ocr_diag_engine, "last_baseline_quality", None)),
-                        "ocr_image_profile": _image_profile_to_dict(getattr(ocr_diag_engine, "last_image_profile", None)),
-                        "easyocr_fallback_used": easyocr_page_diagnostics["easyocr_fallback_count"] > 0,
-                        "easyocr_fallback_reason": "; ".join(easyocr_page_diagnostics["easyocr_fallback_reasons"]) or None,
-                        **easyocr_page_diagnostics,
-                        "ocr_recovery_triggered": bool(getattr(ocr_diag_engine, "last_recovery_triggered", False)),
-                        "ocr_recovery_reasons": list(getattr(ocr_diag_engine, "last_recovery_reasons", [])),
-                        "ocr_selected_variant": getattr(ocr_diag_engine, "last_selected_variant", None),
-                        "ocr_variants_attempted": list(getattr(ocr_diag_engine, "last_variants_attempted", [])),
-                        "ocr_variant_scores": dict(getattr(ocr_diag_engine, "last_variant_scores", {})),
-                        "ocr_variants_succeeded": list(getattr(ocr_diag_engine, "last_variants_succeeded", [])),
+                        "ocr_baseline_quality": ocr_backend_diagnostics.get("baseline_quality"),
+                        "ocr_image_profile": ocr_backend_diagnostics.get("image_profile"),
+                        "ocr_fallback_used": bool(ocr_backend_diagnostics.get("fallback_count", 0)),
+                        "ocr_fallback_reason": "; ".join(ocr_backend_diagnostics.get("fallback_reasons", [])) or None,
+                        # Historical serialized names are projected at the
+                        # compatibility boundary, outside core orchestration.
+                        **LegacyDiagnosticsProjector.public_compatibility_aliases(ocr_backend_diagnostics),
+                        **ocr_backend_diagnostics,
+                        "ocr_recovery_triggered": bool(ocr_backend_diagnostics.get("recovery_triggered", False)),
+                        "ocr_recovery_reasons": list(ocr_backend_diagnostics.get("recovery_reasons", [])),
+                        "ocr_selected_variant": ocr_backend_diagnostics.get("selected_variant"),
+                        "ocr_variants_attempted": list(ocr_backend_diagnostics.get("variants_attempted", [])),
+                        "ocr_variant_scores": dict(ocr_backend_diagnostics.get("variant_scores", {})),
+                        "ocr_variants_succeeded": list(ocr_backend_diagnostics.get("variants_succeeded", [])),
                         "ocr_variants_failed": list(ocr_attempt_errors),
-                        "ocr_candidate_count": getattr(ocr_diag_engine, "last_candidate_count", 0),
-                        "ocr_candidate_metrics": dict(getattr(ocr_diag_engine, "last_candidate_metrics", {})),
+                        "ocr_candidate_count": ocr_backend_diagnostics.get("candidate_count", 0),
+                        "ocr_candidate_metrics": dict(ocr_backend_diagnostics.get("candidate_metrics", {})),
                         "ocr_candidate_quality": {
                             name: float(candidate.get("quality_score", 0.0))
-                            for name, candidate in getattr(ocr_diag_engine, "last_candidate_metrics", {}).items()
+                            for name, candidate in ocr_backend_diagnostics.get("candidate_metrics", {}).items()
                         },
                         "ocr_candidate_coverage": {
                             name: float(candidate.get("spatial_coverage_score", 0.0))
-                            for name, candidate in getattr(ocr_diag_engine, "last_candidate_metrics", {}).items()
+                            for name, candidate in ocr_backend_diagnostics.get("candidate_metrics", {}).items()
                         },
                         "ocr_candidate_line_clusters": {
                             name: int(candidate.get("line_cluster_count", 0))
-                            for name, candidate in getattr(ocr_diag_engine, "last_candidate_metrics", {}).items()
+                            for name, candidate in ocr_backend_diagnostics.get("candidate_metrics", {}).items()
                         },
-                        "ocr_fusion_replacements_attempted": getattr(ocr_diag_engine, "last_fusion_replacements_attempted", 0),
-                        "ocr_fusion_replacements_accepted": getattr(ocr_diag_engine, "last_fusion_replacements_accepted", 0),
-                        "ocr_fusion_replacements_rolled_back": getattr(ocr_diag_engine, "last_fusion_replacements_rolled_back", 0),
-                        "ocr_fusion_lost_clusters": getattr(ocr_diag_engine, "last_fusion_lost_clusters", 0),
-                        "ocr_fusion_conflict_clusters": getattr(ocr_diag_engine, "last_fusion_conflict_clusters", 0),
+                        "ocr_fusion_replacements_attempted": ocr_backend_diagnostics.get("fusion_replacements_attempted", 0),
+                        "ocr_fusion_replacements_accepted": ocr_backend_diagnostics.get("fusion_replacements_accepted", 0),
+                        "ocr_fusion_replacements_rolled_back": ocr_backend_diagnostics.get("fusion_replacements_rolled_back", 0),
+                        "ocr_fusion_lost_clusters": ocr_backend_diagnostics.get("fusion_lost_clusters", 0),
+                        "ocr_fusion_conflict_clusters": ocr_backend_diagnostics.get("fusion_conflict_clusters", 0),
                         # Compatibility alias for the historical diagnostic name.
-                        "ocr_fusion_duplicate_clusters": getattr(ocr_diag_engine, "last_fusion_duplicate_clusters", 0),
-                        "ocr_consensus_replacements": getattr(ocr_diag_engine, "last_consensus_replacements", 0),
-                        "ocr_consensus_insertions": getattr(ocr_diag_engine, "last_consensus_insertions", 0),
-                        "ocr_orientation_selected": easyocr_page_diagnostics.get("orientation_selected"),
-                        "ocr_orientation_attempts": list(easyocr_page_diagnostics.get("orientation_attempts") or []),
-                        "ocr_enhancement_orientation": getattr(ocr_diag_engine, "last_enhancement_orientation", None),
+                        "ocr_fusion_duplicate_clusters": ocr_backend_diagnostics.get("fusion_duplicate_clusters", 0),
+                        "ocr_consensus_replacements": ocr_backend_diagnostics.get("consensus_replacements", 0),
+                        "ocr_consensus_insertions": ocr_backend_diagnostics.get("consensus_insertions", 0),
+                        "ocr_orientation_selected": ocr_backend_diagnostics.get("orientation_selected"),
+                        "ocr_orientation_attempts": list(ocr_backend_diagnostics.get("orientation_attempts") or []),
+                        "ocr_enhancement_orientation": ocr_backend_diagnostics.get("enhancement_orientation"),
                         "ocr_targeted_refinement_regions": [
                             region_id for region_id, stat in {
                                 **ocr_region_stats,
@@ -1243,7 +1385,7 @@ class PdfTextExtractor:
                             region_id for region_id, stat in ocr_region_stats.items()
                             if int(stat.get("resource_exhausted_attempts", 0)) > 0
                         ],
-                        "ocr_early_stop": bool(getattr(ocr_diag_engine, "last_early_stop", False)),
+                        "ocr_early_stop": bool(ocr_backend_diagnostics.get("early_stop", False)),
                         "page_ocr_requested": page_ocr_requested,
                         "region_ocr_requested": region_ocr_requested,
                         "ocr_candidate_region_ids": list(recovery_plan.region_ids),
@@ -1269,6 +1411,7 @@ class PdfTextExtractor:
                             source_metrics_end,
                         ),
                         "ocr_engine": type(self.ocr_engine).__name__ if self.ocr_engine is not None else None,
+                        "ocr_pipeline_work": pipeline_work,
                         "ocr_tile_stats": ocr_tile_stats,
                         "critical_data_refinements": critical_data_refinements,
                         "footnote_refinements": footnote_refinements,
@@ -1278,7 +1421,7 @@ class PdfTextExtractor:
                         "ocr_passes": ocr_passes_total,
                         "ocr_batches": ocr_batches_total,
                         "deskew_angle_deg": (
-                            getattr(self.ocr_engine, "last_deskew_angle", 0.0)
+                            ocr_backend_diagnostics.get("deskew_angle", 0.0)
                             if page_ocr_requested and self.ocr_engine is not None
                             else None
                         ),
@@ -1343,6 +1486,7 @@ class PdfTextExtractor:
                 page_count=context.page_count,
                 pdfium_version=context.pdfium_version,
             )
+        self._close_page_coordinator()
         assemble_start = time.perf_counter()
         document = assemble_document(
             pages=pages,
@@ -1366,59 +1510,25 @@ class PdfTextExtractor:
         }
         document.diagnostics.facts["native_source_calls"] = source.metrics_snapshot()
         document.diagnostics.facts["num_threads"] = _resolve_num_threads(self.config.num_threads)
-        if self.ocr_engine is not None:
-            if hasattr(self.ocr_engine, "identity"):
-                # OCRBackend protocol: emit engine-agnostic identity diagnostics.
-                ident = self.ocr_engine.identity  # type: ignore[union-attr]
-                document.diagnostics.facts["ocr_profile"] = ident.profile
-                document.diagnostics.facts["ocr_engine_identity"] = {
-                    "engine": ident.engine,
-                    "runtime": ident.runtime,
-                    "language": ident.language,
-                    "device": ident.device,
-                    "package_versions": ident.package_versions,
-                }
-            else:
-                # Legacy OcrEngine (Paddle direct, no OCRBackend wrapper):
-                # fall back to the Paddle-specific model profile.
-                profile = get_profile(self.config.paddle_model_profile)
-                document.diagnostics.facts["ocr_profile"] = self.config.paddle_model_profile
-                document.diagnostics.facts["ocr_models"] = {
-                    "detection": profile.detection,
-                    "recognition": profile.recognition,
-                }
+        identity_source = self.ocr_engine or self._ocr_pipeline
+        ident = getattr(identity_source, "identity", None)
+        if ident is not None:
+            document.diagnostics.facts["ocr_profile"] = ident.profile
+            document.diagnostics.facts["ocr_engine_identity"] = {
+                "engine": ident.engine if hasattr(ident, "engine") else ident.selection.engine,
+                "runtime": ident.runtime,
+                "language": ident.language,
+                "device": ident.device,
+                "package_versions": ident.package_versions,
+            }
+        elif identity_source is not None:
+            document.diagnostics.facts["ocr_profile"] = "unknown-injected-engine"
         return document
 
 
 def _process_memory_snapshot() -> dict[str, Any]:
     """Return process RSS metrics with explicit units and collection source."""
     return process_memory_snapshot()
-
-
-def _quality_to_dict(value: Any) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    names = (
-        "score", "sufficient", "recovery_recommended", "character_count",
-        "token_count", "char_weighted_confidence", "median_confidence",
-        "lower_quartile_confidence", "low_confidence_character_ratio",
-        "horizontal_token_ratio", "printable_character_ratio",
-        "alphanumeric_character_ratio", "suspicious_token_ratio",
-        "detection_count", "recognition_count", "recognition_yield",
-        "orientation_incoherent", "reasons",
-    )
-    return {name: list(getattr(value, name)) if name == "reasons" else getattr(value, name) for name in names}
-
-
-def _image_profile_to_dict(value: Any) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    names = (
-        "available", "contrast_span", "grayscale_stddev", "sharpness_score", "noise_score",
-        "median_token_height_px", "low_contrast", "likely_blurred_or_small",
-        "likely_noisy",
-    )
-    return {name: getattr(value, name) for name in names}
 
 
 def _resolve_num_threads(num_threads: int) -> int:
@@ -1465,41 +1575,46 @@ def _backend_supports(engine: Any, capability: str) -> bool:
     return bool(getattr(capabilities, capability, False))
 
 
+def _regional_scale_factors(
+    engine: Any,
+    stage: str,
+    *,
+    quality_policy: str | None,
+    reasons: tuple[str, ...] = (),
+    area_ratio: float = 1.0,
+    fallback: tuple[float, ...] = (1.0,),
+) -> tuple[float, ...]:
+    """Resolve scales from pipeline policy, never from the engine's name."""
+    policy = getattr(engine, "recovery_policy", None) or LEGACY_COMPATIBILITY_RECOVERY_PROFILE
+    choose = getattr(policy, "scale_factors", None)
+    if callable(choose):
+        try:
+            values = tuple(choose(
+                stage, quality_policy=quality_policy, reasons=reasons,
+                area_ratio=area_ratio,
+            ))
+        except (TypeError, ValueError):
+            values = ()
+        if values and all(
+            isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+            for value in values
+        ):
+            return values
+        # A custom/legacy object may expose an unrelated dynamic attribute
+        # named recovery_policy. Preserve injected-engine compatibility from
+        # an explicit profile value rather than inferring from engine identity.
+    compatibility = LEGACY_COMPATIBILITY_RECOVERY_PROFILE.scale_factors(
+        stage, quality_policy=quality_policy, reasons=reasons, area_ratio=area_ratio,
+    )
+    return tuple(compatibility) if compatibility else tuple(fallback)
+
+
 def _backend_capability_facts(engine: Any) -> dict[str, bool]:
     names = (
         "polygons", "direct_recognition", "detector_profiles", "decoder_profiles",
         "orientation_search", "multiple_detectors", "word_beam_search", "native_confidence",
     )
     return {name: _backend_supports(engine, name) for name in names}
-
-
-def _attach_ocr_provenance(tokens: list[OcrToken], engine: Any) -> list[OcrToken]:
-    identity = getattr(engine, "identity", None)
-    engine_name = getattr(identity, "engine", type(engine).__name__ if engine is not None else "unknown")
-    extra = getattr(identity, "extra", {}) or {}
-    result: list[OcrToken] = []
-    for token in tokens:
-        if token.ocr_provenance is not None:
-            result.append(token)
-            continue
-        candidate_id = None
-        if token.provenance and token.provenance.startswith("candidate:"):
-            candidate_id = token.provenance.split(":", 1)[1]
-        result.append(replace(
-            token,
-            ocr_provenance=OcrProvenance(
-                engine=engine_name,
-                candidate_id=candidate_id or "baseline",
-                detector=("dbnet18" if candidate_id and "dbnet" in candidate_id else "craft" if engine_name == "easyocr" else None),
-                recognizer=str(extra.get("recognition_network")) if extra.get("recognition_network") else None,
-                decoder=str(extra.get("decoder")) if extra.get("decoder") else None,
-                preprocessing=(candidate_id,) if candidate_id and candidate_id not in {"default", "full-page"} else (),
-                rotation=float(token.rotation),
-                tile_id=candidate_id.removeprefix("tile:") if candidate_id and candidate_id.startswith("tile:") else None,
-                refinement_kind=(token.provenance if token.provenance and token.provenance not in {"baseline", f"candidate:{candidate_id}"} else None),
-            ),
-        ))
-    return result
 
 
 def _local_fusion_decisions(
@@ -1570,11 +1685,10 @@ def _recognize_dominant_embedded_image(
         pass
     if image.pixel_width < image.bbox.width * scale * 1.15 or image.pixel_height < image.bbox.height * scale * 1.15:
         return []
-    extracted = source.extract_embedded_image(page.page_index, image.object_index)
-    if not extracted:
-        return []
-    bitmap, image_bbox = extracted
-    tokens = _call_page_recognition(engine.recognize_page, bitmap, page_index, image_bbox, quality_policy)
+    # Only request the visible PDF composition through the authorized facade.
+    # The embedded source bitmap may include pixels hidden by clipping or masks.
+    image_bbox = image.bbox
+    tokens = _call_page_recognition(engine.recognize_page, page_image, page_index, image_bbox, quality_policy)
     return [replace(token, provenance="embedded_image_original") for token in tokens]
 
 
@@ -1599,6 +1713,38 @@ def _call_page_recognition(
     return method(image, page_index, bbox, **kwargs)
 
 
+def _is_successful_empty_optional_figure_ocr(
+    *,
+    page_ocr_requested: bool,
+    region_ocr_requested: bool,
+    figure_ocr_requested: bool,
+    ocr_tokens: list[OcrToken],
+    region_ocr_stats: dict[str, dict[str, Any]],
+    warnings: list[str],
+    partial_reasons: list[str],
+) -> bool:
+    """Recognize a clean empty result when only optional figures were read."""
+    optional_regions = (
+        not region_ocr_requested
+        or bool(region_ocr_stats)
+        and all(
+            item.get("kind") == "figure"
+            and item.get("ocr_required") is False
+            and item.get("ocr_failed") is False
+            and item.get("tokens", 0) == 0
+            for item in region_ocr_stats.values()
+        )
+    )
+    return (
+        (figure_ocr_requested or region_ocr_requested)
+        and not page_ocr_requested
+        and optional_regions
+        and not ocr_tokens
+        and not any(item.startswith("figure_ocr_failed:") for item in warnings)
+        and "figure_ocr_unavailable" not in partial_reasons
+    )
+
+
 def _recover_selected_regions(
     engine: Any,
     page_image: Any,
@@ -1612,14 +1758,12 @@ def _recover_selected_regions(
     """Run targeted OCR recovery on regions flagged by the quality gate.
 
     For each region the function constructs a :class:`RegionRefinementRequest`
-    and delegates to :class:`OcrRegionRefiner`.  Regions whose quality reasons
-    include ``"small"``, ``"sparse"``, ``"missing"`` or ``"damaged"`` receive
-    scale factors ``(1.0, 1.5, 2.0)``; all others use only ``(1.0,)``.  The
-    ``quality_reasons`` field is forwarded verbatim to the refiner so they
-    appear in the ``REGION_SELECTED`` debug log entry.
+    and delegates to :class:`OcrRegionRefiner`. The selected pipeline supplies
+    its own scale schedule; the common refiner only executes it. The
+    ``quality_reasons`` field is forwarded verbatim for diagnostics.
 
     The RGB budget gate in :func:`plan_ocr_scales` may further reduce the
-    effective scale list; blocked variants are never created or sent to Paddle.
+    effective scale list; blocked variants are never rendered or sent to OCR.
 
     Returns:
         A 4-tuple of ``(tokens, total_passes, total_batches, per_region_stats)``.
@@ -1628,28 +1772,31 @@ def _recover_selected_regions(
         attempt counts, errors and selected scale/rotation for diagnostics.
     """
     refiner = OcrRegionRefiner(engine)
-    # R66: resolve the scale and variant profile before building requests so
-    # that the declared quality_policy is actually respected.  Baseline must
-    # not silently expand into multi-scale / quality-variant work regardless
-    # of how the caller configured ocr_quality_variants.
+    # Baseline must not silently expand into quality variants. Scale schedules
+    # come from the selected pipeline's local recovery policy.
     _is_baseline_policy = str(quality_policy or "").lower() == "baseline"
-    requests = [
-        RegionRefinementRequest(
+    requests = []
+    target_bindings: dict[str, Any] = {}
+    target_factory = getattr(engine, "make_region_target", None)
+    for region in regions:
+        reasons = tuple(region.quality.reasons)
+        binding = None
+        if callable(target_factory) and not region.ocr_tokens:
+            binding = target_factory(region)
+            target_bindings[region.region_id] = binding
+        requests.append(RegionRefinementRequest(
             bbox=region.bbox,
-            scale_factors=(1.0,) if _is_baseline_policy else (
-                (1.0, 1.5, 2.0) if any(
-                    marker in " ".join(region.quality.reasons).lower()
-                    for marker in ("small", "sparse", "missing", "damaged")
-                ) else (1.0,)
+            scale_factors=_regional_scale_factors(
+                engine, "region", quality_policy=quality_policy,
+                reasons=reasons,
             ),
             quality_variants=False if _is_baseline_policy else quality_variants,
             quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
             page_rotation=page_rotation,
-            quality_reasons=tuple(region.quality.reasons),
-        )
-        for region in regions
-    ]
+            quality_reasons=reasons,
+            integration_targets=(binding,) if binding is not None else (),
+        ))
     results = refiner.refine_many(
         page_image,
         page_index,
@@ -1662,6 +1809,10 @@ def _recover_selected_regions(
     stats: dict[str, dict[str, Any]] = {}
     for region, result in zip(regions, results):
         region_tokens = list(result.tokens)
+        binding = target_bindings.get(region.region_id)
+        integrate_selected = getattr(engine, "integrate_selected_tokens", None)
+        if binding is not None and callable(integrate_selected):
+            region_tokens = list(integrate_selected(region_tokens, binding))
         region.ocr_tokens = region_tokens
         region.ocr_lines = reconstruct_ocr_lines(
             region_tokens, page_index, page_bbox, page_rotation=page_rotation
@@ -1765,9 +1916,27 @@ def _refine_small_footnote_tokens(
     ]
     refined_count = 0
     output = list(tokens)
-    for line in candidates:
+    token_integrator = NativeOCRIntegrator()
+    for line_index, line in enumerate(candidates, start=1):
         box = line.bbox.expand(max(3.0, line.bbox.height * 0.5)).intersection(page_bbox)
         if box is None or box.area <= 0:
+            continue
+        if isinstance(engine, OCRPageFacade):
+            from structured_pdf_text.ocr.pipeline.contracts import WorkGoal
+
+            indices = tuple(index for index, token in enumerate(output)
+                            if box.x0 <= token.bbox.cx <= box.x1 and box.y0 <= token.bbox.cy <= box.y1)
+            if not indices:
+                continue
+            try:
+                target = engine.make_token_target(
+                    output, box, target_id=f"footnote:p{page_index}:{line_index}", indices=indices, goal=WorkGoal.NOTE,
+                )
+            except ValueError:
+                # Overlap alone cannot authorize deletion of the part of an
+                # existing token that lies outside this optional note crop.
+                continue
+            refined_count += int(engine.refine_footnote(target, base_scale=base_scale, quality_policy=quality_policy))
             continue
         try:
             image = region_renderer(box, base_scale * 2.0)
@@ -1798,11 +1967,6 @@ def _refine_small_footnote_tokens(
         new_score = _ocr_token_score(reread)
         old_chars = len(re.sub(r"\s+", "", old_text))
         new_chars = len(re.sub(r"\s+", "", new_text))
-        # R65: use the shared conservation gate (≥60% char retention) so that
-        # the same rule applies to both footnote refinements and weak-region
-        # recovery. This replaces the previous hard-coded 70% check.
-        if not _refinement_conserves_content(old_tokens, reread):
-            continue
         # A rerender can win on better confidence or recover at least 20% more
         # non-whitespace characters without a confidence drop over 0.10.
         if not (
@@ -1810,10 +1974,23 @@ def _refine_small_footnote_tokens(
             or (new_chars >= old_chars * 1.2 and new_score >= old_score - 0.10)
         ):
             continue
-        for index in reversed(old_indices):
-            output.pop(index)
-        output.extend(replace(token, provenance="footnote_high_scale") for token in reread)
-        refined_count += 1
+        try:
+            output, applied = token_integrator.apply_token_replacement(
+                request_id=f"footnote:p{page_index}:{line_index}",
+                page_index=page_index,
+                target_id=f"page-{page_index}:ocr-tokens",
+                tokens=output,
+                expected_snapshot=ocr_tokens_snapshot(output),
+                box=box,
+                selection_indices=tuple(old_indices),
+                replacement=[
+                    replace(token, provenance="footnote_high_scale")
+                    for token in reread
+                ],
+            )
+        except IntegrationRejected:
+            continue
+        refined_count += int(applied)
     return output, refined_count
 
 
@@ -1823,61 +2000,6 @@ _CRITICAL_LABEL_RE = re.compile(
 )
 
 
-def _collect_token_critical_fingerprint(tokens: list[OcrToken]) -> Counter[str]:
-    """VQ-06: Snapshot critical values from a token list for drift detection.
-
-    Returns a multiset of canonical typed values so callers can compare
-    before/after a refinement stage and detect silent changes.
-    """
-    text = " ".join(t.text.strip() for t in tokens if t.text.strip())
-    snapshot: Counter[str] = Counter()
-    snapshot.update(_extract_structural_critical_values(text))
-    snapshot.update(_extract_signed_numeric_critical_values(text))
-    protected = _extract_protected_semantic_tokens(text)
-    for tok in protected:
-        snapshot[f"protected:{tok}"] += 1
-    return snapshot
-
-
-def _emit_conservation_warning(
-    stage: str,
-    before: Counter[str],
-    after: Counter[str],
-    page_index: int,
-    warnings_list: list[str],
-) -> None:
-    """VQ-06: Record a conservation warning when critical values vanish after a stage."""
-    lost = before - after
-    for key, count in lost.items():
-        warnings_list.append(
-            f"conservation_drift:p{page_index}:{stage}: lost {count}x '{key}'"
-        )
-
-
-def _critical_surface_preserved(original: str, proposed: str) -> bool:
-    """VQ-02: Verify sign, leading-zeros and decimal separators are not altered.
-
-    Accepts complementation of an empty field but blocks substitution of an
-    existing value whose surface representation differs in sign, leading zero,
-    or separator character from the OCR hypothesis.
-    """
-    if not original.strip():
-        return True  # Empty → anything is a complement, not a substitution
-    orig = re.sub(r"\s", "", original)
-    prop = re.sub(r"\s", "", proposed)
-    if not prop:
-        return False
-    # Sign preservation
-    orig_sign = orig[0] if orig and orig[0] in "+-" else ""
-    prop_sign = prop[0] if prop and prop[0] in "+-" else ""
-    if orig_sign and orig_sign != prop_sign:
-        return False
-    # Leading-zero preservation (e.g. protocol numbers, CPF segments)
-    if orig.lstrip("+-") and orig.lstrip("+-")[0] == "0":
-        prop_body = prop.lstrip("+-")
-        if not prop_body or prop_body[0] != "0":
-            return False
-    return True
 
 
 def _refine_critical_data_tokens(
@@ -1918,10 +2040,28 @@ def _refine_critical_data_tokens(
             if vertical_distance <= tolerance and horizontal_distance <= max(160.0, tolerance * 3):
                 nearby_labels.extend(labels)
         data_type = refiner.detect_type_from_context(nearby_labels)
-        if data_type is None or refiner.score_token(token, data_type) >= 0.98:
+        if isinstance(engine, OCRPageFacade):
+            needs_refinement = engine.token_refinement_policy.needs_critical(token, data_type)
+        else:
+            needs_refinement = data_type is not None and refiner.score_token(token, data_type) < .98
+        if not needs_refinement:
             continue
         box = token.bbox.expand(max(2.0, token.bbox.height * 0.35)).intersection(page_bbox)
         if box is None or box.area <= 0:
+            continue
+        if isinstance(engine, OCRPageFacade):
+            from structured_pdf_text.ocr.pipeline.contracts import WorkGoal
+
+            try:
+                target = engine.make_token_target(
+                    output, box, target_id=f"critical:p{page_index}:{index}", indices=(index,), goal=WorkGoal.CRITICAL_DATA,
+                )
+            except ValueError:
+                continue
+            refinements += int(engine.refine_critical(
+                target, base_scale=base_scale, quality_policy=quality_policy,
+                data_type=data_type, page_image=page_image,
+            ))
             continue
         refined_tokens: list[OcrToken] = []
         hypotheses: list[list[OcrToken]] = []
@@ -1948,7 +2088,9 @@ def _refine_critical_data_tokens(
                 page_image, page_index, page_bbox,
                 RegionRefinementRequest(
                     bbox=box,
-                    scale_factors=(1.5, 2.0, 3.0),
+                    scale_factors=_regional_scale_factors(
+                        engine, "critical_data", quality_policy=quality_policy,
+                    ),
                     rotations=(0.0,),
                     quality_variants=quality_policy != "baseline",
                     quality_policy=quality_policy,
@@ -2002,6 +2144,27 @@ def _refine_table_cells_ocr(
     base_scale: float = 3.0, page_rotation: int = 0,
 ) -> int:
     """Target weak cells using both detector and direct-recognition paths."""
+    if isinstance(engine, OCRPageFacade):
+        refinements = 0
+        threshold = engine.cell_recovery_policy.minimum_existing_confidence
+        for table in tables:
+            header_rows = table.header_rows if table.header_rows is not None else (
+                (min((cell.row for cell in table.cells), default=0),) if table.cells else ()
+            )
+            for cell in table.cells:
+                if cell.bbox is None or (cell.text.strip() and cell.confidence >= threshold):
+                    continue
+                header_text = next((
+                    item.text for item in table.cells
+                    if item.col == cell.col and item.row in header_rows and item.text.strip()
+                ), "")
+                refinements += int(engine.refine_cell(
+                    table_id=table.table_id, page_index=page_index, cell=cell,
+                    quality_policy=quality_policy, base_scale=base_scale,
+                    header_text=header_text,
+                ))
+        return refinements
+
     import numpy as np
     from PIL import Image
     from .tables.cell_ocr import crop_cell_image
@@ -2009,6 +2172,7 @@ def _refine_table_cells_ocr(
     from structured_pdf_text.ocr.image_views import canonicalize_page_image
 
     refiner = CriticalDataRefiner()
+    integrator = NativeOCRIntegrator(join_table_tokens)
     page_array = np.asarray(page_image)
     capabilities = getattr(engine, "capabilities", None)
     direct_supported = bool(getattr(capabilities, "direct_recognition", False))
@@ -2019,6 +2183,7 @@ def _refine_table_cells_ocr(
         for cell in table.cells:
             if cell.bbox is None or (cell.text.strip() and cell.confidence >= 0.70):
                 continue
+            cell_snapshot = cell_evidence_snapshot(cell)
             crop = crop_cell_image(
                 page_array, cell.bbox, page_bbox, pad_px=3,
                 page_rotation=page_rotation,
@@ -2119,204 +2284,23 @@ def _refine_table_cells_ocr(
             if cell.text.strip() and new_score < old_score:
                 continue
 
-            # VQ-03: for non-empty cells, verify the replacement conserves content.
-            if cell.text.strip():
-                old_wrap = [replace(chosen[0], text=cell.text, confidence=cell.confidence)]
-                new_wrap = [replace(chosen[0], text=text)]
-                if not _refinement_conserves_content(old_wrap, new_wrap):
-                    continue
-
-            # Collect evidence IDs from the tokens being replaced (VQ-04/VQ-28).
-            original_evidence_ids = tuple(
-                t.evidence_id
-                for t in cell.tokens
-                if getattr(t, "evidence_id", None)
-            )
-            cell.tokens = [
-                TextToken(
-                    text=token.text,
-                    bbox=token.bbox,
-                    sources=[EvidenceRef(SourceKind.OCR_REGION, page_index, f"table-cell:{table.table_id}:{cell.row}:{cell.col}")],
-                    confidence=max(0.0, min(1.0, token.confidence or 0.0)),
-                    normalized_text=token.text,
-                    provenance="table_cell_ocr",
-                    rotation=token.rotation,
-                    # VQ-04/VQ-28: stable identity + lineage for ownership tracking
-                    evidence_id=f"ocr:p{page_index}:cell:{table.table_id}:{cell.row}:{cell.col}:idx{ti}",
-                    derived_from_ids=original_evidence_ids,
-                    transformation_type="table_cell_ocr",
-                    decision_reason="cell_confidence_below_threshold",
+            try:
+                applied = integrator.apply_cell_replacement(
+                    request_id=f"cell-ocr:p{page_index}:{table.table_id}:{cell.row}:{cell.col}",
+                    page_index=page_index,
+                    table_id=table.table_id,
+                    cell=cell,
+                    expected_snapshot=cell_snapshot,
+                    evidence=tuple(chosen),
+                    proposed_text=text,
                 )
-                for ti, token in enumerate(chosen)
-            ]
-            cell.text = join_table_tokens(cell.tokens)
-            cell.confidence = max((token.confidence for token in chosen if token.confidence is not None), default=cell.confidence)
-            refinements += 1
+            except IntegrationRejected:
+                continue
+            refinements += int(applied)
     return refinements
 
 
 # ---------------------------------------------------------------------------
-# B2/R67 — semantic conservation helpers
-# ---------------------------------------------------------------------------
-
-# Strict patterns for structural critical data. Monetary and percentage values
-# use dedicated typed patterns below so each kind has a single source of truth.
-_STRUCTURAL_CRITICAL_PATTERNS = (
-    ("process", re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4}\b")),
-    ("cnpj", re.compile(r"\b\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}\b")),
-    ("cpf", re.compile(r"\b\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}\b")),
-    ("date", re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b")),
-)
-
-
-def _similarity_key(text: str) -> str:
-    """Collapse text to a whitespace-free key for SequenceMatcher comparison.
-
-    Removing all whitespace before comparison prevents spacing differences
-    (e.g. "A B C" vs "ABC") from artificially lowering similarity scores,
-    while keeping character-level differences (e.g. "G" vs "6") detectable.
-    """
-    text = unicodedata.normalize("NFKC", text).casefold()
-    return re.sub(r"\s", "", text)
-
-
-def _extract_structural_critical_values(text: str) -> Counter[str]:
-    """Extract typed identifiers and dates, retaining repeated occurrences."""
-    values: Counter[str] = Counter()
-    occupied: list[tuple[int, int]] = []
-    for kind, pattern in _STRUCTURAL_CRITICAL_PATTERNS:
-        for match in pattern.finditer(text):
-            span = match.span()
-            if any(span[0] < end and start < span[1] for start, end in occupied):
-                continue
-            normalized = re.sub(r"[\s.,/\-]", "", match.group())
-            if normalized:
-                values[f"{kind}:{normalized}"] += 1
-                occupied.append(span)
-    return values
-
-
-_SIGNED_MONEY_PATTERN = re.compile(
-    r"(?<![\w\d])r\$\s*([+-]?)\s*((?:\d{1,3}(?:\.\d{3})*)|\d+),(\d{2})(?!\d)",
-    re.IGNORECASE,
-)
-
-_SIGNED_PERCENTAGE_PATTERN = re.compile(
-    r"(?<![\w\d.,])([+-]?)\s*(\d{1,3})(?:([,.])(\d{1,3}))?\s*%(?!\w)"
-)
-
-def _extract_signed_numeric_critical_values(text: str) -> Counter[str]:
-    """Extract canonical sign-sensitive monetary and percentage values.
-
-    Missing sign and explicit '+' are both normalized as positive.
-    The negative sign is preserved because changing it changes the
-    semantic value of financial and percentage data. Decimal normalization
-    preserves decimal position and repeated occurrences.
-    """
-    values: Counter[str] = Counter()
-
-    for match in _SIGNED_MONEY_PATTERN.finditer(text):
-        sign = "-" if match.group(1) == "-" else "+"
-        integer = match.group(2).replace(".", "")
-        amount = Decimal(f"{integer}.{match.group(3)}")
-        values[f"money:{sign}:{format(amount, '.2f')}"] += 1
-
-    for match in _SIGNED_PERCENTAGE_PATTERN.finditer(text):
-        sign = "-" if match.group(1) == "-" else "+"
-        integer = match.group(2)
-        fraction = match.group(4)
-        number = Decimal(f"{integer}.{fraction}" if fraction else integer)
-        values[f"percentage:{sign}:{format(number.normalize(), 'f')}"] += 1
-
-    return values
-
-
-# VQ-07 — protected semantic tokens that must not vanish between old and new text.
-_PROTECTED_NEGATION_WORDS: frozenset[str] = frozenset({
-    "não", "nao", "nem", "sem", "exceto", "salvo", "jamais", "nunca",
-    "menor", "maior", "diferente", "deferido", "indeferido",
-    "aprovado", "reprovado", "ativo", "inativo", "válido", "invalido",
-})
-
-_PROTECTED_OPERATORS_RE = re.compile(
-    # Comparison operators
-    r"(?:<=|>=|<>|!=|[<>]=?)"
-    # Negative sign before a digit — changes numeric value.
-    # Positive sign (+) before a digit is NOT protected: it is redundant
-    # (R$ +350,00 == R$ 350,00) and existing tests rely on this.
-    r"|(?:(?<!\w)-(?=\s*\d))"
-)
-
-
-def _extract_protected_semantic_tokens(text: str) -> frozenset[str]:
-    """Return negation words and comparison operators that must survive refinement."""
-    tokens: set[str] = set()
-    for word in re.split(r"\s+", text.lower()):
-        clean = re.sub(r"[^\w]", "", word, flags=re.UNICODE)
-        if clean in _PROTECTED_NEGATION_WORDS:
-            tokens.add(clean)
-    for match in _PROTECTED_OPERATORS_RE.finditer(text):
-        tokens.add(match.group())
-    return frozenset(tokens)
-
-
-def _refinement_conserves_content(
-    old_tokens: list[OcrToken],
-    new_tokens: list[OcrToken],
-    *,
-    min_coverage: float = 0.60,
-    min_similarity: float = 0.60,
-) -> bool:
-    """Return True when new_tokens retains sufficient content from old_tokens.
-
-    Four independent checks must all pass (B2/R67 + VQ-07):
-
-    0. Protected semantic tokens — negation words and comparison operators in
-       old must all appear in new.  A substitution that silently removes "não"
-       changes document meaning regardless of character-level similarity.
-
-    1. Critical data preservation — structural and signed numeric values.
-
-    2. Character coverage.
-
-    3. Text similarity (long texts only).
-    """
-    old_text = " ".join(t.text.strip() for t in old_tokens if t.text.strip())
-    new_text = " ".join(t.text.strip() for t in new_tokens if t.text.strip())
-    old_chars = len(re.sub(r"\s+", "", old_text))
-    new_chars = len(re.sub(r"\s+", "", new_text))
-
-    # Check 0a: VQ-07 — protected semantic tokens must not vanish
-    old_protected = _extract_protected_semantic_tokens(old_text)
-    if old_protected:
-        new_protected = _extract_protected_semantic_tokens(new_text)
-        if old_protected - new_protected:
-            return False
-
-    # Check 0b: critical structured data must not disappear or be substituted
-    old_critical = _extract_structural_critical_values(old_text)
-    if old_critical:
-        new_critical = _extract_structural_critical_values(new_text)
-        if old_critical - new_critical:
-            return False
-    old_signed_critical = _extract_signed_numeric_critical_values(old_text)
-    if old_signed_critical:
-        new_signed_critical = _extract_signed_numeric_critical_values(new_text)
-        if old_signed_critical - new_signed_critical:
-            return False
-
-    if old_chars <= 4:
-        return True
-    # Check 1: character coverage
-    if new_chars < old_chars * min_coverage:
-        return False
-    # Check 2: text similarity (long texts only)
-    if old_chars >= 15:
-        old_key = _similarity_key(old_text)
-        new_key = _similarity_key(new_text)
-        if SequenceMatcher(None, old_key, new_key).ratio() < min_similarity:
-            return False
-    return True
 
 
 def _recover_weak_ocr_regions(
@@ -2382,6 +2366,11 @@ def _recover_weak_ocr_regions(
 
     refiner = OcrRegionRefiner(engine)
     refined_tokens = list(tokens)
+    token_integrator = NativeOCRIntegrator()
+    from structured_pdf_text.ocr.pipeline.policies import LEGACY_TOKEN_REFINEMENT_POLICY
+
+    acceptance_policy = (engine.token_refinement_policy if isinstance(engine, OCRPageFacade)
+                         else LEGACY_TOKEN_REFINEMENT_POLICY)
     passes = 0
     batches = 0
     stats: dict[str, dict[str, Any]] = {}
@@ -2390,7 +2379,26 @@ def _recover_weak_ocr_regions(
         if box is None or box.area <= 0:
             continue
         area_ratio = box.area / max(page_bbox.area, 1.0)
-        scales = (1.5, 2.0, 3.0) if area_ratio <= 0.12 else (1.5, 2.0)
+        scales = _regional_scale_factors(
+            engine, "weak_line", quality_policy=quality_policy,
+            area_ratio=area_ratio,
+        )
+        target = None
+        if isinstance(engine, OCRPageFacade):
+            indices = tuple(position for position, token in enumerate(refined_tokens) if _line_in_box(token, box))
+            if not indices:
+                continue
+            try:
+                target = engine.make_token_target(
+                    refined_tokens, box, target_id=f"weak-region:p{page_index}:{index}", indices=indices,
+                )
+            except ValueError:
+                stats[f"weak-region-{index}"] = {
+                    "bbox": box, "line_count": len(group), "accepted": False,
+                    "reason": "existing_evidence_extends_outside_authorized_crop",
+                    "attempts": 0, "ocr_passes": 0, "ocr_batches": 0,
+                }
+                continue
         request = RegionRefinementRequest(
             bbox=box,
             scale_factors=scales,
@@ -2399,26 +2407,44 @@ def _recover_weak_ocr_regions(
             quality_policy=quality_policy,
             goal=RegionRefinementGoal.TEXT,
             page_rotation=page_rotation,
+            integration_targets=(target,) if target is not None else (),
         )
-        result = refiner.refine(page_image, page_index, page_bbox, request)
+        try:
+            result = refiner.refine(page_image, page_index, page_bbox, request)
+        except BaseException:
+            if target is not None:
+                engine.discard_selected_tokens(target)
+            raise
         passes += result.ocr_passes
         batches += result.ocr_batches
         old_tokens = [token for token in refined_tokens if _line_in_box(token, box)]
         new_tokens = list(result.tokens)
-        old_quality = assess_ocr_quality(old_tokens, thresholds=thresholds)
-        new_quality = assess_ocr_quality(new_tokens, thresholds=thresholds)
-        accepted = bool(new_tokens) and (
-            not old_tokens
-            or new_quality.score >= old_quality.score + 0.03
-            or (new_quality.sufficient and not old_quality.sufficient)
-        )
+        accepted, old_quality, new_quality = acceptance_policy.accept_weak_line(old_tokens, new_tokens, thresholds)
         # R67: quality score alone cannot justify discarding most of the prior
         # content. A short result with high confidence must still retain at
         # least 60% of the previous non-whitespace character count.
-        if accepted and old_tokens:
-            accepted = _refinement_conserves_content(old_tokens, new_tokens)
-        if accepted:
-            refined_tokens = _replace_tokens_in_box(refined_tokens, box, new_tokens)
+        if target is not None:
+            try:
+                if accepted:
+                    accepted = bool(engine.integrate_selected_tokens(new_tokens, target))
+            except IntegrationRejected:
+                accepted = False
+            finally:
+                engine.discard_selected_tokens(target)
+        elif accepted:
+            try:
+                refined_tokens, applied = token_integrator.apply_token_replacement(
+                    request_id=f"weak-region:p{page_index}:{index}",
+                    page_index=page_index,
+                    target_id=f"page-{page_index}:ocr-tokens",
+                    tokens=refined_tokens,
+                    expected_snapshot=ocr_tokens_snapshot(refined_tokens),
+                    box=box,
+                    replacement=new_tokens,
+                )
+                accepted = applied
+            except IntegrationRejected:
+                accepted = False
         stats[f"weak-region-{index}"] = {
             "bbox": box,
             "line_count": len(group),
@@ -2668,12 +2694,19 @@ def _append_hybrid_ocr_regions(
         regions.append(table_region)
         remaining = [line for line in remaining if not _line_in_box(line, table_bbox)]
 
-    figure_boxes: list[BBox] = []
+    # OCR from a region already classified as a figure must never fall through
+    # into the page's body-text supplement. A figure refinement can be rejected
+    # by the conservation gate, while its initial region OCR remains useful as
+    # diagnostic evidence on the figure itself.
+    figure_boxes: list[BBox] = [
+        region.bbox for region in regions if region.kind == RegionKind.FIGURE
+    ]
     for index, (figure_bbox, figure_lines, figure_tokens) in enumerate(
         figure_ocr_bindings or (),
         start=1,
     ):
-        figure_boxes.append(figure_bbox)
+        if not any(existing.iou(figure_bbox) >= 0.25 for existing in figure_boxes):
+            figure_boxes.append(figure_bbox)
         existing = _best_figure_region(regions, figure_bbox)
         if existing is None:
             existing = full_page_text_region(page_index, figure_bbox, [], complexity)
@@ -2702,33 +2735,6 @@ def _append_hybrid_ocr_regions(
         regions.append(supplemental)
 
 
-def _best_figure_region(
-    regions: list[LayoutRegion],
-    figure_bbox: BBox,
-) -> LayoutRegion | None:
-    candidates = [
-        region
-        for region in regions
-        if region.kind == RegionKind.FIGURE and region.bbox.iou(figure_bbox) >= 0.25
-    ]
-    return max(
-        candidates,
-        key=lambda region: region.bbox.iou(figure_bbox),
-        default=None,
-    )
-
-
-def _bind_figure_ocr_to_regions(
-    regions: list[LayoutRegion],
-    figure_bbox: BBox,
-    figure_lines: list[TextLine],
-    figure_tokens: list[OcrToken],
-) -> None:
-    region = _best_figure_region(regions, figure_bbox)
-    if region is None:
-        return
-    region.ocr_lines = list(figure_lines)
-    region.ocr_tokens = list(figure_tokens)
 
 
 def _image_union_coverage(image_bbox: BBox, regions: list[LayoutRegion]) -> float:
@@ -2828,77 +2834,15 @@ def _validate_detected_tables(
     return valid_tables, validation_facts, construction_facts, provenance_facts
 
 
+
 def _merge_ocr_region_tokens_into_table_cells(
-    *,
-    tables: list[Any],
-    regions: list[LayoutRegion],
-    page_index: int,
+    *, tables: list[Any], regions: list[LayoutRegion], page_index: int,
 ) -> set[int]:
-    """Attach OCR from an image wholly inside a native table cell.
-
-    Native grid detection owns the cell geometry, while regional OCR owns the
-    pixels of an embedded image.  When the image bbox is substantially inside
-    one cell, both evidences belong to that cell.  OCR outside a cell, and all
-    visual-table refinements, remain on their existing paths.
-    """
-    consumed: set[int] = set()
-    for table in tables:
-        if table.method == TableMethod.VISUAL_MODEL:
-            continue
-        cells = [cell for cell in table.cells if cell.bbox is not None]
-        if not cells:
-            continue
-        for region in regions:
-            if not region.ocr_tokens or region.kind == RegionKind.TABLE:
-                continue
-            matching_cells = [
-                cell
-                for cell in cells
-                if region.bbox.overlap_ratio(cell.bbox) >= 0.80
-                and cell.bbox.overlap_ratio(region.bbox) >= 0.75
-            ]
-            if not matching_cells:
-                continue
-            for token in region.ocr_tokens:
-                cell = next(
-                    (
-                        candidate
-                        for candidate in matching_cells
-                        if candidate.bbox.x0 <= token.bbox.cx <= candidate.bbox.x1
-                        and candidate.bbox.y0 <= token.bbox.cy <= candidate.bbox.y1
-                    ),
-                    None,
-                )
-                if cell is None:
-                    continue
-                if any(
-                    existing.text == token.text
-                    and existing.bbox.iou(token.bbox) >= 0.80
-                    for existing in cell.tokens
-                ):
-                    consumed.add(id(token))
-                    continue
-                cell.tokens.append(
-                    TextToken(
-                        text=token.text,
-                        bbox=token.bbox,
-                        sources=[
-                            EvidenceRef(
-                                token.source,
-                                page_index,
-                                f"ocr-table:{table.table_id}:{cell.row}:{cell.col}",
-                            )
-                        ],
-                        confidence=max(0.0, min(1.0, token.confidence or 0.0)),
-                        normalized_text=token.text,
-                        provenance=token.provenance or "table_cell_ocr",
-                        rotation=token.rotation,
-                    )
-                )
-                cell.text = join_table_tokens(cell.tokens)
-                consumed.add(id(token))
-    return consumed
-
+    """Compatibility adapter to the shared core-owned cell integrator."""
+    return _merge_regions_into_table_cells(
+        tables=tables, regions=regions, page_index=page_index,
+        join_tokens=join_table_tokens,
+    )
 
 def _table_prefix_diagnostics(regions: list[LayoutRegion]) -> dict[str, Any]:
     assessments = [
@@ -2971,117 +2915,8 @@ def _line_in_box(value: Any, box: BBox) -> bool:
     return bbox.overlap_ratio(box) >= 0.25 or box.overlap_ratio(bbox) >= 0.25
 
 
-def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int) -> list[TextLine]:
-    """Serialize OCR text by detected table row/column instead of OCR line order.
-
-    OCR line reconstruction is intentionally page-oriented. On dense raster
-    tables it can interleave neighboring rows or split a row into fragments.
-    Once a visual grid has assigned tokens to cells, the cell coordinates are
-    the stronger ordering signal. Only unmatched OCR tokens are used here so
-    the hybrid path does not duplicate authoritative native text.
-    """
-    if not getattr(table, "cells", None):
-        return lines
-    source_tokens = [token for line in lines for token in line.tokens]
-    if not source_tokens:
-        return lines
-    # token.rotation is provenance metadata, not a command to mutate the table
-    # structure.  By the time tokens reach this function their bbox coordinates
-    # are already in canonical page space (box_transform was applied in
-    # paddle._tokens_from_result).  Applying any metadata-based axis reversal on
-    # top of already-canonical bboxes would produce a double-rotation.  Source geometry
-    # validated by _validate_detected_tables is the sole authority for cell order.
-    cell_tokens: dict[tuple[int, int], list[TextToken]] = {}
-    for cell in table.cells:
-        if cell.bbox is None:
-            continue
-        selected = [
-            token
-            for token in source_tokens
-            if cell.bbox.x0 <= token.bbox.cx <= cell.bbox.x1
-            and cell.bbox.y0 <= token.bbox.cy <= cell.bbox.y1
-        ]
-        while selected and selected[0].text.isspace():
-            selected.pop(0)
-        while selected and selected[-1].text.isspace():
-            selected.pop()
-        if selected:
-            cell.text = join_table_tokens(selected)
-            cell_tokens[(cell.row, cell.col)] = selected
-
-    if not cell_tokens:
-        return lines
-    rebuilt: list[TextLine] = []
-    for row in range(max(0, int(table.row_count))):
-        row_tokens: list[TextToken] = []
-        occupied_cells = [
-            cell
-            for cell in table.cells
-            if cell.row == row and (cell.row, cell.col) in cell_tokens
-        ]
-        for cell_index, cell in enumerate(sorted(occupied_cells, key=lambda item: item.col)):
-            if cell_index and row_tokens:
-                previous = row_tokens[-1]
-                current = cell_tokens[(cell.row, cell.col)][0]
-                row_tokens.append(
-                    TextToken(
-                        text=" ",
-                        bbox=(
-                            BBox(previous.bbox.x1, cell.bbox.y0, current.bbox.x0, cell.bbox.y1)
-                            if previous.bbox.x1 <= current.bbox.x0
-                            else BBox(previous.bbox.x1, cell.bbox.y0, previous.bbox.x1, cell.bbox.y1)
-                        ),
-                        sources=[
-                            EvidenceRef(
-                                SourceKind.TABLE_MODEL,
-                                page_index,
-                                f"table-gap:{table.table_id}:{cell.row}:{cell.col}",
-                            )
-                        ],
-                        confidence=0.55,
-                        normalized_text=" ",
-                        flags=set(),
-                    )
-                )
-            row_tokens.extend(cell_tokens[(cell.row, cell.col)])
-        if not row_tokens:
-            continue
-        row_tokens = _merge_short_table_fragments(row_tokens)
-        row_bbox = BBox.union_all([token.bbox for token in row_tokens])
-        rebuilt.append(
-            TextLine(
-                tokens=row_tokens,
-                bbox=row_bbox,
-                baseline=Baseline(y=row_bbox.y1),
-                direction=WritingDirection.LEFT_TO_RIGHT,
-                native_order_min=row,
-                native_order_max=row,
-            )
-        )
-    return rebuilt or lines
-
-
-def _merge_short_table_fragments(tokens: list[TextToken]) -> list[TextToken]:
-    """Remove spaces caused by splitting one alphanumeric word into boxes."""
-    compacted: list[TextToken] = []
-    for index, token in enumerate(tokens):
-        if token.text.isspace():
-            previous = next((item for item in reversed(compacted) if not item.text.isspace()), None)
-            following = next(
-                (item for item in tokens[index + 1 :] if not item.text.isspace()),
-                None,
-            )
-            if (
-                previous is not None
-                and following is not None
-                and len(previous.text.strip()) >= 4
-                and len(following.text.strip()) <= 3
-                and previous.text.strip()[-1].isalnum()
-                and following.text.strip()[0].isalnum()
-            ):
-                continue
-        compacted.append(token)
-    return compacted
+# Historical private imports retained for direct helper consumers.
+from structured_pdf_text.tables.ocr_lines import _rebuild_table_ocr_lines, _merge_short_table_fragments
 
 
 def _refine_visual_table_ocr(
@@ -3106,18 +2941,45 @@ def _refine_visual_table_ocr(
     if not boxes:
         return None
     table_bbox = BBox.union_all(boxes)
-    result = OcrRegionRefiner(engine).refine(
-        page_image,
-        page_index,
-        page.bbox,
-        RegionRefinementRequest(
-            bbox=table_bbox,
-            quality_variants=True,
-            quality_policy=quality_policy,
-            goal=RegionRefinementGoal.TEXT,
-            page_rotation=page_rotation,
-        ),
-    )
+    target = None
+    if isinstance(engine, OCRPageFacade):
+        try:
+            target = engine.make_visual_table_target(table, table_bbox, native_lines=native_lines)
+        except ValueError:
+            return None
+    try:
+        result = OcrRegionRefiner(engine).refine(
+            page_image,
+            page_index,
+            page.bbox,
+            RegionRefinementRequest(
+                bbox=table_bbox,
+                quality_variants=True,
+                quality_policy=quality_policy,
+                goal=RegionRefinementGoal.TEXT,
+                page_rotation=page_rotation,
+                integration_targets=(target,) if target is not None else (),
+            ),
+        )
+    except BaseException:
+        if target is not None:
+            engine.discard_selected_tokens(target)
+        raise
+    if target is not None:
+        try:
+            if not result.tokens:
+                return None
+            refined_table = detect_visual_table(
+                page=page, image=page_image, table_id=table.table_id,
+                tokens=list(result.tokens), page_rotation=page_rotation,
+            )
+            target.stage_candidate(refined_table if refined_table is not None else table)
+            engine.integrate_selected_tokens(result.tokens, target)
+            return table, target.ocr_lines, target.ocr_tokens, result.ocr_passes, result.ocr_batches
+        except IntegrationRejected:
+            return None
+        finally:
+            engine.discard_selected_tokens(target)
     refined_tokens = [
         replace(token, provenance="visual_table_refinement")
         for token in result.tokens
@@ -3152,6 +3014,8 @@ def _refine_figure_ocr(
     page_rotation: int = 0,
     warnings: list[str] | None = None,
     images: list[Any] | None = None,
+    integration_tokens: list[OcrToken] | None = None,
+    integration_regions: list[LayoutRegion] | None = None,
 ) -> list[
     tuple[
         BBox,
@@ -3193,6 +3057,8 @@ def _refine_figure_ocr(
     ] = []
     refiner = OcrRegionRefiner(engine)
     images_to_process = images if images is not None else page.objects.images
+    if isinstance(engine, OCRPageFacade) and (integration_tokens is None or integration_regions is None):
+        raise ValueError("Production figure refinement requires the core page token stream and region bindings")
     for image in images_to_process:
         figure_bbox = image.bbox
         if figure_bbox is None or figure_bbox.height <= 0 or figure_bbox.width <= 0:
@@ -3231,25 +3097,48 @@ def _refine_figure_ocr(
                         f",{page.bbox.x1:.1f},{page.bbox.y1:.1f})"
                     )
             for ocr_box in ocr_boxes:
-                result = refiner.refine(
-                    page_image,
-                    page_index,
-                    page.bbox,
-                    RegionRefinementRequest(
-                        bbox=ocr_box,
-                        quality_variants=str(quality_policy).lower() != "baseline",
-                        quality_policy=quality_policy,
-                        goal=RegionRefinementGoal.TEXT,
-                        page_rotation=page_rotation,
-                    ),
-                )
-                if not result.tokens and result.status in {"runtime_error", "timeout", "budget_blocked"} and warnings is not None:
+                target = None
+                if isinstance(engine, OCRPageFacade):
+                    visible_box = ocr_box.intersection(page.bbox)
+                    if visible_box is None or visible_box.area <= 0:
+                        continue
+                    ocr_box = visible_box
+                    try:
+                        target = engine.make_figure_refinement_target(
+                            integration_tokens, ocr_box, regions=integration_regions, native_lines=native_lines,
+                        )
+                    except ValueError:
+                        continue
+                try:
+                    result = refiner.refine(
+                        page_image,
+                        page_index,
+                        page.bbox,
+                        RegionRefinementRequest(
+                            bbox=ocr_box,
+                            quality_variants=str(quality_policy).lower() != "baseline",
+                            quality_policy=quality_policy,
+                            goal=RegionRefinementGoal.TEXT,
+                            page_rotation=page_rotation,
+                            integration_targets=(target,) if target is not None else (),
+                        ),
+                    )
+                    if target is not None:
+                        try:
+                            selected = list(engine.integrate_selected_tokens(result.tokens, target)) if result.tokens else []
+                        except IntegrationRejected:
+                            selected = []
+                    else:
+                        selected = [replace(token, provenance="figure_ocr") for token in result.tokens]
+                finally:
+                    if target is not None:
+                        engine.discard_selected_tokens(target)
+                if not result.tokens and result.status not in {"ok", "no_text"} and warnings is not None:
                     warnings.append(f"figure_ocr_failed:region={ocr_box}:status={result.status}:reason={result.reason_code}")
-                figure_tokens = [
-                    replace(token, provenance="figure_ocr")
-                    for token in result.tokens
-                ]
+                figure_tokens = selected
                 if not figure_tokens:
+                    if target is not None and result.tokens:
+                        refinements.append((ocr_box, [], [], [], [], result.ocr_passes, result.ocr_batches))
                     continue
                 all_lines = reconstruct_ocr_lines(figure_tokens, page_index, page.bbox, page_rotation=page_rotation)
                 figure_fusion = fuse_native_and_ocr(native_lines, figure_tokens)
@@ -3368,26 +3257,6 @@ def _has_uncovered_image_area(native_page: Any, tables: list[Any]) -> bool:
     return False
 
 
-def _replace_tokens_in_box(
-    tokens: list[OcrToken],
-    box: BBox,
-    replacement: list[OcrToken],
-    *,
-    conservative: bool = True,
-) -> list[OcrToken]:
-    """Replace tokens inside *box* with *replacement*.
-
-    VQ-05: When ``conservative=True`` (default) an empty replacement list
-    cannot silently delete existing content.  The original token list is
-    returned unchanged so that no text disappears without a recorded reason.
-    Callers that intentionally clear a region (e.g. confirmed decorative
-    artefact removal) must pass ``conservative=False``.
-    """
-    inside = [token for token in tokens if _line_in_box(token, box)]
-    outside = [token for token in tokens if not _line_in_box(token, box)]
-    if conservative and inside and not replacement:
-        return tokens
-    return outside + replacement
 
 
 def _crop_page_image(image: Any, page_bbox: BBox, region_bbox: BBox, page_rotation: int = 0) -> Any | None:

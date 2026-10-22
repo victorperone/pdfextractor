@@ -268,12 +268,13 @@ def test_bash_runner_compute_compare_integration_without_extraction(tmp_path, fa
     scripts.mkdir()
     models = tmp_path / "models"
     models.mkdir()
-    for name in ("latin_PP-OCRv5_rec_mobile.onnx", "ppocrv5_latin_dict.txt"):
+    for name in ("PP-OCRv6_det_medium.onnx", "PP-OCRv6_rec_medium.onnx",
+                 "ppocrv6_medium_dict.txt", "ch_ppocr_mobile_v2.0_cls_mobile.onnx"):
         (models / name).write_text("placeholder; no inference")
     runner = scripts / "run_benchmark.sh"
     source = (ROOT / "scripts" / "run_benchmark.sh").read_text()
-    source = source.replace('_RAPIDOCR_CACHE="$HOME/.cache/pdfextractor/rapidocr"',
-                            "_RAPIDOCR_CACHE=" + shlex.quote(str(models)))
+    source = source.replace('_RAPIDOCR_CACHE_HOME="${RAPIDOCR_CACHE_HOME:-$HOME/.cache/pdfextractor}"',
+                            "_RAPIDOCR_CACHE_HOME=" + shlex.quote(str(tmp_path)))
     runner.write_text(source)
     fake_python = tmp_path / "python"
     # The extractor and preflight are intercepted. The real evaluator and
@@ -313,6 +314,7 @@ elif name in ('compute_metrics.py', 'compare_engines.py'):
         "--python", str(fake_python),
     ], env={**os.environ, "AUDIT_CALLS": str(calls_path), "AUDIT_FAILURE": failure},
         capture_output=True, text=True, timeout=45)
+    assert calls_path.is_file(), result.stdout + result.stderr
     calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
     comparisons = [args for args in calls if Path(args[0]).name == "compare_engines.py"]
     if failure:

@@ -29,18 +29,25 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from structured_pdf_text.config import ExtractorConfig, ExtractionMode
+from structured_pdf_text.ocr.registry import ENGINE_REGISTRY
 from structured_pdf_text.ocr.readiness import ReadinessResult, ReadinessStatus, probe_deep, probe_static
 
 
 # Each entry: (display_label, engine, provider, cli_key)
 # cli_key must match the argparse choices below; used in re-exec and --configuration filter.
-CONFIGURATIONS = (
-    ("paddle", "paddle", None, "paddle"),
-    ("rapidocr [onnxruntime]", "rapidocr", "onnxruntime", "rapidocr-onnxruntime"),
-    ("rapidocr [openvino]", "rapidocr", "openvino", "rapidocr-openvino"),
-    ("easyocr", "easyocr", None, "easyocr"),
-    ("tesseract", "tesseract", None, "tesseract"),
-)
+def _configurations():
+    items = []
+    for entry in ENGINE_REGISTRY.entries:
+        if entry.providers:
+            for provider in entry.providers:
+                key = f"{entry.name}-{provider}"
+                items.append((f"{entry.name} [{provider}]", entry.name, provider, key))
+        else:
+            items.append((entry.name, entry.name, None, entry.name))
+    return tuple(items)
+
+
+CONFIGURATIONS = _configurations()
 
 
 def _check(engine: str, provider: str | None, language: str, deep: bool) -> ReadinessResult:
@@ -215,7 +222,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--configuration",
-        choices=("paddle", "rapidocr-onnxruntime", "rapidocr-openvino", "easyocr", "tesseract"),
+        choices=tuple(item[3] for item in CONFIGURATIONS),
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args()

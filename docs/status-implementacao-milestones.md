@@ -22,7 +22,11 @@ general.
 | M9 — visual fallback | Implemented | engine interface, OpenCV backend, visual structure, crop OCR, cell/span mapping, and rejection of charts/diagrams without text support | a learned visual model can replace the backend without changing the pipeline |
 | M10 — cross-page tables | Implemented | signature, real border geometry, headers, X tracks, width, cell types, intervening titles, markers, fragments, merge, and auditable positive/negative decisions | calibrate weights for corporate sequences with more than two fragments |
 | M11 — assembly/renderers | Implemented | structured document, raw/reading text, JSON, Markdown, header/footer policy, and page limits | additional renderings are post-MVP evolution |
-| M12 — performance/hardening | Implemented | timings per stage/strategy, p50/p95/p99, RSS/peak, opt-in native evidence, targeted per-page diagnostics, FFI acquisitions/estimate, timeout, limits, cache, reuse, batching, and per-document multiprocessing | Rust/PyO3 and isolation remain future options conditioned on measurements, as defined in the plan |
+| M12 — performance/hardening | Implemented | timings per stage/strategy, p50/p95/p99, RSS/peak, opt-in native evidence, targeted per-page diagnostics, FFI acquisitions/estimate, explicit cancellation without OCR processing deadlines, limits, cache, reuse, batching, and per-document multiprocessing | Rust/PyO3 and isolation remain future options conditioned on measurements, as defined in the plan |
+
+The separate OCR engine decoupling work is tracked in
+[`OCR_Decoupling_Implementation_Status.md`](OCR_Decoupling_Implementation_Status.md);
+its cross-platform model and corpus gates are not implied by this MVP matrix.
 
 ## Gap closure order
 

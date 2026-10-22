@@ -31,7 +31,7 @@ fi
     'paddlepaddle==3.3.1' 'paddleocr==3.7.0' 'paddlex[ocr]==3.7.2' \
     'rapidocr==3.9.2' \
     'onnxruntime==1.30.0' \
-    'openvino==2024.4.0'
+    'openvino==2026.4.1'
 "$PYTHON_BIN" -m pip install \
     -c "$CONSTRAINTS" \
     'torch==2.14.0+cpu' 'torchvision==0.29.0+cpu' \
@@ -92,33 +92,12 @@ easyocr.Reader(["pt"], gpu=False,
 print("EasyOCR weights ready.")
 PY
 
-# Download the official PP-OCRv5 Latin ONNX recognizer and its matching
-# dictionary (Portuguese diacritics: ã ç ê õ).
+# Provision one pinned detector/recognizer/charset/classifier set for both
+# providers and model sizes. Extraction itself remains offline and fail-closed.
 echo ""
-echo "Downloading RapidOCR Latin recognizer and dictionary for Portuguese..."
-RAPIDOCR_MODEL_DIR="$HOME/.cache/pdfextractor/rapidocr"
-mkdir -p "$RAPIDOCR_MODEL_DIR"
-_RAPIDOCR_REC="$RAPIDOCR_MODEL_DIR/latin_PP-OCRv5_rec_mobile.onnx"
-_RAPIDOCR_KEYS="$RAPIDOCR_MODEL_DIR/ppocrv5_latin_dict.txt"
-if [[ ! -f "$_RAPIDOCR_REC" ]]; then
-    curl -fL \
-        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile.onnx" \
-        -o "$_RAPIDOCR_REC"
-else
-    echo "  latin_PP-OCRv5_rec_mobile.onnx already present — skipping."
-fi
-if [[ ! -f "$_RAPIDOCR_KEYS" ]]; then
-    curl -fL \
-        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile/ppocrv5_latin_dict.txt" \
-        -o "$_RAPIDOCR_KEYS"
-else
-    echo "  ppocrv5_latin_dict.txt already present — skipping."
-fi
-"$PYTHON_BIN" "$SCRIPT_DIR/verify_rapidocr_artifacts.py" \
-    --recognizer "$_RAPIDOCR_REC" --dictionary "$_RAPIDOCR_KEYS"
-export RAPIDOCR_REC_MODEL="$_RAPIDOCR_REC"
-export RAPIDOCR_REC_KEYS="$_RAPIDOCR_KEYS"
-echo "  RapidOCR Latin model ready: $RAPIDOCR_MODEL_DIR"
+echo "Downloading and verifying RapidOCR PP-OCRv6 medium/small profiles..."
+"$PYTHON_BIN" "$SCRIPT_DIR/setup_rapidocr_models.py" \
+    --size all --cache-home "$HOME/.cache/pdfextractor"
 
 # Run static readiness for all four families and five deployment configurations.
 echo ""

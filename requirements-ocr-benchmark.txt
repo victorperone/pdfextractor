@@ -1,5 +1,5 @@
 # requirements-ocr-benchmark.txt
-# Versões exatas testadas no benchmark comparativo OCR (2026-09)
+# Versões exatas do benchmark OCR; OpenVINO PP-OCRv6 atualizado em 2026-10
 # Ambiente: Windows Server 2025, Python 3.12.10, AMD64
 # Tesseract: 5.5.3 (executável do sistema, tessdata: por)
 #
@@ -23,7 +23,7 @@ rapidocr==3.9.2
 onnxruntime==1.30.0
 
 # Fase 5: OpenVINO provider for unified RapidOCR
-openvino==2024.4.0
+openvino==2026.4.1
 
 # Fase 7: EasyOCR (PyTorch CPU)
 # Resolve as wheels CPU publicadas no índice oficial do PyTorch.
@@ -33,10 +33,10 @@ torchvision==0.29.0+cpu
 easyocr==1.7.2
 
 # ATENÇÃO — conflito de numpy:
-# EasyOCR atualiza numpy para 2.5.x; openvino 2024.4.0 exige numpy<2.1.0.
+# EasyOCR atualiza numpy; o smoke de compatibilidade v6 valida o OpenVINO do lock.
 # Após instalar tudo, fixar numpy:
 #   pip install "numpy==2.0.2"
-# numpy 2.0.2 é compatível com: openvino 2024.4.0, easyocr 1.7.2, paddlex 3.7.2, torch 2.14.0
+# numpy 2.0.2 é compatível com EasyOCR 1.7.2, PaddleX 3.7.2 e torch 2.14.0.
 numpy==2.0.2
 
 # Tesseract (Fase 6): executável externo — NÃO é pacote Python

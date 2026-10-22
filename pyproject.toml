@@ -32,12 +32,12 @@ ocr = [
 ]
 # RapidOCR family with selectable inference provider.
 ocr-rapidocr-onnx = [
-    "rapidocr>=3.9.2",
+    "rapidocr==3.9.2",
     "onnxruntime>=1.18",
 ]
 ocr-rapidocr-openvino = [
-    "rapidocr>=3.9.2",
-    "openvino>=2024.4",
+    "rapidocr==3.9.2",
+    "openvino==2026.4.1",
 ]
 # Fase 6: Tesseract (executável externo obrigatório: tesseract 5.x + por.traineddata)
 # Sem dependência Python adicional (usa subprocess)

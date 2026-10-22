@@ -9,7 +9,6 @@ Supported profiles
 - "pt"           : Portuguese / Latin-script documents (PP-OCRv6 medium).
                    Default profile for commands that permit implicit selection.
 - "pt-v6-medium" : Explicit alias for the same PP-OCRv6 medium profile.
-- "pt-v5"        : PP-OCRv5 rollback profile, only when explicitly selected.
 - "pt-v6-small"  : PP-OCRv6 small profile.
 
 Notes
@@ -77,15 +76,6 @@ PROFILES: dict[str, OcrModelProfile] = {
         textline_orientation="PP-LCNet_x1_0_textline_ori",
         detection="PP-OCRv6_medium_det",
         recognition="PP-OCRv6_medium_rec",
-    ),
-    # ── Explicit rollback profile (PP-OCRv5 server) ─────────────────────────
-    # Use --ocr-model-profile pt-v5 to select v5 explicitly.
-    "pt-v5": OcrModelProfile(
-        language="pt-v5",
-        doc_orientation="PP-LCNet_x1_0_doc_ori",
-        textline_orientation="PP-LCNet_x1_0_textline_ori",
-        detection="PP-OCRv5_server_det",
-        recognition="latin_PP-OCRv5_mobile_rec",
     ),
     # ── PP-OCRv6 small profile ───────────────────────────────────────────────
     "pt-v6-small": OcrModelProfile(

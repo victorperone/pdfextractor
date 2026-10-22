@@ -18,7 +18,7 @@ with the build artifacts. Windows native and WSL results are separate runs.
 - [ ] `python scripts/preflight_ocr_backends.py --language pt-BR --deep-smoke`
   runs local inference for all five configurations without downloading models.
 - [ ] Confirm test coverage for configuration errors, recovery budget blocks,
-  worker timeout/crash behavior, atomic artifacts, region coordinate transforms,
+  slow-worker cancellation/crash behavior, atomic artifacts, region coordinate transforms,
   rotations, confidence policy, and backend `close()` lifecycle.
 
 ## Environment record (save once per platform)
@@ -39,7 +39,7 @@ with the build artifacts. Windows native and WSL results are separate runs.
   stdout/stderr, page statuses, warnings, recovery reasons, and memory samples.
 - [ ] Confirm protocol IDs match before comparison; record explicit override if
   intentionally comparing incompatible protocols.
-- [ ] Review missing pages, runtime errors, timeouts, budget blocks, fallbacks,
+- [ ] Review missing pages, runtime errors, explicit cancellations, budget blocks, fallbacks,
   model downloads, partial pages, warnings, NaN metrics, and output truncation.
 - [ ] Review reading order, merged/header tables, chart/flowchart false tables,
   redaction, rotations, CropBox offsets, and critical pt-BR data.

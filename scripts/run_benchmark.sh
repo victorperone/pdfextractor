@@ -13,19 +13,7 @@ fi
 EASYOCR_MODULE_PATH="${EASYOCR_MODULE_PATH:-$HOME/.cache/pdfextractor/easyocr}"
 export EASYOCR_MODULE_PATH
 
-# RapidOCR Latin model (required for Portuguese diacritics — ã ç ê õ).
-# Downloaded by setup_ocr_benchmark.sh into .ocr-model-cache/rapidocr/.
-_RAPIDOCR_CACHE="$HOME/.cache/pdfextractor/rapidocr"
-_RAPIDOCR_REC="$_RAPIDOCR_CACHE/latin_PP-OCRv5_rec_mobile.onnx"
-_RAPIDOCR_KEYS="$_RAPIDOCR_CACHE/ppocrv5_latin_dict.txt"
-if [[ -f "$_RAPIDOCR_REC" && -f "$_RAPIDOCR_KEYS" ]]; then
-    export RAPIDOCR_REC_MODEL="$_RAPIDOCR_REC"
-    export RAPIDOCR_REC_KEYS="$_RAPIDOCR_KEYS"
-else
-    echo "ERROR: RapidOCR Latin recognizer/dictionary pair not found in $_RAPIDOCR_CACHE" >&2
-    echo "       Run scripts/setup_ocr_benchmark.sh first to download the pair." >&2
-    exit 2
-fi
+RAPIDOCR_MODEL_SIZE="${RAPIDOCR_MODEL_SIZE:-medium}"
 PDF="corpus/Corpus_Stress_OCR_Markdown_V4.pdf"
 REFERENCE="corpus/Corpus_Stress_OCR_Markdown_V4_REFERENCIA.md"
 MANIFESTO="corpus/Corpus_Stress_OCR_Markdown_V4_MANIFESTO.json"
@@ -52,6 +40,7 @@ Usage: scripts/run_benchmark.sh [options]
   --configurations LIST  Comma-separated deployment configurations (four families, five configurations)
   --engines LIST         Deprecated option alias for --configurations
   --python PATH       Python executable (default: python or PYTHON_BIN)
+  --rapidocr-model-size SIZE  RapidOCR PP-OCRv6 size: medium (default) or small
 EOF
 }
 
@@ -69,12 +58,32 @@ while (($#)); do
         --configurations) CONFIGURATIONS="$2"; shift 2 ;;
         --engines) echo "Warning: --engines is deprecated; use --configurations" >&2; CONFIGURATIONS="$2"; shift 2 ;;
         --python) PYTHON_BIN="$2"; shift 2 ;;
+        --rapidocr-model-size) RAPIDOCR_MODEL_SIZE="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 
 cd "$REPO_ROOT"
+case "$RAPIDOCR_MODEL_SIZE" in medium|small) ;; *) echo "Invalid RapidOCR model size: $RAPIDOCR_MODEL_SIZE" >&2; exit 2 ;; esac
+_RAPIDOCR_CACHE_HOME="${RAPIDOCR_CACHE_HOME:-$HOME/.cache/pdfextractor}"
+_RAPIDOCR_CACHE="$_RAPIDOCR_CACHE_HOME/rapidocr"
+_RAPIDOCR_NAMES=(RAPIDOCR_DET_MODEL RAPIDOCR_REC_MODEL RAPIDOCR_REC_KEYS RAPIDOCR_CLS_MODEL)
+_RAPIDOCR_FILES=("PP-OCRv6_det_${RAPIDOCR_MODEL_SIZE}.onnx" "PP-OCRv6_rec_${RAPIDOCR_MODEL_SIZE}.onnx" "ppocrv6_${RAPIDOCR_MODEL_SIZE}_dict.txt" "ch_ppocr_mobile_v2.0_cls_mobile.onnx")
+_RAPIDOCR_SET=0
+_RAPIDOCR_UNSET=0
+for name in "${_RAPIDOCR_NAMES[@]}"; do
+    if [[ -n "${!name:-}" ]]; then ((_RAPIDOCR_SET+=1)); else ((_RAPIDOCR_UNSET+=1)); fi
+done
+if ((_RAPIDOCR_SET == 0)); then
+    for index in "${!_RAPIDOCR_NAMES[@]}"; do export "${_RAPIDOCR_NAMES[$index]}=$_RAPIDOCR_CACHE/${_RAPIDOCR_FILES[$index]}"; done
+elif ((_RAPIDOCR_UNSET != 0)); then
+    echo "ERROR: Set all four RAPIDOCR_* model paths or none; partial overrides are rejected." >&2
+    exit 2
+fi
+"$PYTHON_BIN" "$SCRIPT_DIR/verify_rapidocr_artifacts.py" --size "$RAPIDOCR_MODEL_SIZE" \
+    --detector "$RAPIDOCR_DET_MODEL" --recognizer "$RAPIDOCR_REC_MODEL" \
+    --dictionary "$RAPIDOCR_REC_KEYS" --classifier "$RAPIDOCR_CLS_MODEL" || exit 2
 [[ -f "$PDF" ]] || { echo "PDF not found: $PDF" >&2; exit 2; }
 [[ -f "$REFERENCE" ]] || { echo "Reference not found: $REFERENCE" >&2; exit 2; }
 [[ -f "$MANIFESTO" ]] || { echo "Manifesto not found: $MANIFESTO" >&2; exit 2; }
@@ -191,7 +200,9 @@ for engine in "${engine_list[@]}"; do
     echo "========================================"
 
     eval_args=("$PDF" --engine "$backend" --run-id "$run_id" --output-dir "$OUT_DIR" --allow-partial)
-    if [[ -n "$provider" ]]; then eval_args+=(--provider "$provider"); fi
+    if [[ -n "$provider" ]]; then
+        eval_args+=(--provider "$provider" --rapidocr-model-size "$RAPIDOCR_MODEL_SIZE")
+    fi
     if ((!ALL_PAGES)); then eval_args+=(--pages "$PAGES"); fi
     if ! "$PYTHON_BIN" "$SCRIPT_DIR/evaluate_e2e.py" "${eval_args[@]}"; then
         echo "[ERROR] E2E extraction failed for $engine" >&2

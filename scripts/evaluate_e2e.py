@@ -170,7 +170,8 @@ def _selected_page_numbers(config, document) -> list[int]:
     return sorted({int(page.page_index) + 1 for page in document.pages})
 
 
-def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None, provider: str | None = None):
+def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None,
+                  provider: str | None = None, rapidocr_model_size: str | None = None):
     """Build an ExtractorConfig for the given engine and extraction mode.
 
     render_scale is set per-engine via best_ocr_render_scale(). Override with
@@ -185,7 +186,8 @@ def _build_config(engine: str, mode: str, language: str, page_indices: tuple | N
     base = best_extraction_config(language=language, preserve_headers=False)
     render_scale_env = os.environ.get("OCR_RENDER_SCALE")
     render_scale = float(render_scale_env) if render_scale_env else best_ocr_render_scale(engine)
-    config = replace(base, ocr_engine=engine, ocr_provider=provider, mode=ExtractionMode(mode), ocr_render_scale=render_scale)
+    config = replace(base, ocr_engine=engine, ocr_provider=provider, mode=ExtractionMode(mode),
+                     ocr_render_scale=render_scale, rapidocr_model_size=rapidocr_model_size)
     if page_indices is not None:
         config = replace(config, page_indices=page_indices)
     return config
@@ -240,6 +242,8 @@ def main() -> int:
         help="OCR family (default: easyocr); choose RapidOCR provider with --provider",
     )
     ap.add_argument("--provider", choices=["onnxruntime", "openvino"], default=None)
+    ap.add_argument("--rapidocr-model-size", choices=["medium", "small"], default=None,
+                    help="RapidOCR PP-OCRv6 model size (default: medium)")
     ap.add_argument(
         "--mode",
         default="balanced",
@@ -303,7 +307,10 @@ def main() -> int:
     page_indices = _parse_pages_arg(args.pages) if args.pages else None
 
     try:
-        config = _build_config(args.engine, args.mode, args.language, page_indices, args.provider)
+        if args.rapidocr_model_size and args.engine != "rapidocr":
+            raise ValueError("--rapidocr-model-size requires --engine rapidocr")
+        config = _build_config(args.engine, args.mode, args.language, page_indices, args.provider,
+                               args.rapidocr_model_size)
         if args.retain_native_evidence:
             config = replace(config, retain_native_evidence=True)
     except Exception as exc:

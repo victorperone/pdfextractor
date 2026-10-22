@@ -23,7 +23,7 @@
 | --- | --- |
 | 1 — `setup-models` / `models-status` | Both were already registered and appear in help. They were not duplicated. Help, unknown profile, and readiness return were superficially covered, without inference or deep weight validation. |
 | 2 — `pt-v6-medium` | Added as an alias of the same `pt` profile object; both use PP-OCRv6 medium weights. Unknown profile fails without substitution. |
-| 3 — PP-OCRv6 default | `pt` uses PP-OCRv6 medium detection and recognition. `pt-v5` remains explicit; there is no fallback to v5. Metadata now records the profile and model names used. |
+| 3 — PP-OCRv6 default | `pt` uses PP-OCRv6 medium detection and recognition. PR-12 retired `pt-v5` from runtime; old manifests and caches remain historical. There is no fallback to v5. |
 | 4 — documentation and help | README and help were aligned to profiles, explicit OCR selection, `overlay`, resolution, timeouts, and exit codes. Published examples were reviewed against the parser. |
 | 8 — pixel limit | The calculation uses integer dimensions rounded by `ceil`, same as PDFium. The requested scale is preserved when the area fits, including at the boundary; it is only reduced above the limit. Reductions are recorded in `render_limit_reductions`. |
 | 10 — `overlay` | The default is native and does not validate or initialize OCR. `balanced` and `ocr` require an explicit profile; a profile with native mode is rejected. Custom cache is accepted. The other OCR run commands also distinguish a supplied profile from an omitted default. |

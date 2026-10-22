@@ -24,7 +24,8 @@ param(
     [string]$Validation = "corpus\Corpus_Stress_OCR_Markdown_V4_VALIDACAO.txt",
     [string]$CorpusLock = "corpus\acceptance-corpus.lock.json",
     [string]$OutDir     = "output\fase8",
-    [string]$PythonBin  = "python"
+    [string]$PythonBin  = "python",
+    [ValidateSet("medium", "small")][string]$RapidOcrModelSize = $(if ($env:RAPIDOCR_MODEL_SIZE) { $env:RAPIDOCR_MODEL_SIZE } else { "medium" })
 )
 
 Set-StrictMode -Version Latest
@@ -34,9 +35,18 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $ScriptDir
 $env:EASYOCR_MODULE_PATH = if ($env:EASYOCR_MODULE_PATH) { $env:EASYOCR_MODULE_PATH } else { Join-Path $HOME ".cache\pdfextractor\easyocr" }
-$rapidocrCache = Join-Path $HOME ".cache\pdfextractor\rapidocr"
-$env:RAPIDOCR_REC_MODEL = if ($env:RAPIDOCR_REC_MODEL) { $env:RAPIDOCR_REC_MODEL } else { Join-Path $rapidocrCache "latin_PP-OCRv5_rec_mobile.onnx" }
-$env:RAPIDOCR_REC_KEYS = if ($env:RAPIDOCR_REC_KEYS) { $env:RAPIDOCR_REC_KEYS } else { Join-Path $rapidocrCache "ppocrv5_latin_dict.txt" }
+$rapidocrSize = $RapidOcrModelSize
+$rapidocrCacheHome = if ($env:RAPIDOCR_CACHE_HOME) { $env:RAPIDOCR_CACHE_HOME } else { Join-Path $HOME ".cache\pdfextractor" }
+$rapidocrCache = Join-Path $rapidocrCacheHome "rapidocr"
+$rapidocrNames = @("RAPIDOCR_DET_MODEL", "RAPIDOCR_REC_MODEL", "RAPIDOCR_REC_KEYS", "RAPIDOCR_CLS_MODEL")
+$rapidocrFiles = @("PP-OCRv6_det_$rapidocrSize.onnx", "PP-OCRv6_rec_$rapidocrSize.onnx", "ppocrv6_${rapidocrSize}_dict.txt", "ch_ppocr_mobile_v2.0_cls_mobile.onnx")
+$setCount = 0
+foreach ($name in $rapidocrNames) { if (Get-Item "Env:$name" -ErrorAction SilentlyContinue) { $setCount++ } }
+if ($setCount -eq 0) {
+    for ($i = 0; $i -lt $rapidocrNames.Count; $i++) { Set-Item "Env:$($rapidocrNames[$i])" (Join-Path $rapidocrCache $rapidocrFiles[$i]) }
+} elseif ($setCount -ne $rapidocrNames.Count) {
+    throw "Set all four RAPIDOCR_* model paths or none; partial overrides are rejected."
+}
 
 Push-Location $RepoRoot
 try {
@@ -55,18 +65,10 @@ if ($LASTEXITCODE -ne 0) {
     exit 2
 }
 
-# --- RapidOCR Latin model (required for Portuguese diacritics) ---
-$rapidocrCache = Join-Path $HOME ".cache\pdfextractor\rapidocr"
-$rapidocrRec   = "$rapidocrCache\latin_PP-OCRv5_rec_mobile.onnx"
-$rapidocrKeys  = "$rapidocrCache\ppocrv5_latin_dict.txt"
-if ((Test-Path $rapidocrRec) -and (Test-Path $rapidocrKeys)) {
-    $env:RAPIDOCR_REC_MODEL = $rapidocrRec
-    $env:RAPIDOCR_REC_KEYS  = $rapidocrKeys
-} else {
-    Write-Host "ERROR: RapidOCR Latin recognizer/dictionary pair not found in $rapidocrCache" -ForegroundColor Red
-    Write-Host "       Run scripts\setup_ocr_benchmark.ps1 first to download the pair." -ForegroundColor Red
-    exit 2
-}
+& $PythonBin scripts\verify_rapidocr_artifacts.py --size $rapidocrSize `
+    --detector $env:RAPIDOCR_DET_MODEL --recognizer $env:RAPIDOCR_REC_MODEL `
+    --dictionary $env:RAPIDOCR_REC_KEYS --classifier $env:RAPIDOCR_CLS_MODEL
+if ($LASTEXITCODE -ne 0) { throw "RapidOCR v6 artifact verification failed." }
 
 # --- Corpus preflight (mirrors run_benchmark.sh inline Python check) ---
 Write-Host ""
@@ -191,7 +193,7 @@ foreach ($engine in $engines) {
 
     # --- evaluate_e2e ---
     $evalArgs = @("scripts\evaluate_e2e.py", $Corpus, "--engine", $backend, "--run-id", $runId, "--output-dir", $OutDir, "--allow-partial")
-    if ($provider) { $evalArgs += @("--provider", $provider) }
+    if ($provider) { $evalArgs += @("--provider", $provider, "--rapidocr-model-size", $rapidocrSize) }
     if ($AllPages) {
         & $PythonBin @evalArgs
     } else {

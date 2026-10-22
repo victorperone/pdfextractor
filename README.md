@@ -405,8 +405,10 @@ To save extracted characteristics from one PDF pass, use:
   --run-id features-v5 --output-dir output/loop/001/V5
 ```
 
-Configure the RapidOCR Latin model/dictionary as described below before running
-this command. `--save-features` adds `features_*.json` (structured document) and
+RapidOCR uses pinned PP-OCRv6 Portuguese-capable models; `--rapidocr-model-size`
+selects `small` explicitly and defaults to `medium`. Provision them once with
+`python scripts/setup_rapidocr_models.py --size all`. `--save-features` adds
+`features_*.json` (structured document) and
 `diagnostics_*.txt` alongside Markdown and the run manifest. All come from the
 same `extract()` call. `--retain-native-evidence` also retains native PDF
 characters and objects and increases memory use. Existing artifact names are
@@ -529,7 +531,8 @@ pdftext paddle-models-status --paddle-model-profile pt
 text and defaults to `pt-BR`; `--paddle-model-profile` selects Paddle model
 weights when `--ocr-engine paddle` is used. The Paddle profile defaults to `pt`
 and selects PP-OCRv6 medium (`pt-v6-medium` is a supported alias for backward
-compatibility). `pt-v5` selects PP-OCRv5 only when explicitly requested.
+compatibility). Runtime no longer accepts PP-OCRv5; historical manifests and
+cached artifacts remain available for audits.
 `--ocr-quality-policy` is independent: it selects the OCR variant strategy.
 `exhaustive` emits an informational resource-use warning and does not
 automatically reduce OCR quality.
@@ -545,13 +548,14 @@ deprecated aliases.
 |---|---|---|
 | EasyOCR (PyTorch CPU) | `easyocr` **(default)** | Weights pre-downloaded via `setup_ocr_benchmark.sh/.ps1` |
 | PaddleOCR PP-OCRv6 | `paddle` | Requires `pdftext setup-paddle-models`; best critical-data metrics |
-| RapidOCR | `rapidocr` | Choose provider with `--ocr-provider`; Portuguese needs a configured Latin recognizer |
+| RapidOCR PP-OCRv6 | `rapidocr` | Medium is default; select `small` with `--rapidocr-model-size`; provider uses `--ocr-provider` |
 | RapidOCR ONNX alias (deprecated) | `rapidocr-onnx` | Kept for command compatibility |
 | RapidOCR OpenVINO alias (deprecated) | `rapidocr-openvino` | Kept for command compatibility |
 | Tesseract 5 | `tesseract` | Requires Tesseract binary in PATH |
 
 The public language tag `pt-BR` is accepted (with `pt` and `por` aliases).
-Only `--ocr-engine paddle` uses `--paddle-model-profile`. The engine is also
+`--paddle-model-profile` applies to Paddle; `--rapidocr-model-size` applies to
+RapidOCR. The engine is also
 selectable through the Python API via `ExtractorConfig(ocr_engine="easyocr")`,
 `ExtractorConfig(ocr_engine="rapidocr", ocr_provider="openvino")`,
 `ExtractorConfig(ocr_engine="tesseract")`, or
@@ -579,12 +583,10 @@ consensus decisions in `page.diagnostics.facts`.
 
 Performance diagnostics are available in `page.diagnostics.facts` under
 `timings_ms` and `ocr_passes`, and in `document.diagnostics.facts` under
-`total_ms` and `assemble_ms`. Tesseract calls use a subprocess timeout, and
-Paddle calls routed through its worker use configurable initialization and
-request deadlines (`PADDLE_WORKER_INIT_TIMEOUT` and
-`PADDLE_WORKER_REQUEST_TIMEOUT`, in seconds). A deadline kills the worker and
-returns a runtime failure. RapidOCR and EasyOCR currently run in-process, so
-their native inference calls cannot be forcibly cancelled.
+`total_ms` and `assemble_ms`. OCR initialization, inference, and refinement do
+not have product deadlines. Cancellation is explicit: Paddle and Tesseract
+subprocesses are interrupted; EasyOCR and RapidOCR check cancellation between
+in-process calls, which cannot be forcibly stopped while a native call blocks.
 EasyOCR also sets PyTorch thread pools process-wide when an explicit thread
 count is configured; its effective intra-op/inter-op values are recorded in the
 engine identity. Callers sharing Torch with other components should use a
@@ -653,7 +655,7 @@ Paddle OCR profiles, select the backend family and model profile separately:
 pdftext compare documento.pdf --adapters structured-balanced pdfium-raw pymupdf \
   --ocr-engine paddle --language pt-BR --ocr-model-profile pt
 pdftext compare documento.pdf --adapters structured-balanced pdfium-raw pymupdf \
-  --ocr-engine paddle --language pt-BR --ocr-model-profile pt-v5
+  --ocr-engine paddle --language pt-BR --ocr-model-profile pt-v6-small
 ```
 
 The language selects the recognition language, `--ocr-engine` selects the
@@ -847,5 +849,36 @@ resolution or switch to a lower-quality OCR profile when memory is scarce.
 This project is licensed under the Apache License 2.0.
 See the [LICENSE](LICENSE) file for details.
 
-This project uses third-party components, including PaddleOCR, which remain
-subject to their respective licenses.
+Third-party components used by this project:
+
+| Component       | License          | Notes                          |
+|-----------------|------------------|--------------------------------|
+| pypdfium2       | Apache 2.0       | bundles PDFium (BSD 3-Clause)  |
+| PaddleOCR       | Apache 2.0       | optional backend               |
+| EasyOCR         | Apache 2.0       | optional backend               |
+| RapidOCR        | Apache 2.0       | optional backend               |
+| ONNX Runtime    | MIT              | RapidOCR inference provider    |
+| Tesseract 5     | Apache 2.0       | external tool, not bundled     |
+
+See the [NOTICE](NOTICE) file for required attributions.
+OCR model weights are obtained separately by the user and are not
+distributed with this package.
+
+
+## Desacoplamento das engines OCR
+
+A migração conecta os quatro pipelines ao contrato de trabalho autorizado,
+mantém integração e conservação no núcleo e fixa identidades de modelos e
+providers. Consulte [o estado de implementação e os gates pendentes](docs/OCR_Decoupling_Implementation_Status.md).
+
+A seleção regional, células, notas de rodapé e linhas OCR fracas aplicam apenas
+candidatas selecionadas por propostas tipadas, com conservação central. Ranking,
+filtros, recuperação e preferências de integração têm policies locais por engine.
+O helper público de células aceita `ocr_facade=` para usar o mesmo serviço
+autorizado. O worker Paddle usa protocolo 5 com geometria, proveniência e
+diagnósticos preservados. Equivalência de corpus e homologação de plataforma
+ainda estão pendentes; os relatórios registram os controles reprovados.
+
+- [Histórico de PR-01 a PR-03](docs/OCR_Decoupling_PR01_PR03.md)
+- [Baseline de 20/10/2026](docs/OCR_Decoupling_Baseline_2026-10-20.md)
+- [Plano completo](docs/Plan_Decoupling_OCR_Engines.md)

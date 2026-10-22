@@ -30,36 +30,19 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-# Inference timeout: per-request deadline (one page of OCR).
-# Default 2400 s = ~25× the observed ~94 s/page average — exists only to kill
-# a truly frozen process, not to race against normal inference.
-# Override with PADDLE_WORKER_REQUEST_TIMEOUT (or legacy PADDLE_WORKER_TIMEOUT).
-def _worker_request_timeout() -> float:
-    from structured_pdf_text.ocr.env import env_float
-    if "PADDLE_WORKER_REQUEST_TIMEOUT" in os.environ:
-        return env_float("PADDLE_WORKER_REQUEST_TIMEOUT", 2400.0, minimum=0.01)
-    if "PADDLE_WORKER_TIMEOUT" in os.environ:
-        return env_float("PADDLE_WORKER_TIMEOUT", 2400.0, minimum=0.01)
-    return 2400.0
-
-# Init timeout: model loading can be slower than inference on a cold cache.
-# Default 2400 s (same as request) — override with PADDLE_WORKER_INIT_TIMEOUT.
-def _worker_init_timeout() -> float:
-    from structured_pdf_text.ocr.env import env_float
-    return env_float("PADDLE_WORKER_INIT_TIMEOUT", 2400.0, minimum=0.01)
-
 from structured_pdf_text.config import ExtractorConfig, effective_ocr_quality_policy
-from structured_pdf_text.document import OcrToken, SourceKind
+from structured_pdf_text.document import OcrToken
 from structured_pdf_text.errors import PaddleOcrUnavailable
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.runtime_policy import (
     apply_paddle_runtime_policy,
     resolve_paddle_runtime_policy,
 )
+from structured_pdf_text.ocr.pipelines.paddle.wire import PROTOCOL_VERSION, deserialize_tokens
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -105,17 +88,22 @@ def _raise_worker_failure(response: dict[str, Any], context: str) -> None:
     error_type = str(response.get("error_type") or "RuntimeError")
     message = f"{context}: {response.get('error') or error_type}"
     stage = response.get("stage")
+    failure_context = {
+        "stage": stage,
+        "page_index": response.get("page_index"),
+        "details": response.get("details") if isinstance(response.get("details"), dict) else {},
+    }
     fatal_code = response.get("fatal_code")
     if fatal_code == "resource_exhausted" or error_type == "MemoryError" or (
         error_type == "OSError" and response.get("errno") == errno.ENOMEM
     ):
-        raise ResourceExhaustedExtractionError(message, stage=stage)
+        raise ResourceExhaustedExtractionError(message, **failure_context)
     if fatal_code == "paddle_ocr_unavailable":
-        raise PaddleOcrUnavailable(message, stage=stage)
+        raise PaddleOcrUnavailable(message, **failure_context)
     if fatal_code == "required_runtime_unavailable":
-        raise RequiredRuntimeUnavailableError(message, stage=stage)
+        raise RequiredRuntimeUnavailableError(message, **failure_context)
     if response.get("fatal"):
-        raise FatalExtractionError(message, stage=stage)
+        raise FatalExtractionError(message, **failure_context)
     raise RuntimeError(message)
 
 
@@ -157,7 +145,9 @@ class PaddleOCRBackend:
         _enable_mkldnn = self._runtime_policy.enable_mkldnn
 
         self._subprocess_config: dict | None = None
+        self._worker_diagnostics: dict[str, Any] = {}
         self._worker_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._cancel_requested = threading.Event()
         # Serialise all subprocess request/response cycles so two callers
         # on different threads can never interleave their writes and reads.
         self._worker_lock: threading.Lock = threading.Lock()
@@ -234,6 +224,8 @@ class PaddleOCRBackend:
         Uses ``_raw_send`` directly to avoid re-acquiring the lock for the
         init handshake.
         """
+        if self._cancel_requested.is_set():
+            raise RuntimeError("Paddle worker startup cancelled")
         if self._worker_proc is not None and self._worker_proc.poll() is None:
             return  # still alive
 
@@ -243,43 +235,45 @@ class PaddleOCRBackend:
             stdout=subprocess.PIPE,
             bufsize=0,  # unbuffered binary I/O — flush() is explicit in _raw_send
         )
+        if self._cancel_requested.is_set():
+            self._discard_worker()
+            raise RuntimeError("Paddle worker startup cancelled")
         # Init handshake: use _raw_send (no lock, no seq) — we're already locked.
-        init_req = {"protocol_version": 4, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
+        init_req = {"protocol_version": PROTOCOL_VERSION, "method": "init", **self._subprocess_config}  # type: ignore[arg-type]
         try:
-            response = self._raw_send(init_req, timeout=_worker_init_timeout())
+            response = self._raw_send(init_req)
         except Exception:
             self._discard_worker()
             raise
         if response.get("status") != "ok":
             self._discard_worker()
             _raise_worker_failure(response, "Paddle worker init failed")
+        if response.get("protocol_version") != PROTOCOL_VERSION:
+            self._discard_worker()
+            raise RuntimeError("Paddle worker metadata protocol mismatch")
 
-    def _raw_send(self, request: dict, timeout: float | None = None) -> dict:
+    def _raw_send(self, request: dict) -> dict:
         """Write one request and read one response on the raw pipe.
 
-        No lock, no request_id injection — callers must hold ``_worker_lock``
-        before calling this. Init and request deadlines are resolved at call time.
+        No lock or request ID injection. A live worker may wait indefinitely;
+        explicit cancellation kills it and wakes the pipe reader.
         """
         assert self._worker_proc is not None
         assert self._worker_proc.stdin is not None
         assert self._worker_proc.stdout is not None
-        if timeout is None:
-            timeout = _worker_request_timeout()
-
         line = json.dumps(request, ensure_ascii=False) + "\n"
-        self._worker_proc.stdin.write(line.encode())
-        self._worker_proc.stdin.flush()
+        try:
+            self._worker_proc.stdin.write(line.encode())
+            self._worker_proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise RuntimeError("Paddle worker closed unexpectedly") from exc
 
         stdout = self._worker_proc.stdout
         pool = ThreadPoolExecutor(max_workers=1)
-        fut: Future[bytes] = pool.submit(stdout.readline)
+        fut = pool.submit(stdout.readline)
         try:
-            response_line = fut.result(timeout=timeout)
-        except FuturesTimeoutError:
-            self._discard_worker()
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise RuntimeError(f"Paddle worker timed out after {timeout}s")
-        else:
+            response_line = fut.result()
+        finally:
             pool.shutdown(wait=True)
 
         if not response_line:
@@ -306,11 +300,8 @@ class PaddleOCRBackend:
         against the response, making protocol violations immediately visible
         rather than silently returning a stale or misrouted result.
 
-        Enforces a per-request read timeout (PADDLE_WORKER_REQUEST_TIMEOUT env
-        var, or legacy PADDLE_WORKER_TIMEOUT; default 2400 s) so that a truly
-        frozen worker never blocks the
-        parent process indefinitely. readline() runs in a background thread;
-        TimeoutError kills the worker and raises RuntimeError.
+        There is no inference deadline. Cancellation kills the child process
+        outside this lock so a pending read wakes and releases serialization.
         """
         with self._worker_lock:
             # Ensure the worker is alive inside the lock so concurrent callers
@@ -319,7 +310,7 @@ class PaddleOCRBackend:
 
             self._worker_req_seq += 1
             req_id = self._worker_req_seq
-            request = {**request, "protocol_version": 4, "request_id": req_id}
+            request = {**request, "protocol_version": PROTOCOL_VERSION, "request_id": req_id}
             try:
                 response = self._raw_send(request)
             except Exception:
@@ -380,32 +371,10 @@ class PaddleOCRBackend:
             except FileNotFoundError:
                 pass
 
+        self._worker_diagnostics = dict(response.get("diagnostics") or {})
         if response.get("status") != "ok":
             _raise_worker_failure(response, "Paddle worker request failed")
-
-        tokens: list[OcrToken] = []
-        for item in response.get("tokens", []):
-            x0, y0, x1, y1 = item["bbox"]
-            conf = item.get("confidence")
-            # Reconstruct source from the serialized string value; fall back to
-            # OCR_PAGE for responses from older workers that omit the field.
-            raw_source = item.get("source", "ocr_page")
-            try:
-                source = SourceKind(raw_source)
-            except ValueError:
-                source = SourceKind.OCR_PAGE
-            tokens.append(
-                OcrToken(
-                    text=item["text"],
-                    confidence=float(conf) if conf is not None else None,
-                    bbox=BBox(x0, y0, x1, y1),
-                    source=source,
-                    language=item.get("language") or self._config.language,
-                    rotation=int(item.get("rotation", 0)),
-                    provenance=item.get("provenance"),
-                )
-            )
-        return tokens
+        return deserialize_tokens(response.get("tokens", []), language=self._config.language)
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -630,6 +599,7 @@ class PaddleOCRBackend:
         """Gracefully shut down the subprocess worker (if active) and release the engine."""
         if self._closed:
             return
+        self.cancel()
         with self._worker_lock:
             if self._worker_proc is not None:
                 process = self._worker_proc
@@ -661,12 +631,30 @@ class PaddleOCRBackend:
         self._engine = None
         self._closed = True
 
+    def cancel(self) -> None:
+        """Interrupt an active worker request without acquiring its request lock."""
+        self._cancel_requested.set()
+        process = self._worker_proc
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def reset_cancellation(self) -> None:
+        """Start a new extraction cancellation scope after the prior one closed."""
+        if self._worker_lock.locked():
+            raise RuntimeError("Cannot reset Paddle cancellation during an active request")
+        self._cancel_requested.clear()
+
     # ------------------------------------------------------------------
     # Forward diagnostic attributes accessed by api.py
     # ------------------------------------------------------------------
 
     def __getattr__(self, name: str) -> Any:
         if self._engine is None:
+            if name in self._worker_diagnostics:
+                return self._worker_diagnostics[name]
             raise AttributeError(
                 f"'{type(self).__name__}' in subprocess mode has no attribute '{name}'"
             )
@@ -690,3 +678,8 @@ def _pipeline_token_to_canonical(token: OcrToken, source_engine: str) -> OCRToke
         level="line",
         source_engine=source_engine,
     )
+
+
+def build_backend(config):
+    """Lazy registry constructor for the Paddle raw backend."""
+    return PaddleOCRBackend(config)

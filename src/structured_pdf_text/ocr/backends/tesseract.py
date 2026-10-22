@@ -51,6 +51,7 @@ import os
 import subprocess
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -92,7 +93,7 @@ def _tesseract_info(executable: str = "tesseract", extra_flags: list[str] | None
     try:
         result = subprocess.run(
             [executable, "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True,
         )
         output = result.stdout or result.stderr or ""
         for line in output.splitlines():
@@ -102,7 +103,7 @@ def _tesseract_info(executable: str = "tesseract", extra_flags: list[str] | None
         # tessdata dir is reported by --list-langs
         langs_result = subprocess.run(
             [executable, *(extra_flags or []), "--list-langs"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True,
         )
         langs_output = langs_result.stdout + langs_result.stderr
         for line in langs_output.splitlines():
@@ -171,6 +172,7 @@ def _run_tesseract_tsv(
     executable: str = "tesseract",
     profile: str = "default",
     num_threads: int = -1,
+    process_callback=None,
 ) -> str:
     """Run tesseract on image, return TSV output string."""
     pil = _to_pil(image)
@@ -210,22 +212,29 @@ def _run_tesseract_tsv(
         if num_threads != -1:
             env = dict(os.environ)
             env["OMP_THREAD_LIMIT"] = str(max(1, os.cpu_count() or 1) if num_threads == 0 else num_threads)
-        result = subprocess.run(
-            cmd,
-            capture_output=True, text=True, encoding="utf-8", timeout=120, env=env,
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", env=env,
         )
-        if result.returncode != 0:
-            stderr_snippet = (result.stderr or "")[:400].strip()
+        if process_callback is not None:
+            process_callback(process)
+        try:
+            stdout, stderr = process.communicate()
+        finally:
+            if process_callback is not None:
+                process_callback(None)
+        if process.returncode != 0:
+            stderr_snippet = (stderr or "")[:400].strip()
             raise RuntimeError(
-                f"tesseract exited with code {result.returncode}: {stderr_snippet}"
+                f"tesseract exited with code {process.returncode}: {stderr_snippet}"
             )
-        return result.stdout
+        return stdout
     finally:
         if tmp:
             Path(tmp).unlink(missing_ok=True)
 
 
-def _run_tesseract_osd(image: object, extra_flags: list[str], executable: str = "tesseract") -> dict | None:
+def _run_tesseract_osd(image: object, extra_flags: list[str], executable: str = "tesseract", process_callback=None) -> dict | None:
     """Run Tesseract PSM 0 (OSD-only) and return orientation info, or None on failure.
 
     Returns a dict with keys ``rotate`` (int, degrees to apply to correct the
@@ -247,12 +256,19 @@ def _run_tesseract_osd(image: object, extra_flags: list[str], executable: str = 
             "-l", "osd",
             *extra_flags,
         ]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
         )
-        if result.returncode != 0:
+        if process_callback is not None:
+            process_callback(process)
+        try:
+            stdout, stderr = process.communicate()
+        finally:
+            if process_callback is not None:
+                process_callback(None)
+        if process.returncode != 0:
             return None
-        out = result.stdout
+        out = stdout
         rotate: int | None = None
         confidence: float | None = None
         for line in out.splitlines():
@@ -382,6 +398,9 @@ class TesseractBackend:
 
     def __init__(self, config: "ExtractorConfig") -> None:
         self._config = config
+        self._process_lock = threading.RLock()
+        self._active_processes: set[subprocess.Popen] = set()
+        self._cancel_requested = threading.Event()
         from structured_pdf_text.ocr.env import env_bool, env_float, env_int
         from structured_pdf_text.ocr.languages import backend_language, canonical_language
         self._language = canonical_language(config.language)
@@ -442,7 +461,9 @@ class TesseractBackend:
         original_width, original_height = pil.size
         osd_rotation = 0
         if self._osd_enabled:
-            osd = _run_tesseract_osd(pil, self._extra_flags, self._tesseract_cmd)
+            osd = _run_tesseract_osd(
+                pil, self._extra_flags, self._tesseract_cmd, process_callback=self._track_process,
+            )
             if osd is not None and osd["confidence"] >= self._osd_conf_min and osd["rotate"] != 0:
                 pil = pil.rotate(-osd["rotate"], expand=True)
                 osd_rotation = int(osd["rotate"]) % 360
@@ -453,8 +474,23 @@ class TesseractBackend:
             executable=self._tesseract_cmd,
             profile=self._profile,
             num_threads=self._config.num_threads,
+            process_callback=self._track_process,
         )
         return tsv, osd_rotation, original_width, original_height
+
+    def _track_process(self, process):
+        with self._process_lock:
+            if process is None:
+                self._active_processes = {item for item in self._active_processes if item.poll() is None}
+            else:
+                self._active_processes.add(process)
+                # Cancellation can race process creation. Kill here as well as
+                # in cancel() so no child escapes an already-signalled scope.
+                if self._cancel_requested.is_set() and process.poll() is None:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -660,6 +696,7 @@ class TesseractBackend:
             dpi=self._dpi, extra_flags=self._extra_flags,
             executable=self._tesseract_cmd, profile=self._profile,
             num_threads=self._config.num_threads,
+            process_callback=self._track_process,
         )
         tokens = _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
@@ -677,7 +714,7 @@ class TesseractBackend:
         try:
             result = subprocess.run(
                 [self._tesseract_cmd, *self._extra_flags, "--list-langs"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True,
             )
             if result.returncode != 0:
                 return "unknown"
@@ -695,9 +732,28 @@ class TesseractBackend:
         except Exception:
             return "unknown"
 
+    def cancel(self) -> None:
+        """Kill active Tesseract children without waiting for inference locks."""
+        self._cancel_requested.set()
+        with self._process_lock:
+            processes = tuple(self._active_processes)
+        for process in processes:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+
+    def reset_cancellation(self) -> None:
+        """Start a fresh cancellation scope when the extractor is reused."""
+        with self._process_lock:
+            if any(process.poll() is None for process in self._active_processes):
+                raise RuntimeError("Cannot reset Tesseract cancellation during active recognition")
+            self._active_processes.clear()
+            self._cancel_requested.clear()
+
     def close(self) -> None:
-        """No-op: Tesseract runs as a subprocess per call; no persistent state to release."""
-        pass
+        self.cancel()
 
 
 def _map_rotated_tokens_to_original(
@@ -754,3 +810,8 @@ def _map_rotated_tokens_to_original(
             mapped_polygon = tuple(points)
         mapped.append(replace(token, **{bbox_attr: mapped_bbox, polygon_attr: mapped_polygon}))
     return mapped
+
+
+def build_backend(config):
+    """Lazy registry constructor for the Tesseract raw backend."""
+    return TesseractBackend(config)

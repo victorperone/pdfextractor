@@ -33,6 +33,15 @@ class FatalExtractionError(ExtractionError):
         self.details = dict(details or {})
 
 
+class ExtractionCancelled(FatalExtractionError):
+    """The caller explicitly cancelled an extraction operation."""
+
+    code = "extraction_cancelled"
+
+    def __init__(self, message: str = "Extraction was cancelled", *, page_index: int | None = None):
+        super().__init__(message, page_index=page_index, stage="cancelled")
+
+
 class ResourceExhaustedExtractionError(FatalExtractionError):
     """The runtime could not allocate the resources needed for extraction."""
 

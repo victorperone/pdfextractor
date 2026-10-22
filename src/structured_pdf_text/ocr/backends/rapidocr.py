@@ -8,17 +8,10 @@ CF-2: Direct PP-OCRv6 ONNX export from Paddle is blocked on Windows by a DLL
 incompatibility (paddle2onnx 2.x + PaddlePaddle 3.3.1).  PP-OCRv6 ONNX files
 must be exported on Linux and then pointed to via the env vars below.
 
-**Default bundled model is a Chinese + basic ASCII model that does NOT cover
-Portuguese diacritics (ã ç ê õ).** For Portuguese, configure the paired
-PP-OCRv5 Latin recognizer and its matching dictionary:
-
-    RAPIDOCR_REC_MODEL=/path/to/latin_PP-OCRv5_rec_mobile.onnx
-    RAPIDOCR_REC_KEYS=/path/to/ppocrv5_latin_dict.txt
-
-    # PP-OCRv6 medium (better quality; export on Linux first — CF-2):
-    RAPIDOCR_REC_MODEL=/path/to/PP-OCRv6_medium_rec_infer.onnx
-    RAPIDOCR_DET_MODEL=/path/to/PP-OCRv6_medium_det_infer.onnx
-    RAPIDOCR_REC_KEYS=/path/to/ppocr_keys_v1.txt
+The project selects PP-OCRv6 medium by default and small explicitly. Detector,
+recognizer, dictionary and the disabled PP-OCRv4 classifier are pinned and
+verified before use. Extraction never downloads missing models. Legacy v5
+environment overrides are rejected instead of being presented as v6.
 
 A UserWarning is emitted at init time when neither RAPIDOCR_REC_MODEL nor
 RAPIDOCR_DET_MODEL is set, because the bundled ch model will silently drop
@@ -154,6 +147,29 @@ def _rapidocr_accepted_params(cls: type) -> frozenset[str]:
         return frozenset()
 
 
+def _rapidocr_v6_language(language: str) -> str:
+    """Normalize a requested language to the PP-OCRv6 route vocabulary."""
+    normalized = language.casefold().replace("_", "-").split("-", 1)[0]
+    aliases = {"por": "pt", "pt": "pt"}
+    normalized = aliases.get(normalized, normalized)
+    supported = {
+        "af", "az", "bs", "ca", "cs", "cy", "da", "de", "en", "es", "et", "eu",
+        "fi", "fr", "ga", "gl", "hr", "hu", "id", "is", "it", "ku", "la", "lb",
+        "lt", "lv", "mi", "ms", "mt", "nl", "no", "oc", "pl", "pt", "qu", "rm",
+        "ro", "rs_latin", "sk", "sl", "sq", "sv", "sw", "tl", "tr", "uz", "vi",
+        "french", "german",
+    }
+    if normalized not in supported:
+        raise ValueError(f"RapidOCR PP-OCRv6 does not support language {language!r}")
+    return normalized
+
+
+def _rapidocr_config_types():
+    """Load API enums only with the selected RapidOCR runtime."""
+    from rapidocr.utils.typings import EngineType, ModelType, OCRVersion
+    return EngineType, ModelType, OCRVersion
+
+
 def _run_rapidocr(engine: Any, img: Any) -> Any:
     """Run RapidOCR with CLAHE (LAB L-channel) preprocessing."""
     import numpy as np
@@ -258,105 +274,91 @@ class RapidOCRBackend:
     def __init__(self, config: "ExtractorConfig", runtime: str = "onnxruntime") -> None:
         self._config = config
         self._closed = False
-        from structured_pdf_text.ocr.env import env_float
-        self._language = config.language
         self._runtime = runtime
         self._engine_key = "rapidocr"
 
+        from structured_pdf_text.ocr.pipelines.rapidocr.models import (
+            PROFILES,
+            RAPIDOCR_MANIFEST_REVISION,
+            selected_paths,
+            verify_artifacts,
+        )
+
+        settings = getattr(config, "ocr_settings", None)
+        if settings is None:
+            from structured_pdf_text.ocr.pipelines.rapidocr.settings import resolve_settings
+            from structured_pdf_text.ocr.registry import get_entry
+            settings = resolve_settings(config, get_entry(config.ocr_engine))
+        if settings.selection.engine != "rapidocr" or settings.selection.provider != runtime:
+            raise ValueError("RapidOCR settings do not match the selected engine/provider")
+        self._language = settings.language
+        size = settings.model_size
+        paths = (settings.detector_path, settings.recognizer_path, settings.dictionary_path, settings.classifier_path)
+        if any(path is None for path in paths):
+            raise ValueError("RapidOCR requires detector, recognizer, dictionary and classifier paths")
+        det_path, rec_path, rec_keys, cls_path = (str(Path(value).expanduser()) for value in paths)
+        hashes = verify_artifacts(size, paths)
+        # Validate the exact offline artifact set before importing the runtime.
         RapidOCR = _import_rapidocr(runtime)
         self._unified = getattr(RapidOCR, "__module__", "").split(".")[0] == "rapidocr"
-        kwargs: dict[str, Any] = {}
+        profile = PROFILES[size]
+        self._profile = profile.profile
+        self._model_size = size
+        self._manifest_revision = RAPIDOCR_MANIFEST_REVISION
+        self._effective_models = {
+            "detector": profile.detector.filename,
+            "recognizer": profile.recognizer.filename,
+            "dictionary": profile.dictionary.filename,
+            "classifier": f"{profile.classifier.filename} (disabled during inference; PP-OCRv4)",
+            "classifier_inference": False,
+        }
 
-        det_path = os.environ.get("RAPIDOCR_DET_MODEL")
-        rec_path = os.environ.get("RAPIDOCR_REC_MODEL")
-        rec_keys = os.environ.get("RAPIDOCR_REC_KEYS")
-        configured_cache = getattr(config, "ocr_cache_home", None)
-        if configured_cache:
-            cache = Path(configured_cache).expanduser() / "rapidocr"
-            rec_path = rec_path or str(cache / "latin_PP-OCRv5_rec_mobile.onnx")
-            rec_keys = rec_keys or str(cache / "ppocrv5_latin_dict.txt")
-        if not rec_path and not rec_keys:
-            cache = Path.home() / ".cache" / "pdfextractor" / "rapidocr"
-            cached_rec = cache / "latin_PP-OCRv5_rec_mobile.onnx"
-            cached_keys = cache / "ppocrv5_latin_dict.txt"
-            if cached_rec.is_file() or cached_keys.is_file():
-                rec_path = str(cached_rec)
-                rec_keys = str(cached_keys)
-        if det_path and not self._unified:
-            kwargs["det_model_path"] = det_path
-        if bool(rec_path) != bool(rec_keys):
-            raise ValueError(
-                "RapidOCR recognition model and dictionary must be configured "
-                "together via RAPIDOCR_REC_MODEL and RAPIDOCR_REC_KEYS."
-            )
-        if rec_path and not self._unified:
-            kwargs["rec_model_path"] = rec_path
-        if rec_keys and not self._unified:
-            kwargs["rec_keys_path"] = rec_keys
-        for artifact in (det_path, rec_path, rec_keys):
-            if artifact:
-                candidate = Path(artifact).expanduser()
-                if not candidate.is_file() or candidate.stat().st_size <= 0:
-                    raise ValueError(f"RapidOCR artifact is missing or empty: {artifact}")
-
-        if not rec_path and self._language.casefold() in {"pt", "pt-br", "por"}:
-            self._profile = "builtin-ch"
-            raise ValueError(
-                "RapidOCR's bundled Chinese recognizer is not compatible with pt-BR; "
-                "configure a paired Latin recognizer and dictionary"
-            )
-        elif rec_path:
-            profile, missing = portuguese_dictionary_profile(rec_keys)
-            if self._language.casefold() in {"pt", "pt-br", "por"} and missing:
-                raise ValueError(f"RapidOCR dictionary cannot represent Portuguese: missing {''.join(missing)}")
-            self._profile = profile if self._language.lower().startswith("pt") else "custom-rec"
-        else:
-            self._profile = "custom-det"
-
-        unclip    = env_float("RAPIDOCR_UNCLIP_RATIO", 1.8, minimum=0.0)
-        box_thresh = env_float("RAPIDOCR_BOX_THRESH", 0.45, minimum=0.0, maximum=1.0)
-        det_thresh = env_float("RAPIDOCR_DET_THRESH", 0.25, minimum=0.0, maximum=1.0)
-        text_score = env_float("RAPIDOCR_TEXT_SCORE", 0.5, minimum=0.0, maximum=1.0)
-        angle_cls  = os.environ.get("RAPIDOCR_ANGLE_CLS", "0").lower() in ("1", "true", "yes")
+        unclip = settings.unclip_ratio
+        box_thresh = settings.box_threshold
+        det_thresh = settings.detector_threshold
+        text_score = settings.text_score
         self._effective_tuning = {
             "det_db_unclip_ratio": unclip,
             "det_db_box_thresh": box_thresh,
             "det_db_thresh": det_thresh,
             "text_score": text_score,
-            "with_angle_cls": angle_cls,
-        }
-
-        tuning_kwargs: dict[str, Any] = {
-            "det_db_unclip_ratio": unclip,
-            "det_db_box_thresh":   box_thresh,
-            "det_db_thresh":       det_thresh,
-            "text_score":          text_score,
-            "with_angle_cls":      angle_cls,
+            "orientation_classifier_enabled": False,
         }
         if self._unified:
             # RapidOCR 3.x validates enum-typed parameters before applying
             # overrides. Passing the provider name as a plain string raises
             # TypeError during backend construction, so use the package's
             # EngineType enum for all three stages.
-            from rapidocr.utils.typings import EngineType
-
+            EngineType, ModelType, OCRVersion = _rapidocr_config_types()
             engine_type = EngineType(runtime)
+            model_type = ModelType(size)
+            ocr_version = OCRVersion.PPOCRV6
+            language = _rapidocr_v6_language(self._language)
             provider = {
                 "Det.engine_type": engine_type,
-                "Cls.engine_type": engine_type,
                 "Rec.engine_type": engine_type,
+                "Global.use_cls": False,
+                "Global.model_root_dir": str(Path(det_path).parent),
+                "Det.model_type": model_type,
+                "Det.ocr_version": ocr_version,
+                "Det.lang_type": "multi",
+                "Det.model_path": det_path,
+                "Global.text_score": text_score,
+                "Cls.engine_type": engine_type,
+                "Cls.model_path": cls_path,
+                "Cls.ocr_version": OCRVersion.PPOCRV4,
+                "Rec.model_type": model_type,
+                "Rec.ocr_version": ocr_version,
+                "Rec.lang_type": language,
+                "Rec.model_path": rec_path,
+                "Rec.rec_keys_path": rec_keys,
             }
-            requested_threads = config.num_threads
+            requested_threads = settings.num_threads
             effective_threads = max(1, os.cpu_count() or 1) if requested_threads == 0 else requested_threads
             if effective_threads > 0 and runtime == "onnxruntime":
                 provider["EngineConfig.onnxruntime.intra_op_num_threads"] = effective_threads
             elif effective_threads > 0 and runtime == "openvino":
                 provider["EngineConfig.openvino.inference_num_threads"] = effective_threads
-            if det_path:
-                provider["Det.model_path"] = det_path
-            if rec_path:
-                provider["Rec.model_path"] = rec_path
-                provider["Rec.rec_keys_path"] = rec_keys
             provider.update({
                 "Det.unclip_ratio": unclip,
                 "Det.box_thresh": box_thresh,
@@ -364,31 +366,25 @@ class RapidOCRBackend:
             })
             self._engine = RapidOCR(params=provider)
         else:
-            accepted = _rapidocr_accepted_params(RapidOCR)
-            merged = {**kwargs, **{k: v for k, v in tuning_kwargs.items() if k in accepted}}
-            self._engine = RapidOCR(**merged)
+            raise RuntimeError(
+                "RapidOCR PP-OCRv6 profiles require the unified rapidocr 3.9.2 API; "
+                "the legacy provider package cannot represent the selected model identity."
+            )
 
         self._det_model = det_path
         self._rec_model = rec_path
         self._rec_keys  = rec_keys
+        self._cls_model = cls_path
 
         # Hash every custom artefact provided via env vars individually so the
         # manifest can prove exactly which files were used.  Bundled models live
         # inside the package wheel and are not addressable as ordinary paths.
-        hashes: dict[str, str] = {}
-        if det_path:
-            d = sha256_file(det_path)
-            if d:
-                hashes["det_model"] = d
-        if rec_path:
-            r = sha256_file(rec_path)
-            if r:
-                hashes["rec_model"] = r
-        if rec_keys:
-            k = sha256_file(rec_keys)
-            if k:
-                hashes["rec_keys"] = k
-        self._artifact_hashes = hashes
+        self._artifact_hashes = {
+            "det_model": hashes["detector"],
+            "rec_model": hashes["recognizer"],
+            "rec_keys": hashes["dictionary"],
+            "cls_model": hashes["classifier"],
+        }
 
     # ------------------------------------------------------------------
     # OCRBackend — identity and capabilities
@@ -425,6 +421,13 @@ class RapidOCRBackend:
                 "rec_keys":  self._rec_keys,
                 "language_profile": self._profile,
                 "det_model": self._det_model,
+                "model_size": self._model_size,
+                "model_profile": self._profile,
+                "model_manifest": self._manifest_revision,
+                "models": self._effective_models,
+                "classifier_model": self._cls_model,
+                "classifier_inference": False,
+                "effective_tuning": self._effective_tuning,
             },
         )
 
@@ -562,3 +565,8 @@ class RapidOCRBackend:
 
 # Convenience aliases used by factory.py
 RapidOCROnnxBackend = RapidOCRBackend
+
+
+def build_backend(config):
+    """Lazy registry constructor for the selected RapidOCR provider."""
+    return RapidOCRBackend(config, runtime=config.ocr_provider or "onnxruntime")

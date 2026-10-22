@@ -13,7 +13,8 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.quality import assess_ocr_quality, raw_result_metrics
+from structured_pdf_text.ocr.quality import assess_ocr_quality
+from structured_pdf_text.ocr.pipelines.paddle.quality import raw_result_metrics
 from structured_pdf_text.text.line_detector import reconstruct_native_lines
 from structured_pdf_text.text.lists import extract_list_items
 from structured_pdf_text.text.normalize import normalize_reading_text, normalize_text

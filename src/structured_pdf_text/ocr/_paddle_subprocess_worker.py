@@ -5,7 +5,7 @@ Paddle OCR subprocess worker — CF-4 DLL isolation (Windows).
 Spawned by PaddleOCRBackend when torch is detected in the same venv.
 Runs in a clean process where PaddlePaddle DLLs load without conflicts.
 
-Protocol: JSONL over stdin/stdout (one JSON object per line).
+Protocol: JSONL version 5 over stdin/stdout (one JSON object per line).
 
   Request:
     {
@@ -57,6 +57,10 @@ def _redirect_protocol_stdout() -> None:
 # Add src/ to path so structured_pdf_text is importable when the package
 # is not installed in the venv (dev mode via sys.path in the parent script).
 _SRC = Path(__file__).parent.parent.parent  # .../src/
+# A worker launched by filename puts ocr/ first on sys.path. Its compatibility
+# paddle.py must never shadow the third-party paddle package in that process.
+_WORKER_DIR = Path(__file__).resolve().parent
+sys.path[:] = [entry for entry in sys.path if Path(entry).resolve() != _WORKER_DIR]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
@@ -64,6 +68,8 @@ from structured_pdf_text.ocr.runtime_policy import (
     PaddleRuntimePolicy,
     apply_paddle_runtime_policy,
 )
+from structured_pdf_text.ocr.pipelines.paddle.wire import PROTOCOL_VERSION, serialize_tokens
+from structured_pdf_text.ocr.pipeline.diagnostics import LegacyDiagnosticsProjector
 
 # Apply the parent's resolved policy before importing Paddle/PaddleOCR.
 
@@ -96,21 +102,7 @@ def _make_engine(config: dict):
 
 
 def _tokens_to_json(tokens) -> list[dict]:
-    out = []
-    for t in tokens:
-        source = getattr(t, "source", None)
-        out.append(
-            {
-                "text": t.text,
-                "confidence": float(t.confidence) if t.confidence is not None else None,
-                "bbox": [t.bbox.x0, t.bbox.y0, t.bbox.x1, t.bbox.y1],
-                "source": source.value if hasattr(source, "value") else str(source or "ocr_page"),
-                "language": getattr(t, "language", None),
-                "rotation": getattr(t, "rotation", 0),
-                "provenance": getattr(t, "provenance", None),
-            }
-        )
-    return out
+    return serialize_tokens(tokens)
 
 
 def main() -> None:
@@ -136,12 +128,13 @@ def main() -> None:
 
         try:
             protocol_version = req.get("protocol_version")
-            if protocol_version != 4:
+            if protocol_version != PROTOCOL_VERSION:
                 raise ValueError(f"unsupported protocol_version: {protocol_version!r}")
             if method == "init":
                 init_config = req
                 engine = _make_engine(req)
-                _reply({"status": "ok", "tokens": [], "error": None}, req_id)
+                _reply({"status": "ok", "tokens": [], "error": None,
+                        "protocol_version": PROTOCOL_VERSION}, req_id)
 
             elif method == "healthcheck":
                 if engine is None:
@@ -175,7 +168,8 @@ def main() -> None:
                     bbox = BBox(*coords)
                     tokens = engine.recognize_region(image, page_index, bbox)
 
-                _reply({"status": "ok", "tokens": _tokens_to_json(tokens), "error": None}, req_id)
+                _reply({"status": "ok", "tokens": _tokens_to_json(tokens), "error": None,
+                        "diagnostics": LegacyDiagnosticsProjector.snapshot_attributes(engine)}, req_id)
 
             else:
                 _reply({"status": "error", "tokens": [], "error": f"unknown method: {method!r}"}, req_id)
@@ -190,7 +184,10 @@ def main() -> None:
                 "errno": exc.errno if isinstance(exc, OSError) else None,
                 "fatal": fatal or isinstance(exc, MemoryError) or (isinstance(exc, OSError) and exc.errno == errno.ENOMEM),
                 "fatal_code": getattr(exc, "code", None) if fatal else None,
-                "stage": method,
+                "stage": getattr(exc, "stage", None) or method,
+                "page_index": getattr(exc, "page_index", None),
+                "details": getattr(exc, "details", {}) if fatal else {},
+                "diagnostics": LegacyDiagnosticsProjector.snapshot_attributes(engine) if engine is not None else {},
             }, req_id)
 
 

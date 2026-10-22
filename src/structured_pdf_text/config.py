@@ -222,6 +222,10 @@ class ExtractorConfig:
     ocr_runtime: str | None = None
     ocr_provider: str | None = None
     paddle_model_profile: str = "pt"
+    rapidocr_model_size: str | None = None
+    # Optional immutable settings object for the selected engine. The resolver
+    # validates its type/selection; legacy scalar fields remain compatible.
+    ocr_settings: object | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -251,46 +255,26 @@ class ExtractorConfig:
         from structured_pdf_text.ocr.languages import canonical_language
 
         object.__setattr__(self, "language", canonical_language(self.language))
-        engine_aliases = {
-            "rapidocr-onnx": ("rapidocr", "onnxruntime"),
-            "rapidocr-openvino": ("rapidocr", "openvino"),
-        }
-        public_engines = {"paddle", "rapidocr", "easyocr", "tesseract"}
-        if self.ocr_engine not in public_engines | set(engine_aliases):
-            raise ConfigurationError(
-                f"Unsupported OCR engine {self.ocr_engine!r}; supported: "
-                f"{', '.join(sorted(public_engines))}"
-            )
-        if self.ocr_engine in engine_aliases:
-            canonical_engine, alias_provider = engine_aliases[self.ocr_engine]
-            if self.ocr_provider not in (None, alias_provider):
-                raise ConfigurationError(
-                    f"{self.ocr_engine!r} conflicts with ocr_provider={self.ocr_provider!r}"
-                )
-            object.__setattr__(self, "ocr_engine", canonical_engine)
-            object.__setattr__(self, "ocr_provider", alias_provider)
-            import warnings
-            warnings.warn(
-                f"{next(name for name, value in engine_aliases.items() if value[1] == alias_provider)!r} "
-                "is deprecated; select ocr_engine='rapidocr' and ocr_provider explicitly",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if self.ocr_provider is not None:
-            if self.ocr_engine != "rapidocr":
-                raise ConfigurationError("ocr_provider is only valid when ocr_engine='rapidocr'")
-            if self.ocr_provider not in {"onnxruntime", "openvino"}:
-                raise ConfigurationError(
-                    "ocr_provider must be 'onnxruntime' or 'openvino', "
-                    f"got {self.ocr_provider!r}"
-                )
+        from structured_pdf_text.ocr.registry import resolve_selection
+        try:
+            engine_entry, provider = resolve_selection(self.ocr_engine, self.ocr_provider)
+        except (KeyError, ValueError) as exc:
+            raise ConfigurationError(f"Unsupported OCR engine or provider: {exc}") from exc
+        object.__setattr__(self, "ocr_engine", engine_entry.name)
+        object.__setattr__(self, "ocr_provider", provider)
+        if self.rapidocr_model_size is not None:
+            if engine_entry.name != "rapidocr":
+                raise ConfigurationError("rapidocr_model_size is only valid when ocr_engine='rapidocr'")
+            if self.rapidocr_model_size not in {"medium", "small", "v6-medium", "v6-small"}:
+                raise ConfigurationError("rapidocr_model_size must be 'medium' or 'small'")
+            object.__setattr__(self, "rapidocr_model_size", self.rapidocr_model_size.removeprefix("v6-"))
         if self.ocr_cache_home is not None and not isinstance(self.ocr_cache_home, (str, Path)):
             raise ConfigurationError("ocr_cache_home must be a path string or None")
-        if self.ocr_runtime not in {None, "paddle_static", "onnxruntime", "openvino"}:
-            raise ConfigurationError(f"Unsupported deprecated ocr_runtime value: {self.ocr_runtime!r}")
-        if self.ocr_runtime in {"onnxruntime", "openvino"}:
-            if self.ocr_engine != "rapidocr":
-                raise ConfigurationError("deprecated ocr_runtime providers are only valid for RapidOCR")
+        if self.ocr_runtime is not None and self.ocr_runtime not in engine_entry.legacy_runtime_values:
+            raise ConfigurationError(
+                f"Unsupported deprecated ocr_runtime value {self.ocr_runtime!r} for {self.ocr_engine!r}"
+            )
+        if self.ocr_runtime in engine_entry.providers:
             if self.ocr_provider is not None and self.ocr_provider != self.ocr_runtime:
                 raise ConfigurationError("ocr_runtime conflicts with ocr_provider")
             if self.ocr_provider is None:
@@ -301,8 +285,6 @@ class ExtractorConfig:
                     stacklevel=2,
                 )
                 object.__setattr__(self, "ocr_provider", self.ocr_runtime)
-        elif self.ocr_runtime == "paddle_static" and self.ocr_engine != "paddle":
-            raise ConfigurationError("ocr_runtime='paddle_static' is only valid when ocr_engine='paddle'")
         if self.ocr_engine == "paddle":
             from structured_pdf_text.ocr.models import PROFILES
             if self.paddle_model_profile not in PROFILES:
@@ -310,10 +292,11 @@ class ExtractorConfig:
                     f"Unsupported Paddle model profile {self.paddle_model_profile!r}; "
                     f"supported: {', '.join(sorted(PROFILES))}"
                 )
-        elif self.paddle_model_profile != "pt":
-            raise ConfigurationError("paddle_model_profile is only valid when ocr_engine='paddle'")
-        if self.ocr_runtime not in (None, "paddle_static") and self.ocr_engine == "paddle":
-            raise ConfigurationError("RapidOCR ocr_runtime cannot be used with Paddle")
+        else:
+            legacy_defaults = dict(engine_entry.legacy_config_fields)
+            default_profile = legacy_defaults.get("paddle_model_profile", "pt")
+            if self.paddle_model_profile != default_profile:
+                raise ConfigurationError(f"paddle_model_profile is only valid when ocr_engine='paddle'")
         if isinstance(self.ocr_batch_size, bool) or not isinstance(self.ocr_batch_size, int) or self.ocr_batch_size < 1:
             raise ConfigurationError(f"ocr_batch_size must be >= 1, got {self.ocr_batch_size!r}")
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in (self.ocr_tile_rows, self.ocr_tile_columns)):
@@ -464,65 +447,28 @@ def max_quality_extraction_config(
 #                     integer scale to the 300 DPI target (4.17).
 #
 # Override at call time or via OCR_RENDER_SCALE env var in evaluate_e2e.py.
-_ENGINE_RENDER_SCALE: dict[str, float] = {
-    "paddle":             2.0,
-    "easyocr":            3.0,
-    "rapidocr":            3.0,
-    "rapidocr-onnx":      3.0,
-    "rapidocr-openvino":  3.0,
-    "tesseract":          4.0,
-}
-
-
 def best_ocr_render_scale(engine: str) -> float:
     """Return the recommended ocr_render_scale for the given engine.
 
     Values are research-backed starting points (not final A/B-validated).
     Unknown engines are rejected to avoid silently using the wrong render size.
     """
-    aliases = {"rapidocr-onnx": "rapidocr", "rapidocr-openvino": "rapidocr"}
-    normalized = aliases.get(engine, engine)
     try:
-        return _ENGINE_RENDER_SCALE[normalized]
+        from structured_pdf_text.ocr.registry import get_entry
+        return get_entry(engine).default_render_scale
     except KeyError:
         raise ConfigurationError(f"Unknown OCR engine for render scale: {engine!r}") from None
 
 
 def effective_ocr_quality_thresholds(config: ExtractorConfig) -> OcrQualityThresholds:
-    """Return confidence gates calibrated for the selected OCR family.
-
-    Paddle: uses the configured thresholds directly (PP-OCRv6 operating point).
-
-    EasyOCR: uses empirically derived thresholds from the Phase 8 benchmark
-    (V3: 144 pages, V4: 224 pages).  EasyOCR confidence scores are generally
-    lower than Paddle's on clean text (~0.82 vs ~0.90 mean) and more variable
-    on degraded scans, so all thresholds are relaxed relative to Paddle.
-    These values allow detection of genuinely bad pages (triggering recovery)
-    without excessive false-positive recovery on good pages.
-
-    Other engines: confidence is neutralized (thresholds set to permissive values)
-    until backend-specific calibration data is available. Geometry, text-integrity,
-    and orientation gates are retained for all families.
-    """
+    """Resolve engine-owned confidence gates through registry metadata."""
     from dataclasses import replace
+    from structured_pdf_text.ocr.factory import import_object
+    from structured_pdf_text.ocr.registry import get_entry
 
-    if config.ocr_engine == "paddle":
-        return config.ocr_quality_thresholds
-
-    if config.ocr_engine == "easyocr":
-        # Calibrated from Phase 8 benchmark — conservative starting point.
-        # Raise these values after per-document validation with real corpus data.
-        return replace(
-            config.ocr_quality_thresholds,
-            strong_mean_confidence=0.82,
-            strong_lower_quartile=0.65,
-            max_low_confidence_char_ratio=0.20,
-            severe_mean_confidence=0.55,
-            severe_low_confidence_char_ratio=0.45,
-            low_confidence_threshold=0.60,
-        )
-
-    # Unknown / uncalibrated engines — neutralize confidence gates, retain geometry gates.
+    resolver_path = get_entry(config.ocr_engine).quality_thresholds_resolver
+    if resolver_path:
+        return import_object(resolver_path)(config, get_entry(config.ocr_engine))
     return replace(
         config.ocr_quality_thresholds,
         strong_mean_confidence=0.0,

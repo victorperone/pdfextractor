@@ -6,22 +6,38 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 export EASYOCR_MODULE_PATH="${EASYOCR_MODULE_PATH:-$REPO_ROOT/.ocr-model-cache/easyocr}"
-export RAPIDOCR_REC_MODEL="${RAPIDOCR_REC_MODEL:-$REPO_ROOT/.ocr-model-cache/rapidocr/latin_PP-OCRv5_rec_mobile.onnx}"
-export RAPIDOCR_REC_KEYS="${RAPIDOCR_REC_KEYS:-$REPO_ROOT/.ocr-model-cache/rapidocr/ppocrv5_latin_dict.txt}"
+RAPIDOCR_MODEL_SIZE="${RAPIDOCR_MODEL_SIZE:-medium}"
+RAPIDOCR_CACHE_HOME="${RAPIDOCR_CACHE_HOME:-$HOME/.cache/pdfextractor}"
+RAPIDOCR_CACHE="$RAPIDOCR_CACHE_HOME/rapidocr"
+RAPIDOCR_NAMES=(RAPIDOCR_DET_MODEL RAPIDOCR_REC_MODEL RAPIDOCR_REC_KEYS RAPIDOCR_CLS_MODEL)
+RAPIDOCR_FILES=("PP-OCRv6_det_${RAPIDOCR_MODEL_SIZE}.onnx" "PP-OCRv6_rec_${RAPIDOCR_MODEL_SIZE}.onnx" "ppocrv6_${RAPIDOCR_MODEL_SIZE}_dict.txt" "ch_ppocr_mobile_v2.0_cls_mobile.onnx")
+RAPIDOCR_SET=0
+RAPIDOCR_UNSET=0
+for name in "${RAPIDOCR_NAMES[@]}"; do
+    if [[ -n "${!name:-}" ]]; then ((RAPIDOCR_SET+=1)); else ((RAPIDOCR_UNSET+=1)); fi
+done
+if ((RAPIDOCR_SET == 0)); then
+    for index in "${!RAPIDOCR_NAMES[@]}"; do export "${RAPIDOCR_NAMES[$index]}=$RAPIDOCR_CACHE/${RAPIDOCR_FILES[$index]}"; done
+elif ((RAPIDOCR_UNSET != 0)); then
+    echo "Set all four RAPIDOCR_* model paths or none; partial overrides are rejected." >&2
+    exit 2
+fi
 export PATH="$REPO_ROOT/.venv/bin:$REPO_ROOT/.ocr-runtime/bin:$PATH"
 
 cd "$REPO_ROOT"
 
 for required in "$EASYOCR_MODULE_PATH/craft_mlt_25k.pth" \
                 "$EASYOCR_MODULE_PATH/latin_g2.pth" \
-                "$RAPIDOCR_REC_MODEL" "$RAPIDOCR_REC_KEYS" \
                 "$REPO_ROOT/.venv/bin/tesseract"; do
     [[ -s "$required" ]] || { echo "Required OCR artifact is missing: $required" >&2; exit 2; }
 done
+"$PYTHON_BIN" scripts/verify_rapidocr_artifacts.py --size "$RAPIDOCR_MODEL_SIZE" \
+    --detector "$RAPIDOCR_DET_MODEL" --recognizer "$RAPIDOCR_REC_MODEL" \
+    --dictionary "$RAPIDOCR_REC_KEYS" --classifier "$RAPIDOCR_CLS_MODEL"
 
 run_corpus() {
     local version="$1" pdf="$2" reference="$3" manifesto="$4"
-    local run_id_prefix="${version,,}-full-20261004"
+    local run_id_prefix="${version,,}-ppocrv6-${RAPIDOCR_MODEL_SIZE}-full-20261021"
     local out_dir="output/$version"
     local config backend provider run_id hypothesis run_manifest metric_file log_file
     local -a metric_files=()
@@ -43,7 +59,7 @@ run_corpus() {
         echo "[$version] $config: starting full-document extraction" | tee -a "$log_file"
         eval_args=("$pdf" --engine "$backend" --mode balanced --language pt-BR \
             --run-id "$run_id" --output-dir "$out_dir" --allow-partial --quiet)
-        [[ -z "$provider" ]] || eval_args+=(--provider "$provider")
+        [[ -z "$provider" ]] || eval_args+=(--provider "$provider" --rapidocr-model-size "$RAPIDOCR_MODEL_SIZE")
         if [[ -s "$hypothesis" && -s "$run_manifest" ]] && \
            "$PYTHON_BIN" -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1], encoding="utf-8")).get("engine_identity") else 1)' "$run_manifest"; then
             echo "[$version] $config: reusing completed extraction artifacts" | tee -a "$log_file"

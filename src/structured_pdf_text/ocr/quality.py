@@ -12,40 +12,11 @@ from structured_pdf_text.document import OcrToken, TokenFlag
 
 
 @dataclass(frozen=True, slots=True)
-class PaddleRawMetrics:
-    """Raw diagnostic counters extracted from a PaddleOCR result object.
-
-    All fields are optional because they depend on the PaddleOCR version and
-    the pipeline configuration actually used at inference time.  Missing fields
-    are ``None`` rather than zero so that callers can distinguish "not produced"
-    from "produced zero".
-
-    Attributes:
-        detection_count: Number of text regions proposed by the detection
-            head.
-        recognition_count: Number of proposed regions that were forwarded
-            to the recognition head and produced a non-empty string.
-        recognition_yield: ``recognition_count / detection_count``, or
-            ``None`` when either count is unavailable.  Values below 0.65
-            indicate that many detected boxes were discarded.
-        mean_detection_score: Average detector confidence across all
-            proposed boxes, or ``None`` when detector scores are absent.
-        recognition_score_threshold: The minimum recognition confidence
-            that PaddleOCR applied when filtering results.
-        document_orientation: Whole-page rotation angle in degrees as
-            reported by the document pre-processor, or ``None``.
-        textline_orientations: Tuple of per-line orientation angles in
-            degrees, one entry per recognised text line.  Empty when the
-            line-orientation classifier was not used.
-    """
-
+class RawOCRMetrics:
+    """Engine-neutral counts used by shared OCR quality assessment."""
     detection_count: int | None = None
     recognition_count: int | None = None
     recognition_yield: float | None = None
-    mean_detection_score: float | None = None
-    recognition_score_threshold: float | None = None
-    document_orientation: int | None = None
-    textline_orientations: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,9 +56,9 @@ class OcrQualityAssessment:
             alphanumeric by ``str.isalnum``.
         suspicious_token_ratio: Fraction of tokens flagged by
             :func:`is_suspicious_token`.
-        detection_count: Forwarded from :class:`PaddleRawMetrics`.
-        recognition_count: Forwarded from :class:`PaddleRawMetrics`.
-        recognition_yield: Forwarded from :class:`PaddleRawMetrics`.
+        detection_count: Forwarded from engine-neutral raw metrics.
+        recognition_count: Forwarded from engine-neutral raw metrics.
+        recognition_yield: Forwarded from engine-neutral raw metrics.
         orientation_incoherent: ``True`` when the caller determined that
             token orientations are inconsistent across the page.
         reasons: Tuple of short diagnostic strings, one per failed quality
@@ -162,7 +133,7 @@ class OcrCandidate:
 
     name: str
     tokens: list[OcrToken]
-    raw_metrics: PaddleRawMetrics
+    raw_metrics: RawOCRMetrics
     quality: OcrQualityAssessment
     rotation: int = 0
     enhancement: str | None = None
@@ -336,7 +307,7 @@ def _is_token_orientation_plausible(token: OcrToken) -> bool:
 def assess_ocr_quality(
     tokens: Iterable[OcrToken],
     *,
-    raw_metrics: PaddleRawMetrics | None = None,
+    raw_metrics: RawOCRMetrics | None = None,
     thresholds: OcrQualityThresholds | None = None,
     orientation_incoherent: bool = False,
 ) -> OcrQualityAssessment:
@@ -400,7 +371,7 @@ def assess_ocr_quality(
             May include inferred whitespace separators; they are filtered
             out before metric computation.
         raw_metrics: Optional diagnostic counters from the OCR engine.
-            When ``None``, a default :class:`PaddleRawMetrics` instance is
+            When ``None``, a default :class:`RawOCRMetrics` instance is
             used (all fields ``None``).
         thresholds: Quality thresholds configuration.  When ``None``,
             default :class:`~structured_pdf_text.config.OcrQualityThresholds`
@@ -455,7 +426,7 @@ def assess_ocr_quality(
     # Single-character tokens are excluded because their bbox geometry does not
     # reliably indicate orientation.
     horizontal = sum(_is_token_orientation_plausible(token) for token in metric_values) / max(1, token_count)
-    metrics = raw_metrics or PaddleRawMetrics()
+    metrics = raw_metrics or RawOCRMetrics()
     reasons: list[str] = []
     if not metric_values:
         reasons.append("no_tokens")
@@ -516,104 +487,3 @@ def _percentile(values: list[float], fraction: float) -> float:
     if lower == upper:
         return ordered[lower]
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
-
-
-def raw_result_metrics(raw: Any) -> PaddleRawMetrics:
-    """Extract optional PaddleOCR 3.x or legacy metrics without raising."""
-    records = _result_dicts(raw)
-    detection = _first_value(records, "dt_polys", "dt_boxes")
-    recognition = _first_value(records, "rec_texts", "rec_boxes", "rec_polys")
-    det_scores = _first_value(records, "dt_scores")
-    rec_scores = _first_value(records, "rec_scores")
-    orientations = _first_value(records, "textline_orientation_angles")
-    doc_result = _first_value(records, "doc_preprocessor_res")
-    detection_count = _length(detection)
-    recognition_count = _length(recognition)
-    if recognition_count is None:
-        recognition_count = _length(rec_scores)
-    if detection_count is None or recognition_count is None:
-        legacy_count = _legacy_count(raw)
-        detection_count = detection_count if detection_count is not None else legacy_count
-        recognition_count = recognition_count if recognition_count is not None else legacy_count
-    return PaddleRawMetrics(
-        detection_count=detection_count,
-        recognition_count=recognition_count,
-        recognition_yield=(recognition_count / max(detection_count, 1)) if detection_count is not None and recognition_count is not None else None,
-        mean_detection_score=_mean_numbers(det_scores),
-        recognition_score_threshold=_number(_first_value(records, "text_rec_score_thresh")),
-        document_orientation=_orientation(doc_result),
-        textline_orientations=tuple(_orientation(item) for item in (orientations or ()) if _orientation(item) is not None),
-    )
-
-
-def _legacy_count(raw: Any) -> int | None:
-    """Count legacy ``[[poly, [text, score]], ...]`` records safely."""
-    if not isinstance(raw, (list, tuple)):
-        return None
-    count = 0
-    for item in raw:
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            payload = item[1]
-            if isinstance(payload, (list, tuple)) and payload and str(payload[0]).strip():
-                count += 1
-            elif isinstance(item[0], (list, tuple)):
-                count += 1
-    return count or None
-
-
-def _result_dicts(raw: Any) -> list[dict[str, Any]]:
-    if isinstance(raw, dict):
-        return [raw]
-    if isinstance(raw, (list, tuple)):
-        output: list[dict[str, Any]] = []
-        for item in raw:
-            if isinstance(item, dict):
-                output.append(item)
-            elif hasattr(item, "json") and isinstance(item.json, dict):
-                output.append(item.json)
-        return output
-    if hasattr(raw, "json") and isinstance(raw.json, dict):
-        return [raw.json]
-    return []
-
-
-def _first_value(records: list[dict[str, Any]], *names: str) -> Any:
-    for record in records:
-        for name in names:
-            if name in record and record[name] is not None:
-                return record[name]
-    return None
-
-
-def _length(value: Any) -> int | None:
-    try:
-        return len(value) if value is not None else None
-    except TypeError:
-        return None
-
-
-def _mean_numbers(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        numbers = [float(item) for item in value]
-    except (TypeError, ValueError):
-        return None
-    return sum(numbers) / len(numbers) if numbers else None
-
-
-def _number(value: Any) -> float | None:
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _orientation(value: Any) -> int | None:
-    if isinstance(value, dict):
-        value = value.get("angle", value.get("orientation"))
-    try:
-        value = int(round(float(value)))
-    except (TypeError, ValueError):
-        return None
-    return value % 360

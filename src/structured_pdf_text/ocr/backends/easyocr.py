@@ -1055,7 +1055,9 @@ def _best_candidate(
         OcrCandidateResult(label, _candidate_family(label), tuple(tokens), score, "easyocr")
         for score, label, tokens, _ in scored
     ]
-    fused = OcrCandidateFusionEngine().fuse(candidate_results)
+    from structured_pdf_text.ocr.pipelines.easyocr.policy import FUSION_POLICY
+
+    fused = OcrCandidateFusionEngine(FUSION_POLICY).fuse(candidate_results)
     diagnostics = [
         {
             "candidate_id": label,
@@ -2829,3 +2831,8 @@ class EasyOCRBackend:
         self._reader = None
         getattr(self, "_auxiliary_readers", {}).clear()
         self._closed = True
+
+
+def build_backend(config):
+    """Lazy registry constructor for the EasyOCR raw backend."""
+    return EasyOCRBackend(config)

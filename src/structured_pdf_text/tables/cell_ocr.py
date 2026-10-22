@@ -118,13 +118,19 @@ def ocr_table_cells(
     table: "StructuredTable",
     page_array: "Any",
     page_bbox: "BBox",
-    ocr_fn: "Callable[[Any], str]",
+    ocr_fn: "Callable[[Any], str] | None" = None,
     *,
     confidence_threshold: float = _REFINE_CONFIDENCE_THRESHOLD,
     max_cells: int = 200,
     page_rotation: int = 0,
+    ocr_facade: "Any | None" = None,
 ) -> "StructuredTable":
     """Run targeted OCR on low-confidence table cells and return an updated table.
+
+    Pass ``ocr_facade=`` for scoped pipeline execution, typed evidence and core
+    conservation. This path renders the exact authorized cell through services;
+    ``page_array`` may be ``None``. The positional callback remains a low-level
+    compatibility API for callers that own their raster and OCR lifecycle.
 
     For each cell in ``table`` that has confidence below ``confidence_threshold``
     or no text, ``ocr_fn`` is called with the cell crop array and should return
@@ -143,6 +149,35 @@ def ocr_table_cells(
         refined are included unchanged.  The original table is not mutated.
     """
     import dataclasses
+
+    if ocr_facade is not None:
+        from copy import deepcopy
+        from structured_pdf_text.ocr.pipeline.coordinator import OCRPageFacade
+
+        if ocr_fn is not None:
+            raise ValueError("Choose an authorized OCR facade or a legacy raster callback")
+        if not isinstance(ocr_facade, OCRPageFacade):
+            raise TypeError("ocr_facade must be an OCRPageFacade bound to the current page")
+        if page_bbox != ocr_facade.coordinator.page_bbox or page_rotation != ocr_facade.coordinator.rotation:
+            raise ValueError("Table geometry does not match the authorized page")
+        cells = []
+        processed = 0
+        for cell in table.cells:
+            if processed >= max_cells or cell.bbox is None or not _cell_needs_ocr(cell, confidence_threshold):
+                cells.append(cell)
+                continue
+            draft = deepcopy(cell)
+            processed += 1
+            ocr_facade.refine_cell(
+                table_id=table.table_id, page_index=ocr_facade.coordinator.page_index,
+                cell=draft, quality_policy=ocr_facade.coordinator.quality_policy,
+                base_scale=ocr_facade.render_scale, header_text="",
+            )
+            cells.append(draft)
+        return dataclasses.replace(table, cells=cells)
+
+    if not callable(ocr_fn):
+        raise TypeError("Provide an authorized OCR facade or a raster OCR callback")
 
     refined_cells = []
     processed = 0

@@ -30,8 +30,8 @@ from structured_pdf_text.ocr.quality import (
     OcrQualityAssessment,
     assess_ocr_coverage,
     assess_ocr_quality,
-    raw_result_metrics,
 )
+from structured_pdf_text.ocr.pipelines.paddle.quality import raw_result_metrics
 from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
 from structured_pdf_text.ocr.runtime_policy import (
     apply_paddle_runtime_policy,

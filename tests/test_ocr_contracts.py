@@ -223,33 +223,44 @@ class TestFactory:
         with pytest.raises(ConfigurationError, match="Unsupported OCR engine"):
             ExtractorConfig(ocr_engine="nonexistent")
 
-    def test_factory_builds_rapidocr_when_optional_runtime_is_stubbed(self, monkeypatch, tmp_path) -> None:
+    def test_factory_builds_rapidocr_provider_with_pinned_profiles(self, monkeypatch, tmp_path) -> None:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr import factory
         from structured_pdf_text.ocr.backends.rapidocr import RapidOCRBackend
+        from structured_pdf_text.ocr.pipelines.rapidocr import models
 
         class DummyRapidOCR:
-            def __init__(self, **kwargs):
-                pass
+            __module__ = "rapidocr.fake"
+            def __init__(self, *, params):
+                self.params = params
 
         monkeypatch.setattr(
             "structured_pdf_text.ocr.backends.rapidocr._import_rapidocr",
             lambda runtime: DummyRapidOCR,
         )
-        model = tmp_path / "recognizer.onnx"
-        dictionary = tmp_path / "dictionary.txt"
-        model.write_bytes(b"mock model")
-        dictionary.write_text("\n".join("ãõçêáéíóú"), encoding="utf-8")
-        monkeypatch.setenv("RAPIDOCR_REC_MODEL", str(model))
-        monkeypatch.setenv("RAPIDOCR_REC_KEYS", str(dictionary))
+        paths = [tmp_path / name for name in ("det.onnx", "rec.onnx", "dict.txt", "cls.onnx")]
+        for path in paths:
+            path.write_bytes(b"mock model")
+        for name, path in zip(("RAPIDOCR_DET_MODEL", "RAPIDOCR_REC_MODEL", "RAPIDOCR_REC_KEYS", "RAPIDOCR_CLS_MODEL"), paths):
+            monkeypatch.setenv(name, str(path))
+        monkeypatch.setattr(models, "verify_artifacts", lambda _size, _paths: {
+            "detector": "1" * 64, "recognizer": "2" * 64,
+            "dictionary": "3" * 64, "classifier": "4" * 64,
+        })
+        monkeypatch.setattr(
+            "structured_pdf_text.ocr.backends.rapidocr._rapidocr_config_types",
+            lambda: (type("EngineType", (), {"__new__": lambda cls, value: value}),
+                     type("ModelType", (), {"__new__": lambda cls, value: value}),
+                     type("OCRVersion", (), {"PPOCRV6": "PP-OCRv6", "PPOCRV4": "PP-OCRv4"})),
+        )
         backend = factory.build_ocr_backend(ExtractorConfig(ocr_engine="rapidocr-onnx"))
         assert isinstance(backend, RapidOCRBackend)
         assert backend._runtime == "onnxruntime"
+        assert backend.identity.profile == "pp-ocrv6-medium"
 
-    def test_factory_rejects_chinese_default_for_brazilian_portuguese(self, monkeypatch) -> None:
+    def test_factory_fails_when_pinned_rapidocr_v6_models_are_not_provisioned(self, monkeypatch) -> None:
         from structured_pdf_text.config import ExtractorConfig
         from structured_pdf_text.ocr import factory
-        from structured_pdf_text.ocr.backends.rapidocr import RapidOCRBackend
 
         class DummyRapidOCR:
             def __init__(self, **kwargs):
@@ -259,7 +270,9 @@ class TestFactory:
             "structured_pdf_text.ocr.backends.rapidocr._import_rapidocr",
             lambda runtime: DummyRapidOCR,
         )
-        with pytest.raises(ValueError, match="not compatible with pt-BR"):
+        for name in ("RAPIDOCR_DET_MODEL", "RAPIDOCR_REC_MODEL", "RAPIDOCR_REC_KEYS", "RAPIDOCR_CLS_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+        with pytest.raises(ValueError, match="detector is missing or empty"):
             factory.build_ocr_backend(ExtractorConfig(ocr_engine="rapidocr"))
 
     def test_factory_builds_tesseract_backend(self) -> None:

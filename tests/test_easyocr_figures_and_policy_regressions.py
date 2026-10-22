@@ -538,7 +538,10 @@ class TestP1PreprocessingDedup:
 # Figure no_text — _recover_selected_regions distinguishes optional from required
 # ---------------------------------------------------------------------------
 
-from structured_pdf_text.api import _recover_selected_regions  # noqa: E402
+from structured_pdf_text.api import (  # noqa: E402
+    _is_successful_empty_optional_figure_ocr,
+    _recover_selected_regions,
+)
 from PIL import Image  # noqa: E402
 
 
@@ -628,3 +631,55 @@ class TestFigureNoTextPolicy:
             "Table with no text and no errors is a required region — must be ocr_failed"
         )
         assert stat["ocr_required"] is True
+
+    def test_empty_figure_only_request_is_a_successful_optional_result(self) -> None:
+        assert _is_successful_empty_optional_figure_ocr(
+            page_ocr_requested=False,
+            region_ocr_requested=False,
+            figure_ocr_requested=True,
+            ocr_tokens=[],
+            region_ocr_stats={},
+            warnings=[],
+            partial_reasons=[],
+        )
+
+    def test_optional_empty_figure_selected_as_region_is_successful(self) -> None:
+        assert _is_successful_empty_optional_figure_ocr(
+            page_ocr_requested=False,
+            region_ocr_requested=True,
+            figure_ocr_requested=False,
+            ocr_tokens=[],
+            region_ocr_stats={"figure": {
+                "kind": "figure", "ocr_required": False, "ocr_failed": False,
+                "tokens": 0, "status": "no_text",
+            }},
+            warnings=[],
+            partial_reasons=[],
+        )
+
+    def test_empty_figure_result_does_not_hide_required_work_or_errors(self) -> None:
+        base = {
+            "page_ocr_requested": False,
+            "region_ocr_requested": False,
+            "figure_ocr_requested": True,
+            "ocr_tokens": [],
+            "region_ocr_stats": {},
+            "warnings": [],
+            "partial_reasons": [],
+        }
+        for changes in (
+            {"page_ocr_requested": True},
+            {"region_ocr_requested": True, "figure_ocr_requested": False,
+             "region_ocr_stats": {}},
+            {"region_ocr_requested": True, "figure_ocr_requested": False,
+             "region_ocr_stats": {"table": {
+                 "kind": "table", "ocr_required": True, "ocr_failed": True,
+                 "tokens": 0,
+             }}},
+            {"warnings": ["figure_ocr_failed:status=cancelled"]},
+            {"partial_reasons": ["figure_ocr_unavailable"]},
+            {"ocr_tokens": [object()]},
+        ):
+            assert not _is_successful_empty_optional_figure_ocr(
+                **(base | changes)
+            )

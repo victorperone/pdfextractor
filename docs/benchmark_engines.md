@@ -16,7 +16,11 @@ effective model and OCR parameters.
 | `tesseract` | Tesseract | Tesseract executable |
 
 The run configuration names identify benchmark rows; the public OCR engine
-family remains `rapidocr` for both RapidOCR providers.
+family remains `rapidocr` for both RapidOCR providers. RapidOCR uses PP-OCRv6
+medium by default; pass `--rapidocr-model-size small` for its small profile.
+The manifests record the effective size and artifact hashes. Historical V3/V4
+leaderboard claims describe their recorded model configurations; PP-OCRv6 must
+be benchmarked in a new namespace before those comparisons are updated.
 
 ## Choose a backend
 
@@ -45,6 +49,7 @@ config = ExtractorConfig(
     language="pt-BR",
     ocr_engine="rapidocr",
     ocr_provider="openvino",
+    rapidocr_model_size="medium",  # default; set "small" for the smaller profile
 )
 ```
 
@@ -58,6 +63,7 @@ pdftext extract documento.pdf --mode balanced --language pt-BR --output markdown
 pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine tesseract --output markdown
 pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine rapidocr --ocr-provider onnxruntime --output markdown
 pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine rapidocr --ocr-provider openvino --output markdown
+pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine rapidocr --ocr-provider openvino --rapidocr-model-size small --output markdown
 pdftext extract documento.pdf --mode balanced --language pt-BR --ocr-engine paddle --paddle-model-profile pt --output markdown
 ```
 
@@ -80,6 +86,18 @@ expected to use the prepared local artifacts. The setup scripts and constraints
 files are the source of exact package pins. Run `python scripts/check_ocr_install.py
 --imports` and `python scripts/preflight_ocr_backends.py --language pt-BR` to
 inspect an existing environment.
+
+PP-OCRv6 with the OpenVINO provider pins OpenVINO 2026.4.1. A real smoke with
+2024.4.0 failed while loading the v6 recognizer's ONNX graph. On Linux, the
+2026.4.1 runtime passed both medium and small Portuguese smokes, and page 19 of
+V5 passed E2E for both sizes. Windows installation and corpus-level gates remain
+separate requirements before declaring the provider supported on that platform.
+
+After setup, `python scripts/smoke_rapidocr_profiles.py --cache-home <cache-root>`
+runs real Portuguese recognition for medium and small with ONNX Runtime and
+OpenVINO. Treat the profiles as homologated only after the smoke passes with
+the local model hashes recorded. This session's Linux matrix passed with the
+local RapidOCR v6 artifact hashes recorded in its manifests.
 
 ## Run configurations
 

@@ -1,11 +1,11 @@
 """Tests for the Paddle subprocess worker protocol — P1-11.
 
 Covers:
-  - timeout: hung worker causes RuntimeError, not a deadlock
+  - cancellation: a hung worker is interrupted without an inference deadline
   - worker crash: unexpected EOF raises RuntimeError clearly
   - malformed JSON response: raises RuntimeError with context
   - stdout noise (print()): print() in the worker does NOT corrupt the JSONL pipe
-  - restart after kill: _worker_send auto-restarts the worker after kill/timeout
+  - worker crash: unexpected EOF raises RuntimeError clearly
   - token metadata round-trip: source/rotation/provenance/language survive serialisation
   - quality thresholds round-trip: OcrQualityThresholds values survive the init handshake
   - concurrent calls: _worker_lock prevents response cross-contamination
@@ -26,8 +26,10 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 import pytest
+from structured_pdf_text.ocr.pipelines.paddle.wire import PROTOCOL_VERSION
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,6 +61,111 @@ def _send(proc: subprocess.Popen, obj: dict) -> dict:  # type: ignore[type-arg]
     proc.stdin.flush()  # type: ignore[union-attr]
     raw = proc.stdout.readline()  # type: ignore[union-attr]
     return json.loads(raw)
+
+
+def test_worker_bootstrap_cannot_shadow_paddle_runtime_with_compatibility_module():
+    script = textwrap.dedent(f"""
+        import importlib.util, json, sys
+        sys.path.insert(0, {str(_WORKER_SCRIPT.parent)!r})
+        from structured_pdf_text.ocr import _paddle_subprocess_worker
+        spec = importlib.util.find_spec('paddle')
+        print(json.dumps({{'origin': spec.origin if spec else None, 'paths': sys.path}}))
+    """)
+    process = _fake_worker_proc(script)
+    try:
+        payload = json.loads(process.stdout.readline())
+        assert process.wait(timeout=3) == 0
+        assert str(_WORKER_SCRIPT.parent) not in payload["paths"]
+        assert payload["origin"] != str(_WORKER_SCRIPT.parent / "paddle.py")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+
+
+@pytest.mark.parametrize("error_name", [
+    "ResourceExhaustedExtractionError", "PaddleOcrUnavailable",
+    "RequiredRuntimeUnavailableError", "FatalExtractionError",
+])
+def test_worker_preserves_typed_failure_details_and_processing_stage(monkeypatch, error_name):
+    from structured_pdf_text import errors
+    from structured_pdf_text.ocr import _paddle_subprocess_worker as worker
+    from structured_pdf_text.ocr.backends.paddle import _raise_worker_failure
+
+    error_class = getattr(errors, error_name)
+    failure = error_class("runtime failed", page_index=7, stage="ocr_initialize",
+                          details={"cause_type": "AttributeError", "cause_message": "missing device"})
+    def fail(_config):
+        raise failure
+    responses = []
+    monkeypatch.setattr(worker, "_redirect_protocol_stdout", lambda: None)
+    monkeypatch.setattr(worker, "_make_engine", fail)
+    monkeypatch.setattr(worker, "_reply", lambda response, request_id=None: responses.append(response))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"protocol_version": PROTOCOL_VERSION, "method": "init"}) + '\nQUIT\n'))
+    worker.main()
+    with pytest.raises(error_class) as raised:
+        _raise_worker_failure(responses[0], "worker init")
+    assert raised.value.stage == "ocr_initialize"
+    assert raised.value.page_index == 7
+    assert raised.value.details == failure.details
+
+
+def test_real_worker_and_parent_round_trip_polygon_provenance_and_diagnostics(monkeypatch):
+    from PIL import Image
+    from structured_pdf_text.document import OcrProvenance, OcrToken, SourceKind
+    from structured_pdf_text.geometry import BBox, Point
+    from structured_pdf_text.ocr import _paddle_subprocess_worker as worker
+    from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
+    from structured_pdf_text.ocr.pipeline.diagnostics import LegacyDiagnosticsProjector
+
+    token = OcrToken(
+        "ação -0,01", BBox(2, 3, 41, 20), .93, "pt-BR", SourceKind.OCR_REGION,
+        rotation=90, provenance="orientation_recovery", level="word",
+        polygon=(Point(2, 4), Point(40, 3), Point(41, 19), Point(3, 20)),
+        ocr_provenance=OcrProvenance("paddle", candidate_id="rot90", detector="v6",
+                                     preprocessing=("clahe",), rotation=90),
+    )
+    engine = SimpleNamespace(
+        recognize_page=lambda *args, **kwargs: [token], last_pass_count=3,
+        last_batch_count=2, last_attempt_errors=["optional variant failed"],
+        last_selected_variant="rot90", last_candidate_metrics={"baseline": {"score": .87}},
+    )
+    responses = []
+    monkeypatch.setattr(worker, "_redirect_protocol_stdout", lambda: None)
+    monkeypatch.setattr(worker, "_make_engine", lambda _: engine)
+    monkeypatch.setattr(worker, "_reply", lambda response, request_id=None: responses.append(response))
+    requests = [
+        {"method": "init", "protocol_version": PROTOCOL_VERSION},
+        {"method": "recognize_page", "protocol_version": PROTOCOL_VERSION, "image_path": "mock.png"},
+    ]
+    monkeypatch.setattr(Image, "open", lambda _: Image.new("RGB", (50, 30)))
+    monkeypatch.setattr(sys, "stdin", io.StringIO('\n'.join(json.dumps(req) for req in requests) + '\nQUIT\n'))
+    worker.main()
+    assert responses[0]["protocol_version"] == PROTOCOL_VERSION
+    assert responses[1]["status"] == "ok"
+    backend = PaddleOCRBackend.__new__(PaddleOCRBackend)
+    backend._config = SimpleNamespace(language="pt-BR")
+    backend._engine = None
+    backend._worker_send = lambda _: json.loads(json.dumps(responses[1]))
+    assert backend._call_subprocess("recognize_page", Image.new("RGB", (50, 30)), 0) == [token]
+    assert LegacyDiagnosticsProjector.operation_metrics(backend) == LegacyDiagnosticsProjector.operation_metrics(engine)
+    assert LegacyDiagnosticsProjector.consume(backend, engine_name="paddle") == LegacyDiagnosticsProjector.consume(engine, engine_name="paddle")
+
+
+def test_worker_startup_rejects_an_older_metadata_protocol(monkeypatch):
+    from structured_pdf_text.ocr.backends import paddle as module
+
+    backend = module.PaddleOCRBackend.__new__(module.PaddleOCRBackend)
+    backend._cancel_requested = threading.Event()
+    backend._worker_proc = None
+    backend._subprocess_config = {}
+    backend._raw_send = lambda _: {"status": "ok", "protocol_version": 4}
+    discarded = []
+    backend._discard_worker = lambda: discarded.append(True)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: SimpleNamespace())
+    with pytest.raises(RuntimeError, match="protocol mismatch"):
+        backend._ensure_worker()
+    assert discarded == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +200,7 @@ def _make_harness(fake_proc: subprocess.Popen) -> Any:  # type: ignore[type-arg]
             self._worker_lock = threading.Lock()
             self._worker_req_seq = 0
             self._subprocess_config: dict = {}
+            self._cancel_requested = threading.Event()
 
         # Copy the real method bodies via delegation
         def _ensure_worker(self) -> None:
@@ -109,68 +217,48 @@ def _make_harness(fake_proc: subprocess.Popen) -> Any:  # type: ignore[type-arg]
                 proc.kill()
 
         def _raw_send(self, request: dict) -> dict:
-            assert self._worker_proc is not None
-            assert self._worker_proc.stdin is not None
-            assert self._worker_proc.stdout is not None
-
-            from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
-            line = json.dumps(request, ensure_ascii=False) + "\n"
-            try:
-                self._worker_proc.stdin.write(line.encode())
-                self._worker_proc.stdin.flush()
-            except (BrokenPipeError, OSError):
-                raise RuntimeError("Paddle worker closed unexpectedly")
-
-            stdout = self._worker_proc.stdout
-            pool = ThreadPoolExecutor(max_workers=1)
-            fut: Future[bytes] = pool.submit(stdout.readline)
-            try:
-                response_line = fut.result(timeout=_TIMEOUT)
-            except FuturesTimeoutError:
-                self._discard_worker()
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise RuntimeError(f"Paddle worker timed out after {_TIMEOUT}s")
-            else:
-                pool.shutdown(wait=True)
-
-            if not response_line:
-                raise RuntimeError("Paddle worker closed unexpectedly")
-
-            try:
-                return json.loads(response_line)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    f"Paddle worker sent malformed JSON: {response_line[:200]!r}"
-                ) from exc
+            from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
+            return PaddleOCRBackend._raw_send(self, request)
 
         def _worker_send(self, request: dict) -> dict:
             # Exercise the production implementation; the harness only fakes IO.
             from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
             return PaddleOCRBackend._worker_send(self, request)
 
+        def cancel(self) -> None:
+            from structured_pdf_text.ocr.backends.paddle import PaddleOCRBackend
+            PaddleOCRBackend.cancel(self)
+
     return Harness(fake_proc)
 
 
-# Short timeout so tests complete quickly.
-_TIMEOUT = 2.0
-
-
 # ---------------------------------------------------------------------------
-# 1. Timeout: hung worker → RuntimeError, not deadlock
+# 1. Explicit cancellation interrupts a pending worker read
 # ---------------------------------------------------------------------------
 
-def test_worker_timeout_raises_runtime_error() -> None:
-    """A worker that never responds causes RuntimeError, not an infinite hang."""
+def test_worker_cancellation_interrupts_pending_read() -> None:
+    """A live worker may wait indefinitely until the caller cancels it."""
     # Worker reads stdin but never writes anything back.
     hung_worker = _fake_worker_proc("import sys; sys.stdin.read()")
     h = _make_harness(hung_worker)
 
-    with pytest.raises(RuntimeError, match="timed out"):
-        h._raw_send({"method": "healthcheck"})
+    errors = []
+    thread = threading.Thread(target=lambda: _capture_error(errors, h._raw_send, {"method": "healthcheck"}))
+    thread.start()
+    time.sleep(0.2)
+    h.cancel()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert errors and isinstance(errors[0], RuntimeError)
+    assert "closed unexpectedly" in str(errors[0])
+    hung_worker.wait(timeout=3)
 
-    hung_worker.kill()
-    hung_worker.wait()
+
+def _capture_error(errors, function, *args):
+    try:
+        function(*args)
+    except Exception as exc:
+        errors.append(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +732,7 @@ def test_real_worker_unknown_method_returns_error() -> None:
         env=_WORKER_ENV,
         bufsize=0,
     )
-    resp = _send(proc, {"protocol_version": 4, "method": "fly_to_the_moon", "request_id": 7})
+    resp = _send(proc, {"protocol_version": PROTOCOL_VERSION, "method": "fly_to_the_moon", "request_id": 7})
     assert resp["status"] == "error"
     assert "unknown method" in (resp.get("error") or "")
     assert resp.get("request_id") == 7

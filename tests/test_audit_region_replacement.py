@@ -59,6 +59,19 @@ class TestReplaceTokensConservative:
         texts = [t.text for t in result]
         assert "R$ 1.234,00" in texts, "OCR replacement must be applied when non-empty"
 
+    def test_conservative_replacement_preserves_critical_values(self):
+        original = [_ocr_token("O total é R$ 123,45 e não pode ser removido")]
+        replacement = [_ocr_token("O total é R$ 999,99 e não pode ser removido")]
+
+        result = _replace_tokens_in_box(
+            tokens=original,
+            box=_bbox(),
+            replacement=replacement,
+            conservative=True,
+        )
+
+        assert result == original
+
     def test_non_conservative_allows_empty_replacement(self):
         """conservative=False permits empty wipeout (explicit intent)."""
         original = [_ocr_token("anything", x0=0, x1=100)]

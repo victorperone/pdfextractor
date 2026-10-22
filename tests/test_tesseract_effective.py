@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+from types import SimpleNamespace
+
 from PIL import Image
 
 from structured_pdf_text.config import ExtractorConfig
@@ -53,6 +56,64 @@ def test_raw_and_pipeline_paths_share_effective_tesseract_options(monkeypatch) -
     assert options["executable"] == "configured-tesseract"
     assert options["profile"] == "tesseract-degraded-scan-v1"
     assert options["num_threads"] == 3
+
+
+def test_active_tesseract_child_can_be_cancelled_without_an_inference_deadline(tmp_path):
+    executable = tmp_path / "slow-tesseract"
+    executable.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n", encoding="utf-8")
+    executable.chmod(0o755)
+    backend = TesseractBackend.__new__(TesseractBackend)
+    backend._process_lock = threading.RLock()
+    backend._active_processes = set()
+    backend._cancel_requested = threading.Event()
+    started = threading.Event()
+    errors = []
+
+    def register(process):
+        backend._track_process(process)
+        if process is not None:
+            started.set()
+
+    def run():
+        try:
+            tesseract_module._run_tesseract_tsv(
+                Image.new("RGB", (12, 12), "white"), "por", 3, 1, 300, [],
+                executable=str(executable), process_callback=register,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(timeout=5)
+    backend.cancel()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert errors and "tesseract exited with code" in str(errors[0])
+
+
+def test_tesseract_identity_and_readiness_probes_have_no_deadline(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if "--version" in command:
+            stdout = "tesseract 5.5.3\n"
+        else:
+            stdout = "List of available languages (2):\neng\npor\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(tesseract_module.subprocess, "run", run)
+    tesseract_module._tesseract_info("tesseract")
+    backend = TesseractBackend.__new__(TesseractBackend)
+    backend._tesseract_cmd = "tesseract"
+    backend._extra_flags = []
+    backend._tess_lang = "por"
+    backend._osd_enabled = False
+
+    assert backend.healthcheck() == "ready"
+    assert len(calls) == 3
+    assert all("timeout" not in kwargs for _, kwargs in calls)
 
 
 def test_osd_rotation_maps_pipeline_and_canonical_tokens(monkeypatch) -> None:

@@ -307,7 +307,7 @@ class _EmptyResultEngine:
 def test_refiner_uses_tiling_for_blocked_scale(monkeypatch) -> None:
     """When a scale is budget-blocked, tiles are tried and result is not budget_blocked."""
     # Force a tiny budget so even 1× blocks, triggering tiling.
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "0.01")  # 10 KiB
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "0.01")  # 10 KiB
     engine = _EmptyResultEngine()
     page_bbox = BBox(0.0, 0.0, 200.0, 200.0)
     result = OcrRegionRefiner(engine).refine(
@@ -332,7 +332,7 @@ def test_refiner_uses_tiling_for_blocked_scale(monkeypatch) -> None:
 def test_refiner_blocked_scale_tiles_do_not_exceed_budget(monkeypatch) -> None:
     """Each tile passed to OCR must fit within the configured budget."""
     budget_mib = 0.1  # 100 KiB
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", str(budget_mib))
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", str(budget_mib))
     budget_bytes = int(budget_mib * 1024 * 1024)
 
     engine = _EmptyResultEngine()
@@ -372,7 +372,7 @@ class _OOMOnOCR:
 
 def test_oom_in_ocr_rotation_loop_does_not_abort_refine(monkeypatch) -> None:
     """OOM during OCR triggers tiled recovery; if all grids also OOM → resource_exhausted."""
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
     engine = _OOMOnOCR()
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     result = OcrRegionRefiner(engine).refine(
@@ -425,7 +425,7 @@ class _OOMOnLargePixelsEngine:
 
 def test_oom_in_budget_allowed_scale_triggers_tiled_recovery(monkeypatch) -> None:
     """When OCR raises OOM on a budget-allowed scale, tiled recovery must succeed."""
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")  # allow full scale
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")  # allow full scale
     engine = _OOMOnLargePixelsEngine()
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     result = OcrRegionRefiner(engine).refine(
@@ -446,7 +446,7 @@ def test_oom_in_budget_allowed_scale_triggers_tiled_recovery(monkeypatch) -> Non
 
 def test_tile_grid_escalation_on_tile_oom(monkeypatch) -> None:
     """When first grid's tiles OOM, escalate to finer grid; succeed there → status=ok."""
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
 
     # OOM for images wider than 70 px; tiles from grid=2 are ~64px, grid=4 are ~33px.
     # Threshold chosen so grid=2 tiles OOM but grid=4 tiles succeed.
@@ -512,7 +512,7 @@ def _make_layout_region(region_id: str, bbox: BBox) -> LayoutRegion:
 
 def test_oom_all_grids_fail_gives_resource_exhausted(monkeypatch) -> None:
     """When all tile grids up to 8×8 fail with OOM → status=resource_exhausted."""
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
     engine = _OOMOnOCR()  # always OOMs
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     result = OcrRegionRefiner(engine).refine(
@@ -543,7 +543,7 @@ def test_tiled_recovery_preserves_rotation(monkeypatch, rotation: float) -> None
     """
     if rotation != 0.0:
         pytest.importorskip("cv2")
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
     engine = _OOMOnLargePixelsEngine()
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     result = OcrRegionRefiner(engine).refine(
@@ -576,7 +576,7 @@ def test_tiled_recovery_tile_offsets_applied_to_page_coords(monkeypatch) -> None
     This verifies that tile_region_bbox offsets are correctly applied and that the tiled
     path does not map every token to the origin of the full region.
     """
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "0.05")  # ~50 KiB forces tiling on 400×100
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "0.05")  # ~50 KiB forces tiling on 400×100
 
     call_index: list[int] = [0]
 
@@ -640,7 +640,7 @@ def test_tiled_recovery_token_bbox_within_page_bounds_for_all_rotations(monkeypa
     Uses _OOMOnLargePixelsEngine to force tiling; tests rotation=0 only (no cv2 needed)
     while verifying the complete geometry path (resize → rotate → OCR → map → page).
     """
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
     engine = _OOMOnLargePixelsEngine()
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     result = OcrRegionRefiner(engine).refine(
@@ -674,7 +674,7 @@ def test_oom_recovered_region_stat_has_resource_exhausted_attempts(monkeypatch) 
     must report resource_exhausted_attempts >= 1 and resource_exhausted=True so
     the event remains visible in telemetry.
     """
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
     engine = _OOMOnLargePixelsEngine()  # 100×100 raster OOMs; tiles succeed
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     region = _make_layout_region("region-test-oom-recovered", page_bbox)
@@ -737,7 +737,7 @@ def test_page_facts_count_recovered_oom_attempts(monkeypatch) -> None:
 
 def test_no_oom_region_stat_has_zero_resource_exhausted_attempts(monkeypatch) -> None:
     """Case B: successful OCR with no OOM → resource_exhausted_attempts=0, resource_exhausted=False."""
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
     engine = _EmptyResultEngine()  # always succeeds, never OOMs
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     region = _make_layout_region("region-test-no-oom", page_bbox)
@@ -768,7 +768,7 @@ def test_unrecovered_oom_region_stat_has_resource_exhausted_status_and_attempts(
     status=resource_exhausted flags complete failure; resource_exhausted_attempts
     counts the number of OOM events even when recovery partially succeeded.
     """
-    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB_EASYOCR", "1000.0")
+    monkeypatch.setenv("PDFEXTRACTOR_OCR_RGB_BUDGET_MIB", "1000.0")
     engine = _OOMOnOCR()  # always OOMs — no recovery possible
     page_bbox = BBox(0.0, 0.0, 100.0, 100.0)
     region = _make_layout_region("region-test-unrecovered-oom", page_bbox)

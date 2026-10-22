@@ -17,6 +17,7 @@ import json
 import os
 import tempfile
 import getpass
+import signal
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from .diagnostics.report import document_report
 from .diagnostics.dump import dump_native_page_json
 from .diagnostics.corpus import corpus_report
 from .diagnostics.compare import compare_extractors
-from .errors import ConfigurationError, FatalExtractionError
+from .errors import ConfigurationError, ExtractionCancelled, FatalExtractionError
 from .ocr.models import (
     PADDLE_OCR_FEATURE_DEFAULTS,
     UV_DOC_MODEL,
@@ -43,8 +44,8 @@ from .ocr.models import (
     required_model_directories,
 )
 from .ocr.runtime_policy import apply_paddle_runtime_policy, resolve_paddle_runtime_policy
-from .ocr.registry import PUBLIC_ENGINES
-from .ocr.readiness import probe_static
+from .ocr.registry import public_engines, public_providers
+from .ocr.pipeline.cancellation import CancellationToken
 from .ocr.paddle import (
     PaddleOcrUnavailable,
     _local_model_root,
@@ -70,6 +71,13 @@ def _warn_if_exhaustive(policy: str, *, emitted: bool = False) -> bool:
         return emitted
     print(EXHAUSTIVE_OCR_WARNING, file=sys.stderr)
     return True
+
+
+def _add_rapidocr_size_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--rapidocr-model-size", choices=("medium", "small"), default=None,
+        help="RapidOCR PP-OCRv6 model size (default: medium; small is explicit)",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,7 +115,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         metavar="PROFILE",
         help=(
             "Paddle model profile to use (e.g. pt-v6-medium). "
-            "PP-OCRv6 is the default profile; PP-OCRv5 remains available as pt-v5."
+            "PP-OCRv6 medium is the default; pt-v6-small selects the small profile."
         ),
     )
     extract_parser.add_argument(
@@ -183,14 +191,15 @@ def _main_impl(argv: list[str] | None = None) -> int:
         "--ocr-engine",
         default=None,
         metavar="ENGINE",
-        choices=PUBLIC_ENGINES,
+        choices=public_engines(),
         help=(
             "OCR engine family: easyocr (default), paddle, rapidocr, tesseract. "
             "RapidOCR runtime selection uses --ocr-provider."
         ),
     )
-    extract_parser.add_argument("--ocr-provider", choices=["onnxruntime", "openvino"], default=None,
+    extract_parser.add_argument("--ocr-provider", choices=public_providers(), default=None,
                                 help="Inference provider when --ocr-engine rapidocr is selected")
+    _add_rapidocr_size_argument(extract_parser)
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
     inspect_parser.add_argument("pdf", type=Path)
@@ -213,8 +222,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="Override the OCR model cache directory",
     )
-    inspect_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
-    inspect_parser.add_argument("--ocr-provider", choices=("onnxruntime", "openvino"), default=None)
+    inspect_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr")
+    inspect_parser.add_argument("--ocr-provider", choices=public_providers(), default=None)
+    _add_rapidocr_size_argument(inspect_parser)
     inspect_parser.add_argument(
         "--ocr-quality-policy",
         choices=[policy.value for policy in OcrQualityPolicy],
@@ -240,8 +250,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         help="Paddle model profile (default: pt)",
     )
     overlay_parser.add_argument("--language", default="pt-BR", help="OCR language tag")
-    overlay_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
-    overlay_parser.add_argument("--ocr-provider", choices=("onnxruntime", "openvino"), default=None)
+    overlay_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr")
+    overlay_parser.add_argument("--ocr-provider", choices=public_providers(), default=None)
+    _add_rapidocr_size_argument(overlay_parser)
     overlay_parser.add_argument(
         "--cache-home", default=None, metavar="DIR",
         help="Override the OCR model cache directory",
@@ -306,8 +317,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         default=0,
         help="CPU threads for OCR engine (0 = auto-detect, -1 = the engine's own thread default)",
     )
-    report_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr")
-    report_parser.add_argument("--ocr-provider", choices=("onnxruntime", "openvino"), default=None)
+    report_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr")
+    report_parser.add_argument("--ocr-provider", choices=public_providers(), default=None)
+    _add_rapidocr_size_argument(report_parser)
 
     compare_parser = subparsers.add_parser(
         "compare",
@@ -326,7 +338,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
         default="pymupdf",
     )
     compare_parser.add_argument("--language", default=None, help="OCR language for the selected adapter (default: pt-BR)")
-    compare_parser.add_argument("--ocr-engine", choices=PUBLIC_ENGINES, default="easyocr", help="OCR backend family (default: easyocr)")
+    compare_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr", help="OCR backend family (default: easyocr)")
+    _add_rapidocr_size_argument(compare_parser)
     compare_parser.add_argument("--cache-home", default=None, metavar="DIR")
     compare_parser.add_argument(
         "--ocr-model-profile", default=None, metavar="PROFILE",
@@ -409,6 +422,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             config = _replace(config, num_threads=args.threads,
                               ocr_engine=args.ocr_engine or config.ocr_engine,
                               ocr_provider=args.ocr_provider,
+                              rapidocr_model_size=args.rapidocr_model_size,
                               paddle_model_profile=profile_name,
                               ocr_cache_home=args.cache_home)
         elif args.best:
@@ -418,6 +432,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             config = _replace(config, num_threads=args.threads,
                               ocr_engine=args.ocr_engine or config.ocr_engine,
                               ocr_provider=args.ocr_provider,
+                              rapidocr_model_size=args.rapidocr_model_size,
                               paddle_model_profile=profile_name,
                               ocr_cache_home=args.cache_home)
         else:
@@ -432,6 +447,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 num_threads=args.threads,
                 ocr_engine=effective_engine,
                 ocr_provider=args.ocr_provider,
+                rapidocr_model_size=args.rapidocr_model_size,
                 paddle_model_profile=profile_name,
                 ocr_cache_home=args.cache_home,
             )
@@ -439,28 +455,6 @@ def _main_impl(argv: list[str] | None = None) -> int:
             from dataclasses import replace as _replace
             config = _replace(config, ocr_cache_home=args.cache_home)
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
-        # F04: Paddle model preflight only runs when the selected engine is Paddle.
-        if _mode_requires_ocr(config.mode):
-            readiness = probe_static(config, cache_home=args.cache_home)
-            if readiness.status.value == "degraded":
-                print(
-                    f"OCR backend is available in degraded mode: {readiness.reason_code}: {readiness.details}",
-                    file=sys.stderr,
-                )
-            elif readiness.status.value != "ready":
-                print(
-                    f"OCR backend is not ready before extraction: {readiness.status.value} "
-                    f"({readiness.reason_code or 'unknown'}): {readiness.details}",
-                    file=sys.stderr,
-                )
-                if config.ocr_engine == "paddle":
-                    print(
-                        f"Run: pdftext setup-paddle-models --ocr-model-profile {config.paddle_model_profile}"
-                        + (f" --cache-home {args.cache_home}" if args.cache_home else ""),
-                        file=sys.stderr,
-                    )
-                return 1
-
         def _progress(current: int, total: int) -> None:
             print(f"\rExtracting page {current}/{total}...", end="", file=sys.stderr, flush=True)
 
@@ -470,22 +464,34 @@ def _main_impl(argv: list[str] | None = None) -> int:
             password = sys.stdin.readline().rstrip("\r\n")
         elif args.ask_password:
             password = getpass.getpass("PDF password: ")
-        if args.cache_home:
-            os.environ["PADDLE_PDX_CACHE_HOME"] = str(
-                Path(args.cache_home).expanduser().resolve()
-            )
+        cancellation_token = CancellationToken()
+        previous_sigint = None
+        try:
+            previous_sigint = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, lambda _signum, _frame: cancellation_token.cancel())
+        except ValueError:
+            previous_sigint = None
         try:
             with PdfTextExtractor(config) as extractor:
                 document = extractor.extract(
                     args.pdf,
                     password=password,
                     progress_callback=callback,
+                    cancellation_token=cancellation_token,
                 )
+        except ExtractionCancelled as exc:
+            if args.progress:
+                print(file=sys.stderr)
+            print(f"Extraction cancelled: {exc}", file=sys.stderr)
+            return 130
         except FatalExtractionError as exc:
             if args.progress:
                 print(file=sys.stderr)
             _print_fatal_extraction_error(exc)
             return 1
+        finally:
+            if previous_sigint is not None:
+                signal.signal(signal.SIGINT, previous_sigint)
         if args.progress:
             print(file=sys.stderr)
         for warning in document.diagnostics.warnings:
@@ -523,18 +529,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
             page_indices=(args.page - 1,) if args.page is not None else None,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
-        if _mode_requires_ocr(config.mode):
-            readiness = probe_static(config, cache_home=args.cache_home)
-            if readiness.status.value != "ready":
-                print(f"OCR backend is not ready: {readiness.status.value} ({readiness.reason_code})", file=sys.stderr)
-                return 1
-        if args.cache_home:
-            os.environ["PADDLE_PDX_CACHE_HOME"] = str(
-                Path(args.cache_home).expanduser().resolve()
-            )
         try:
             with PdfTextExtractor(config) as extractor:
                 document = extractor.extract(args.pdf)
@@ -574,6 +572,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         if mode == ExtractionMode.NATIVE and args.ocr_model_profile is not None:
             print("--ocr-model-profile cannot be used with --mode native", file=sys.stderr)
             return 2
+        if mode == ExtractionMode.NATIVE and args.rapidocr_model_size is not None:
+            print("--rapidocr-model-size cannot be used with --mode native", file=sys.stderr)
+            return 2
         profile_name = args.ocr_model_profile or "pt"
         config = ExtractorConfig(
             mode=mode,
@@ -581,14 +582,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
             paddle_model_profile=profile_name,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
             page_indices=(index,),
         )
-        if mode != ExtractionMode.NATIVE:
-            readiness = probe_static(config, cache_home=args.cache_home)
-            if readiness.status.value != "ready":
-                print(f"OCR backend is not ready: {readiness.status.value} ({readiness.reason_code})", file=sys.stderr)
-                return 1
         try:
             with PdfTextExtractor(
                 config
@@ -620,21 +617,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
             num_threads=args.threads,
             ocr_engine=args.ocr_engine,
             ocr_provider=args.ocr_provider,
+            rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if args.workers < 1:
             print("--workers must be at least 1", file=sys.stderr)
             return 2
-        if _mode_requires_ocr(config.mode):
-            readiness = probe_static(config, cache_home=args.cache_home)
-            if readiness.status.value != "ready":
-                print(f"OCR backend is not ready: {readiness.status.value} ({readiness.reason_code})", file=sys.stderr)
-                return 1
-        if args.cache_home:
-            os.environ["PADDLE_PDX_CACHE_HOME"] = str(
-                Path(args.cache_home).expanduser().resolve()
-            )
         try:
             report = corpus_report(args.pdfs, config, workers=args.workers)
         except FatalExtractionError as exc:
@@ -650,19 +639,17 @@ def _main_impl(argv: list[str] | None = None) -> int:
         if args.ocr_model_profile and args.ocr_engine != "paddle":
             print("--ocr-model-profile requires --ocr-engine paddle", file=sys.stderr)
             return 2
-        ocr_adapters = {"structured-balanced"}
+        if args.rapidocr_model_size and args.ocr_engine != "rapidocr":
+            print("--rapidocr-model-size requires --ocr-engine rapidocr", file=sys.stderr)
+            return 2
         comparison_config = ExtractorConfig(
             mode=ExtractionMode.BALANCED,
             language=args.language or "pt-BR",
             ocr_engine=args.ocr_engine,
             paddle_model_profile=args.ocr_model_profile or "pt",
+            rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
         )
-        if any(adapter in ocr_adapters for adapter in args.adapters):
-            readiness = probe_static(comparison_config, cache_home=args.cache_home)
-            if readiness.status.value != "ready":
-                print(f"OCR backend is not ready: {readiness.status.value} ({readiness.reason_code})", file=sys.stderr)
-                return 1
         try:
             comparison = compare_extractors(
                 args.pdf,
@@ -690,12 +677,6 @@ def _main_impl(argv: list[str] | None = None) -> int:
         return _cmd_models_status(profile_name, args.cache_home)
 
     return 2
-
-
-def _mode_requires_ocr(mode: ExtractionMode | str) -> bool:
-    """Return True when the extraction mode can trigger OCR."""
-    ocr_modes = {ExtractionMode.BALANCED, ExtractionMode.OCR, "balanced", "ocr"}
-    return mode in ocr_modes
 
 
 def _cmd_setup_easyocr_models(language: str, cache_home: str | None, include_dbnet: bool) -> int:

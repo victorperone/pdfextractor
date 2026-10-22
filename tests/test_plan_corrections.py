@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from reportlab.pdfgen import canvas
+import pytest
 
 import structured_pdf_text.cli as cli_module
 import structured_pdf_text.diagnostics.compare as compare_module
@@ -15,7 +16,6 @@ from structured_pdf_text.assemble.document import assemble_document
 from structured_pdf_text.config import ExtractorConfig, SecurityLimits, effective_ocr_quality_thresholds
 from structured_pdf_text.diagnostics.compare import ComparisonExtraction, compare_extractors
 from structured_pdf_text.ocr.models import PROFILES, get_profile
-from structured_pdf_text.ocr.readiness import ReadinessResult, ReadinessStatus
 
 
 def _pdf(path: Path) -> Path:
@@ -29,7 +29,8 @@ def test_v6_medium_is_an_alias_of_default_v6_profile() -> None:
     assert PROFILES["pt-v6-medium"] is PROFILES["pt"]
     assert get_profile("pt").detection == "PP-OCRv6_medium_det"
     assert get_profile("pt-v6-medium").recognition == "PP-OCRv6_medium_rec"
-    assert get_profile("pt-v5").detection == "PP-OCRv5_server_det"
+    with pytest.raises(ValueError, match="Supported profiles"):
+        get_profile("pt-v5")
 
 
 def test_render_scale_preserves_requested_size_inside_and_at_limit() -> None:
@@ -224,14 +225,7 @@ def test_cli_overlay_native_does_not_validate_ocr(monkeypatch, tmp_path: Path) -
     assert code == 0
 
 
-def test_cli_overlay_ocr_mode_does_not_require_model_profile(monkeypatch, capsys, tmp_path: Path) -> None:
-    # Verify that --ocr-model-profile is never required, even in balanced OCR mode.
-    # Isolate argument validation from optional OCR package/model availability.
-    monkeypatch.setattr(
-        cli_module,
-        "probe_static",
-        lambda *_args, **_kwargs: ReadinessResult(ReadinessStatus.READY),
-    )
+def test_cli_overlay_ocr_mode_defers_model_readiness_until_work_is_authorized(capsys, tmp_path: Path) -> None:
     code = cli_module.main([
         "overlay", str(tmp_path / "not-opened.pdf"), "--page", "1", "--out", str(tmp_path / "out.png"),
         "--mode", "balanced", "--ocr-engine", "paddle",
