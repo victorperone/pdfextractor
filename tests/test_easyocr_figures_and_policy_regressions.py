@@ -483,44 +483,31 @@ class TestP1PreprocessingDedup:
     """Visually identical preprocessing images must not produce duplicate candidates."""
 
     def test_identical_arrays_deduplicated(self):
-        """When grayscale and autocontrast produce identical bytes, only one enters."""
+        """A uniform input must not schedule identical preprocessing passes."""
         from structured_pdf_text.ocr.backends.easyocr import _image_preprocessing_candidates
-        import hashlib
+        pytest.importorskip("cv2")
+        pytest.importorskip("PIL.Image")
         import numpy as np
 
         white = np.full((50, 50, 3), 255, dtype=np.uint8)
-        try:
-            candidates = _image_preprocessing_candidates(white, adaptive=False)
-        except Exception:
-            pytest.skip("cv2/PIL not available")
-        if not candidates:
-            pytest.skip("cv2/PIL not available — function returned empty list")
-
-        labels = [label for label, _ in candidates]
-        fingerprints = []
-        for _, variant in candidates:
-            arr = np.asarray(variant)
-            fp = f"{arr.shape}:{arr.dtype}:{hashlib.md5(arr.tobytes()).hexdigest()}"
-            fingerprints.append(fp)
-        assert len(fingerprints) == len(set(fingerprints)), (
-            f"Duplicate fingerprints found. Labels: {labels}"
-        )
+        assert _image_preprocessing_candidates(white, adaptive=False) == []
 
     def test_distinct_preprocessings_not_collapsed(self):
         """A varied image must yield multiple distinct preprocessing candidates."""
         from structured_pdf_text.ocr.backends.easyocr import _image_preprocessing_candidates
+        pytest.importorskip("cv2")
+        pytest.importorskip("PIL.Image")
+        import hashlib
         import numpy as np
 
         rng = np.random.default_rng(42)
         varied = rng.integers(0, 255, (60, 80, 3), dtype=np.uint8)
-        try:
-            candidates = _image_preprocessing_candidates(varied, adaptive=False)
-        except Exception:
-            pytest.skip("cv2/PIL not available")
-        if not candidates:
-            pytest.skip("cv2/PIL not available — function returned empty list")
-
+        candidates = _image_preprocessing_candidates(varied, adaptive=False)
         assert len(candidates) >= 2, "At least 2 distinct preprocessings expected"
+        fingerprint = lambda arr: (arr.shape, str(arr.dtype), hashlib.sha256(arr.tobytes()).hexdigest())
+        fingerprints = [fingerprint(np.asarray(variant)) for _, variant in candidates]
+        assert len(fingerprints) == len(set(fingerprints))
+        assert fingerprint(varied) not in fingerprints
 
     def test_no_error_on_empty_image(self):
         """Empty image must return an empty list without raising."""

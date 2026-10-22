@@ -610,6 +610,12 @@ class OCRPageFacade:
 
         return getattr(self.coordinator.pipeline, "fusion_policy", LEGACY_FUSION_POLICY)
 
+    @property
+    def figure_segmentation_policy(self):
+        from .policies import LEGACY_FIGURE_SEGMENTATION_POLICY
+
+        return getattr(self.coordinator.pipeline, "figure_segmentation_policy", LEGACY_FIGURE_SEGMENTATION_POLICY)
+
     def refine_footnote(self, target, *, base_scale, quality_policy):
         from .token_refinement import refine_footnote
 

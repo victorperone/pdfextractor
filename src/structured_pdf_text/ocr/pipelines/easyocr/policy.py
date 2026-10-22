@@ -1,5 +1,7 @@
 """EasyOCR-owned recovery schedule, matching the pre-migration path."""
 from structured_pdf_text.ocr.pipeline.policies import CellRecoveryPolicy, ConservativeIntegrationPolicy, RegionalCandidatePolicy, RegionalRecoveryProfile, TokenRefinementPolicy
+from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
+from structured_pdf_text.ocr.pipeline.policies import FigureSegmentationPolicy
 
 # Kept local so future EasyOCR tuning cannot alter another engine. Values
 # capture the common legacy schedule; changing them is a separate experiment.
@@ -21,8 +23,7 @@ INTEGRATION_POLICY = ConservativeIntegrationPolicy("easyocr-integration-v1")
 CELL_POLICY = CellRecoveryPolicy()
 
 TOKEN_REFINEMENT_POLICY = TokenRefinementPolicy()
-
-from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
+FIGURE_SEGMENTATION_POLICY = FigureSegmentationPolicy()
 
 FUSION_POLICY = CandidateFusionPolicy(
     detector_families=("craft_greedy", "craft_beam", "dbnet"),

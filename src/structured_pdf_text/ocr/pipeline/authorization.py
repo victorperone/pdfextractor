@@ -63,7 +63,10 @@ class AuthorizationRegistry:
             if auth is None or supplied != auth or auth.scope != request.scope:
                 raise ValueError("Unknown, forged or mismatched authorization")
             if box is not None and not union_contains(auth.regions, valid_bbox(box)):
-                raise ValueError("Requested geometry is outside the exact authorization union")
+                raise ValueError(
+                    "Requested geometry is outside the exact authorization union: "
+                    f"requested={box!r}, authorized={auth.regions!r}"
+                )
             return auth
 
     def validate_result(self, request: OCRWorkRequest, result: OCRPipelineResult) -> None:

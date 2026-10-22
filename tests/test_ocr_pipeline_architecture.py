@@ -59,6 +59,17 @@ def test_gate_supports_a_fifth_engine_and_neutral_rules():
     assert not violations("from structured_pdf_text.ocr.backends.easyocr import X", "structured_pdf_text.ocr.factory")
 
 
+@pytest.mark.parametrize("module", [
+    "structured_pdf_text.api", "structured_pdf_text.native.pdfium_source",
+    "structured_pdf_text.tables.visual", "structured_pdf_text.fusion.integrator",
+    "structured_pdf_text.renderers.markdown", "structured_pdf_text.diagnostics.report",
+])
+def test_gate_covers_core_consumers_outside_ocr_directory(module):
+    assert violations("import torch", module)
+    assert violations("from structured_pdf_text.ocr.backends.easyocr import X", module)
+    assert not violations("from structured_pdf_text.ocr.pipeline.contracts import OCRPipelineResult", module)
+
+
 def test_shared_quality_module_has_no_paddle_result_parser():
     from pathlib import Path
     source = Path("src/structured_pdf_text/ocr/quality.py").read_text(encoding="utf-8")
@@ -80,6 +91,9 @@ def test_each_builtin_pipeline_owns_a_local_recovery_profile():
     assert len({id(pipeline.integration_policy) for pipeline in pipelines}) == 4
     assert len({id(pipeline.token_refinement_policy) for pipeline in pipelines}) == 4
     assert len({id(pipeline.fusion_policy) for pipeline in pipelines}) == 4
+    assert len({id(pipeline.figure_segmentation_policy) for pipeline in pipelines}) == 4
+    assert all(profile.scale_factors("region", quality_policy="baseline") == (1.0,) for profile in profiles)
+    assert all(profile.scale_factors("critical_data") == (1.5, 2.0, 3.0) for profile in profiles)
 
 
 def test_page_candidate_fusion_calibration_and_component_provenance_stay_local():
@@ -106,8 +120,6 @@ def test_page_candidate_fusion_calibration_and_component_provenance_stay_local()
         assert len(expected.tokens) == 2 and expected.tokens[1].ocr_provenance.detector is None
     mechanism = (ROOT / "src/structured_pdf_text/ocr/candidate_fusion.py").read_text()
     assert "craft_greedy" not in mechanism and "beamsearch" not in mechanism
-    assert all(profile.scale_factors("region", quality_policy="baseline") == (1.0,) for profile in profiles)
-    assert all(profile.scale_factors("critical_data") == (1.5, 2.0, 3.0) for profile in profiles)
 
 
 def test_builtin_settings_resolvers_live_with_the_selected_engine():

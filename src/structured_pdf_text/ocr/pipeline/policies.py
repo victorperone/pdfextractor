@@ -173,6 +173,60 @@ LEGACY_TOKEN_REFINEMENT_POLICY = TokenRefinementPolicy()
 
 
 @dataclass(frozen=True, slots=True)
+class FigureSegmentationPolicy:
+    """Local splitting preferences; the core owns geometry and authorization."""
+
+    minimum_width: int = 240
+    minimum_height: int = 80
+    minimum_aspect: float = 2.0
+    dark_threshold: int = 210
+    occupied_ratio: float = .025
+    minimum_gap: int = 8
+    gap_width_ratio: float = .025
+    minimum_segment_ratio: float = .18
+    maximum_segments: int = 4
+
+    def segments(self, crop, *, aspect):
+        width, height = crop.size
+        whole = ((0, width),)
+        if width < self.minimum_width or height < self.minimum_height or aspect < self.minimum_aspect:
+            return whole
+        try:
+            with crop.convert("L") as gray:
+                pixels = list(gray.getdata())
+        except MemoryError:
+            raise
+        except Exception:
+            return whole
+        occupied = [
+            sum(pixels[y * width + x] < self.dark_threshold for y in range(height))
+            / max(height, 1) > self.occupied_ratio
+            for x in range(width)
+        ]
+        gaps = []
+        start = None
+        for index, value in enumerate(occupied + [True]):
+            if not value and start is None:
+                start = index
+            elif value and start is not None:
+                if index - start >= max(self.minimum_gap, int(width * self.gap_width_ratio)):
+                    gaps.append((start, index))
+                start = None
+        segments = []
+        left = 0
+        for gap_left, gap_right in gaps:
+            if gap_left - left >= int(width * self.minimum_segment_ratio):
+                segments.append((left, gap_left))
+            left = gap_right
+        if width - left >= int(width * self.minimum_segment_ratio):
+            segments.append((left, width))
+        return tuple(segments) if 2 <= len(segments) <= self.maximum_segments else whole
+
+
+LEGACY_FIGURE_SEGMENTATION_POLICY = FigureSegmentationPolicy()
+
+
+@dataclass(frozen=True, slots=True)
 class RegionalCandidatePolicy:
     """Local calibration for regional filtering, ranking and numeric consensus."""
 

@@ -302,6 +302,43 @@ class TestSubfigureBoxes:
 # _refine_figure_ocr — integration with fake engine
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_local_figure_segmentation_changes_only_selected_engine(rotation):
+    from dataclasses import replace
+    from PIL import ImageDraw
+    from structured_pdf_text.ocr.pipelines.easyocr.policy import FIGURE_SEGMENTATION_POLICY as easy
+    from structured_pdf_text.ocr.pipelines.paddle.policy import FIGURE_SEGMENTATION_POLICY as paddle
+    from structured_pdf_text.ocr.pipelines.rapidocr.policy import FIGURE_SEGMENTATION_POLICY as rapid
+    from structured_pdf_text.ocr.pipelines.tesseract.policy import FIGURE_SEGMENTATION_POLICY as tesseract
+
+    page = BBox(0, 0, 100, 400) if rotation in (90, 270) else BBox(0, 0, 400, 100)
+    with Image.new("RGB", (400, 100), "white") as image:
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((10, 10, 169, 89), fill="black")
+        draw.rectangle((230, 10, 389, 89), fill="black")
+        before = [_subfigure_boxes(image, page, page, rotation, policy=policy)
+                  for policy in (paddle, rapid, tesseract)]
+        split = _subfigure_boxes(image, page, page, rotation, policy=easy)
+        unsplit = _subfigure_boxes(image, page, page, rotation,
+                                  policy=replace(easy, minimum_width=500))
+        assert len(split) == 2 and unsplit == [page]
+        assert all(box.intersection(page) == box for box in split)
+        for policy, expected in zip((paddle, rapid, tesseract), before):
+            assert _subfigure_boxes(image, page, page, rotation, policy=policy) == expected == split
+
+
+@pytest.mark.parametrize("segments", [((-1, 100),), ((0, 401),), ((0, 250), (200, 400)), ((0., 100),)])
+def test_core_rejects_local_figure_segments_outside_crop_or_overlapping(segments):
+    class InvalidPolicy:
+        def segments(self, crop, *, aspect):
+            assert crop.size == (400, 100)
+            return segments
+
+    with Image.new("RGB", (600, 200), "white") as image:
+        with pytest.raises(ValueError, match="Figure segmentation"):
+            _subfigure_boxes(image, BBox(0, 0, 600, 200), BBox(100, 50, 500, 150), policy=InvalidPolicy())
+
+
 def _fake_image_obj(width: int = 100, height: int = 100) -> SimpleNamespace:
     """Minimal image-like object that passes _image_size() and crop()."""
     pil = Image.new("RGB", (width, height), (255, 255, 255))

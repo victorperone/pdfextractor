@@ -3,10 +3,20 @@
 Run this checklist for each release candidate. Preserve the logs and manifests
 with the build artifacts. Windows native and WSL results are separate runs.
 
+The engine decoupling implementation and its observed results are tracked in
+[the implementation report](OCR_Decoupling_Implementation_Status.md). The
+[architecture decision](adr/0001-authorized-ocr-pipelines.md) and
+[extension guide](OCR_Pipeline_Extension.md) describe the current boundaries.
+This checklist remains a per-release gate; code completion does not check it
+automatically.
+
 ## Automated repository gates
 
 - [ ] Start from a clean Python 3.12 environment using the platform setup guide.
 - [ ] `python -m pip check` reports no broken requirements.
+- [ ] `python scripts/check_ocr_dependencies.py` accepts the full production
+  tree, including core consumers outside `ocr/`; the fifth-engine CLI fixture
+  passes without edits to the core or existing pipelines.
 - [ ] `python scripts/check_ocr_install.py --imports` succeeds and reports exactly
   one installed OpenCV distribution.
 - [ ] `pytest -q` and `python -m pytest -q` collect the same tests and pass with
@@ -43,6 +53,12 @@ with the build artifacts. Windows native and WSL results are separate runs.
   model downloads, partial pages, warnings, NaN metrics, and output truncation.
 - [ ] Review reading order, merged/header tables, chart/flowchart false tables,
   redaction, rotations, CropBox offsets, and critical pt-BR data.
+- [ ] Compare engine migration with its unchanged-model baseline separately
+  from RapidOCR v6 model/provider experiments; review rejected out-of-scope
+  detections and all content/geometry differences without weakening conservation.
+- [ ] Exercise critical fields, dedicated figures and visual tables through
+  typed integration, including signs, ownership, source lineage, rejected
+  selections, stale targets, atomicity and idempotent replay.
 - [ ] Run an endurance workload of approximately 1,000 pages or equivalent;
   inspect parent/process-tree RSS, handles/file descriptors, child workers, and
   growth by page window.

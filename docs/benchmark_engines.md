@@ -22,6 +22,14 @@ The manifests record the effective size and artifact hashes. Historical V3/V4
 leaderboard claims describe their recorded model configurations; PP-OCRv6 must
 be benchmarked in a new namespace before those comparisons are updated.
 
+The authorized pipeline migration is still being validated. Reduced V5 controls
+show differences from legacy outputs, and RapidOCR has an out-of-scope detection
+rejected in page 21. These results do not replace the historical leaderboard or
+establish release acceptance. See the
+[implementation status](OCR_Decoupling_Implementation_Status.md) for run IDs,
+model/provider evidence and remaining gates, and the
+[extension guide](OCR_Pipeline_Extension.md) for the current pipeline contract.
+
 ## Choose a backend
 
 The default engine is **EasyOCR**, which achieved the lowest average CER across

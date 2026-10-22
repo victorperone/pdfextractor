@@ -51,7 +51,6 @@ from .errors import (
 )
 from .evidence.complexity import ComplexityAnalyzer
 from .memory import process_memory_snapshot
-from .ocr.models import get_profile
 from .evidence.decision import assess_region_recovery
 from .fusion.conservation import (
     _collect_token_critical_fingerprint,
@@ -101,6 +100,7 @@ from .tables.validation import (
 )
 from .tables.text_tracks import assess_borderless_region
 from .tables.text_join import join_table_tokens
+from .tables.ocr_lines import _rebuild_table_ocr_lines, _merge_short_table_fragments
 from .text.line_detector import lines_to_text, reconstruct_native_lines, spacing_diagnostics
 from .visibility import (
     characters_inside_page,
@@ -2915,10 +2915,6 @@ def _line_in_box(value: Any, box: BBox) -> bool:
     return bbox.overlap_ratio(box) >= 0.25 or box.overlap_ratio(bbox) >= 0.25
 
 
-# Historical private imports retained for direct helper consumers.
-from structured_pdf_text.tables.ocr_lines import _rebuild_table_ocr_lines, _merge_short_table_fragments
-
-
 def _refine_visual_table_ocr(
     engine: Any,
     page_image: Any,
@@ -3085,7 +3081,14 @@ def _refine_figure_ocr(
         else:
             # Check whether the figure has any area within the rendered page.
             # _subfigure_boxes returns [] when the crop is None (no overlap).
-            ocr_boxes = _subfigure_boxes(page_image, page.bbox, figure_bbox, page_rotation)
+            if isinstance(engine, OCRPageFacade):
+                visible_figure = figure_bbox.intersection(page.bbox)
+                ocr_boxes = [] if visible_figure is None else _subfigure_boxes(
+                    page_image, page.bbox, visible_figure, page_rotation,
+                    policy=engine.figure_segmentation_policy,
+                )
+            else:
+                ocr_boxes = _subfigure_boxes(page_image, page.bbox, figure_bbox, page_rotation)
             if not ocr_boxes:
                 if warnings is not None:
                     warnings.append(
@@ -3158,7 +3161,7 @@ def _refine_figure_ocr(
     return refinements
 
 
-def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox, page_rotation: int = 0) -> list[BBox]:
+def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox, page_rotation: int = 0, *, policy=None) -> list[BBox]:
     """Find well-separated horizontal subfigures using rendered ink gaps.
 
     Returns an empty list when the figure has no rendereable area within the
@@ -3170,43 +3173,25 @@ def _subfigure_boxes(image: Any, page_bbox: BBox, figure_bbox: BBox, page_rotati
     if crop is None:
         # Figure is completely outside the rendered page area; no subfigures.
         return []
-    width, height = _image_size(crop)
+    from .ocr.pipeline.policies import LEGACY_FIGURE_SEGMENTATION_POLICY
+
+    width, _ = _image_size(crop)
     visual_figure = figure_bbox.rotate_to_visual(page_rotation, page_bbox.width, page_bbox.height)
-    if width < 240 or height < 80 or visual_figure.width / max(visual_figure.height, 1.0) < 2.0:
-        return [figure_bbox]
     try:
-        pixels = list(crop.convert("L").getdata())
-    except MemoryError:
-        raise
-    except Exception:
-        return [figure_bbox]
-    occupied: list[bool] = []
-    for x in range(width):
-        dark = sum(
-            pixels[y * width + x] < 210
-            for y in range(height)
-        ) / max(height, 1)
-        occupied.append(dark > 0.025)
-    gaps: list[tuple[int, int]] = []
-    start: int | None = None
-    for index, value in enumerate(occupied + [True]):
-        if not value and start is None:
-            start = index
-        elif value and start is not None:
-            if index - start >= max(8, int(width * 0.025)):
-                gaps.append((start, index))
-            start = None
-    if not gaps:
-        return [figure_bbox]
-    segments: list[tuple[int, int]] = []
-    left = 0
-    for gap_left, gap_right in gaps:
-        if gap_left - left >= int(width * 0.18):
-            segments.append((left, gap_left))
-        left = gap_right
-    if width - left >= int(width * 0.18):
-        segments.append((left, width))
-    if len(segments) < 2 or len(segments) > 4:
+        segments = (policy or LEGACY_FIGURE_SEGMENTATION_POLICY).segments(
+            crop, aspect=visual_figure.width / max(visual_figure.height, 1.0),
+        )
+    finally:
+        close = getattr(crop, "close", None)
+        if callable(close):
+            close()
+    # A policy may narrow this core-selected figure, never extend its scope.
+    previous_end = 0
+    for left, right in segments:
+        if type(left) is not int or type(right) is not int or not (previous_end <= left < right <= width):
+            raise ValueError("Figure segmentation exceeds its selected crop or overlaps another segment")
+        previous_end = right
+    if segments == ((0, width),):
         return [figure_bbox]
     scale_x = visual_figure.width / max(width, 1)
     output: list[BBox] = []

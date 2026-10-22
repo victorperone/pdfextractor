@@ -1,5 +1,7 @@
 """RapidOCR-owned recovery schedule, matching the pre-migration path."""
 from structured_pdf_text.ocr.pipeline.policies import CellRecoveryPolicy, ConservativeIntegrationPolicy, RegionalCandidatePolicy, RegionalRecoveryProfile, TokenRefinementPolicy
+from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
+from structured_pdf_text.ocr.pipeline.policies import FigureSegmentationPolicy
 
 # Both RapidOCR providers share policy; their resolved settings stay separate.
 CANDIDATE_POLICY = RegionalCandidatePolicy()
@@ -20,7 +22,6 @@ INTEGRATION_POLICY = ConservativeIntegrationPolicy("rapidocr-integration-v1")
 CELL_POLICY = CellRecoveryPolicy()
 
 TOKEN_REFINEMENT_POLICY = TokenRefinementPolicy()
-
-from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
+FIGURE_SEGMENTATION_POLICY = FigureSegmentationPolicy()
 
 FUSION_POLICY = CandidateFusionPolicy()

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from .pipeline.candidate_policy import LEGACY_FUSION_POLICY
 
-from structured_pdf_text.document import OcrProvenance, OcrToken
+from structured_pdf_text.document import OcrToken
 
 
 @dataclass(frozen=True, slots=True)

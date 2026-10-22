@@ -49,6 +49,12 @@ def violations(source: str, module: str, *, package: bool = False) -> list[str]:
     package_name = module if package else module.rpartition(".")[0]
     own = owner(module)
     neutral = module in (f"{OCR}.backends", f"{OCR}.pipelines") or module.startswith(f"{OCR}.backends._") or any(module == prefix or module.startswith(prefix + ".") for prefix in (f"{OCR}.pipeline", f"{OCR}.common"))
+    # Include all core consumers, not just files beneath ocr/. CLI setup and
+    # legacy config aliases remain explicit composition boundaries.
+    neutral |= (module.startswith("structured_pdf_text.")
+                and module != OCR
+                and not module.startswith(OCR + ".")
+                and module not in ("structured_pdf_text.cli", "structured_pdf_text.config"))
     dynamic_names = {"__import__"}
     importlib_names = {"importlib"}
     builtins_names = {"builtins"}
@@ -109,7 +115,7 @@ def regression_engines(paths) -> tuple[str, ...]:
 
 def check_tree(root: Path) -> list[str]:
     result = []
-    for path in sorted((root/"structured_pdf_text"/"ocr").rglob("*.py")):
+    for path in sorted((root/"structured_pdf_text").rglob("*.py")):
         name = ".".join(path.relative_to(root).with_suffix("").parts)
         package = path.name == "__init__.py"
         if package:

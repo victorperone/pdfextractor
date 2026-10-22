@@ -871,9 +871,11 @@ A migração conecta os quatro pipelines ao contrato de trabalho autorizado,
 mantém integração e conservação no núcleo e fixa identidades de modelos e
 providers. Consulte [o estado de implementação e os gates pendentes](docs/OCR_Decoupling_Implementation_Status.md).
 
-A seleção regional, células, notas de rodapé e linhas OCR fracas aplicam apenas
-candidatas selecionadas por propostas tipadas, com conservação central. Ranking,
-filtros, recuperação e preferências de integração têm policies locais por engine.
+A seleção regional, células, notas, linhas fracas, dados críticos e refinamentos
+dedicados de figuras/tabelas visuais aplicam candidatas por propostas tipadas,
+com conservação central. Dados críticos preservam a posição e a linhagem dos
+tokens; figuras e tabelas têm aplicação atômica nos alvos reais. Ranking, fusão,
+recuperação e segmentação de figuras têm policies locais por engine.
 O helper público de células aceita `ocr_facade=` para usar o mesmo serviço
 autorizado. O worker Paddle usa protocolo 5 com geometria, proveniência e
 diagnósticos preservados. Equivalência de corpus e homologação de plataforma
@@ -882,3 +884,5 @@ ainda estão pendentes; os relatórios registram os controles reprovados.
 - [Histórico de PR-01 a PR-03](docs/OCR_Decoupling_PR01_PR03.md)
 - [Baseline de 20/10/2026](docs/OCR_Decoupling_Baseline_2026-10-20.md)
 - [Plano completo](docs/Plan_Decoupling_OCR_Engines.md)
+- [Guia para adicionar uma engine](docs/OCR_Pipeline_Extension.md)
+- [Decisão de arquitetura](docs/adr/0001-authorized-ocr-pipelines.md)

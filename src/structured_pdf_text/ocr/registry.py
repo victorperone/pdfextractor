@@ -160,7 +160,7 @@ ENGINE_REGISTRY = EngineRegistry((
     ),
     BackendEntry(
         name="rapidocr", display_name="RapidOCR", default_runtime="onnxruntime",
-        default_profile="latin/pt-compatible", extras="ocr-rapidocr-onnx",
+        default_profile="pp-ocrv6-medium", extras="ocr-rapidocr-onnx",
         setup_hint='pip install "structured-pdf-text[ocr-rapidocr-onnx]"',
         backend_factory="structured_pdf_text.ocr.backends.rapidocr:build_backend",
         pipeline_factory="structured_pdf_text.ocr.pipelines.rapidocr.pipeline:build_pipeline",
