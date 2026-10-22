@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import difflib
@@ -313,6 +314,9 @@ class PaddleOcrEngine:
         self.language = language
         self.model_profile = options.pop("model_profile", language)
         self.num_threads = num_threads
+        self.use_gpu = bool(options.pop("use_gpu", False))
+        self.effective_device = "unknown" if self.use_gpu else "cpu"
+        self.gpu_fallback_reason = None
         self.cache_home = options.pop("cache_home", None) or os.environ.get(
             "PADDLE_PDX_CACHE_HOME",
             str(Path.home() / ".cache" / "pdfextractor" / "paddlex"),
@@ -388,7 +392,20 @@ class PaddleOcrEngine:
                     page_index=page_index,
                     stage="ocr_inference",
                 )
-                raise
+                from structured_pdf_text.ocr.device import gpu_configuration_failure
+                if not self.effective_device.startswith("gpu") or not gpu_configuration_failure(exc):
+                    raise
+                logging.getLogger(__name__).warning("PaddleOCR: CUDA unavailable during inference; retrying on CPU (%s)", exc)
+                self.gpu_fallback_reason = f"cuda_runtime_failed:{type(exc).__name__}:{exc}"
+                self._ocr = None
+                self._init_error = None
+                # Keep the user's GPU intent while fixing this instance's effective device.
+                self.options["device"] = "cpu"
+                self.effective_device = "cpu"
+                return self._recognize_page_impl(
+                    page_image, page_index, page_bbox, quality_variants=quality_variants,
+                    quality_policy=quality_policy, page_rotation=page_rotation,
+                )
 
     def _recognize_page_impl(
         self,
@@ -970,9 +987,36 @@ class PaddleOcrEngine:
             raise error from exc
 
         try:
-            self._ocr = PaddleOCR(
-                **options
-            )
+            device = "cpu"
+            if self.use_gpu and self.gpu_fallback_reason is None:
+                try:
+                    import paddle
+                    available = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+                    device = "gpu:0" if available else "cpu"
+                    if not available:
+                        self.gpu_fallback_reason = "cuda_unavailable"
+                except Exception as exc:
+                    raise_if_resource_exhausted(exc, stage="paddle_device_probe")
+                    device = "cpu"
+                    self.gpu_fallback_reason = f"cuda_probe_failed:{type(exc).__name__}"
+                if device == "cpu":
+                    logging.getLogger(__name__).warning("PaddleOCR: CUDA requested; using CPU (%s)", self.gpu_fallback_reason)
+            # The GPU wheel may otherwise auto-select CUDA even for CPU requests.
+            options["device"] = device
+            if str(device).startswith("gpu"):
+                options["enable_mkldnn"] = False
+            try:
+                self._ocr = PaddleOCR(**options)
+            except Exception as exc:
+                from structured_pdf_text.ocr.device import gpu_configuration_failure
+                if not str(device).startswith("gpu") or not gpu_configuration_failure(exc):
+                    raise
+                logging.getLogger(__name__).warning("PaddleOCR: CUDA initialization failed; using CPU (%s)", exc)
+                device = "cpu"
+                self.gpu_fallback_reason = f"cuda_initialization_failed:{type(exc).__name__}:{exc}"
+                options.update(device="cpu", enable_mkldnn=runtime_policy.enable_mkldnn)
+                self._ocr = PaddleOCR(**options)
+            self.effective_device = str(device)
         except FatalExtractionError as exc:
             self._init_error = exc
             raise

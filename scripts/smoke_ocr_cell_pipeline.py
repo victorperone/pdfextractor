@@ -14,7 +14,7 @@ from structured_pdf_text.document import TableCell
 from structured_pdf_text.native.pdfium_source import PdfiumNativeEvidenceSource
 from structured_pdf_text.ocr.factory import build_ocr_pipeline
 from structured_pdf_text.ocr.pipeline.coordinator import OCRPageFacade, PageCoordinator
-from structured_pdf_text.ocr.registry import PUBLIC_ENGINES
+from structured_pdf_text.ocr.registry import public_engines, public_providers
 
 
 def run(args, fixture):
@@ -29,6 +29,7 @@ def run(args, fixture):
         ocr_provider=args.provider, rapidocr_model_size=args.model_size,
         paddle_model_profile=args.paddle_profile, ocr_cache_home=args.cache_home,
         ocr_quality_policy="baseline", num_threads=args.threads,
+        use_gpu=getattr(args, "gpu", False),
     )
     if args.engine == "paddle" and args.paddle_mode != "automatic":
         # Exercise both real transports on Linux; this harness override is not
@@ -92,8 +93,9 @@ def run(args, fixture):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--engine", choices=PUBLIC_ENGINES, required=True)
-    parser.add_argument("--provider", choices=("onnxruntime", "openvino"))
+    parser.add_argument("--engine", choices=public_engines(), required=True)
+    parser.add_argument("--provider", choices=public_providers())
+    parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--model-size", choices=("medium", "small"))
     parser.add_argument("--paddle-profile", default="pt")
     parser.add_argument("--paddle-mode", choices=("automatic", "direct", "worker"), default="automatic")

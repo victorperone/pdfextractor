@@ -13,7 +13,7 @@ from .contracts import (
 )
 from .converters import from_domain
 from .diagnostics import LegacyDiagnosticsProjector
-from .policies import LEGACY_CELL_POLICY, LEGACY_COMPATIBILITY_RECOVERY_PROFILE, LEGACY_INTEGRATION_POLICY, LEGACY_RASTER_BOUNDARY_POLICY
+from .policies import LEGACY_CELL_POLICY, LEGACY_COMPATIBILITY_RECOVERY_PROFILE, LEGACY_INTEGRATION_POLICY, LEGACY_RASTER_BOUNDARY_POLICY, LEGACY_EVIDENCE_ADMISSION_POLICY
 
 
 class AuthorizedBackendPipeline:
@@ -26,6 +26,7 @@ No other engine or readiness probe is loaded by the execution adapter.
     integration_policy = LEGACY_INTEGRATION_POLICY
     cell_policy = LEGACY_CELL_POLICY
     raster_boundary_policy = LEGACY_RASTER_BOUNDARY_POLICY
+    admission_policy = LEGACY_EVIDENCE_ADMISSION_POLICY
 
     def __init__(self, engine, *, selection: EngineSelection | None = None, render_scale: float = 1.0,
                  capabilities: tuple[str, ...] = ("page", "region"), settings=None,
@@ -203,6 +204,8 @@ No other engine or readiness probe is loaded by the execution adapter.
             tokens, failures, candidates, proposals = [], [], [], []
             calls = 0
             attempt_diagnostics = []
+            admitted_ids = set()
+            admission_decisions = []
             for auth in request.authorizations:
                 for box in auth.regions:
                     attempt_id = None
@@ -234,6 +237,7 @@ No other engine or readiness probe is loaded by the execution adapter.
                                 })
                             services.check_cancelled()
                             attempt_tokens = []
+                            rejected_groups = {}
                             for number, token in enumerate(observed):
                                 try:
                                     if not isinstance(token, OcrToken):
@@ -263,10 +267,26 @@ No other engine or readiness probe is loaded by the execution adapter.
                                                            authorization_id=auth.authorization_id, attempt_id=attempt_id)
                                     services.validate_token(request, evidence)
                                     tokens.append(evidence)
-                                    attempt_tokens.append(evidence.token_id)
+                                    reason = self.admission_policy.rejection_reason(evidence, request)
+                                    if reason is None:
+                                        attempt_tokens.append(evidence.token_id)
+                                        admitted_ids.add(evidence.token_id)
+                                    else:
+                                        rejected_groups.setdefault(reason, []).append(evidence.token_id)
+                                        admission_decisions.append({
+                                            "token_id": evidence.token_id,
+                                            "attempt_id": attempt_id,
+                                            "authorization_id": evidence.authorization_id,
+                                            "text": evidence.text, "confidence": evidence.confidence_normalized,
+                                            "bbox": {name: getattr(evidence.bbox, name) for name in ("x0", "y0", "x1", "y1")},
+                                            "selected": False, "reason": reason,
+                                        })
                                 except ValueError as exc:
                                     failures.append(LocalFailure(WorkStatus.INVALID_REGION, str(exc), attempt_id, request.mandatory))
-                            candidates.append(CandidateEvidence(attempt_id, attempt_id, tuple(attempt_tokens), True, "legacy_result"))
+                            if attempt_tokens or not rejected_groups:
+                                candidates.append(CandidateEvidence(attempt_id, attempt_id, tuple(attempt_tokens), True, "legacy_result"))
+                            for index, (reason, ids) in enumerate(rejected_groups.items()):
+                                candidates.append(CandidateEvidence(f"{attempt_id}:rejected:{index}", attempt_id, tuple(ids), False, reason))
                     except (FatalExtractionError, WorkCancelled):
                         raise
                     except BudgetBlocked as exc:
@@ -277,7 +297,7 @@ No other engine or readiness probe is loaded by the execution adapter.
                         services.check_cancelled()
                         raise_if_resource_exhausted(exc, page_index=request.scope.page_index, stage="ocr_pipeline_legacy")
                         failures.append(LocalFailure(WorkStatus.RUNTIME_ERROR, f"{type(exc).__name__}: {exc}", attempt_id, request.mandatory))
-                ids = tuple(t.token_id for t in tokens if t.authorization_id == auth.authorization_id)
+                ids = tuple(t.token_id for t in tokens if t.authorization_id == auth.authorization_id and t.token_id in admitted_ids)
                 if ids:
                     proposals.append(self.integration_policy.propose(request, auth.authorization_id, ids))
             status = WorkStatus.PARTIAL if tokens and failures else failures[0].status if failures else WorkStatus.OK if tokens else WorkStatus.NO_TEXT
@@ -289,10 +309,15 @@ No other engine or readiness probe is loaded by the execution adapter.
                                            "legacy_calls": calls,
                                            "passes": sum(item["metrics"]["passes"] for item in attempt_diagnostics),
                                            "batches": sum(item["metrics"]["batches"] for item in attempt_diagnostics),
+                                           "observed_tokens": len(tokens),
+                                           "admitted_tokens": len(admitted_ids),
+                                           "rejected_tokens": len(tokens) - len(admitted_ids),
                                        },
                                        engine_diagnostics={self._selection.engine: {
                                            "adapter": self._adapter_label, **diagnostics,
                                            "attempts": attempt_diagnostics,
+                                           "admission_policy": self.admission_policy.policy_id,
+                                           "admission_decisions": admission_decisions,
                                        }})
             services.validate_result(request, result)
             return result

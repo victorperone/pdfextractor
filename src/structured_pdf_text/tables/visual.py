@@ -17,6 +17,7 @@ The :func:`detect_visual_table` function orchestrates the detection pipeline:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from structured_pdf_text.document import NativePageEvidence, StructuredTable, TableCell, TableFragment, TableMethod, TextToken
@@ -55,8 +56,20 @@ def detect_visual_table(
     tokens: list[TextToken] | None = None,
     structure_engine: Any | None = None,
     page_rotation: int | None = None,
+    *,
+    image_bbox: BBox | None = None,
 ) -> StructuredTable | None:
-    """Recover a strong raster grid without inventing cell text."""
+    """Recover a strong raster grid without inventing cell text.
+
+    ``image_bbox`` describes the canonical page rectangle represented by the
+    raster, including pixel rounding. Omit it for a whole-page raster.
+    """
+    raster_bbox = image_bbox if image_bbox is not None else page.bbox
+    if (not all(math.isfinite(value) for value in (
+            raster_bbox.x0, raster_bbox.y0, raster_bbox.x1, raster_bbox.y1))
+            or raster_bbox.area <= 0
+            or not _contains_with_tolerance(page.bbox, raster_bbox, 0)):
+        raise ValueError("Visual table raster must represent a finite rectangle inside the page")
     if page_rotation is None:
         page_rotation = page.objects.rotation
     if page_rotation % 360:
@@ -71,10 +84,10 @@ def detect_visual_table(
     if grid is None:
         return None
     width, height = _image_size(image)
-    x_scale = page.bbox.width / max(float(width), 1.0)
-    y_scale = page.bbox.height / max(float(height), 1.0)
-    x_edges = tuple(page.bbox.x0 + value * x_scale for value in grid.x_edges)
-    y_edges = tuple(page.bbox.y0 + value * y_scale for value in grid.y_edges)
+    x_scale = raster_bbox.width / max(float(width), 1.0)
+    y_scale = raster_bbox.height / max(float(height), 1.0)
+    x_edges = tuple(raster_bbox.x0 + value * x_scale for value in grid.x_edges)
+    y_edges = tuple(raster_bbox.y0 + value * y_scale for value in grid.y_edges)
     grid_bbox = BBox(x_edges[0], y_edges[0], x_edges[-1], y_edges[-1])
     image_boxes = [item.bbox for item in page.objects.images if item.bbox is not None]
     if not image_boxes:
@@ -103,6 +116,7 @@ def detect_visual_table(
         x_edges=x_edges,
         y_edges=y_edges,
         tokens=cell_tokens,
+        raster_bbox=raster_bbox,
     )
     if cell_tokens and not _has_visual_table_text_support(cells, grid):
         return None
@@ -123,6 +137,50 @@ def detect_visual_table(
         method=TableMethod.VISUAL_MODEL,
         header_rows=(),
     )
+
+
+def detect_visual_table_in_region(
+    page: NativePageEvidence,
+    image: Any,
+    region: BBox,
+    **kwargs: Any,
+) -> StructuredTable | None:
+    """Discover structure in a region of an existing composed page raster.
+
+    This does not authorize OCR or access embedded source pixels. Presentation
+    rotation is undone before cropping, and the pixel-aligned crop frame is
+    retained for both grid mapping and separator sampling.
+    """
+    from structured_pdf_text.ocr.image_views import canonicalize_page_image
+
+    if (not all(math.isfinite(value) for value in (region.x0, region.y0, region.x1, region.y1))
+            or region.area <= 0 or not _contains_with_tolerance(page.bbox, region, 0)):
+        raise ValueError("Visual table region must be finite and inside the page")
+    canonical = canonicalize_page_image(image, page.objects.rotation)
+    crop = None
+    try:
+        width, height = _image_size(canonical)
+        if width <= 0 or height <= 0:
+            return None
+        page_box = page.bbox
+        left = max(0, math.floor((region.x0 - page_box.x0) * width / page_box.width))
+        top = max(0, math.floor((region.y0 - page_box.y0) * height / page_box.height))
+        right = min(width, math.ceil((region.x1 - page_box.x0) * width / page_box.width))
+        bottom = min(height, math.ceil((region.y1 - page_box.y0) * height / page_box.height))
+        if left >= right or top >= bottom:
+            return None
+        crop = (canonical.crop((left, top, right, bottom)) if hasattr(canonical, "crop")
+                else canonical[top:bottom, left:right].copy())
+        frame = BBox(page_box.x0 + left * page_box.width / width,
+                     page_box.y0 + top * page_box.height / height,
+                     page_box.x0 + right * page_box.width / width,
+                     page_box.y0 + bottom * page_box.height / height)
+        return detect_visual_table(page, crop, page_rotation=0, image_bbox=frame, **kwargs)
+    finally:
+        if crop is not None and hasattr(crop, "close"):
+            crop.close()
+        if canonical is not image and hasattr(canonical, "close"):
+            canonical.close()
 
 
 def _contains_with_tolerance(container: BBox, content: BBox, tolerance: float) -> bool:
@@ -237,6 +295,7 @@ def _build_visual_cells(
     x_edges: tuple[float, ...],
     y_edges: tuple[float, ...],
     tokens: list[Any],
+    raster_bbox: BBox | None = None,
 ) -> list[TableCell]:
     """Create cells and infer missing internal separators as spans.
 
@@ -247,6 +306,7 @@ def _build_visual_cells(
     """
     rows = len(y_edges) - 1
     cols = len(x_edges) - 1
+    raster_bbox = raster_bbox if raster_bbox is not None else page.bbox
     occupied: set[tuple[int, int]] = set()
     cells: list[TableCell] = []
     for row in range(rows):
@@ -255,12 +315,12 @@ def _build_visual_cells(
                 continue
             end_col = col + 1
             while end_col < cols and not _has_vertical_separator(
-                image, page.bbox, x_edges[end_col], y_edges[row], y_edges[row + 1]
+                image, raster_bbox, x_edges[end_col], y_edges[row], y_edges[row + 1]
             ):
                 end_col += 1
             end_row = row + 1
             while end_row < rows and not _has_horizontal_separator(
-                image, page.bbox, y_edges[end_row], x_edges[col], x_edges[end_col]
+                image, raster_bbox, y_edges[end_row], x_edges[col], x_edges[end_col]
             ):
                 end_row += 1
             for covered_row in range(row, end_row):

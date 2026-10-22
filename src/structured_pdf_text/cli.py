@@ -199,6 +199,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     )
     extract_parser.add_argument("--ocr-provider", choices=public_providers(), default=None,
                                 help="Inference provider when --ocr-engine rapidocr is selected")
+    extract_parser.add_argument("--gpu", action="store_true", help="Request CUDA for supporting OCR engines; CPU fallback is reported. Tesseract stays CPU.")
     _add_rapidocr_size_argument(extract_parser)
 
     inspect_parser = subparsers.add_parser("inspect", help="Print page diagnostics")
@@ -224,6 +225,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     )
     inspect_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr")
     inspect_parser.add_argument("--ocr-provider", choices=public_providers(), default=None)
+    inspect_parser.add_argument("--gpu", action="store_true", help="Request CUDA for supporting OCR engines; CPU fallback is reported. Tesseract stays CPU.")
     _add_rapidocr_size_argument(inspect_parser)
     inspect_parser.add_argument(
         "--ocr-quality-policy",
@@ -252,6 +254,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     overlay_parser.add_argument("--language", default="pt-BR", help="OCR language tag")
     overlay_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr")
     overlay_parser.add_argument("--ocr-provider", choices=public_providers(), default=None)
+    overlay_parser.add_argument("--gpu", action="store_true", help="Request CUDA for supporting OCR engines; CPU fallback is reported. Tesseract stays CPU.")
     _add_rapidocr_size_argument(overlay_parser)
     overlay_parser.add_argument(
         "--cache-home", default=None, metavar="DIR",
@@ -319,6 +322,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     )
     report_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr")
     report_parser.add_argument("--ocr-provider", choices=public_providers(), default=None)
+    report_parser.add_argument("--gpu", action="store_true", help="Request CUDA for supporting OCR engines; CPU fallback is reported. Tesseract stays CPU.")
     _add_rapidocr_size_argument(report_parser)
 
     compare_parser = subparsers.add_parser(
@@ -339,6 +343,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     )
     compare_parser.add_argument("--language", default=None, help="OCR language for the selected adapter (default: pt-BR)")
     compare_parser.add_argument("--ocr-engine", choices=public_engines(), default="easyocr", help="OCR backend family (default: easyocr)")
+    compare_parser.add_argument("--gpu", action="store_true", help="Request CUDA for supporting OCR engines; CPU fallback is reported. Tesseract stays CPU.")
     _add_rapidocr_size_argument(compare_parser)
     compare_parser.add_argument("--cache-home", default=None, metavar="DIR")
     compare_parser.add_argument(
@@ -424,7 +429,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                               ocr_provider=args.ocr_provider,
                               rapidocr_model_size=args.rapidocr_model_size,
                               paddle_model_profile=profile_name,
-                              ocr_cache_home=args.cache_home)
+                              ocr_cache_home=args.cache_home, use_gpu=args.gpu)
         elif args.best:
             config = best_extraction_config(language=language)
             # F05: --best must not silently ignore an explicit --ocr-engine.
@@ -434,7 +439,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                               ocr_provider=args.ocr_provider,
                               rapidocr_model_size=args.rapidocr_model_size,
                               paddle_model_profile=profile_name,
-                              ocr_cache_home=args.cache_home)
+                              ocr_cache_home=args.cache_home, use_gpu=args.gpu)
         else:
             config = ExtractorConfig(
                 mode=args.mode,
@@ -450,10 +455,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 rapidocr_model_size=args.rapidocr_model_size,
                 paddle_model_profile=profile_name,
                 ocr_cache_home=args.cache_home,
+                use_gpu=args.gpu,
             )
         if args.cache_home:
             from dataclasses import replace as _replace
-            config = _replace(config, ocr_cache_home=args.cache_home)
+            config = _replace(config, ocr_cache_home=args.cache_home, use_gpu=args.gpu)
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         def _progress(current: int, total: int) -> None:
             print(f"\rExtracting page {current}/{total}...", end="", file=sys.stderr, flush=True)
@@ -531,6 +537,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             ocr_provider=args.ocr_provider,
             rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
+            use_gpu=args.gpu,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         try:
@@ -584,6 +591,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             ocr_provider=args.ocr_provider,
             rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
+            use_gpu=args.gpu,
             page_indices=(index,),
         )
         try:
@@ -619,6 +627,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             ocr_provider=args.ocr_provider,
             rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
+            use_gpu=args.gpu,
         )
         _warn_if_exhaustive(effective_ocr_quality_policy(config).value)
         if args.workers < 1:
@@ -649,6 +658,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             paddle_model_profile=args.ocr_model_profile or "pt",
             rapidocr_model_size=args.rapidocr_model_size,
             ocr_cache_home=args.cache_home,
+            use_gpu=args.gpu,
         )
         try:
             comparison = compare_extractors(

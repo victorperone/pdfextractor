@@ -27,7 +27,8 @@ def to_domain(token: TokenEvidence) -> OcrToken:
                     SourceKind(metadata.get("source", SourceKind.OCR_REGION.value)),
                     rotation=metadata.get("rotation", 0), provenance=metadata.get("provenance"),
                     polygon=token.polygon, level=token.level,
-                    ocr_provenance=OcrProvenance(**provenance) if provenance is not None else None)
+                    ocr_provenance=OcrProvenance(**provenance) if provenance is not None else None,
+                    evidence_id=token.token_id)
 
 
 def from_raw(token: OCRToken, frame: RasterFrame, *, token_id: str, authorization_id: str, attempt_id: str) -> TokenEvidence:

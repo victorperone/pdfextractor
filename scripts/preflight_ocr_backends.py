@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -50,20 +51,23 @@ def _configurations():
 CONFIGURATIONS = _configurations()
 
 
-def _check(engine: str, provider: str | None, language: str, deep: bool) -> ReadinessResult:
+def _check(engine: str, provider: str | None, language: str, deep: bool,
+           cache_home: str | None = None, use_gpu: bool = False) -> ReadinessResult:
     try:
         config = ExtractorConfig(
             mode=ExtractionMode.OCR,
             language=language,
             ocr_engine=engine,
             ocr_provider=provider,
+            ocr_cache_home=cache_home,
+            use_gpu=use_gpu,
         )
         return probe_deep(config) if deep else probe_static(config)
     except Exception as exc:
         return ReadinessResult(ReadinessStatus.UNKNOWN, "configuration_error", {"message": str(exc)})
 
 
-def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
+def _check_max_quality_easyocr(language: str, cache_home: str | None = None, use_gpu: bool = False) -> dict[str, Any]:
     """Run a max-quality preflight for EasyOCR.
 
     Verifies:
@@ -112,6 +116,8 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
             mode=ExtractionMode.OCR,
             language=language,
             ocr_engine="easyocr",
+            use_gpu=use_gpu,
+            ocr_cache_home=cache_home,
         )
         baseline = probe_deep(baseline_config)
         report["baseline_ready"] = baseline.status == ReadinessStatus.READY
@@ -141,6 +147,9 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
     backend = None
     try:
         mq_config = max_quality_extraction_config(language=language)
+        mq_config = replace(mq_config, use_gpu=use_gpu)
+        if cache_home is not None:
+            mq_config = replace(mq_config, ocr_cache_home=cache_home)
         backend = build_ocr_backend(mq_config)
 
         # 2a: run recognize_page with exhaustive quality policy
@@ -210,6 +219,8 @@ def _check_max_quality_easyocr(language: str) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--language", default="pt-BR")
+    parser.add_argument("--gpu", action="store_true", help="Request CUDA; deep smoke reports the effective device")
+    parser.add_argument("--cache-home", help="Use the same engine cache directory as model setup")
     parser.add_argument("--deep-smoke", action="store_true", help="Load each backend and OCR a generated pt-BR sample")
     parser.add_argument(
         "--max-quality",
@@ -243,7 +254,7 @@ def main() -> int:
         # Other engines are not subject to the exhaustive candidate requirement.
         print(f"\nMax-quality EasyOCR preflight  (language={args.language})")
         print("-" * 60)
-        mq = _check_max_quality_easyocr(args.language)
+        mq = _check_max_quality_easyocr(args.language, args.cache_home, args.gpu)
 
         _yes_no = lambda v: "yes" if v else "no"
         _ok_fail = lambda v: "OK" if v else "FAIL"
@@ -280,9 +291,14 @@ def main() -> int:
         all_ready = True
         script = str(Path(__file__).resolve())
         for _label, _, _, _cli_key in CONFIGURATIONS:
+            command = [sys.executable, script, "--language", args.language,
+                       "--deep-smoke", "--configuration", _cli_key]
+            if args.cache_home is not None:
+                command.extend(["--cache-home", args.cache_home])
+            if args.gpu:
+                command.append("--gpu")
             result = subprocess.run(
-                [sys.executable, script, "--language", args.language,
-                 "--deep-smoke", "--configuration", _cli_key],
+                command,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -311,7 +327,7 @@ def main() -> int:
     print("-" * 100)
     all_ready = True
     for label, engine, provider, _ in configurations:
-        result = _check(engine, provider, args.language, args.deep_smoke)
+        result = _check(engine, provider, args.language, args.deep_smoke, args.cache_home, args.gpu)
         if result.status.value != "ready":
             all_ready = False
         extra = result.reason_code or ""

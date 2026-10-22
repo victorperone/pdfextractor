@@ -11,7 +11,7 @@ Key functions:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import math
 from pathlib import Path
@@ -211,6 +211,8 @@ class ExtractorConfig:
     security_limits: SecurityLimits = SecurityLimits()
     # 0 = auto-detect (os.cpu_count()); -1 = pass the engine's own thread default unchanged
     num_threads: int = 0
+    # Request CUDA on supporting engines; CPU fallback is explicit in identity/logs.
+    use_gpu: bool = field(default=False, kw_only=True)
 
     # OCR engine selection — new fields, both with defaults so existing code
     # that constructs ExtractorConfig without these args continues to work.
@@ -310,6 +312,8 @@ class ExtractorConfig:
             raise ConfigurationError("ocr_tile_overlap must be in [0.10, 0.20]")
         if isinstance(self.num_threads, bool) or not isinstance(self.num_threads, int) or self.num_threads < -1:
             raise ConfigurationError(f"num_threads must be -1, 0, or positive, got {self.num_threads!r}")
+        if not isinstance(self.use_gpu, bool):
+            raise ConfigurationError("use_gpu must be a bool")
         if self.page_indices is not None:
             if not isinstance(self.page_indices, tuple):
                 raise ConfigurationError("page_indices must be a tuple of zero-based integers or None")

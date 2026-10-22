@@ -61,6 +61,19 @@ LEGACY_RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy()
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceAdmissionPolicy:
+    """Default admission preserves all validated observations."""
+
+    policy_id: str = "admit-observed-evidence-v1"
+
+    def rejection_reason(self, token, request):
+        return None
+
+
+LEGACY_EVIDENCE_ADMISSION_POLICY = EvidenceAdmissionPolicy()
+
+
+@dataclass(frozen=True, slots=True)
 class CellRecoveryPolicy:
     """Candidate selection values owned independently by each engine pipeline."""
 

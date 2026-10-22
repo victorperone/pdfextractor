@@ -850,7 +850,7 @@ class ProposalIntegrator:
 
                 staged_target_snapshots.append((proposal.target, before))
 
-            if referenced != set(token_by_id):
+            if referenced != set(token_by_id) - result.unselected_token_ids:
                 raise ValueError("Every candidate token must be authorized by exactly one integration proposal")
 
             # Optimistic concurrency check for every target is performed again

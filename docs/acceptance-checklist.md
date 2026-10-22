@@ -12,21 +12,23 @@ automatically.
 
 ## Automated repository gates
 
-- [ ] Start from a clean Python 3.12 environment using the platform setup guide.
-- [ ] `python -m pip check` reports no broken requirements.
+- [ ] Create a fresh Python 3.12 environment for each deployment configuration
+  using the [isolated installation guide](OCR_Installation_Profiles.md).
+- [ ] `python -m pip check` reports no broken requirements in each environment.
 - [ ] `python scripts/check_ocr_dependencies.py` accepts the full production
   tree, including core consumers outside `ocr/`; the fifth-engine CLI fixture
   passes without edits to the core or existing pipelines.
-- [ ] `python scripts/check_ocr_install.py --imports` succeeds and reports exactly
-  one installed OpenCV distribution.
+- [ ] Each environment's Python runs `scripts/check_ocr_install.py
+  --configuration <profile> --imports` successfully and reports exactly the
+  expected OpenCV distribution. Preserve JSON reports and resolved wheel hashes.
 - [ ] `pytest -q` and `python -m pytest -q` collect the same tests and pass with
   zero unexpected skips.
 - [ ] `python -m compileall -q src scripts tests` succeeds.
-- [ ] `python scripts/preflight_ocr_backends.py --language pt-BR` reports static
-  readiness for PaddleOCR, RapidOCR/ONNX Runtime, RapidOCR/OpenVINO, EasyOCR,
-  and Tesseract.
-- [ ] `python scripts/preflight_ocr_backends.py --language pt-BR --deep-smoke`
-  runs local inference for all five configurations without downloading models.
+- [ ] Run `scripts/preflight_ocr_backends.py --language pt-BR --configuration
+  <profile> --cache-home <engine-cache>` with each environment's Python; all
+  five configurations report static readiness.
+- [ ] Repeat the per-profile preflight with `--deep-smoke`; all five
+  configurations run local inference without downloading models.
 - [ ] Confirm test coverage for configuration errors, recovery budget blocks,
   slow-worker cancellation/crash behavior, atomic artifacts, region coordinate transforms,
   rotations, confidence policy, and backend `close()` lifecycle.
@@ -56,12 +58,38 @@ automatically.
 - [ ] Compare engine migration with its unchanged-model baseline separately
   from RapidOCR v6 model/provider experiments; review rejected out-of-scope
   detections and all content/geometry differences without weakening conservation.
+- [ ] Preserve the strict report when independently minted UUIDs differ. If
+  using `--canonicalize-lineage-ids`, preserve the additional report and its
+  policy/counts; review changed parent/evidence relationships, token suffixes,
+  critical text, hashes and settings without treating renaming as quality acceptance.
 - [ ] Exercise critical fields, dedicated figures and visual tables through
   typed integration, including signs, ownership, source lineage, rejected
   selections, stale targets, atomicity and idempotent replay.
 - [ ] Run an endurance workload of approximately 1,000 pages or equivalent;
   inspect parent/process-tree RSS, handles/file descriptors, child workers, and
   growth by page window.
+
+Use the finite endurance runner after provisioning local models, for example:
+
+```bash
+python scripts/run_ocr_endurance.py corpus/V5/Document_AI_V5.pdf \
+  --engine rapidocr --provider onnxruntime --model-size medium \
+  --cache-home .ocr-model-cache --pages 19,21,24,31 \
+  --repeat 250 --warmup 1 --output-dir outputs/endurance-v5-rapidocr-unique
+```
+
+This example measures 1,000 selected pages and excludes the four warmup pages.
+The same extractor/runtime is reused across extractions. Use a new directory
+for every engine/provider/platform; existing artifacts are never overwritten.
+The runner requires `psutil` for complete process-tree RSS and FD/handle
+measurements. `samples.jsonl` records page boundaries and iteration/close
+snapshots; `report.json` records operational checks and effective identities.
+It rejects a package already imported from a different checkout before
+reserving artifacts, so source hashes cannot silently describe the wrong code.
+The initial Markdown and structured JSON support separate quality review.
+Inspect resource growth after warmup; process exit and repeatable content alone
+do not approve memory stability, corpus accuracy or a release. A short or
+simple synthetic workload must be identified as such in acceptance evidence.
 
 ## Manual platform acceptance
 

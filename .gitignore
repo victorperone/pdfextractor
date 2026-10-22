@@ -28,6 +28,7 @@ htmlcov/
 .venv/
 .venv-paddle-v6-eval/
 .ocr-runtime/
+.ocr-envs/
 .ocr-model-cache/
 venv/
 ENV/

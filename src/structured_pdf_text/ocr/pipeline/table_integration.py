@@ -157,6 +157,20 @@ def stage_visual_table(selections, target, evidence_order=()):
                     and (old.bbox.overlap_ratio(cell.bbox) >= .25 or cell.bbox.overlap_ratio(old.bbox) >= .25)]
         if not _refinement_conserves_content([SimpleNamespace(text=old.text)], [SimpleNamespace(text=cell.text) for cell in matching]):
             raise IntegrationRejected("Visual table refinement loses prior cell content or a protected value")
+        # Recognition at a different scale can move boxes while conserving the
+        # cell. Keep the prior observations as parents of this validated draft,
+        # so the original figure lines remain owned by the resulting table.
+        # Spatial coincidence alone must never claim unrelated observations.
+        parents = tuple(dict.fromkeys(
+            value for token in old.tokens
+            for value in (getattr(token, "evidence_id", None), *getattr(token, "derived_from_ids", ()))
+            if value
+        ))
+        for cell in matching:
+            prepare_cell_evidence(cell, table_id=table.table_id, page_index=page)
+            for token in cell.tokens:
+                if token.text.strip():
+                    token.derived_from_ids = tuple(dict.fromkeys((*token.derived_from_ids, *parents)))
     for cell in table.cells:
         prepare_cell_evidence(cell, table_id=table.table_id, page_index=page)
         for token in cell.tokens:

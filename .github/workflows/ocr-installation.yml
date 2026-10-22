@@ -1,0 +1,48 @@
+name: OCR isolated installation
+
+# Installation/import evidence only. Models, semantic corpus acceptance and
+# native Windows cancellation/readiness require separate observed runs.
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Deployment profile
+        type: choice
+        default: tesseract
+        options: [tesseract, easyocr, paddle, rapidocr-onnxruntime, rapidocr-openvino, all]
+      platform:
+        description: Installation platform
+        type: choice
+        default: ubuntu-latest
+        options: [ubuntu-latest, windows-latest, both]
+
+permissions:
+  contents: read
+
+jobs:
+  installation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.platform == 'both' && '["ubuntu-latest","windows-latest"]' || format('["{0}"]', inputs.platform)) }}
+        profile: ${{ fromJSON(inputs.configuration == 'all' && '["tesseract","easyocr","paddle","rapidocr-onnxruntime","rapidocr-openvino"]' || format('["{0}"]', inputs.configuration)) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install, check dependency metadata and import the selected runtime
+        run: python scripts/setup_ocr_environments.py --configuration ${{ matrix.profile }}
+      - name: Preserve installer logs and resolved wheel hashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-installation-${{ matrix.os }}-${{ matrix.profile }}
+          include-hidden-files: true
+          path: |
+            .ocr-envs/*/setup.log
+            .ocr-envs/*/setup-report.json
+            .ocr-envs/*/install-check.json
+            .ocr-envs/*/*-install.json

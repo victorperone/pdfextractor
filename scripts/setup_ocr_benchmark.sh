@@ -1,107 +1,27 @@
 #!/usr/bin/env bash
-# Install the complete OCR benchmark runtime in the project WSL environment.
+# Provision one virtualenv per deployment profile; never combine cv2 wheels.
 set -euo pipefail
-
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 OCR_PREFIX="$REPO_ROOT/.ocr-runtime"
-CONSTRAINTS="$REPO_ROOT/constraints-ocr-linux-py312.txt"
-CONDA_BIN="${CONDA_BIN:-$(command -v conda || true)}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
-    echo "Create the project virtualenv first: python3.12 -m venv .venv" >&2
+    echo "Create the Python 3.12 project virtualenv first, or set PYTHON_BIN." >&2
     exit 2
 fi
-if [[ ! -f "$CONSTRAINTS" ]]; then
-    echo "OCR constraints file not found: $CONSTRAINTS" >&2
+# Keep the existing local Tesseract installation discoverable by every profile.
+# Tesseract installation is explicit and separate from Python dependency setup.
+if [[ -x "$OCR_PREFIX/bin/tesseract" ]]; then
+    export PATH="$OCR_PREFIX/bin:$PATH"
+    export TESSDATA_PREFIX="$OCR_PREFIX/share/tessdata"
+fi
+if ! command -v tesseract >/dev/null 2>&1; then
+    echo "Install Tesseract 5.x + Portuguese traineddata, then re-run setup." >&2
+    echo "For example: conda create --prefix .ocr-runtime -c conda-forge tesseract=5.5.3" >&2
     exit 2
 fi
-if [[ -z "$CONDA_BIN" ]]; then
-    echo "Conda is required to install a local Tesseract runtime without sudo." >&2
-    exit 2
-fi
 
-if [[ ! -x "$OCR_PREFIX/bin/tesseract" ]]; then
-    "$CONDA_BIN" create --prefix "$OCR_PREFIX" --override-channels -c conda-forge -y 'tesseract=5.5.3'
-fi
-
-"$PYTHON_BIN" -m pip install -c "$CONSTRAINTS" -e .
-"$PYTHON_BIN" -m pip install -c "$CONSTRAINTS" \
-    'paddlepaddle==3.3.1' 'paddleocr==3.7.0' 'paddlex[ocr]==3.7.2' \
-    'rapidocr==3.9.2' \
-    'onnxruntime==1.30.0' \
-    'openvino==2026.4.1'
-"$PYTHON_BIN" -m pip install \
-    -c "$CONSTRAINTS" \
-    'torch==2.14.0+cpu' 'torchvision==0.29.0+cpu' \
-    --index-url https://download.pytorch.org/whl/cpu
-"$PYTHON_BIN" -m pip install -c "$CONSTRAINTS" 'easyocr==1.7.2'
-# EasyOCR pulls newer NumPy/tifffile releases; keep the compatible benchmark pins.
-"$PYTHON_BIN" -m pip install -c "$CONSTRAINTS" 'numpy==2.0.2' 'tifffile<2026'
-
-EASYOCR_MODULE_PATH="$HOME/.cache/pdfextractor/easyocr"
-mkdir -p "$REPO_ROOT/.venv/bin" "$EASYOCR_MODULE_PATH"
-cat > "$REPO_ROOT/.venv/bin/tesseract" <<EOF
-#!/usr/bin/env bash
-OCR_RUNTIME="$OCR_PREFIX"
-export TESSDATA_PREFIX="\$OCR_RUNTIME/share/tessdata"
-exec "\$OCR_RUNTIME/bin/tesseract" "\$@"
-EOF
-chmod +x "$REPO_ROOT/.venv/bin/tesseract"
-
-"$PYTHON_BIN" - <<'PY'
-import importlib.metadata as metadata
-import numpy
-import easyocr
-import onnxruntime
-import openvino
-import paddleocr
-import paddlex
-import torch
-import torchvision
-
-for name in (
-    "paddleocr", "paddlex", "rapidocr", "onnxruntime",
-    "openvino", "easyocr", "torch", "torchvision",
-):
-    print(f"{name} {metadata.version(name)}")
-print(f"numpy {numpy.__version__}")
-print(f"torch device cpu={not torch.cuda.is_available()}")
-PY
-"$PYTHON_BIN" -m pip check
-
-if ! "$REPO_ROOT/.venv/bin/tesseract" --list-langs 2>&1 | grep -qx 'por'; then
-    echo "Tesseract Portuguese traineddata (por) is unavailable." >&2
-    exit 1
-fi
-"$REPO_ROOT/.venv/bin/tesseract" --version | head -n 1
-echo "Tesseract por traineddata: ready"
-
-# Materialise EasyOCR weights (craft_mlt_25k.pth + latin_g2.pth) so that
-# the measured benchmark run never triggers a network download.
-echo "Downloading EasyOCR weights (craft + latin_g2) — this may take a few minutes..."
-EASYOCR_MODULE_PATH="$EASYOCR_MODULE_PATH" \
-"$PYTHON_BIN" - <<'PY'
-import os, easyocr
-# Instantiating Reader with download_enabled=True (default) fetches and caches
-# craft_mlt_25k.pth and latin_g2.pth.  Subsequent runs find them on disk.
-easyocr.Reader(["pt"], gpu=False,
-               model_storage_directory=os.environ["EASYOCR_MODULE_PATH"],
-               download_enabled=True)
-print("EasyOCR weights ready.")
-PY
-
-# Provision one pinned detector/recognizer/charset/classifier set for both
-# providers and model sizes. Extraction itself remains offline and fail-closed.
-echo ""
-echo "Downloading and verifying RapidOCR PP-OCRv6 medium/small profiles..."
-"$PYTHON_BIN" "$SCRIPT_DIR/setup_rapidocr_models.py" \
-    --size all --cache-home "$HOME/.cache/pdfextractor"
-
-# Run static readiness for all four families and five deployment configurations.
-echo ""
-echo "Checking OpenCV uniqueness and OCR package imports..."
-"$PYTHON_BIN" "$SCRIPT_DIR/check_ocr_install.py" --imports
-echo "Running static preflight across all five OCR configurations..."
-"$PYTHON_BIN" "$SCRIPT_DIR/preflight_ocr_backends.py" --language pt-BR
+exec "$PYTHON_BIN" "$SCRIPT_DIR/setup_ocr_environments.py" \
+    --configuration tesseract rapidocr-onnxruntime rapidocr-openvino easyocr paddle \
+    --provision-models "$@"

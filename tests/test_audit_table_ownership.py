@@ -95,6 +95,16 @@ class TestTableTokenClaimStrength:
         strength = _table_token_claim_strength(unrelated, table, page_index=0)
         assert strength == 0, "Unrelated token must not be claimed by this table"
 
+    def test_refined_cell_claims_original_evidence_but_not_unrelated_overlapping_observation(self):
+        original = _token("-42,90", evidence_id="authorized:original")
+        refined = _token("-42,90", evidence_id="cell:refined",
+                         derived_from_ids=(original.evidence_id,))
+        table = _table_with_cell_token(refined)
+        assert _table_token_claim_strength(original, table, page_index=0) == 2
+        # Matching text/geometry is insufficient without source lineage.
+        unrelated = replace(original, evidence_id="authorized:different-observation")
+        assert _table_token_claim_strength(unrelated, table, page_index=0) == 0
+
     def test_none_evidence_id_falls_back_to_python_id(self):
         """Legacy tokens without evidence_id fall back to id() matching."""
         tok = _token("legacy", evidence_id=None)

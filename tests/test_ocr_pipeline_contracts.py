@@ -105,7 +105,8 @@ def test_domain_token_roundtrip_does_not_fabricate_native_confidence():
     assert token.confidence_native is None
     assert token.confidence_scale == "unknown"
     assert token.normalization == "domain_0..1"
-    assert to_domain(token) == raw
+    assert to_domain(token) == replace(raw, evidence_id=token.token_id)
+    assert to_domain(token).evidence_id == token.token_id
 
 
 @pytest.mark.parametrize("changes", [

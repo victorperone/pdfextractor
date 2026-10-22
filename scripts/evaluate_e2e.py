@@ -171,7 +171,8 @@ def _selected_page_numbers(config, document) -> list[int]:
 
 
 def _build_config(engine: str, mode: str, language: str, page_indices: tuple | None,
-                  provider: str | None = None, rapidocr_model_size: str | None = None):
+                  provider: str | None = None, rapidocr_model_size: str | None = None,
+                  use_gpu: bool = False):
     """Build an ExtractorConfig for the given engine and extraction mode.
 
     render_scale is set per-engine via best_ocr_render_scale(). Override with
@@ -187,7 +188,7 @@ def _build_config(engine: str, mode: str, language: str, page_indices: tuple | N
     render_scale_env = os.environ.get("OCR_RENDER_SCALE")
     render_scale = float(render_scale_env) if render_scale_env else best_ocr_render_scale(engine)
     config = replace(base, ocr_engine=engine, ocr_provider=provider, mode=ExtractionMode(mode),
-                     ocr_render_scale=render_scale, rapidocr_model_size=rapidocr_model_size)
+                     ocr_render_scale=render_scale, rapidocr_model_size=rapidocr_model_size, use_gpu=use_gpu)
     if page_indices is not None:
         config = replace(config, page_indices=page_indices)
     return config
@@ -231,6 +232,8 @@ def _save_features(document, output_dir: Path, engine_slug: str, run_id: str) ->
 
 def main() -> int:
     """Entry point: extract a PDF with one OCR engine and save Markdown + run manifest."""
+    from structured_pdf_text.ocr.registry import public_engines, public_providers
+
     ap = argparse.ArgumentParser(
         description="Run pdfextractor E2E pipeline and save output (Fase 8)."
     )
@@ -238,10 +241,11 @@ def main() -> int:
     ap.add_argument(
         "--engine",
         default="easyocr",
-        choices=["easyocr", "paddle", "rapidocr", "tesseract"],
+        choices=public_engines(),
         help="OCR family (default: easyocr); choose RapidOCR provider with --provider",
     )
-    ap.add_argument("--provider", choices=["onnxruntime", "openvino"], default=None)
+    ap.add_argument("--provider", choices=public_providers(), default=None)
+    ap.add_argument("--gpu", action="store_true", help="Request CUDA and record the effective device")
     ap.add_argument("--rapidocr-model-size", choices=["medium", "small"], default=None,
                     help="RapidOCR PP-OCRv6 model size (default: medium)")
     ap.add_argument(
@@ -310,7 +314,7 @@ def main() -> int:
         if args.rapidocr_model_size and args.engine != "rapidocr":
             raise ValueError("--rapidocr-model-size requires --engine rapidocr")
         config = _build_config(args.engine, args.mode, args.language, page_indices, args.provider,
-                               args.rapidocr_model_size)
+                               args.rapidocr_model_size, args.gpu)
         if args.retain_native_evidence:
             config = replace(config, retain_native_evidence=True)
     except Exception as exc:

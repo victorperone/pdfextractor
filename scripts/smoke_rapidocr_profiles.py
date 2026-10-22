@@ -52,10 +52,11 @@ def _normalize(value: str) -> str:
     return re.sub(r"\s+", " ", value.casefold()).strip()
 
 
-def run(size: str, provider: str, cache_home: Path | None, font_path: Path | None) -> dict:
+def run(size: str, provider: str, cache_home: Path | None, font_path: Path | None, use_gpu: bool = False) -> dict:
     config = ExtractorConfig(
         mode="ocr", ocr_engine="rapidocr", ocr_provider=provider,
         rapidocr_model_size=size, language="pt-BR", ocr_cache_home=cache_home,
+        use_gpu=use_gpu,
     )
     settings = resolve_config(config).settings
     hashes = verify_artifacts(size, (
@@ -95,6 +96,7 @@ def main() -> int:
     parser.add_argument("--cache-home", type=Path)
     parser.add_argument("--size", choices=("medium", "small", "all"), default="all")
     parser.add_argument("--provider", choices=("onnxruntime", "openvino", "all"), default="all")
+    parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--font", type=Path)
     args = parser.parse_args()
     sizes = ("medium", "small") if args.size == "all" else (args.size,)
@@ -102,7 +104,7 @@ def main() -> int:
     results = []
     for size in sizes:
         for provider in providers:
-            result = run(size, provider, args.cache_home, args.font)
+            result = run(size, provider, args.cache_home, args.font, args.gpu)
             results.append(result)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

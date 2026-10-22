@@ -29,6 +29,7 @@ Detection/quality tuning:
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 from pathlib import Path
 import time
@@ -276,6 +277,10 @@ class RapidOCRBackend:
         self._closed = False
         self._runtime = runtime
         self._engine_key = "rapidocr"
+        self._device = "cpu"
+        self._gpu_fallback_reason = None
+        self._active_providers = {}
+        self._cuda_enabled = False
 
         from structured_pdf_text.ocr.pipelines.rapidocr.models import (
             PROFILES,
@@ -359,12 +364,65 @@ class RapidOCRBackend:
                 provider["EngineConfig.onnxruntime.intra_op_num_threads"] = effective_threads
             elif effective_threads > 0 and runtime == "openvino":
                 provider["EngineConfig.openvino.inference_num_threads"] = effective_threads
+            cuda = False
+            if settings.use_gpu and runtime == "onnxruntime":
+                try:
+                    import onnxruntime as ort
+                    # CUDA/cuDNN come from this environment's NVIDIA wheels.
+                    preload = getattr(ort, "preload_dlls", None)
+                    if callable(preload):
+                        preload(directory="")
+                    cuda = "CUDAExecutionProvider" in ort.get_available_providers()
+                    if not cuda:
+                        self._gpu_fallback_reason = "cuda_provider_unavailable"
+                except Exception as exc:
+                    from structured_pdf_text.errors import raise_if_resource_exhausted
+                    raise_if_resource_exhausted(exc, stage="rapidocr_device_probe")
+                    self._gpu_fallback_reason = f"cuda_probe_failed:{type(exc).__name__}"
+            elif settings.use_gpu:
+                self._gpu_fallback_reason = "openvino_profile_cpu_only"
+            if runtime == "onnxruntime":
+                provider["EngineConfig.onnxruntime.use_cuda"] = cuda
+                if cuda:
+                    provider["EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search"] = "DEFAULT"
             provider.update({
                 "Det.unclip_ratio": unclip,
                 "Det.box_thresh": box_thresh,
                 "Det.thresh": det_thresh,
             })
-            self._engine = RapidOCR(params=provider)
+            self._cuda_enabled = cuda
+            self._provider_options = dict(provider)
+            self._runtime_constructor = RapidOCR
+            try:
+                self._engine = RapidOCR(params=provider)
+            except Exception as exc:
+                from structured_pdf_text.ocr.device import gpu_configuration_failure
+                if not cuda or not gpu_configuration_failure(exc):
+                    raise
+                self._gpu_fallback_reason = f"cuda_initialization_failed:{type(exc).__name__}:{exc}"
+                logging.getLogger(__name__).warning("RapidOCR: CUDA initialization failed; using CPU (%s)", exc)
+                cuda = self._cuda_enabled = False
+                self._provider_options["EngineConfig.onnxruntime.use_cuda"] = False
+                self._engine = RapidOCR(params=self._provider_options)
+            if runtime == "onnxruntime":
+                self._refresh_execution_device()
+                if cuda and self._device != "cuda":
+                    logging.getLogger(__name__).warning("RapidOCR: CUDA not active in all stages; using CPU")
+                    cuda = self._cuda_enabled = False
+                    self._provider_options["EngineConfig.onnxruntime.use_cuda"] = False
+                    self._engine = RapidOCR(params=self._provider_options)
+                    self._refresh_execution_device()
+                for attribute in ("text_det", "text_rec"):
+                    session = getattr(getattr(getattr(self._engine, attribute, None), "session", None), "session", None)
+                    # ORT's run() can otherwise retry EP failures on CPU,
+                    # hiding a CUDA failure (including memory exhaustion).
+                    disable_fallback = getattr(session, "disable_fallback", None)
+                    if cuda and callable(disable_fallback):
+                        disable_fallback()
+                self._refresh_execution_device()
+            if settings.use_gpu and self._device != "cuda":
+                logging.getLogger(__name__).warning(
+                    "RapidOCR: CUDA requested; effective device=%s (%s)", self._device, self._gpu_fallback_reason)
         else:
             raise RuntimeError(
                 "RapidOCR PP-OCRv6 profiles require the unified rapidocr 3.9.2 API; "
@@ -390,19 +448,58 @@ class RapidOCRBackend:
     # OCRBackend — identity and capabilities
     # ------------------------------------------------------------------
 
+    def _infer(self, image):
+        try:
+            return _run_rapidocr(self._engine, image)
+        except Exception as exc:
+            from structured_pdf_text.ocr.device import gpu_configuration_failure
+            if not self._cuda_enabled or not gpu_configuration_failure(exc):
+                raise
+            logging.getLogger(__name__).warning("RapidOCR: CUDA unavailable during inference; retrying on CPU (%s)", exc)
+            self._provider_options["EngineConfig.onnxruntime.use_cuda"] = False
+            self._engine = self._runtime_constructor(params=self._provider_options)
+            self._cuda_enabled = False
+            self._gpu_fallback_reason = f"cuda_runtime_failed:{type(exc).__name__}:{exc}"
+            self._refresh_execution_device()
+            return _run_rapidocr(self._engine, image)
+
+    def _refresh_execution_device(self) -> None:
+        """Inspect live sessions; a construction-time provider list can go stale."""
+        if self._runtime != "onnxruntime" or self._closed or self._engine is None:
+            return
+        providers = {}
+        for stage, attribute in (("detector", "text_det"), ("recognizer", "text_rec")):
+            session = getattr(getattr(getattr(self._engine, attribute, None), "session", None), "session", None)
+            if session is not None and callable(getattr(session, "get_providers", None)):
+                providers[stage] = list(session.get_providers())
+        self._active_providers = providers
+        count = sum("CUDAExecutionProvider" in active for active in providers.values())
+        self._device = "cuda" if count == 2 else "mixed" if count else "cpu"
+        if self._cuda_enabled and self._device != "cuda":
+            self._gpu_fallback_reason = "cuda_provider_not_active_in_all_stages"
+        elif self._device == "cuda" and self._gpu_fallback_reason == "cuda_provider_not_active_in_all_stages":
+            self._gpu_fallback_reason = None
+
     @property
     def identity(self) -> OCRBackendIdentity:
-        """Return engine identity: package versions, artifact hashes, and tuning parameters."""
+        """Return live device identity, package/model hashes and tuning parameters."""
+        previous = self._device
+        self._refresh_execution_device()
+        if self._config.use_gpu and self._device != previous and self._device != "cuda":
+            logging.getLogger(__name__).warning(
+                "RapidOCR: runtime device changed to %s (%s)", self._device, self._gpu_fallback_reason)
         pkg_name = "rapidocr" if self._unified else (
             "rapidocr-onnxruntime" if self._runtime == "onnxruntime" else "rapidocr-openvino"
         )
         runtime_pkg = "onnxruntime" if self._runtime == "onnxruntime" else "openvino"
+        if runtime_pkg == "onnxruntime" and _package_version("onnxruntime-gpu") != "unknown":
+            runtime_pkg = "onnxruntime-gpu"
         return OCRBackendIdentity(
             engine=self._engine_key,
             runtime=self._runtime,
             profile=self._profile,
             language=self._language,
-            device="cpu",
+            device=self._device,
             package_versions={
                 pkg_name: _package_version(pkg_name),
                 runtime_pkg: _package_version(runtime_pkg),
@@ -410,6 +507,9 @@ class RapidOCRBackend:
             artifact_hashes=self._artifact_hashes,
             extra={
                 "render_scale": self._config.effective_ocr_render_scale(),
+                "gpu_requested": self._config.use_gpu,
+                "gpu_fallback_reason": self._gpu_fallback_reason,
+                "active_providers": self._active_providers,
                 "clahe": True,
                 **self._effective_tuning,
                 "requested_threads": self._config.num_threads,
@@ -457,7 +557,7 @@ class RapidOCRBackend:
             )
         try:
             img = _to_numpy(request.image)
-            out = _run_rapidocr(self._engine, img)
+            out = self._infer(img)
             raw = _extract_raw(out)
             rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
             tokens = tuple(_result_to_ocr_tokens(raw, self._engine_key, offset_x=rx0, offset_y=ry0))
@@ -498,7 +598,7 @@ class RapidOCRBackend:
         if self._closed:
             raise RuntimeError("RapidOCR backend is closed")
         img = _to_numpy(page_image)
-        out = _run_rapidocr(self._engine, img)
+        out = self._infer(img)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         tokens = _result_to_pipeline_tokens(_extract_raw(out), page_index, self._language)
         return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0], page_rotation)
@@ -519,7 +619,7 @@ class RapidOCRBackend:
         crop, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(img, region_bbox, page_bbox)
         if crop.size == 0:
             return []
-        out = _run_rapidocr(self._engine, crop)
+        out = self._infer(crop)
         tokens = _result_to_pipeline_tokens(
             _extract_raw(out), page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
@@ -546,7 +646,7 @@ class RapidOCRBackend:
         try:
             import numpy as np
             probe = np.full((32, 32, 3), 255, dtype=np.uint8)
-            _run_rapidocr(self._engine, probe)
+            self._infer(probe)
             return "ready"
         except Exception:
             return "unknown"

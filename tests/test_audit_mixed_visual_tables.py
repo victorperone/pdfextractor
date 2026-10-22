@@ -123,15 +123,83 @@ class TestVQ09VisualDetectionGuard:
         assert not result, "Page without images must not run visual detection"
 
 
-@pytest.mark.xfail(reason="VQ-09 Phase B — full hybrid page integration requires visual engine", strict=False)
 class TestMixedVisualTablesIntegration:
-    """Integration tests requiring the real visual detection engine."""
+    """PDFium and API integration; only recognition/grid discovery are faked."""
 
-    def test_v5_p019_produces_two_tables(self):
-        """V5-P019: page must have native table + visual raster table as distinct objects."""
-        # Full integration test requires the corpus PDF
-        pytest.skip("Corpus PDF not available in CI")
+    def test_hybrid_produces_two_tables_without_duplicate_text(self, tmp_path, monkeypatch):
+        from ocr_domain_fixtures import hybrid_table_pdf, install_table_structure, extract_hybrid
+        from structured_pdf_text.renderers import render_markdown
 
-    def test_visual_table_not_overlapping_native(self):
-        """Detected visual grid that overlaps native table > 50% is discarded."""
-        pytest.skip("Requires visual engine")
+        calls = install_table_structure(monkeypatch)
+        document, engine = extract_hybrid(hybrid_table_pdf(tmp_path / "hybrid.pdf"))
+        tables = document.pages[0].tables
+        assert len(tables) == 2
+        native = next(table for table in tables if table.method == TableMethod.STRICT_GRID)
+        raster = next(table for table in tables if table.method == TableMethod.VISUAL_MODEL)
+        assert native.page_fragments[0].bbox.intersection(raster.page_fragments[0].bbox) is None
+        assert raster.page_fragments[0].bbox == BBox(25, 380, 370, 500)
+        assert (raster.row_count, raster.column_count) == (3, 3)
+        assert raster.cells[4].text == "-42,90"
+        assert raster.cells[5].text == "AB-009"
+        assert all(token.evidence_id and token.derived_from_ids
+                   for cell in raster.cells for token in cell.tokens)
+        markdown = render_markdown(document)
+        assert markdown.count("<table>") == 2
+        assert markdown.count("Papel") == 1
+        assert markdown.count("Caneta") == 1
+        assert not document.pages[0].diagnostics.warnings
+        assert (400, 600) in calls and (345, 120) in calls
+        assert len(engine.calls) > 1  # Includes work discovered after initial OCR.
+
+    def test_visual_table_overlapping_native_is_discarded(self, tmp_path, monkeypatch):
+        """The real API rejects a visual candidate duplicating the native grid."""
+        from ocr_domain_fixtures import hybrid_table_pdf, install_table_structure, extract_hybrid
+
+        calls = install_table_structure(monkeypatch, duplicate_native=True)
+        document, _ = extract_hybrid(hybrid_table_pdf(tmp_path / "overlap.pdf"))
+        assert (400, 600) in calls
+        assert len(document.pages[0].tables) == 1
+        assert document.pages[0].tables[0].method == TableMethod.STRICT_GRID
+
+    def test_refined_grid_with_shifted_boxes_keeps_prior_figure_ownership(self, tmp_path, monkeypatch):
+        """Real recognizers move boxes between passes while preserving cell text."""
+        from dataclasses import replace
+        from ocr_domain_fixtures import TableFixtureOCR, hybrid_table_pdf, install_table_structure, extract_hybrid
+        from structured_pdf_text.renderers import render_markdown
+
+        original = TableFixtureOCR.recognize_page
+        def shifted(self, *args, **kwargs):
+            tokens = original(self, *args, **kwargs)
+            delta = 0 if len(self.calls) == 1 else .25
+            return [replace(token, bbox=BBox(token.bbox.x0, token.bbox.y0 + delta,
+                                             token.bbox.x1, token.bbox.y1 + delta)) for token in tokens]
+        monkeypatch.setattr(TableFixtureOCR, "recognize_page", shifted)
+        install_table_structure(monkeypatch)
+        document, _ = extract_hybrid(hybrid_table_pdf(tmp_path / "shifted.pdf"))
+        markdown = render_markdown(document)
+        assert markdown.count("Papel") == 1
+        assert markdown.count("Caneta") == 1
+        assert not document.pages[0].diagnostics.warnings
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_real_pdf_presentation_rotation_preserves_both_table_frames(self, tmp_path, monkeypatch, rotation):
+        import pypdfium2 as pdfium
+        from ocr_domain_fixtures import hybrid_table_pdf, install_table_structure, extract_hybrid
+
+        path = hybrid_table_pdf(tmp_path / "canonical.pdf")
+        rotated = tmp_path / "rotated.pdf"
+        with pdfium.PdfDocument(path) as document:
+            page = document[0]
+            try:
+                page.set_rotation(rotation)
+                page.gen_content()
+            finally:
+                page.close()
+            document.save(rotated)
+        install_table_structure(monkeypatch)
+        document, _ = extract_hybrid(rotated)
+        raster = next(table for table in document.pages[0].tables if table.method == TableMethod.VISUAL_MODEL)
+        assert raster.page_fragments[0].bbox == BBox(25, 380, 370, 500)
+        assert len(document.pages[0].tables) == 2
+        assert (raster.row_count, raster.column_count) == (3, 3)
+        assert raster.cells[4].text == "-42,90"

@@ -204,8 +204,10 @@ class PageCoordinator:
                         raise ValueError("Deferred OCR candidates cannot reuse a request ID")
                     from .converters import to_domain
 
-                    self.last_tokens = tuple(to_domain(token) for token in result.tokens)
-                    for domain_token, evidence in zip(self.last_tokens, result.tokens):
+                    proposed_ids = {value for proposal in result.proposals for value in proposal.evidence_ids}
+                    proposed_evidence = tuple(token for token in result.tokens if token.token_id in proposed_ids)
+                    self.last_tokens = tuple(to_domain(token) for token in proposed_evidence)
+                    for domain_token, evidence in zip(self.last_tokens, proposed_evidence):
                         self._deferred_tokens[id(domain_token)] = (
                             planned.request, result, evidence.token_id, domain_token, integration_targets,
                         )

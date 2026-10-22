@@ -6,6 +6,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+ENVIRONMENT_ROOT=""
+USE_GPU=0
 if [[ -x "$REPO_ROOT/.ocr-runtime/bin/tesseract" ]]; then
     PATH="$REPO_ROOT/.ocr-runtime/bin:$PATH"
     export PATH
@@ -40,6 +42,8 @@ Usage: scripts/run_benchmark.sh [options]
   --configurations LIST  Comma-separated deployment configurations (four families, five configurations)
   --engines LIST         Deprecated option alias for --configurations
   --python PATH       Python executable (default: python or PYTHON_BIN)
+  --environment-root PATH  Use PATH/<configuration>/bin/python for each extraction
+  --gpu               Request CUDA; Tesseract and the pinned OpenVINO profile stay CPU
   --rapidocr-model-size SIZE  RapidOCR PP-OCRv6 size: medium (default) or small
 EOF
 }
@@ -58,6 +62,8 @@ while (($#)); do
         --configurations) CONFIGURATIONS="$2"; shift 2 ;;
         --engines) echo "Warning: --engines is deprecated; use --configurations" >&2; CONFIGURATIONS="$2"; shift 2 ;;
         --python) PYTHON_BIN="$2"; shift 2 ;;
+        --environment-root) ENVIRONMENT_ROOT="$2"; shift 2 ;;
+        --gpu) USE_GPU=1; shift ;;
         --rapidocr-model-size) RAPIDOCR_MODEL_SIZE="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -65,7 +71,22 @@ while (($#)); do
 done
 
 cd "$REPO_ROOT"
+IFS=',' read -r -a engine_list <<< "$CONFIGURATIONS"
+rapidocr_requested=0
+for index in "${!engine_list[@]}"; do
+    engine_list[$index]="${engine_list[$index]//[[:space:]]/}"
+    case "${engine_list[$index]}" in
+        rapidocr-onnxruntime|rapidocr-openvino) rapidocr_requested=1 ;;
+        tesseract|easyocr|paddle) ;;
+        *) echo "Invalid deployment configuration: ${engine_list[$index]}" >&2; exit 2 ;;
+    esac
+    if [[ -n "$ENVIRONMENT_ROOT" && ! -x "$ENVIRONMENT_ROOT/${engine_list[$index]}/bin/python" ]]; then
+        echo "Missing isolated Python: $ENVIRONMENT_ROOT/${engine_list[$index]}/bin/python" >&2
+        exit 2
+    fi
+done
 case "$RAPIDOCR_MODEL_SIZE" in medium|small) ;; *) echo "Invalid RapidOCR model size: $RAPIDOCR_MODEL_SIZE" >&2; exit 2 ;; esac
+if ((rapidocr_requested)); then
 _RAPIDOCR_CACHE_HOME="${RAPIDOCR_CACHE_HOME:-$HOME/.cache/pdfextractor}"
 _RAPIDOCR_CACHE="$_RAPIDOCR_CACHE_HOME/rapidocr"
 _RAPIDOCR_NAMES=(RAPIDOCR_DET_MODEL RAPIDOCR_REC_MODEL RAPIDOCR_REC_KEYS RAPIDOCR_CLS_MODEL)
@@ -84,12 +105,13 @@ fi
 "$PYTHON_BIN" "$SCRIPT_DIR/verify_rapidocr_artifacts.py" --size "$RAPIDOCR_MODEL_SIZE" \
     --detector "$RAPIDOCR_DET_MODEL" --recognizer "$RAPIDOCR_REC_MODEL" \
     --dictionary "$RAPIDOCR_REC_KEYS" --classifier "$RAPIDOCR_CLS_MODEL" || exit 2
+fi
 [[ -f "$PDF" ]] || { echo "PDF not found: $PDF" >&2; exit 2; }
 [[ -f "$REFERENCE" ]] || { echo "Reference not found: $REFERENCE" >&2; exit 2; }
 [[ -f "$MANIFESTO" ]] || { echo "Manifesto not found: $MANIFESTO" >&2; exit 2; }
 [[ -f "$VALIDATION" ]] || { echo "Validation report not found: $VALIDATION" >&2; exit 2; }
 
-"$PYTHON_BIN" "$SCRIPT_DIR/provision_acceptance_corpus.py" --manifest "$CORPUS_LOCK"
+"$PYTHON_BIN" "$SCRIPT_DIR/provision_acceptance_corpus.py" --manifest "$CORPUS_LOCK" || exit 2
 
 # Confirm that PDF, reference, manifesto, and the supplied validation report
 # describe the same complete corpus before spending time on OCR.
@@ -178,9 +200,11 @@ mkdir -p "$OUT_DIR"
 
 failed=()
 metric_files=()
-IFS=',' read -r -a engine_list <<< "$CONFIGURATIONS"
 for engine in "${engine_list[@]}"; do
-    engine="${engine//[[:space:]]/}"
+    engine_python="$PYTHON_BIN"
+    if [[ -n "$ENVIRONMENT_ROOT" ]]; then
+        engine_python="$ENVIRONMENT_ROOT/$engine/bin/python"
+    fi
     run_id="$RUN_SUFFIX-$engine"
     config_slug="${engine//-/_}"
     metrics="$OUT_DIR/metrics_v3_${config_slug}_${run_id}.json"
@@ -200,11 +224,12 @@ for engine in "${engine_list[@]}"; do
     echo "========================================"
 
     eval_args=("$PDF" --engine "$backend" --run-id "$run_id" --output-dir "$OUT_DIR" --allow-partial)
+    if ((USE_GPU)); then eval_args+=(--gpu); fi
     if [[ -n "$provider" ]]; then
         eval_args+=(--provider "$provider" --rapidocr-model-size "$RAPIDOCR_MODEL_SIZE")
     fi
     if ((!ALL_PAGES)); then eval_args+=(--pages "$PAGES"); fi
-    if ! "$PYTHON_BIN" "$SCRIPT_DIR/evaluate_e2e.py" "${eval_args[@]}"; then
+    if ! "$engine_python" "$SCRIPT_DIR/evaluate_e2e.py" "${eval_args[@]}"; then
         echo "[ERROR] E2E extraction failed for $engine" >&2
         failed+=("$engine")
         continue

@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 import sys
+from uuid import UUID
 
 import pytest
 
@@ -95,13 +96,14 @@ def test_late_page_content_remains_visible_after_global_examples_are_truncated()
     assert last["examples_by_category"]["content"][0]["after"] == "R$ 0,01"
 
 
-def test_nonfinite_and_empty_inputs_are_rejected():
+@pytest.mark.parametrize("canonicalize", [False, True])
+def test_nonfinite_and_empty_inputs_are_rejected(canonicalize):
     after = document()
     after["pages"][0]["diagnostics"]["processing_time_ms"] = float("nan")
     with pytest.raises(ValueError):
-        compare_features(document(), after)
+        compare_features(document(), after, canonicalize_lineage_ids=canonicalize)
     with pytest.raises(ValueError):
-        compare_features({}, {})
+        compare_features({}, {}, canonicalize_lineage_ids=canonicalize)
 
 
 def test_changed_provider_and_missing_identity_cannot_pass():
@@ -119,8 +121,9 @@ def test_changed_provider_and_missing_identity_cannot_pass():
     assert "identity_mismatch:engine_identity" in check_run_identity(before, after)
 
 
+@pytest.mark.parametrize("canonicalize", [False, True])
 @pytest.mark.parametrize("change", [None, "config", "markdown"])
-def test_cli_checks_resolved_settings_and_rendered_markdown(tmp_path, monkeypatch, change):
+def test_cli_checks_resolved_settings_and_rendered_markdown(tmp_path, monkeypatch, change, canonicalize):
     manifests = []
     configs = []
     features = []
@@ -139,13 +142,14 @@ def test_cli_checks_resolved_settings_and_rendered_markdown(tmp_path, monkeypatc
         config.write_text(json.dumps({"merge_cross_page_tables": side == "after" and change == "config"}))
         configs.append(config)
         feature = tmp_path / f"{side}-features.json"
-        feature.write_text(json.dumps(document()))
+        feature.write_text(json.dumps(lineage_document(1 if side == "before" else 100)
+                                      if canonicalize else document()))
         features.append(feature)
     output = tmp_path / "comparison.json"
     monkeypatch.setattr(sys, "argv", ["compare", *map(str, features),
         "--before-manifest", str(manifests[0]), "--after-manifest", str(manifests[1]),
         "--before-config", str(configs[0]), "--after-config", str(configs[1]),
-        "--output", str(output)])
+        "--output", str(output), *(["--canonicalize-lineage-ids"] if canonicalize else [])])
     assert comparator.main() == (0 if change is None else 1)
     report = json.loads(output.read_text())
     assert report["equivalent"] is (change is None)
@@ -153,6 +157,97 @@ def test_cli_checks_resolved_settings_and_rendered_markdown(tmp_path, monkeypatc
         assert "identity_mismatch:resolved_config" in report["identity_errors"]
     if change == "markdown":
         assert report["markdown_identical"] is False
+
+
+def lineage_document(seed):
+    request, authorization, second_request = [UUID(int=seed + i, version=4).hex for i in range(3)]
+    result = document()
+    page = result["pages"][0]
+    first = f"{request}:attempt:1:token:0"
+    second = f"{second_request}:attempt:1:token:0"
+    page["tokens"] = [{"evidence_id": first, "text": "R$ -0,01"},
+                      {"evidence_id": second, "text": "AB-009"}]
+    page["derived_from_ids"] = [first, second, "native:page:0:line:1"]
+    page["diagnostics"]["facts"]["requests"] = [
+        {"request_id": request, "authorization_id": authorization,
+         "proposal_id": f"{request}:{authorization}:cell", "evidence_ids": [first]},
+        {"request_id": second_request, "parent_request_id": request, "evidence_ids": [second]},
+    ]
+    return result
+
+
+def test_lineage_renaming_is_opt_in_deterministic_and_does_not_mutate_artifacts():
+    before, after = lineage_document(1), lineage_document(100)
+    original = deepcopy((before, after))
+    assert not compare_features(before, after)["equivalent"]
+    report = compare_features(before, after, canonicalize_lineage_ids=True)
+    assert report["equivalent"] and report["difference_count"] == 0
+    assert report["lineage_id_normalization"]["before_uuid_components"] == 3
+    assert report["lineage_id_normalization"]["after_uuid_components"] == 3
+    assert (before, after) == original
+    reordered = dict(reversed(list(after.items())))
+    assert compare_features(before, reordered, canonicalize_lineage_ids=True)["equivalent"]
+
+
+@pytest.mark.parametrize("mutation", ["wrong_parent", "wrong_edge", "collapsed_ids", "token_suffix",
+                                      "sign", "native_lineage", "geometry", "missing_field"])
+def test_normalization_preserves_lineage_graph_and_semantic_changes(mutation):
+    before, after = lineage_document(1), lineage_document(100)
+    page = after["pages"][0]
+    requests = page["diagnostics"]["facts"]["requests"]
+    if mutation == "wrong_parent":
+        requests[1]["parent_request_id"] = requests[1]["request_id"]
+    elif mutation == "wrong_edge":
+        requests[0]["evidence_ids"] = requests[1]["evidence_ids"][:]
+    elif mutation == "collapsed_ids":
+        page["tokens"][1]["evidence_id"] = page["tokens"][0]["evidence_id"]
+    elif mutation == "token_suffix":
+        page["tokens"][0]["evidence_id"] = page["tokens"][0]["evidence_id"].replace("token:0", "token:1")
+    elif mutation == "sign":
+        page["tokens"][0]["text"] = "R$ 0,01"
+    elif mutation == "native_lineage":
+        page["derived_from_ids"][-1] = "native:page:0:line:2"
+    elif mutation == "geometry":
+        page["tables"][0]["cells"][0]["bbox"]["x0"] += .01
+    else:
+        del requests[0]["authorization_id"]
+    assert not compare_features(before, after, canonicalize_lineage_ids=True)["equivalent"]
+
+
+@pytest.mark.parametrize("field", ["text", "reading_text", "raw_text", "identifier", "model_hash"])
+def test_uuid_looking_content_and_model_metadata_are_exact(field):
+    before, after = lineage_document(1), lineage_document(100)
+    before["pages"][0][field] = UUID(int=1, version=4).hex
+    after["pages"][0][field] = UUID(int=100, version=4).hex
+    assert not compare_features(before, after, canonicalize_lineage_ids=True)["equivalent"]
+
+
+def test_uuid_normalization_preserves_distinct_lexical_ids_and_literal_strings():
+    before, after = lineage_document(1), lineage_document(100)
+    uuid = UUID(int=100, version=4)
+    # These are distinct strings even though they encode the same UUID value.
+    after["pages"][0]["derived_from_ids"][0] = str(uuid)
+    assert not compare_features(before, after, canonicalize_lineage_ids=True)["equivalent"]
+    after = lineage_document(100)
+    after["pages"][0]["derived_from_ids"][0] = "__ocr_opaque_uuid_0__:attempt:1:token:0"
+    assert not compare_features(before, after, canonicalize_lineage_ids=True)["equivalent"]
+
+
+def test_uuid_looking_prefix_in_a_long_hash_is_not_renamed():
+    before, after = lineage_document(1), lineage_document(100)
+    before["pages"][0]["request_id"] = UUID(int=1, version=4).hex * 2
+    after["pages"][0]["request_id"] = UUID(int=100, version=4).hex * 2
+    assert not compare_features(before, after, canonicalize_lineage_ids=True)["equivalent"]
+
+
+def test_python_tuple_input_cannot_impersonate_an_internal_renamed_id():
+    before, after = lineage_document(1), lineage_document(100)
+    before["pages"][0]["request_id"] = UUID(int=500, version=4).hex
+    # Three UUIDs have already appeared in the sorted diagnostics fields.
+    after["pages"][0]["request_id"] = ("", 3, "")
+    assert not compare_features(before, after, canonicalize_lineage_ids=True)["equivalent"]
+    assert not compare_features(json.loads(json.dumps(before)), json.loads(json.dumps(after)),
+                                canonicalize_lineage_ids=True)["equivalent"]
 
 
 def test_incomplete_model_identity_is_not_equivalence():

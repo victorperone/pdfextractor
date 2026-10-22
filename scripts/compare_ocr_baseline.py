@@ -30,9 +30,54 @@ def _cost_field(path: tuple[str | int, ...], key: str) -> bool:
     )
 
 
+_LINEAGE_FIELDS = frozenset({
+    "request_id", "parent_request_id", "authorization_id", "authorization_ids",
+    "attempt_id", "proposal_id", "proposal_ids", "token_id", "token_ids",
+    "evidence_id", "evidence_ids", "derived_from_ids", "source_token_ids",
+    "raster_id", "raster_ids", "observation_id", "observation_ids",
+})
+_OPAQUE_UUID4 = re.compile(
+    r"(?<![0-9a-f])(?:[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?![0-9a-f])",
+    re.IGNORECASE,
+)
+
+
+def _canonicalize_lineage_ids(document: dict) -> tuple[dict, int]:
+    """Rename opaque UUID components consistently, preserving reference edges.
+
+    Only explicit lineage fields participate. Text, native identifiers, model
+    hashes and meaningful attempt/token suffixes remain exact. Internal tuples
+    distinguish renamed components from any literal string in the JSON input.
+    """
+    names: dict[str, int] = {}
+
+    def walk(value, field=None):
+        if isinstance(value, dict):
+            return {key: walk(value[key], key) for key in sorted(value)}
+        if isinstance(value, (list, tuple)):
+            return [walk(item, field) for item in value]
+        if isinstance(value, str) and field in _LINEAGE_FIELDS:
+            matches = list(_OPAQUE_UUID4.finditer(value))
+            if matches:
+                parts = []
+                start = 0
+                for match in matches:
+                    parts.append(value[start:match.start()])
+                    opaque = match.group()
+                    parts.append(names.setdefault(opaque, len(names)))
+                    start = match.end()
+                parts.append(value[start:])
+                return tuple(parts)
+        return value
+
+    result = walk(document)
+    return result, len(names)
+
+
 def compare_features(
     before: dict[str, Any], after: dict[str, Any], *, bbox_tolerance_pt: float = 0.0,
-    max_examples: int = 100,
+    max_examples: int = 100, canonicalize_lineage_ids: bool = False,
 ) -> dict[str, Any]:
     if not math.isfinite(bbox_tolerance_pt) or bbox_tolerance_pt < 0:
         raise ValueError("bbox_tolerance_pt must be finite and non-negative")
@@ -43,6 +88,12 @@ def compare_features(
             raise ValueError("Expected a structured document with non-empty pages")
         # Reject NaN/Inf even when present only in excluded costs.
         json.dumps(document, allow_nan=False)
+    normalization = None
+    if canonicalize_lineage_ids:
+        before, before_count = _canonicalize_lineage_ids(before)
+        after, after_count = _canonicalize_lineage_ids(after)
+        normalization = {"policy": "uuid4-components-in-explicit-lineage-fields-v1",
+                         "before_uuid_components": before_count, "after_uuid_components": after_count}
     counts: Counter[str] = Counter()
     examples: list[dict[str, Any]] = []
     page_differences: dict[str, dict[str, Any]] = {}
@@ -113,7 +164,7 @@ def compare_features(
             record(path, old, new)
 
     walk(before, after)
-    return {
+    result = {
         "schema_version": "ocr-equivalence-1.0",
         "equivalent": not counts,
         "bbox_tolerance_pt": bbox_tolerance_pt,
@@ -124,6 +175,9 @@ def compare_features(
         "examples_truncated": sum(counts.values()) > len(examples),
         "costs": costs,
     }
+    if normalization is not None:
+        result["lineage_id_normalization"] = normalization
+    return result
 
 
 def check_run_identity(before: dict, after: dict) -> list[str]:
@@ -230,6 +284,10 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     for field in ("ocr_settings", "rapidocr_model_size"):
         if result.get(field) is None:
             result.pop(field, None)
+    # Omission in pre-GPU captures meant the same CPU default. True remains
+    # significant: GPU and CPU executions must not pass as refactoring parity.
+    if result.get("use_gpu") is False:
+        result.pop("use_gpu")
     return result
 
 
@@ -261,6 +319,8 @@ def main() -> int:
     parser.add_argument("--after-config", required=True, type=Path, help="Resolved ExtractorConfig JSON")
     parser.add_argument("--pages", help="Compare selected 1-based pages only, e.g. '19,24,31' or '10-12'")
     parser.add_argument("--bbox-tolerance-pt", type=float, default=0.0)
+    parser.add_argument("--canonicalize-lineage-ids", action="store_true",
+                        help="Compare opaque UUID lineage by consistent renaming; preserve reference relationships")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
@@ -291,6 +351,7 @@ def main() -> int:
             before_features,
             after_features,
             bbox_tolerance_pt=args.bbox_tolerance_pt,
+            canonicalize_lineage_ids=args.canonicalize_lineage_ids,
         )
         markdown = []
         for manifest, path in ((before_manifest, args.before_manifest), (after_manifest, args.after_manifest)):

@@ -110,7 +110,8 @@ def test_worker_preserves_typed_failure_details_and_processing_stage(monkeypatch
     assert raised.value.details == failure.details
 
 
-def test_real_worker_and_parent_round_trip_polygon_provenance_and_diagnostics(monkeypatch):
+@pytest.mark.parametrize("use_gpu", [False, True])
+def test_real_worker_and_parent_round_trip_polygon_provenance_and_diagnostics(monkeypatch, use_gpu):
     from PIL import Image
     from structured_pdf_text.document import OcrProvenance, OcrToken, SourceKind
     from structured_pdf_text.geometry import BBox, Point
@@ -127,6 +128,7 @@ def test_real_worker_and_parent_round_trip_polygon_provenance_and_diagnostics(mo
     )
     engine = SimpleNamespace(
         recognize_page=lambda *args, **kwargs: [token], last_pass_count=3,
+        effective_device="gpu:0" if use_gpu else "cpu", gpu_fallback_reason=None,
         last_batch_count=2, last_attempt_errors=["optional variant failed"],
         last_selected_variant="rot90", last_candidate_metrics={"baseline": {"score": .87}},
     )
@@ -144,10 +146,12 @@ def test_real_worker_and_parent_round_trip_polygon_provenance_and_diagnostics(mo
     assert responses[0]["protocol_version"] == PROTOCOL_VERSION
     assert responses[1]["status"] == "ok"
     backend = PaddleOCRBackend.__new__(PaddleOCRBackend)
-    backend._config = SimpleNamespace(language="pt-BR")
+    backend._config = SimpleNamespace(language="pt-BR", use_gpu=use_gpu)
+    backend._worker_execution = {"device": "unknown", "gpu_fallback_reason": None}
     backend._engine = None
     backend._worker_send = lambda _: json.loads(json.dumps(responses[1]))
     assert backend._call_subprocess("recognize_page", Image.new("RGB", (50, 30)), 0) == [token]
+    assert backend._worker_execution["device"] == ("gpu:0" if use_gpu else "cpu")
     assert LegacyDiagnosticsProjector.operation_metrics(backend) == LegacyDiagnosticsProjector.operation_metrics(engine)
     assert LegacyDiagnosticsProjector.consume(backend, engine_name="paddle") == LegacyDiagnosticsProjector.consume(engine, engine_name="paddle")
 

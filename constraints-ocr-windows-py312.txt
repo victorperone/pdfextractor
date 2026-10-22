@@ -1,9 +1,11 @@
-# Supported native Windows all-OCR environment, Python 3.12.
+# Windows deployment profiles, Python 3.12 (separate virtualenv per profile).
 # Refresh deliberately with a clean install and commit the resulting diff.
 pypdfium2==5.13.0
 Pillow==12.3.0
 numpy==2.0.2
 opencv-python-headless==4.10.0.84
+opencv-python==4.10.0.84
+opencv-contrib-python==4.10.0.84
 psutil==7.2.2
 paddlepaddle==3.3.1
 paddleocr==3.7.0

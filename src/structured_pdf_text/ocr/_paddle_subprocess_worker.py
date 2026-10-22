@@ -98,6 +98,7 @@ def _make_engine(config: dict):
         quality_thresholds=quality_thresholds,
         enable_mkldnn=config.get("mkldnn", False),
         cache_home=config.get("cache_home"),
+        use_gpu=config.get("use_gpu", False),
     )
 
 
@@ -134,7 +135,7 @@ def main() -> None:
                 init_config = req
                 engine = _make_engine(req)
                 _reply({"status": "ok", "tokens": [], "error": None,
-                        "protocol_version": PROTOCOL_VERSION}, req_id)
+                        "protocol_version": PROTOCOL_VERSION, "execution": _execution(engine)}, req_id)
 
             elif method == "healthcheck":
                 if engine is None:
@@ -169,7 +170,8 @@ def main() -> None:
                     tokens = engine.recognize_region(image, page_index, bbox)
 
                 _reply({"status": "ok", "tokens": _tokens_to_json(tokens), "error": None,
-                        "diagnostics": LegacyDiagnosticsProjector.snapshot_attributes(engine)}, req_id)
+                        "diagnostics": LegacyDiagnosticsProjector.snapshot_attributes(engine),
+                        "execution": _execution(engine)}, req_id)
 
             else:
                 _reply({"status": "error", "tokens": [], "error": f"unknown method: {method!r}"}, req_id)
@@ -188,7 +190,13 @@ def main() -> None:
                 "page_index": getattr(exc, "page_index", None),
                 "details": getattr(exc, "details", {}) if fatal else {},
                 "diagnostics": LegacyDiagnosticsProjector.snapshot_attributes(engine) if engine is not None else {},
+                "execution": _execution(engine),
             }, req_id)
+
+
+def _execution(engine) -> dict:
+    return {"device": getattr(engine, "effective_device", "unknown"),
+            "gpu_fallback_reason": getattr(engine, "gpu_fallback_reason", None)}
 
 
 def _reply(obj: dict, request_id: int | None = None) -> None:

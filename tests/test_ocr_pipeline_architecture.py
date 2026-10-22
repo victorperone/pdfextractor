@@ -150,6 +150,13 @@ def test_environment_snapshots_are_owned_by_the_selected_engine(monkeypatch):
     from structured_pdf_text import ExtractorConfig
     from structured_pdf_text.ocr.factory import resolve_config
 
+    # Tests that initialize a real compatibility wrapper may have set cache
+    # variables; the ownership assertion needs a controlled starting snapshot.
+    import os
+    for name in tuple(os.environ):
+        if name.startswith(("EASYOCR_", "PADDLE_", "RAPIDOCR_", "TESSERACT_")):
+            monkeypatch.delenv(name)
+
     for name, value in {
         "EASYOCR_WORKERS": "0",
         "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
@@ -280,7 +287,8 @@ assert not attempts, attempts
 
 @pytest.mark.parametrize("engine", PUBLIC_ENGINES)
 @pytest.mark.parametrize("mode", ["native", "fast", "balanced"])
-def test_native_page_never_constructs_ocr(engine, mode, monkeypatch, tmp_path):
+@pytest.mark.parametrize("use_gpu", [False, True])
+def test_native_page_never_constructs_ocr(engine, mode, use_gpu, monkeypatch, tmp_path):
     from reportlab.pdfgen import canvas
     from structured_pdf_text import ExtractorConfig, PdfTextExtractor
     import structured_pdf_text.ocr.factory as factory
@@ -296,7 +304,7 @@ def test_native_page_never_constructs_ocr(engine, mode, monkeypatch, tmp_path):
         from structured_pdf_text.native.pdfium_source import PdfiumNativeEvidenceSource
         monkeypatch.setattr(PdfiumNativeEvidenceSource, "render_page", forbidden)
         monkeypatch.setattr(PdfiumNativeEvidenceSource, "render_region", forbidden)
-    with PdfTextExtractor(ExtractorConfig(mode=mode, ocr_engine=engine)) as extractor:
+    with PdfTextExtractor(ExtractorConfig(mode=mode, ocr_engine=engine, use_gpu=use_gpu)) as extractor:
         doc = extractor.extract(path)
     assert doc.pages
 

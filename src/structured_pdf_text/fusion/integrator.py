@@ -39,6 +39,7 @@ def prepare_cell_evidence(cell: TableCell, *, table_id: str, page_index: int) ->
                 max(0.0, min(1.0, token.confidence or 0.0)), token.text,
                 provenance=token.provenance, rotation=token.rotation,
                 ocr_provenance=token.ocr_provenance,
+                evidence_id=token.evidence_id,
             )
         if not token.evidence_id:
             fingerprint = sha256(repr((
@@ -111,6 +112,7 @@ def ocr_tokens_snapshot(tokens: tuple[OcrToken, ...] | list[OcrToken]) -> tuple:
         result.append((
             token.text, values, token.confidence, token.language, token.source.value,
             token.rotation, token.provenance, polygon, token.level, token.ocr_provenance,
+            token.evidence_id,
         ))
     return tuple(result)
 
@@ -180,9 +182,10 @@ class NativeOCRIntegrator:
             ):
                 raise IntegrationRejected("Cell replacement does not conserve existing content")
 
-            original_ids = tuple(
-                token.evidence_id for token in cell.tokens if token.evidence_id
-            )
+            original_ids = tuple(dict.fromkeys(
+                value for token in cell.tokens
+                for value in (token.evidence_id, *token.derived_from_ids) if value
+            ))
             source_ids = tuple(source_evidence_ids)
             previous_owners = {token.owner_id for token in cell.tokens if token.owner_id}
             owner_id = next(iter(previous_owners)) if len(previous_owners) == 1 else (
@@ -421,6 +424,8 @@ def merge_ocr_region_tokens_into_table_cells(
                     normalized_text=token.text,
                     provenance=token.provenance or "table_cell_ocr",
                     rotation=token.rotation,
+                    evidence_id=token.evidence_id,
+                    ocr_provenance=token.ocr_provenance,
                 ))
                 staged[key] = cell, current_tokens
                 consumed.add(id(token))

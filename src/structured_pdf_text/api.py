@@ -93,7 +93,7 @@ from .ocr.recovery import (
 )
 from .ocr.quality import assess_ocr_quality
 from .tables.detector import detect_tables_native
-from .tables.visual import detect_visual_table
+from .tables.visual import detect_visual_table, detect_visual_table_in_region
 from .tables.validation import (
     build_table_construction_diagnostics,
     validate_table_geometry,
@@ -996,10 +996,6 @@ class PdfTextExtractor:
                         for f in t.page_fragments
                         if f.page_index == page_index and f.bbox is not None
                     ]
-                    img_w = getattr(rendered_page, "width", None) or 1
-                    img_h = getattr(rendered_page, "height", None) or 1
-                    page_w = max(native_page.bbox.width, 1.0)
-                    page_h = max(native_page.bbox.height, 1.0)
                     for img_obj in native_page.objects.images:
                         img_box = img_obj.bbox
                         if img_box is None:
@@ -1007,22 +1003,16 @@ class PdfTextExtractor:
                         # Skip if already explained by an existing table.
                         if any(img_box.overlap_ratio(ab) >= 0.50 for ab in all_accepted_bboxes):
                             continue
-                        # Crop the rendered page to the image region.
+                        # Discover structure in the composed raster with its
+                        # actual crop frame; OCR still uses authorized services.
                         try:
-                            px0 = max(0, int(img_box.x0 / page_w * img_w))
-                            py0 = max(0, int(img_box.y0 / page_h * img_h))
-                            px1 = min(img_w, int(img_box.x1 / page_w * img_w))
-                            py1 = min(img_h, int(img_box.y1 / page_h * img_h))
-                            if px1 <= px0 or py1 <= py0:
-                                continue
-                            crop = rendered_page.crop((px0, py0, px1, py1))
                             extra_id = f"page-{page_index + 1}:visual-grid-{len(_visual_candidates) + 1}"
-                            extra = detect_visual_table(
+                            extra = detect_visual_table_in_region(
                                 native_page,
-                                crop,
+                                rendered_page,
+                                img_box,
                                 table_id=extra_id,
                                 tokens=[token for line in ocr_lines for token in line.tokens],
-                                page_rotation=native_page.objects.rotation,
                             )
                             if extra is not None:
                                 _visual_candidates.append(extra)

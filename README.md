@@ -93,6 +93,17 @@ Private PDFs for manual validation should be placed under `corpus/`; see
 
 ## Install locally
 
+CUDA inference is opt-in: `ExtractorConfig(use_gpu=True)` or `extract --gpu`.
+CPU is the default, including in CUDA environments. Missing GPU libraries or
+configuration produce a warning and a CPU retry within the same engine/model.
+Use separate GPU environments for EasyOCR, PaddleOCR and RapidOCR/ONNX;
+the pinned RapidOCR/OpenVINO profile and Tesseract run on CPU. See the
+[WSL2 GPU setup and verification](docs/OCR_Installation_Profiles.md#gpu-no-linuxwsl2).
+The native extraction path does not initialize OCR or GPU runtimes.
+PaddleOCR and both RapidOCR providers default to PP-OCRv6 medium (Det/Rec).
+See the [local WSL2 validation and review report](docs/OCR_GPU_Validation_2026-10-22.md)
+for the prepared environment paths, evidence and remaining acceptance gates.
+
 ### Linux / WSL
 
 ```bash
@@ -246,27 +257,28 @@ See the full guide at [`docs/benchmark_engines.md`](docs/benchmark_engines.md).
 
 ```powershell
 # Smoke test — 5 pages, all engines
-.\scripts\run_benchmark.ps1
+.\scripts\run_benchmark.ps1 -EnvironmentRoot .ocr-envs
 
 # Full document
-.\scripts\run_benchmark.ps1 -RunSuffix "v1" -AllPages
+.\scripts\run_benchmark.ps1 -EnvironmentRoot .ocr-envs -RunSuffix "v1" -AllPages
 
 # Single engine or subset
-.\scripts\run_benchmark.ps1 -Engine tesseract -AllPages -RunSuffix "v2"
-.\scripts\run_benchmark.ps1 -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
+.\scripts\run_benchmark.ps1 -EnvironmentRoot .ocr-envs -Engine tesseract -AllPages -RunSuffix "v2"
+.\scripts\run_benchmark.ps1 -EnvironmentRoot .ocr-envs -Engine "easyocr,tesseract" -AllPages -RunSuffix "v2"
 ```
 
 ### Quick start (Linux / WSL)
 
 ```bash
-# Prepare OCR runtimes in .venv and Tesseract in the local prefix
+# With Tesseract 5.x + Portuguese traineddata already in PATH:
+# prepare one environment per deployment profile (preserves .venv)
 scripts/setup_ocr_benchmark.sh
 
 # Smoke test — pages 77–81 of Stress OCR Markdown V4
-scripts/run_benchmark.sh --run-suffix wsl-smoke
+scripts/run_benchmark.sh --python .venv/bin/python --environment-root .ocr-envs --run-suffix wsl-smoke
 
 # Full Stress V4 corpus
-scripts/run_benchmark.sh --run-suffix wsl-v1 --all-pages
+scripts/run_benchmark.sh --python .venv/bin/python --environment-root .ocr-envs --run-suffix wsl-v1 --all-pages
 ```
 
 Scripts involved:
@@ -278,7 +290,8 @@ Scripts involved:
 | `scripts/regrade_existing.py` | Evaluates existing Markdown without extraction or OCR |
 | `scripts/compare_engines.py` | Generates comparative table of all engines |
 | `scripts/run_benchmark.ps1` | Orchestrates the three steps sequentially on Windows |
-| `scripts/setup_ocr_benchmark.sh` | Installs the required runtimes and models on WSL |
+| `scripts/setup_ocr_environments.py` | Installs isolated profiles on Linux/WSL and Windows; [guide](docs/OCR_Installation_Profiles.md) |
+| `scripts/setup_ocr_benchmark.sh` | Prepares all isolated profiles and models on Linux/WSL |
 | `scripts/run_benchmark.sh` | Orchestrates the three steps sequentially on Linux/WSL |
 
 ### Evaluating existing Markdown
@@ -873,8 +886,10 @@ providers. Consulte [o estado de implementação e os gates pendentes](docs/OCR_
 
 RapidOCR usa uma policy local que remove bordas sintéticas do raster e mantém
 o frame dentro da autorização original. Essa correção passou nos testes de
-geometria e nos controles operacionais; falsos positivos em figuras sem texto
-continuam bloqueando a homologação de qualidade.
+geometria e nos controles operacionais. Uma policy local de admissão preserva
+observações rejeitadas nos diagnósticos e impede sua integração: no perfil
+medium, os controles de figuras sem texto V5-21/V5-31 passaram nos dois providers.
+O small ainda produz falso positivo em V5-21; a homologação completa segue aberta.
 
 A seleção regional, células, notas, linhas fracas, dados críticos e refinamentos
 dedicados de figuras/tabelas visuais aplicam candidatas por propostas tipadas,
@@ -885,6 +900,13 @@ O helper público de células aceita `ocr_facade=` para usar o mesmo serviço
 autorizado. O worker Paddle usa protocolo 5 com geometria, proveniência e
 diagnósticos preservados. Equivalência de corpus e homologação de plataforma
 ainda estão pendentes; os relatórios registram os controles reprovados.
+
+A descoberta de tabela em recortes preserva o frame do raster, a rotação e a
+linhagem até as células refinadas. Há testes sintéticos pela API real para
+tabelas híbridas, células vazias e conservação de conteúdo crítico. O runner
+[`scripts/run_ocr_endurance.py`](scripts/run_ocr_endurance.py) mede repetições com
+o mesmo runtime, memória/descritores e limpeza de workers; exemplos e limites
+estão no [checklist de aceitação](docs/acceptance-checklist.md).
 
 - [Histórico de PR-01 a PR-03](docs/OCR_Decoupling_PR01_PR03.md)
 - [Baseline de 20/10/2026](docs/OCR_Decoupling_Baseline_2026-10-20.md)

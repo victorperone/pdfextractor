@@ -52,7 +52,7 @@ from structured_pdf_text.ocr.factory import build_ocr_backend
 from structured_pdf_text.ocr.pipeline.adapters import AuthorizedBackendPipeline
 from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
 from structured_pdf_text.ocr.pipeline.policies import (
-    CellRecoveryPolicy, ConservativeIntegrationPolicy, FigureSegmentationPolicy,
+    CellRecoveryPolicy, ConservativeIntegrationPolicy, EvidenceAdmissionPolicy, FigureSegmentationPolicy,
     RasterBoundaryPolicy, RegionalRecoveryProfile, TokenRefinementPolicy,
 )
 
@@ -64,6 +64,7 @@ class MinhaPipeline(AuthorizedBackendPipeline):
     fusion_policy = CandidateFusionPolicy()
     figure_segmentation_policy = FigureSegmentationPolicy()
     raster_boundary_policy = RasterBoundaryPolicy()
+    admission_policy = EvidenceAdmissionPolicy()
 
 def build_pipeline(resolved):
     backend = build_ocr_backend(replace(
@@ -109,16 +110,55 @@ e precisa de nova captura, sem substituir o baseline histórico.
 
 ## Integração e validação
 
+Uma policy local de admissão recebe `TokenEvidence` já validado e o request.
+`rejection_reason(token, request)` retorna `None` para admitir a observação ou
+um motivo estável para rejeitá-la. A confiança normalizada está em
+`token.confidence_normalized`; não derive confiança de campos desconhecidos.
+O default admite todas as observações e preserva os demais pipelines.
+
+Observações rejeitadas permanecem em `OCRPipelineResult.tokens` e em candidatas
+com `selected=False`, mas não recebem proposta de integração. Os contadores
+`observed_tokens`, `admitted_tokens` e `rejected_tokens` e os diagnósticos de
+admissão conservam a distinção. Um trabalho pode retornar `ok` com observações
+rejeitadas e nenhum texto integrado; o resultado final desse objetivo é
+`no_text`, sem apagar o trabalho realizado. Falhas de runtime/geometria
+continuam sendo falhas, independentemente de abstenção de qualidade.
+
+O coordenador oferece à seleção diferida somente evidências referenciadas em
+propostas válidas. O contrato proíbe propor evidência de candidata exclusivamente
+não selecionada; o integrador ainda exige que toda evidência elegível tenha
+exatamente uma proposta. Preservar observações brutas não permite recuperá-las
+por um caminho paralelo depois da rejeição.
+
 `ProposalIntegrator` aplica as propostas aos alvos vinculados pelo núcleo.
 Substituições conservam conteúdo confiável, sinais, valores, ownership e
 linhagem. Seleções de tiles guardam suas autorizações originais e são aplicadas
 juntas; tentativas descartadas não podem alterar os alvos. Não invoque um
 backend raw diretamente de API, tabelas ou figuras.
 
+O conversor para `OcrToken` preserva o ID da observação autorizada em
+`evidence_id`; a reconstrução deve transferi-lo para `TextToken`. Uma célula
+refinada preserva IDs anteriores em `derived_from_ids`, inclusive quando o
+novo reconhecimento desloca o box. Rebuilds de linhas preservam transitivamente
+`merged_source_line_ids` para que conservação/assembly não emitam novamente o
+conteúdo consumido pela tabela. Não substitua esses vínculos por coincidência
+de texto ou posição. O campo em `OcrToken` é opcional para compatibilidade raw.
+
+Na descoberta central de estrutura em raster, um recorte precisa conservar sua
+extensão em pontos PDF (`image_bbox`). `detect_visual_table_in_region` faz a
+conversão da composição visível, desfaz rotação e libera o recorte. Ele não
+substitui os serviços autorizados que continuam obrigatórios para todo OCR.
+
 Use como referência executável
 `tests/test_ocr_pipeline_architecture.py::test_registered_fifth_engine_flows_through_cli_authorization_and_integration`.
 Ele registra uma quinta engine fake e percorre configuração, CLI, factory,
 render autorizado, integração e saída. Não comprova qualidade de um runtime real.
+`tests/test_registered_engine_runners.py` também registra uma engine depois de
+importar os runners e percorre o benchmark E2E, identidade, artefatos e proteção
+contra sobrescrita. Os parsers de benchmark, smoke de célula e endurance devem
+consultar `public_engines()` e `public_providers()` durante a chamada, sem
+congelar as listas no import. O teste percorre também um provider próprio da
+quinta engine.
 
 Antes de declarar suporte, execute o gate de imports, testes de contrato e
 serviços, negativas de pixels/resultados externos, conservação e cancelamento.

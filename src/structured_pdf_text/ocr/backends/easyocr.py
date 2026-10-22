@@ -4,7 +4,7 @@ EasyOCR downloads models on first use to ~/.cache/pdfextractor/easyocr/:
   - craft_mlt_25k.pth  (detection, ~83 MB)
   - latin_g2.pth       (recognition for Portuguese, ~15 MB)
 
-No GPU is used (gpu=False). Models are cached locally after first download.
+CPU is the default; use_gpu requests CUDA with an explicit CPU fallback.
 The Reader always receives model_storage_directory pointing to the project
 cache directory so the readiness probe and the inference runtime always check
 the same location, regardless of whether EASYOCR_MODULE_PATH is set.
@@ -138,6 +138,7 @@ from structured_pdf_text.document import OcrToken, SourceKind
 from structured_pdf_text.errors import FatalExtractionError, raise_if_resource_exhausted
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, sha256_file
+from structured_pdf_text.ocr.device import gpu_configuration_failure, retry_gpu_configuration_on_cpu
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
     OCRCapabilities,
@@ -2228,7 +2229,7 @@ def _rebuild_reader_no_quantize(reader: "Any") -> "Any":
 
 
 class EasyOCRBackend:
-    """OCRBackend using EasyOCR with PyTorch CPU inference.
+    """OCRBackend using EasyOCR with CPU default and optional CUDA inference.
 
     Satisfies both OCRBackend (benchmark) and OcrEngine (pipeline) protocols.
     Models are stored in ~/.cache/pdfextractor/easyocr/ by default.
@@ -2326,8 +2327,27 @@ class EasyOCRBackend:
         # network. Set EASYOCR_ALLOW_DOWNLOAD=1 only during the setup phase.
         allow_download = os.environ.get("EASYOCR_ALLOW_DOWNLOAD", "0") == "1"
 
+        self._gpu_fallback_reason = None
+        gpu = False
+        if config.use_gpu:
+            try:
+                import torch
+                gpu = bool(torch.cuda.is_available())
+                if not gpu:
+                    self._gpu_fallback_reason = "cuda_unavailable"
+            except Exception as exc:
+                raise_if_resource_exhausted(exc, stage="easyocr_device_probe")
+                self._gpu_fallback_reason = f"cuda_probe_failed:{type(exc).__name__}"
+            if not gpu:
+                import logging
+                logging.getLogger(__name__).warning("EasyOCR: CUDA requested; using CPU (%s)", self._gpu_fallback_reason)
+        self._cpu_quantize = self._quantize
+        if gpu:
+            # PyTorch dynamic quantization is a CPU optimization.
+            self._quantize = False
+
         kwargs: dict[str, Any] = {
-            "gpu": False,
+            "gpu": gpu,
             "verbose": False,
             "download_enabled": allow_download,
             # Always pass the resolved cache dir so Reader and readiness probe
@@ -2338,7 +2358,24 @@ class EasyOCRBackend:
         if recog_network:
             kwargs["recog_network"] = recog_network
 
-        self._reader = easyocr_mod.Reader(self._langs, **kwargs)
+        try:
+            self._reader = easyocr_mod.Reader(self._langs, **kwargs)
+        except Exception as exc:
+            if not gpu or not gpu_configuration_failure(exc):
+                raise
+            import logging
+            self._gpu_fallback_reason = f"cuda_initialization_failed:{type(exc).__name__}:{exc}"
+            logging.getLogger(__name__).warning("EasyOCR: CUDA initialization failed; using CPU (%s)", exc)
+            gpu = False
+            self._quantize = self._cpu_quantize
+            kwargs.update(gpu=False, quantize=self._quantize)
+            self._reader = easyocr_mod.Reader(self._langs, **kwargs)
+        self._runtime_device = str(getattr(self._reader, "device", "unknown" if gpu else "cpu"))
+        self._device = "cuda" if self._runtime_device.startswith("cuda") else self._runtime_device
+        if gpu and self._device != "cuda":
+            self._gpu_fallback_reason = f"reader_selected:{self._runtime_device}"
+            import logging
+            logging.getLogger(__name__).warning("EasyOCR: CUDA requested; Reader selected %s", self._runtime_device)
         self._reader._pdfextractor_init_options = {
             "lang_list": list(self._langs), **kwargs,
         }
@@ -2351,6 +2388,23 @@ class EasyOCRBackend:
         self._auxiliary_readers: dict[str, Any] = {}
 
         self.reset_page_diagnostics()
+
+    def _fallback_to_cpu(self, exc: BaseException) -> bool:
+        if getattr(self, "_device", "cpu") != "cuda" or not gpu_configuration_failure(exc):
+            return False
+        import logging
+        options = dict(self._reader._pdfextractor_init_options)
+        languages = options.pop("lang_list")
+        options.update(gpu=False, quantize=self._cpu_quantize)
+        logging.getLogger(__name__).warning("EasyOCR: CUDA unavailable during inference; retrying on CPU (%s)", exc)
+        self._reader = _import_easyocr().Reader(languages, **options)
+        self._reader._pdfextractor_init_options = {"lang_list": languages, **options}
+        self._quantize = self._cpu_quantize
+        self._runtime_device = self._device = "cpu"
+        self._gpu_fallback_reason = f"cuda_runtime_failed:{type(exc).__name__}:{exc}"
+        self._auxiliary_readers.clear()
+        self._dbnet_runtime_state = None
+        return True
 
     # ------------------------------------------------------------------
     # DBNet18 per-instance runtime probe
@@ -2460,10 +2514,10 @@ class EasyOCRBackend:
     def identity(self) -> OCRBackendIdentity:
         return OCRBackendIdentity(
             engine="easyocr",
-            runtime="torch-cpu",
+            runtime="torch-cuda" if getattr(self, "_device", "cpu") == "cuda" else "torch-cpu",
             profile="+".join(self._langs),
             language=self._language,
-            device="cpu",
+            device=getattr(self, "_device", "cpu"),
             package_versions={
                 "easyocr": _package_version("easyocr"),
                 "torch": _package_version("torch"),
@@ -2479,6 +2533,9 @@ class EasyOCRBackend:
             extra={
                 "render_scale": self._config.effective_ocr_render_scale(),
                 "recognition_network": self._recog_network,
+                "gpu_requested": self._config.use_gpu,
+                "runtime_device": getattr(self, "_runtime_device", "cpu"),
+                "gpu_fallback_reason": getattr(self, "_gpu_fallback_reason", None),
                 "mag_ratio": self._mag_ratio,
                 "canvas_size_policy": "int(mag_ratio * max(h, w))",
                 "decoder": self._decoder,
@@ -2601,6 +2658,8 @@ class EasyOCRBackend:
                 status = "ok" if tokens else "no_text"
                 extra_warnings = ()
         except Exception as exc:
+            if self._fallback_to_cpu(exc):
+                return self.recognize(request)
             return OCRResult(
                 status="runtime_error",
                 tokens=(),
@@ -2622,6 +2681,7 @@ class EasyOCRBackend:
     # OcrEngine protocol — consumed by recovery.py / pipeline
     # ------------------------------------------------------------------
 
+    @retry_gpu_configuration_on_cpu
     def recognize_page(
         self,
         page_image: object,
@@ -2730,6 +2790,7 @@ class EasyOCRBackend:
 
         return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0], page_rotation)
 
+    @retry_gpu_configuration_on_cpu
     def recognize_region(
         self,
         page_image: object,
@@ -2761,6 +2822,7 @@ class EasyOCRBackend:
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)
 
+    @retry_gpu_configuration_on_cpu
     def recognize_direct(
         self, image: object, page_index: int, page_bbox: "BBox | None" = None,
         *, quality_policy: str | None = None,

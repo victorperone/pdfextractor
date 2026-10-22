@@ -121,6 +121,7 @@ def reconstruct_ocr_lines(
                     provenance=token.provenance or _default_ocr_provenance(token),
                     rotation=token.rotation,
                     ocr_provenance=token.ocr_provenance,
+                    evidence_id=token.evidence_id,
                 )
             )
             previous = token

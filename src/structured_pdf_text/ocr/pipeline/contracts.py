@@ -474,6 +474,11 @@ class OCRPipelineResult:
         if self.failures and self.status in (WorkStatus.OK, WorkStatus.NO_TEXT):
             raise ValueError("Local failures must remain visible in the work status")
 
+    @property
+    def unselected_token_ids(self) -> frozenset[str]:
+        selected = {i for c in self.candidates if c.selected for i in c.token_ids}
+        return frozenset(i for c in self.candidates if not c.selected for i in c.token_ids) - selected
+
     def validate_for(self, request: OCRWorkRequest) -> None:
         if self.request_id != request.request_id or self.scope != request.scope or self.selection != request.selection:
             raise ValueError("Result does not belong to this request/scope/engine/provider")
@@ -495,6 +500,8 @@ class OCRPipelineResult:
         for candidate in self.candidates:
             if any(i not in tokens or tokens[i].attempt_id != candidate.attempt_id for i in candidate.token_ids):
                 raise ValueError("Candidate lineage mismatch")
+        if any(i in self.unselected_token_ids for p in self.proposals for i in p.evidence_ids):
+            raise ValueError("Integration proposal refers to unselected candidate evidence")
         for suggestion in self.additional_work_suggested:
             if not contains(request.scope.page_geometry.bbox, suggestion.bbox):
                 raise ValueError("Suggested work lies outside the page")

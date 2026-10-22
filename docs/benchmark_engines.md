@@ -25,7 +25,10 @@ be benchmarked in a new namespace before those comparisons are updated.
 The authorized pipeline migration is still being validated. Reduced V5 controls
 show differences from legacy outputs. RapidOCR's raster boundary correction
 removed the authorization error in page 21, but negative controls still contain
-spurious figure text. These results do not replace the historical leaderboard or
+spurious figure text with the small profile. A local evidence admission policy
+cleared the V5-21/V5-31 negative controls for medium with both providers;
+the small profile still reads `O` on V5-21. These reduced controls do not
+establish general quality or replace the historical leaderboard or
 establish release acceptance. See the
 [implementation status](OCR_Decoupling_Implementation_Status.md) for run IDs,
 model/provider evidence and remaining gates, and the
@@ -88,13 +91,13 @@ scripts/setup_ocr_benchmark.sh
 .\scripts\setup_ocr_benchmark.ps1
 ```
 
-These scripts install the supported OCR stack, prepare local EasyOCR and
-RapidOCR artifacts, check package consistency/OpenCV uniqueness, and run static
-readiness. The setup currently downloads models; benchmark execution itself is
-expected to use the prepared local artifacts. The setup scripts and constraints
-files are the source of exact package pins. Run `python scripts/check_ocr_install.py
---imports` and `python scripts/preflight_ocr_backends.py --language pt-BR` to
-inspect an existing environment.
+These scripts create a separate virtualenv for each deployment profile under
+`.ocr-envs`, prepare model artifacts, check dependencies/OpenCV ownership and
+run static readiness. Tesseract with Portuguese traineddata must already be in
+`PATH`. Existing environments are preserved; use another environment root for
+a fresh installation. See [isolated installation](OCR_Installation_Profiles.md)
+for single-engine installation, offline wheels and JSON installation reports.
+Model downloads occur during explicit setup; extraction uses local artifacts.
 
 PP-OCRv6 with the OpenVINO provider pins OpenVINO 2026.4.1. A real smoke with
 2024.4.0 failed while loading the v6 recognizer's ONNX graph. On Linux, the
@@ -113,11 +116,11 @@ local RapidOCR v6 artifact hashes recorded in its manifests.
 The default runners execute five configurations (four OCR families):
 
 ```bash
-scripts/run_benchmark.sh --run-suffix acceptance-wsl --all-pages
+scripts/run_benchmark.sh --python .venv/bin/python --environment-root .ocr-envs --run-suffix acceptance-wsl --all-pages
 ```
 
 ```powershell
-.\scripts\run_benchmark.ps1 -RunSuffix acceptance-windows -AllPages
+.\scripts\run_benchmark.ps1 -PythonBin .\.venv\Scripts\python.exe -EnvironmentRoot .ocr-envs -RunSuffix acceptance-windows -AllPages
 ```
 
 The corpus, reference Markdown, manifest, and validation report must be
@@ -145,6 +148,16 @@ RSS. Process-tree values are sampled and can miss short-lived peaks; the manifes
 records the sample count and interval when available.
 
 ## Acceptance layers
+
+For structured refactoring captures, `scripts/compare_ocr_baseline.py` keeps
+strict comparison as its default. Independent authorized runs mint different
+request/authorization/evidence UUIDs. The explicit `--canonicalize-lineage-ids`
+option compares those UUID components by consistent renaming across known
+lineage fields. It preserves parent/evidence references, distinct identities,
+attempt/token suffixes, native lineage, text, model hashes, geometry, settings
+and Markdown checks. Each report records the normalization policy and counts.
+Keep both reports; an equivalent lineage graph does not approve recognition
+quality or erase structural differences from a historical capture.
 
 The automated suite and real-backend/corpus acceptance are separate gates. Run
 the core suite with both entrypoints, then static and deep backend preflight,

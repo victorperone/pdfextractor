@@ -35,7 +35,14 @@ associação à região juntos. Tabelas visuais usam um draft de estrutura valid
 contra os tokens observados; a engine não altera a grade diretamente.
 
 Autorizações distintas de tiles permanecem distintas na seleção final.
-Tentativas não selecionadas são descartadas. Snapshots e recibos impedem
+Uma policy local pode se abster sobre evidência OCR já autorizada: observações
+e candidatas rejeitadas ficam no resultado bruto, contadores e diagnóstico,
+sem proposta de integração nem exposição à seleção diferida. O integrador
+exige aplicação única de toda evidência elegível e impede integrar evidência
+de candidata exclusivamente não selecionada. Abstenção não elimina incidentes
+de geometria ou runtime e não permite ampliar o escopo.
+
+Tentativas não selecionadas liberam os alvos diferidos sem mutação. Snapshots e recibos impedem
 mutação parcial, aplicação contra alvo alterado e replay inconsistente.
 
 Backends raw e adapters públicos continuam disponíveis para seus consumidores.

@@ -5,7 +5,7 @@ are read only by the selected resolver and are captured once per extractor.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +23,11 @@ class EngineSettings:
     quality_policy: Any
     quality_thresholds: Any
     rgb_budget_mib: float
+    use_gpu: bool = field(default=False, kw_only=True)
+
+    def __post_init__(self):
+        if not isinstance(self.use_gpu, bool):
+            raise ValueError("use_gpu must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +124,7 @@ def _common(config: "ExtractorConfig", engine: str, provider: str | None) -> dic
     return {
         "selection": EngineSelection(engine, provider),
         "language": config.language,
+        "use_gpu": config.use_gpu,
         "render_scale": config.effective_ocr_render_scale(),
         "quality_policy": config.effective_ocr_quality_policy(),
         "quality_thresholds": effective_ocr_quality_thresholds(config),

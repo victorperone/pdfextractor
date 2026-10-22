@@ -1,5 +1,6 @@
 """Core table reading order shared by OCR integration and legacy consumers."""
 from typing import Any
+from structured_pdf_text.assemble.conservation import line_identity
 from structured_pdf_text.document import Baseline, EvidenceRef, SourceKind, TextLine, TextToken, WritingDirection
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.tables.text_join import join_table_tokens
@@ -84,6 +85,14 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int,
             continue
         row_tokens = _merge_short_table_fragments(row_tokens)
         row_bbox = BBox.union_all([token.bbox for token in row_tokens])
+        row_token_ids = {id(token) for token in row_tokens}
+        row_line_id = f"ocr-table:p{page_index}:{table.table_id}:row:{row}"
+        source_ids = tuple(dict.fromkeys(
+            source_id for line in lines
+            if any(id(token) in row_token_ids for token in line.tokens if token.text.strip())
+            for source_id in (*line.merged_source_line_ids, line_identity(line))
+            if source_id != row_line_id
+        ))
         rebuilt.append(
             TextLine(
                 tokens=row_tokens,
@@ -92,6 +101,8 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int,
                 direction=WritingDirection.LEFT_TO_RIGHT,
                 native_order_min=row,
                 native_order_max=row,
+                line_id=row_line_id,
+                merged_source_line_ids=source_ids,
             )
         )
     return rebuilt or lines

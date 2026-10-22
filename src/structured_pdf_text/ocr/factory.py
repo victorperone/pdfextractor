@@ -69,6 +69,7 @@ def build_ocr_backend(config: "ExtractorConfig") -> OCRBackend:
         ocr_engine=resolved.engine,
         ocr_provider=resolved.provider,
         ocr_settings=resolved.settings,
+        use_gpu=resolved.settings.use_gpu,
     ))
     return backend
 

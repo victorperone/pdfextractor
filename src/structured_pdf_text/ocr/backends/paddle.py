@@ -136,8 +136,9 @@ class PaddleOCRBackend:
         self._runtime_policy = resolve_paddle_runtime_policy()
         apply_paddle_runtime_policy(self._runtime_policy)
         logging.getLogger(__name__).info(
-            "Paddle runtime policy: device=cpu, paddle=%s, enable_mkldnn=%s (%s), disable_pir_api=%s",
-            _package_version("paddlepaddle"),
+            "Paddle runtime policy: requested_gpu=%s, paddle=%s, enable_mkldnn=%s (%s), disable_pir_api=%s",
+            config.use_gpu,
+            _package_version("paddlepaddle-gpu") if _package_version("paddlepaddle-gpu") != "unknown" else _package_version("paddlepaddle"),
             self._runtime_policy.enable_mkldnn,
             self._runtime_policy.reason,
             self._runtime_policy.disable_pir_api,
@@ -146,6 +147,7 @@ class PaddleOCRBackend:
 
         self._subprocess_config: dict | None = None
         self._worker_diagnostics: dict[str, Any] = {}
+        self._worker_execution = {"device": "unknown" if config.use_gpu else "cpu", "gpu_fallback_reason": None}
         self._worker_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._cancel_requested = threading.Event()
         # Serialise all subprocess request/response cycles so two callers
@@ -176,6 +178,7 @@ class PaddleOCRBackend:
                 "mkldnn": _enable_mkldnn,
                 "disable_pir_api": self._runtime_policy.disable_pir_api,
                 "cache_home": self._cache_home,
+                "use_gpu": config.use_gpu,
             }
             self._engine = None
         else:
@@ -192,6 +195,7 @@ class PaddleOCRBackend:
                 quality_thresholds=config.ocr_quality_thresholds,
                 enable_mkldnn=_enable_mkldnn,
                 cache_home=self._cache_home,
+                use_gpu=config.use_gpu,
             )
 
     # ------------------------------------------------------------------
@@ -251,6 +255,7 @@ class PaddleOCRBackend:
         if response.get("protocol_version") != PROTOCOL_VERSION:
             self._discard_worker()
             raise RuntimeError("Paddle worker metadata protocol mismatch")
+        self._worker_execution.update(response.get("execution") or {})
 
     def _raw_send(self, request: dict) -> dict:
         """Write one request and read one response on the raw pipe.
@@ -372,6 +377,7 @@ class PaddleOCRBackend:
                 pass
 
         self._worker_diagnostics = dict(response.get("diagnostics") or {})
+        self._worker_execution.update(response.get("execution") or {})
         if response.get("status") != "ok":
             _raise_worker_failure(response, "Paddle worker request failed")
         return deserialize_tokens(response.get("tokens", []), language=self._config.language)
@@ -383,25 +389,33 @@ class PaddleOCRBackend:
     @property
     def identity(self) -> OCRBackendIdentity:
         """Return engine identity including package versions, artifact hashes, and runtime mode."""
+        device = (self._worker_execution.get("device", "unknown") if self._subprocess_config else
+                  getattr(self._engine, "effective_device", "unknown" if self._config.use_gpu else "cpu"))
+        fallback = (self._worker_execution.get("gpu_fallback_reason") if self._subprocess_config else
+                    getattr(self._engine, "gpu_fallback_reason", None))
+        runtime_package = "paddlepaddle-gpu" if _package_version("paddlepaddle-gpu") != "unknown" else "paddlepaddle"
         return OCRBackendIdentity(
             engine="paddle",
             runtime="paddle_subprocess" if self._subprocess_config else "paddle_static",
             profile=self._config.paddle_model_profile,
             language=self._config.language,
-            device="cpu",
+            device="cuda" if str(device).startswith("gpu") else str(device),
             package_versions={
-                "paddlepaddle": _package_version("paddlepaddle"),
+                runtime_package: _package_version(runtime_package),
                 "paddleocr": _package_version("paddleocr"),
                 "paddlex": _package_version("paddlex"),
             },
             artifact_hashes=dict(self._artifact_hashes),
             extra={
                 "render_scale": self._config.effective_ocr_render_scale(),
+                "gpu_requested": self._config.use_gpu,
+                "runtime_device": device,
+                "gpu_fallback_reason": fallback,
                 "quality_policy": effective_ocr_quality_policy(self._config).value,
                 "quality_variants": self._config.ocr_quality_variants,
                 "ocr_batch_size": self._config.ocr_batch_size,
                 "num_threads": _resolve_num_threads(self._config.num_threads),
-                "one_dnn": self._runtime_policy.enable_mkldnn,
+                "one_dnn": self._runtime_policy.enable_mkldnn and not str(device).startswith("gpu"),
                 "orientation_classifier": True,
                 "unwarping": True,
             },

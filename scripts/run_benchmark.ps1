@@ -25,6 +25,8 @@ param(
     [string]$CorpusLock = "corpus\acceptance-corpus.lock.json",
     [string]$OutDir     = "output\fase8",
     [string]$PythonBin  = "python",
+    [string]$EnvironmentRoot = "",
+    [switch]$Gpu,
     [ValidateSet("medium", "small")][string]$RapidOcrModelSize = $(if ($env:RAPIDOCR_MODEL_SIZE) { $env:RAPIDOCR_MODEL_SIZE } else { "medium" })
 )
 
@@ -35,7 +37,21 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $ScriptDir
 $env:EASYOCR_MODULE_PATH = if ($env:EASYOCR_MODULE_PATH) { $env:EASYOCR_MODULE_PATH } else { Join-Path $HOME ".cache\pdfextractor\easyocr" }
+if ($EnvironmentRoot -and -not [System.IO.Path]::IsPathRooted($EnvironmentRoot)) {
+    $EnvironmentRoot = Join-Path $RepoRoot $EnvironmentRoot
+}
+$allConfigurations = @("tesseract", "rapidocr-onnxruntime", "rapidocr-openvino", "easyocr", "paddle")
+$engines = if ($Configuration) { @($Configuration -split "," | ForEach-Object { $_.Trim() }) } else { $allConfigurations }
+foreach ($engine in $engines) {
+    if ($engine -notin $allConfigurations) { throw "Invalid deployment configuration: $engine" }
+    if ($EnvironmentRoot) {
+        $enginePath = Join-Path $EnvironmentRoot "$engine\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { throw "Missing isolated Python: $enginePath" }
+    }
+}
+$rapidocrRequested = @($engines | Where-Object { $_ -like "rapidocr-*" }).Count -gt 0
 $rapidocrSize = $RapidOcrModelSize
+if ($rapidocrRequested) {
 $rapidocrCacheHome = if ($env:RAPIDOCR_CACHE_HOME) { $env:RAPIDOCR_CACHE_HOME } else { Join-Path $HOME ".cache\pdfextractor" }
 $rapidocrCache = Join-Path $rapidocrCacheHome "rapidocr"
 $rapidocrNames = @("RAPIDOCR_DET_MODEL", "RAPIDOCR_REC_MODEL", "RAPIDOCR_REC_KEYS", "RAPIDOCR_CLS_MODEL")
@@ -46,6 +62,8 @@ if ($setCount -eq 0) {
     for ($i = 0; $i -lt $rapidocrNames.Count; $i++) { Set-Item "Env:$($rapidocrNames[$i])" (Join-Path $rapidocrCache $rapidocrFiles[$i]) }
 } elseif ($setCount -ne $rapidocrNames.Count) {
     throw "Set all four RAPIDOCR_* model paths or none; partial overrides are rejected."
+}
+
 }
 
 Push-Location $RepoRoot
@@ -65,10 +83,12 @@ if ($LASTEXITCODE -ne 0) {
     exit 2
 }
 
+if ($rapidocrRequested) {
 & $PythonBin scripts\verify_rapidocr_artifacts.py --size $rapidocrSize `
     --detector $env:RAPIDOCR_DET_MODEL --recognizer $env:RAPIDOCR_REC_MODEL `
     --dictionary $env:RAPIDOCR_REC_KEYS --classifier $env:RAPIDOCR_CLS_MODEL
 if ($LASTEXITCODE -ne 0) { throw "RapidOCR v6 artifact verification failed." }
+}
 
 # --- Corpus preflight (mirrors run_benchmark.sh inline Python check) ---
 Write-Host ""
@@ -157,20 +177,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # --- Deployment configuration loop ---
-$allConfigurations = @("tesseract", "rapidocr-onnxruntime", "rapidocr-openvino", "easyocr", "paddle")
-
-if ($Configuration -ne "") {
-    $engines = $Configuration -split "," | ForEach-Object { $_.Trim() }
-} else {
-    $engines = $allConfigurations
-}
-
 $failed      = @()
 $metricFiles = @()
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 foreach ($engine in $engines) {
+    $enginePython = $PythonBin
+    if ($EnvironmentRoot) { $enginePython = Join-Path $EnvironmentRoot "$engine\Scripts\python.exe" }
     $runId      = "$RunSuffix-$engine"
     $configSlug = $engine -replace "-", "_"
     $backend    = $engine
@@ -193,11 +207,12 @@ foreach ($engine in $engines) {
 
     # --- evaluate_e2e ---
     $evalArgs = @("scripts\evaluate_e2e.py", $Corpus, "--engine", $backend, "--run-id", $runId, "--output-dir", $OutDir, "--allow-partial")
+    if ($Gpu) { $evalArgs += "--gpu" }
     if ($provider) { $evalArgs += @("--provider", $provider, "--rapidocr-model-size", $rapidocrSize) }
     if ($AllPages) {
-        & $PythonBin @evalArgs
+        & $enginePython @evalArgs
     } else {
-        & $PythonBin @evalArgs --pages $Pages
+        & $enginePython @evalArgs --pages $Pages
     }
 
     if ($LASTEXITCODE -ne 0) {

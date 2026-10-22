@@ -1,8 +1,8 @@
-"""V5 manifest — End-to-end regression scaffold.
+"""Synthetic domain integration for invariants motivated by the V5 audit.
 
-Documents the high-level quality expectations from the V5 audit. These tests
-use the Fake OCR backend to run the full pipeline deterministically.
-Some tests are live; others are xfail specs for future work.
+PDFium, authorization, cell integration, assembly and renderers are real;
+OCR and grid discovery are deterministic injections. These are not V5 corpus
+recognition tests, which remain separate release gates.
 """
 from __future__ import annotations
 
@@ -57,32 +57,60 @@ class TestV5ManifestContract:
         assert int(parts[4][3:]) >= 0
 
 
-@pytest.mark.xfail(reason="V5 E2E — requires corpus PDF fixture", strict=False)
-class TestV5E2EWithCorpus:
-    """Full-pipeline tests that require the corpus PDF (excluded from CI without fixture)."""
+@pytest.fixture
+def hybrid_pdf(tmp_path, monkeypatch):
+    from ocr_domain_fixtures import hybrid_table_pdf, install_table_structure
 
-    def test_v5_p009_empty_cells_preserved(self):
-        """V5-P009: empty cells in 'Ajuste' row must not be filled by OCR."""
-        import os
-        corpus_path = os.path.join(
-            os.path.dirname(__file__),
-            "corpus", "Corpus_Integrado_PDF_OCR_TableMagic_V3.pdf"
-        )
-        if not os.path.exists(corpus_path):
-            pytest.skip("Corpus PDF not available")
+    install_table_structure(monkeypatch)
+    return hybrid_table_pdf(tmp_path / "critical-hybrid.pdf")
 
-        from structured_pdf_text.api import PdfTextExtractor
-        extractor = PdfTextExtractor(ExtractorConfig(ocr_backend="fake"))
-        doc = extractor.extract(corpus_path, page_indices=[9])
-        md = doc.to_markdown()
-        # The Ajuste row: columns 3 and 5 must be empty
-        lines = [l for l in md.splitlines() if "Ajuste" in l]
-        assert lines, "V5-P009: Ajuste row must appear in output"
 
-    def test_v5_no_negation_removal_across_all_pages(self):
-        """No page in V5 corpus should have a negation word removed by OCR refinement."""
-        pytest.skip("Corpus PDF not available in CI")
+class TestSyntheticHybridInvariants:
+    def test_empty_cells_preserved_after_real_ocr_work(self, hybrid_pdf):
+        from ocr_domain_fixtures import extract_hybrid
+        from structured_pdf_text.document import TableMethod
+        from structured_pdf_text.renderers import render_markdown
 
-    def test_v5_critical_data_fingerprints_stable(self):
-        """CPF/CNPJ/monetary values must be identical across two extraction runs."""
-        pytest.skip("Corpus PDF not available in CI")
+        document, _ = extract_hybrid(hybrid_pdf)
+        native = next(table for table in document.tables if table.method == TableMethod.STRICT_GRID)
+        row = [cell for cell in native.cells if cell.row == 1]
+        assert [cell.text for cell in row] == ["Ajuste", "", ""]
+        assert all(not cell.tokens for cell in row[1:])
+        assert render_markdown(document).count("Ajuste") == 1
+
+    def test_native_negation_and_critical_values_survive_conflicting_observation(self, hybrid_pdf):
+        from ocr_domain_fixtures import extract_hybrid
+        from structured_pdf_text.document import OcrToken, SourceKind
+        from structured_pdf_text.geometry import BBox
+        from structured_pdf_text.renderers import render_markdown
+
+        # Outside the selected figure; the adapter must never request this
+        # native rectangle just because the injected recognizer has a reading.
+        wrong = OcrToken("AUTORIZADO", BBox(25, 16, 125, 28), .99, "pt-BR", SourceKind.OCR_REGION)
+        document, engine = extract_hybrid(hybrid_pdf, extra_tokens=(wrong,))
+        markdown = render_markdown(document)
+        assert markdown.count("NÃO AUTORIZADO") == 1
+        assert "CPF 123.456.789-09 CNPJ 12.345.678/0001-90" in markdown
+        assert "Saldo R$ -42,90 ID AB-009" in markdown
+        assert all(box.intersection(wrong.bbox) is None for box in engine.calls)
+
+    def test_critical_fingerprints_and_structure_stable_in_both_renderers(self, hybrid_pdf):
+        import json
+        import re
+        from ocr_domain_fixtures import extract_hybrid
+        from structured_pdf_text.renderers import render_json, render_markdown
+
+        first, _ = extract_hybrid(hybrid_pdf)
+        second, _ = extract_hybrid(hybrid_pdf)
+        assert render_markdown(first) == render_markdown(second)
+        assert first.reading_text == second.reading_text
+        fingerprint = re.compile(r"123\.456\.789-09|12\.345\.678/0001-90|-42,90|AB-009")
+        assert fingerprint.findall(first.reading_text) == fingerprint.findall(second.reading_text)
+        assert len(fingerprint.findall(first.reading_text)) == 6
+        for document in (first, second):
+            def reject_constant(value):
+                raise AssertionError(f"Nonfinite JSON: {value}")
+            serialized = json.loads(render_json(document), parse_constant=reject_constant)
+            assert len(serialized["pages"]) == 1
+            assert len(serialized["pages"][0]["tables"]) == 2
+            assert document.pages[0].diagnostics.facts["content_fallback_lines"] == 0

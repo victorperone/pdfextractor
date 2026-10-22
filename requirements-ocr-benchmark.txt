@@ -3,7 +3,10 @@
 # Ambiente: Windows Server 2025, Python 3.12.10, AMD64
 # Tesseract: 5.5.3 (executável do sistema, tessdata: por)
 #
-# Instalação: pip install -r requirements-ocr-benchmark.txt
+# Inventário histórico de versões; não instalar junto no mesmo virtualenv.
+# EasyOCR, RapidOCR e PaddleX exigem variantes OpenCV que sobrepõem cv2.
+# Instalação: python scripts/setup_ocr_environments.py --configuration <perfil>
+# Guia: docs/OCR_Installation_Profiles.md
 # Provider engines are installed declaratively with the unified RapidOCR package.
 #
 # Ou usar o script: scripts/setup_ocr_benchmark.ps1

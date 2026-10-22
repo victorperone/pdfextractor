@@ -327,6 +327,7 @@ def _table_token_claim_strength(
             eid = getattr(item, "evidence_id", None)
             if eid:
                 cell_evidence_ids.add(eid)
+            cell_evidence_ids.update(getattr(item, "derived_from_ids", ()))
             cell_python_ids.add(id(item))
 
     if cell_evidence_ids or cell_python_ids:

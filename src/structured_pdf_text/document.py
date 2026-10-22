@@ -260,6 +260,9 @@ class OcrToken:
     polygon: "tuple[Point, ...] | None" = None
     level: str = "line"
     ocr_provenance: "OcrProvenance | None" = None
+    # Assigned by the authorized pipeline, preserved when reconstructing lines
+    # and transferring recognized evidence into cells. Raw backends may omit it.
+    evidence_id: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
