@@ -140,7 +140,7 @@ def test_rapidocr_checks_active_detector_and_recognizer_sessions(rapid_factory, 
     assert engine._engine.text_det.session.session.fallback_enabled is (device != "cuda")
     assert engine._engine.text_rec.session.session.fallback_enabled is (device != "cuda")
     if device == "cuda":
-        assert engine._engine.params["EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search"] == "DEFAULT"
+        assert engine._engine.params["EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search"] == "HEURISTIC"
     else:
         assert engine.identity.extra["gpu_fallback_reason"]
 

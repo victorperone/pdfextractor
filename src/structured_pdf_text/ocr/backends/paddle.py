@@ -42,6 +42,7 @@ from structured_pdf_text.ocr.runtime_policy import (
     apply_paddle_runtime_policy,
     resolve_paddle_runtime_policy,
 )
+from structured_pdf_text.ocr.slow_work import warn_if_slow
 from structured_pdf_text.ocr.pipelines.paddle.wire import PROTOCOL_VERSION, deserialize_tokens
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
@@ -211,7 +212,7 @@ class PaddleOCRBackend:
         if proc.poll() is None:
             proc.kill()
         try:
-            proc.wait(timeout=1)
+            proc.wait()
         except Exception:
             pass
         for stream in (proc.stdin, proc.stdout):
@@ -621,13 +622,14 @@ class PaddleOCRBackend:
                     if process.stdin is not None:
                         process.stdin.write(b"QUIT\n")
                         process.stdin.flush()
-                    process.wait(timeout=10)
+                    with warn_if_slow("Paddle worker shutdown"):
+                        process.wait()
                 except Exception:
                     try:
                         process.kill()
                     finally:
                         try:
-                            process.wait(timeout=5)
+                            process.wait()
                         except Exception:
                             pass
                 finally:

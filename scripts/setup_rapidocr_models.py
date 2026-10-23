@@ -27,7 +27,7 @@ def _download(url: str, destination: Path) -> None:
             subprocess.run([curl, "-fL", "--retry", "3", "--output", str(partial), url], check=True)
         else:
             request = urllib.request.Request(url, headers={"User-Agent": "structured-pdf-text-model-setup/1"})
-            with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
+            with urllib.request.urlopen(request) as response, partial.open("wb") as output:
                 while block := response.read(1024 * 1024):
                     output.write(block)
         partial.replace(destination)

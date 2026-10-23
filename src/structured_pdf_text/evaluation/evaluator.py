@@ -300,7 +300,7 @@ def _get_git_sha() -> str | None:
         import subprocess
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
             cwd=Path(__file__).resolve().parents[3],
         )
         if result.returncode == 0:

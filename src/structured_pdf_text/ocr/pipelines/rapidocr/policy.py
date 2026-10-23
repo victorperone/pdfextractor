@@ -62,3 +62,41 @@ class RapidOCRFigureAdmissionPolicy:
 
 
 ADMISSION_POLICY = RapidOCRFigureAdmissionPolicy()
+
+
+@dataclass(frozen=True, slots=True)
+class RapidOCROrientationPolicy:
+    """Recover rotated text when the upright reading is weak.
+
+    The pinned PP-OCRv6 profile keeps the PP-OCRv4 angle classifier disabled:
+    it separates only 0 and 180 degrees. Instead, a weak upright reading (mean
+    confidence below ``confidence_floor``) is compared with the 270, 90 and 180
+    degree turns of the same authorized crop. An alternative is kept only if it
+    is itself confident and reads at least ``minimum_gain`` times as much
+    confidence-weighted text as the upright reading. Healthy readings never
+    trigger a search, so ordinary pages keep their single pass.
+    """
+
+    policy_id: str = "rapidocr-orientation-search-v1"
+    confidence_floor: float = .90
+    minimum_gain: float = 2.0
+    alternatives: tuple[int, ...] = (3, 1, 2)
+
+    def __post_init__(self):
+        if not 0 <= self.confidence_floor <= 1 or not math.isfinite(self.confidence_floor):
+            raise ValueError("Orientation confidence floor must be finite in [0, 1]")
+        if not math.isfinite(self.minimum_gain) or self.minimum_gain < 1:
+            raise ValueError("Orientation minimum gain must be finite and at least 1")
+        if not self.alternatives or any(turn not in (1, 2, 3) for turn in self.alternatives):
+            raise ValueError("Orientation alternatives must be quarter turns 1, 2 or 3")
+
+    def identity(self) -> dict:
+        return {
+            "policy_id": self.policy_id,
+            "confidence_floor": self.confidence_floor,
+            "minimum_gain": self.minimum_gain,
+            "alternatives": list(self.alternatives),
+        }
+
+
+ORIENTATION_POLICY = RapidOCROrientationPolicy()

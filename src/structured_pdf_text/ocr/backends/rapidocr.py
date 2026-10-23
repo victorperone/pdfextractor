@@ -49,6 +49,16 @@ from structured_pdf_text.ocr.contracts import (
 
 PORTUGUESE_REQUIRED_CHARS = frozenset("ãõçêáéíóú")
 
+# cuDNN convolution algorithm selection for the CUDA provider. "DEFAULT" searched
+# again for every new input shape: the 001 campaign logged 52.712 "Fallback mode"
+# warnings on V4 and detection ran about 5x slower in isolation (3,0 s against
+# 0,6 s for six shapes). HEURISTIC emits no warnings and is repeatable, but its
+# kernels round differently: on 18 sampled pages 15 produced identical text and
+# the other 3 differed only at detection borders (one punctuation mark and one
+# spurious fragment on noise pages). Captures under the old value stay comparable
+# only through their recorded identity.
+_CUDNN_CONV_ALGO_SEARCH = "HEURISTIC"
+
 
 def portuguese_dictionary_profile(path: str | os.PathLike[str] | None) -> tuple[str, tuple[str, ...]]:
     """Classify a recognizer dictionary for Portuguese sanity-check purposes.
@@ -196,6 +206,48 @@ def _extract_raw(out: Any) -> Any:
     return None
 
 
+def _quarter_turn_to_source(points, quarter_turns: int, height: int, width: int) -> list[list[float]]:
+    """Map polygon points from ``np.rot90(image, quarter_turns)`` to the source image.
+
+    ``height`` and ``width`` are the dimensions of the unrotated source image.
+    """
+    mapped = []
+    for x, y in points:
+        if quarter_turns == 1:
+            x, y = width - y, x
+        elif quarter_turns == 2:
+            x, y = width - x, height - y
+        elif quarter_turns == 3:
+            x, y = y, height - x
+        mapped.append([float(x), float(y)])
+    return mapped
+
+
+def _rows_to_source(rows, quarter_turns: int, height: int, width: int) -> list:
+    mapped = []
+    for box, text, score in rows:
+        points = [(float(point[0]), float(point[1])) for point in box]
+        mapped.append((_quarter_turn_to_source(points, quarter_turns, height, width), text, score))
+    return mapped
+
+
+def _reading_evidence(rows) -> tuple[float, float]:
+    """Return (mean confidence, confidence-weighted characters) for non-empty rows."""
+    confidences = []
+    weighted = 0.0
+    for row in rows or ():
+        text = str(row[1]).strip()
+        if not text:
+            continue
+        confidence = finite_confidence(row[2]) if len(row) > 2 else None
+        confidence = 0.0 if confidence is None else confidence
+        confidences.append(confidence)
+        weighted += len(text) * confidence
+    if not confidences:
+        return 0.0, 0.0
+    return sum(confidences) / len(confidences), weighted
+
+
 def _result_to_ocr_tokens(
     raw: Any,
     source_engine: str,
@@ -322,12 +374,17 @@ class RapidOCRBackend:
         box_thresh = settings.box_threshold
         det_thresh = settings.detector_threshold
         text_score = settings.text_score
+        from structured_pdf_text.ocr.pipelines.rapidocr.policy import ORIENTATION_POLICY
+        self._orientation_policy = ORIENTATION_POLICY
+        self._orientation_selected = {}
         self._effective_tuning = {
             "det_db_unclip_ratio": unclip,
             "det_db_box_thresh": box_thresh,
             "det_db_thresh": det_thresh,
             "text_score": text_score,
             "orientation_classifier_enabled": False,
+            "orientation_search": self._orientation_policy.identity(),
+            "cudnn_conv_algo_search": _CUDNN_CONV_ALGO_SEARCH,
         }
         if self._unified:
             # RapidOCR 3.x validates enum-typed parameters before applying
@@ -384,7 +441,7 @@ class RapidOCRBackend:
             if runtime == "onnxruntime":
                 provider["EngineConfig.onnxruntime.use_cuda"] = cuda
                 if cuda:
-                    provider["EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search"] = "DEFAULT"
+                    provider["EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search"] = _CUDNN_CONV_ALGO_SEARCH
             provider.update({
                 "Det.unclip_ratio": unclip,
                 "Det.box_thresh": box_thresh,
@@ -462,6 +519,40 @@ class RapidOCRBackend:
             self._gpu_fallback_reason = f"cuda_runtime_failed:{type(exc).__name__}:{exc}"
             self._refresh_execution_device()
             return _run_rapidocr(self._engine, image)
+
+    def _recognize_rows(self, image) -> list:
+        """Return raw rows in the source image frame, searching turns only when needed.
+
+        The upright pass runs first. A weak reading (mean confidence below the
+        policy floor) is compared with the policy's quarter turns; an alternative
+        replaces the upright reading only if it is confident and clearly reads
+        more text. Alternative rows are mapped back to the source frame before
+        they reach the token parsers, so callers still receive crop coordinates.
+        """
+        import numpy as np
+        rows = _extract_raw(self._infer(image)) or []
+        policy = self._orientation_policy
+        upright_mean, upright_score = _reading_evidence(rows)
+        if not rows or upright_mean >= policy.confidence_floor:
+            return rows
+        height, width = image.shape[0], image.shape[1]
+        best_rows, best_turn, best_score = rows, 0, upright_score
+        for quarter_turns in policy.alternatives:
+            turned = np.ascontiguousarray(np.rot90(image, quarter_turns))
+            candidate = _extract_raw(self._infer(turned)) or []
+            mean, score = _reading_evidence(candidate)
+            if mean < policy.confidence_floor or score < policy.minimum_gain * upright_score:
+                continue
+            if score > best_score:
+                best_rows = _rows_to_source(candidate, quarter_turns, height, width)
+                best_turn, best_score = quarter_turns, score
+        if best_turn:
+            self._orientation_selected[best_turn] = self._orientation_selected.get(best_turn, 0) + 1
+            logging.getLogger(__name__).info(
+                "RapidOCR orientation search selected %d quarter turn(s): upright_mean=%.3f upright_weighted=%.0f selected_weighted=%.0f",
+                best_turn, upright_mean, upright_score, best_score,
+            )
+        return best_rows
 
     def _refresh_execution_device(self) -> None:
         """Inspect live sessions; a construction-time provider list can go stale."""
@@ -557,8 +648,7 @@ class RapidOCRBackend:
             )
         try:
             img = _to_numpy(request.image)
-            out = self._infer(img)
-            raw = _extract_raw(out)
+            raw = self._recognize_rows(img)
             rx0, ry0 = (request.region_bbox[0], request.region_bbox[1]) if request.region_bbox else (0.0, 0.0)
             tokens = tuple(_result_to_ocr_tokens(raw, self._engine_key, offset_x=rx0, offset_y=ry0))
             text = " ".join(t.text for t in tokens)
@@ -598,9 +688,9 @@ class RapidOCRBackend:
         if self._closed:
             raise RuntimeError("RapidOCR backend is closed")
         img = _to_numpy(page_image)
-        out = self._infer(img)
+        rows = self._recognize_rows(img)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
-        tokens = _result_to_pipeline_tokens(_extract_raw(out), page_index, self._language)
+        tokens = _result_to_pipeline_tokens(rows, page_index, self._language)
         return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0], page_rotation)
 
     def recognize_region(
@@ -619,9 +709,9 @@ class RapidOCRBackend:
         crop, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(img, region_bbox, page_bbox)
         if crop.size == 0:
             return []
-        out = self._infer(crop)
+        rows = self._recognize_rows(crop)
         tokens = _result_to_pipeline_tokens(
-            _extract_raw(out), page_index, self._language,
+            rows, page_index, self._language,
             offset_x=float(cx0), offset_y=float(cy0),
             source=SourceKind.OCR_REGION,
         )

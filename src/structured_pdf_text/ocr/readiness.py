@@ -87,7 +87,7 @@ def _probe_static_builtin(config: ExtractorConfig, engine: str, *, cache_home: s
         try:
             result = subprocess.run(
                 [executable, *flags, "--list-langs"], capture_output=True,
-                text=True, encoding="utf-8", timeout=10,
+                text=True, encoding="utf-8",
             )
             if result.returncode:
                 return ReadinessResult(ReadinessStatus.UNKNOWN, "language_probe_failed", {"stderr": result.stderr})
@@ -97,8 +97,6 @@ def _probe_static_builtin(config: ExtractorConfig, engine: str, *, cache_home: s
             if missing:
                 return ReadinessResult(ReadinessStatus.INCOMPLETE, "language_data_missing", {"missing": missing})
             return ReadinessResult(ReadinessStatus.READY, details={"executable": executable, "language": lang})
-        except subprocess.TimeoutExpired:
-            return ReadinessResult(ReadinessStatus.UNKNOWN, "executable_timeout")
         except OSError as exc:
             return ReadinessResult(ReadinessStatus.UNKNOWN, "executable_error", {"message": str(exc)})
 

@@ -189,7 +189,7 @@ class ProcessTreeMemorySampler:
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(1.0, self.interval_seconds * 4))
+            self._thread.join()
 
     def as_dict(self) -> dict[str, Any]:
         return {

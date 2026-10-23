@@ -6,6 +6,7 @@ from threading import RLock
 
 from structured_pdf_text.document import OcrProvenance, OcrToken
 from structured_pdf_text.errors import FatalExtractionError, raise_if_resource_exhausted
+from ..slow_work import warn_if_slow
 from .budgets import BudgetBlocked, WorkCancelled
 from .contracts import (
     CandidateEvidence, EffectiveIdentity, EngineSelection,
@@ -160,7 +161,8 @@ No other engine or readiness probe is loaded by the execution adapter.
                 args.append(bbox)
             elif "page_bbox" in parameters or var_keywords:
                 kwargs["page_bbox"] = bbox
-        return method(*args, **kwargs)
+        with warn_if_slow(f"{self._selection.engine} {stage} inference"):
+            return method(*args, **kwargs)
 
     def _identity(self):
         legacy = getattr(self._engine, "identity", None)
