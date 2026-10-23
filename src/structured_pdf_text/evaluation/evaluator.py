@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,6 +68,39 @@ def _parse_scoped_pages(pages: dict[int, str], origin: str) -> list[MarkdownNode
     for number, body in pages.items():
         nodes.extend(parse_page(body, number, origin, start_seq=len(nodes)))
     return nodes
+
+
+def _evaluate_single_page(args: tuple) -> dict:
+    """Worker: computes _populate_quality for a single page.
+
+    Top-level so ProcessPoolExecutor can pickle it on Windows (spawn method).
+    Receives basic Python types only; returns a plain dict.
+    """
+    page, ref_text, hyp_text, page_in_hyp, max_text_edit_cells, max_alignment_pairs = args
+    req = EvaluationRequest(
+        ref_text=ref_text,
+        hyp_text=hyp_text,
+        max_text_edit_cells=max_text_edit_cells,
+        max_alignment_pairs=max_alignment_pairs,
+    )
+    page_doc = V2DocumentMetrics()
+    _populate_quality(
+        page_doc, req,
+        {page: ref_text},
+        {page: hyp_text} if page_in_hyp else {},
+    )
+    result = page_doc.to_dict()
+    for group in (*result["quality"].values(), result["integrity"]):
+        for metric in group.values():
+            if isinstance(metric, dict) and "definition_id" in metric:
+                metric["scope"] = "page"
+    counts = page_doc.text["cer_sequential_visible"]["counts"]
+    return {
+        "page": page,
+        "result": result,
+        "ref_chars": counts["ref_chars"],
+        "hyp_chars": counts["hyp_chars"],
+    }
 
 
 def evaluate(request: EvaluationRequest) -> dict[str, Any]:
@@ -173,25 +208,45 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     metadata = corpus_page_metadata(request.manifesto_path)
     run_pages = run_page_metadata(request.run_metadata)
     _populate_quality(doc, request, ref_scoped, hyp_scoped)
-    for page in effective_selected_pages:
-        page_doc = V2DocumentMetrics()
-        _populate_quality(
-            page_doc, request, {page: ref_scoped[page]},
-            {page: hyp_scoped[page]} if page in hyp_scoped else {},
+
+    page_args = [
+        (
+            page,
+            ref_scoped[page],
+            hyp_scoped.get(page, ""),
+            page in hyp_scoped,
+            request.max_text_edit_cells,
+            request.max_alignment_pairs,
         )
-        result = page_doc.to_dict()
-        for group in (*result["quality"].values(), result["integrity"]):
-            for metric in group.values():
-                if isinstance(metric, dict) and "definition_id" in metric:
-                    metric["scope"] = "page"
-        counts = page_doc.text["cer_sequential_visible"]["counts"]
+        for page in effective_selected_pages
+    ]
+    try:
+        _hw_cores = len(os.sched_getaffinity(0))
+    except AttributeError:
+        _hw_cores = os.cpu_count() or 1
+    n_workers = min(len(page_args), _hw_cores)
+    page_results: dict[int, dict] = {}
+    if n_workers > 1 and len(page_args) > 1:
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_evaluate_single_page, arg): arg[0] for arg in page_args}
+            for future in as_completed(futures):
+                r = future.result()
+                page_results[r["page"]] = r
+    else:
+        for arg in page_args:
+            r = _evaluate_single_page(arg)
+            page_results[r["page"]] = r
+
+    for page in effective_selected_pages:
+        r = page_results[page]
+        result = r["result"]
         doc.per_page.append({
             "page": page,
             "family": metadata.get(page, {}).get("family"),
             "conditions": metadata.get(page, {}).get("conditions", []),
             "selected_but_missing": page not in hyp_scoped,
-            "reference_empty": counts["ref_chars"] == 0,
-            "hypothesis_empty": counts["hyp_chars"] == 0,
+            "reference_empty": r["ref_chars"] == 0,
+            "hypothesis_empty": r["hyp_chars"] == 0,
             "quality": result["quality"],
             "integrity": result["integrity"],
             "evaluation": result["evaluation"],

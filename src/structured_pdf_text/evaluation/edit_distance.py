@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-DEFAULT_MAX_EDIT_CELLS = 8_000_000
+DEFAULT_MAX_EDIT_CELLS = 64_000_000
 EDIT_DISTANCE_POLICY = "levenshtein-exact-banded-sdi-v1"
 
 
