@@ -501,13 +501,13 @@ def test_schema_version_is_3():
 
 def test_canonical_doc_no_container_nodes():
     from structured_pdf_text.evaluation.models import NodeKind
-    from structured_pdf_text.evaluation.canonical_document import _CONTAINER_KINDS
 
+    containers = {NodeKind.TABLE, NodeKind.TABLE_ROW, NodeKind.LIST}
     table_md = "| A | B |\n|---|---|\n| 1 | 2 |\n"
     nodes = _nodes(table_md)
     doc = CanonicalDocument.from_nodes(nodes)
 
     for leaf in doc.leaf_nodes:
-        assert leaf.kind not in _CONTAINER_KINDS, (
+        assert leaf.kind not in containers, (
             f"Container node {leaf.kind} não deveria estar nos leaf_nodes"
         )

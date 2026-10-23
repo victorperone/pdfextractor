@@ -286,7 +286,7 @@ Scripts involved:
 | Script | Function |
 |---|---|
 | `scripts/evaluate_e2e.py` | Extracts PDF with one engine; saves Markdown + manifest |
-| `scripts/compute_metrics.py` | Computes metrics against ground truth |
+| `scripts/compute_metrics.py` | Computes canonical metrics against ground truth |
 | `scripts/regrade_existing.py` | Evaluates existing Markdown without extraction or OCR |
 | `scripts/compare_engines.py` | Generates comparative table of all engines |
 | `scripts/run_benchmark.ps1` | Orchestrates the three steps sequentially on Windows |
@@ -296,12 +296,14 @@ Scripts involved:
 
 ### Evaluating existing Markdown
 
-Both metric CLIs use `structured_pdf_text.evaluation.evaluate()` and schema
-`evaluation-3.0.0`. `compute_metrics.py` writes the canonical result to
-`metrics_v3_{engine}_{run_id}.json`; its `metrics_{engine}_{run_id}.json`
-is a legacy diagnostic export. The runners pass the canonical result to the
-comparator. `regrade_existing.py` writes its canonical result to
-`metrics_{engine}_{run_id}.json`.
+Both metric CLIs are thin wrappers over `structured_pdf_text.evaluation.cli`
+and schema `evaluation-3.0.0`; there is no other metric implementation.
+`compute_metrics.py` writes `metrics_v3_{engine}_{run_id}.json` and
+`errors_v3_{engine}_{run_id}.md` (default run ID: hypothesis file stem).
+`regrade_existing.py` writes the same canonical result to
+`metrics_{engine}_{run_id}.json` and `errors_{engine}_{run_id}.md`. The runners
+pass the canonical result to the comparator, which accepts only
+`evaluation-3.0.0`.
 
 ```python
 from structured_pdf_text.evaluation import EvaluationRequest, evaluate
@@ -321,22 +323,39 @@ represents a blank page. Metadata-only manifestos require `--reference`, as with
 `corpus/V3/Document_AI_V3.md`. Explicit Markdown takes precedence over manifesto
 text. Invalid inputs or a canonical evaluation failure make the command fail.
 
-Text metrics use exact Levenshtein S/D/I counts with bounded working memory.
+Text metrics use exact Levenshtein S/D/I counts with bounded working memory
+(a minimal band, else Myers/Hyyrö bit-parallel distance and one exact band).
 Raw CER uses the original Markdown bodies; visible text comes from parser
 tokens, preserving literal code. Aligned CER counts terminal text units once.
-The evaluator records metric definitions version `3.0.5` and its resource policy.
-The default budgets are 8,000,000 DP cells per sequential metric (shared across
-blocks for aligned CER) and 250,000 candidate pairs per alignment. Exceeding a
-budget produces `resource_limit` with a null value; the evaluation is partial
-and ineligible for ranking. `EvaluationRequest.max_text_edit_cells` and
-`max_alignment_pairs` can configure these budgets. Large documents can still
-need further alignment optimization; a partial evaluation is not a complete
-quality score.
+`cer_sequential_visible` (MET-TX03) is the same CER as MET-TX02, because parser
+text is already visible; it is computed once and copied. MET-I03 likewise copies
+MET-TX06. The evaluator records metric definitions version `3.1.0` and its
+resource policy.
+
+Document metrics are page-anchored (`parser-visible-leaves-v3-page-anchored-micro`):
+every selected page is evaluated once, in parallel, and the document CER/WER and
+aligned CER are Σ page edits / Σ page reference length. Content moved to another
+page counts as a deletion and an insertion. Structure and reading order use the
+union of the page alignments with document-wide order, so page inversions remain
+measurable; tables, critical data, token coverage and integrity compare the whole
+document. The aligner first pairs blocks with identical content (same layer, type
+and page) by occurrence, then scores the remaining blocks of the same layer — text
+leaves with leaves, containers with containers (`content-match-v3-exact-first-layered`).
+Reading order counts matched text leaves only.
+
+The default budgets are 64,000,000 DP cells per page and metric (shared across
+blocks for aligned CER) and 250,000 fuzzy candidate pairs per page alignment;
+document-level recomputation receives one budget per page. Exceeding a budget
+produces `resource_limit` with a null value; the evaluation is partial and
+ineligible for ranking, and a page's failure makes the document metric
+unavailable. `EvaluationRequest.max_text_edit_cells` and `max_alignment_pairs`
+configure these budgets.
 
 Paragraph detection checks both ends of each matched paragraph on an exact,
 page-local token alignment. `paragraph_boundary_f1` separately measures internal
-paragraph cuts; pages with no cuts on either side are N/A. The paragraph metrics
-share one `max_text_edit_cells` budget across pages. Ordered-list ordinals use
+paragraph cuts; pages with no cuts on either side are N/A. Paragraphs of list
+items and block quotes are the text of those blocks, not paragraph blocks; a list
+item's text excludes its nested lists. Ordered-list ordinals use
 CommonMark's displayed numbering (container start plus item index). Page markers
 must be top-level, column-zero headings: markers inside code, HTML elements,
 quotes or lists remain content. A delimiter immediately after a completed HTML
@@ -345,7 +364,7 @@ Physical page order is preserved. Fence validity follows the
 parser's source maps, including backtick/tilde lengths and nested containers.
 Parser identity records the installed `markdown-it-py` version; page and paragraph
 policies are required by the shared comparison contract. Regrade older artifacts
-before comparing them with definitions `3.0.5`.
+before comparing them with definitions `3.1.0`.
 
 Evaluation files are immutable within an engine/run ID/output-directory namespace.
 Repeating identical inputs preserves the original files and timestamps. Changed
@@ -354,10 +373,10 @@ hypotheses, references, scope, evaluator policies or run metadata require a new
 benchmark comparability. Existing files without a publication journal are
 preserved and rejected rather than adopted automatically.
 
-Compute and regrade can share a directory for identical inputs. Existing
-canonical/legacy files retain their role: name conflicts use `metrics_legacy_*`,
-`errors_legacy_*`, `metrics_v3_*` or `errors_v3_*` as appropriate. The CLI prints
-the actual output paths. Keep the hidden `.evaluation-*.json` journal with the
+Compute and regrade can share a directory for identical inputs: the second CLI
+adds its filenames as byte-identical aliases of the published canonical files
+(`metrics_v3_*`/`errors_v3_*` when names collide). The CLI prints the actual
+output paths. Keep the hidden `.evaluation-*.json` journal with the
 artifacts. A `.evaluation-*.lock` indicates an active or interrupted publication;
 an interrupted lock needs review before reuse. New artifacts use atomic creation
 without replacement, requiring filesystem hard-link support; unsupported
@@ -398,16 +417,22 @@ The API exports `validate_result()` and `result_schema()`. Invalid states, value
 counts, scopes, missing page diagnostics and nonfinite numbers are rejected
 before publication or comparison. The policy is
 `canonical-schema-and-invariants-v1`; runtime validation requires `jsonschema`.
-Definitions 3.0.5 give undefined token coverage denominators an explicit null
+Definitions 3.1.0 give undefined token coverage denominators an explicit null
 state, keep CER directions constant, and include literal code in integrity
-coverage. Heading/list CER shares the recorded structure edit budget.
+coverage. Heading/list CER shares the recorded structure edit budget. Tables are
+paired by the Dice coefficient of their cell-word multisets (order-independent,
+case-folded only for pairing); cell exact match and cell CER are case-sensitive,
+table content F1 ignores empty cells, and column order compares content-matched
+non-empty cells over all matched rows. Critical data reads the parser's leaf text
+once, with priority identifiers > currency > valid dates > percent > numbers;
+invalid date spellings remain numbers. Header/footer heuristics require a line
+to repeat on at least two pages.
 
 Equal normalized block sequences with the same types and pages have an exact
 linear alignment shortcut; arbitrary differences still use the guarded greedy
 alignment. Strict pairwise order counts use an exact O(n log n) algorithm.
-Identical table/row sequences avoid redundant similarity matrices. Legacy
-diagnostics use the canonical table parser and heading CER; the canonical
-evaluation remains the comparison contract.
+Identical table/row sequences avoid redundant similarity matrices, and table and
+row matches are computed once per evaluation.
 
 To save extracted characteristics from one PDF pass, use:
 

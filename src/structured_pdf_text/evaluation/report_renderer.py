@@ -276,3 +276,77 @@ def render_run_sections(all_data: list[tuple[str, dict]]) -> list[str]:
         lines += ["Detalhamento por página indisponível em pelo menos um run. "
                   "Reavalie esse artefato para obter os breakdowns canônicos.", ""]
     return lines
+
+
+def render_error_report(result: dict, *, run_id: str, engine: str,
+                        ref_path: object, hyp_path: object) -> str:
+    """Canonical per-run error report; every value comes from the result."""
+    evaluation, inputs, integrity = (result.get(key, {}) for key in ("evaluation", "inputs", "integrity"))
+    lines = [
+        f"# Evaluation Error Report (schema {result.get('schema_version')})",
+        "",
+        f"**Run ID:** `{run_id}`  ",
+        f"**Engine:** `{engine}`  ",
+        f"**Hypothesis:** `{hyp_path}`  ",
+        f"**Reference:** `{ref_path or 'via manifesto'}`  ",
+        f"**Created:** `{result.get('evaluator', {}).get('created_at_utc', 'N/A')}`  ",
+        "",
+        "## Evaluation Status",
+        "",
+        f"- Status: **{evaluation.get('status')}**",
+        f"- Rank eligible: **{evaluation.get('rank_eligible')}**",
+        f"- Applicable metrics: {evaluation.get('applicable_metric_count')}",
+        f"- Unavailable metrics: {evaluation.get('unavailable_metric_count')}",
+    ]
+    if evaluation.get("rank_ineligibility_reasons"):
+        lines += ["", "### Ineligibility Reasons", ""]
+        lines += [f"- `{reason}`" for reason in evaluation["rank_ineligibility_reasons"]]
+
+    validity = integrity.get("markdown_validity", {})
+    if validity:
+        lines += [
+            "", "## Markdown Validity", "",
+            f"- Status: **{validity.get('validity_status', 'unknown')}**",
+            f"- Parse errors: {validity.get('parse_errors', 0)}",
+            f"- Unclosed fences: {validity.get('unclosed_fences', 0)}",
+            f"- Duplicate page markers: {validity.get('duplicate_page_markers', 0)}",
+        ]
+        lines += [f"- ⚠ {warning}" for warning in validity.get("warnings", [])]
+
+    missing = inputs.get("selected_missing_pages", [])
+    extra = inputs.get("extra_pages_out_of_scope", [])
+    if missing or extra:
+        lines += ["", "## Page Scope Issues", ""]
+        if missing:
+            lines.append(f"- **Missing pages** (FN for all metrics): {missing}")
+        if extra:
+            lines.append(f"- **Extra pages** (out of scope): {extra}")
+
+    lines += ["", "## Quality Metrics Summary", ""]
+    titles = {"text": "Text", "structure": "Structure", "reading_order": "Reading Order",
+              "tables": "Tables", "critical_data": "Critical Data"}
+    for group, title in titles.items():
+        metrics = result.get("quality", {}).get(group, {})
+        if not metrics:
+            continue
+        lines += [f"### {title}", ""]
+        for key, metric in metrics.items():
+            if not isinstance(metric, dict) or "status" not in metric:
+                continue
+            value = metric.get("value")
+            if finite_number(value):
+                lines.append(f"- `{key}`: {value:.4f} ({metric['status']}, {metric.get('direction', '')})")
+            else:
+                lines.append(f"- `{key}`: N/A ({metric['status']})")
+        lines.append("")
+
+    if integrity.get("duplicate_excess_rate"):
+        lines += ["## Integrity", ""]
+        for label, key in (("Duplicate excess rate", "duplicate_excess_rate"),
+                           ("Content coverage recall", "page_content_coverage_recall")):
+            value = integrity.get(key, {}).get("value")
+            lines.append(f"- {label}: {_number(value) or 'N/A'}")
+        lines.append("")
+
+    lines += ["", *render_run_sections([(engine, result)])]
+    return "\n".join(lines)

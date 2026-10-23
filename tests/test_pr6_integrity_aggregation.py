@@ -191,10 +191,10 @@ class TestContentCoverageRecall:
         m = page_content_coverage_recall([], [])
         assert m.status == MetricStatus.NOT_APPLICABLE
 
-    def test_empty_ref_hyp_has_content_false_positive(self):
-        """Ref empty, hyp has content → false_positive_only."""
+    def test_empty_ref_hyp_has_content_is_undefined_like_text_recall(self):
+        """Ref empty, hyp has content → undefined recall (same as MET-TX06)."""
         m = page_content_coverage_recall([], [_para("Extra.", "hypothesis")])
-        assert m.status == MetricStatus.FALSE_POSITIVE_ONLY
+        assert m.status == MetricStatus.UNDEFINED_DENOMINATOR
 
 
 # ---------------------------------------------------------------------------

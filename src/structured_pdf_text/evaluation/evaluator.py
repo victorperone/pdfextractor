@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,13 @@ from .reference_hash import REFERENCE_HASH_PROTOCOL, compute_reference_effective
 from .reference_inputs import document_pages, page_number, pages_markdown, selected_pages_from_run
 from .structure_metrics import StructureMetrics, compute_structure_metrics
 from .table_metrics import TableMetrics, compute_table_metrics
-from .text_metrics import TextMetrics, compute_text_metrics
+from .text_metrics import (
+    TextMetrics, compute_text_metrics, page_anchored_aligned_cer, page_anchored_edit_rate,
+    text_coverage_precision, text_coverage_recall,
+)
+from .canonical_document import CanonicalDocument
+from .models import NormProfile
+from .normalization import normalize
 
 
 @dataclass(frozen=True)
@@ -63,20 +70,25 @@ def _sha256_path(path: Path) -> str | None:
     return compute_reference_source_hash(path)
 
 
-def _parse_scoped_pages(pages: dict[int, str], origin: str) -> list[MarkdownNode]:
-    nodes: list[MarkdownNode] = []
+def _parse_scoped_pages(pages: dict[int, str], origin: str) -> dict[int, list[MarkdownNode]]:
+    """Nodes per page; order indices are global, in the given page order."""
+    by_page: dict[int, list[MarkdownNode]] = {}
+    seq = 0
     for number, body in pages.items():
-        nodes.extend(parse_page(body, number, origin, start_seq=len(nodes)))
-    return nodes
+        by_page[number] = parse_page(body, number, origin, start_seq=seq)
+        seq += len(by_page[number])
+    return by_page
 
 
 def _evaluate_single_page(args: tuple) -> dict:
     """Worker: computes _populate_quality for a single page.
 
     Top-level so ProcessPoolExecutor can pickle it on Windows (spawn method).
-    Receives basic Python types only; returns a plain dict.
+    Receives the page's parsed nodes (document-wide IDs); returns a plain dict
+    plus the page-local alignment pairs, which the document view reuses.
     """
-    page, ref_text, hyp_text, page_in_hyp, max_text_edit_cells, max_alignment_pairs = args
+    (page, ref_text, hyp_text, page_in_hyp, ref_nodes, hyp_nodes,
+     max_text_edit_cells, max_alignment_pairs) = args
     req = EvaluationRequest(
         ref_text=ref_text,
         hyp_text=hyp_text,
@@ -84,10 +96,11 @@ def _evaluate_single_page(args: tuple) -> dict:
         max_alignment_pairs=max_alignment_pairs,
     )
     page_doc = V2DocumentMetrics()
-    _populate_quality(
+    pairs = _populate_quality(
         page_doc, req,
         {page: ref_text},
         {page: hyp_text} if page_in_hyp else {},
+        ref_nodes, hyp_nodes,
     )
     result = page_doc.to_dict()
     for group in (*result["quality"].values(), result["integrity"]):
@@ -100,6 +113,7 @@ def _evaluate_single_page(args: tuple) -> dict:
         "result": result,
         "ref_chars": counts["ref_chars"],
         "hyp_chars": counts["hyp_chars"],
+        "pairs": pairs,
     }
 
 
@@ -148,16 +162,16 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     # --- Provenance ---
     doc.evaluator_info = {
         "implementation_commit": _get_git_sha(),
-        "metric_definitions_version": "3.0.5",
+        "metric_definitions_version": "3.1.0",
         "normalization_policy": "unicode_layout",
         "parser": PARSER_VERSION,
         "page_syntax_policy": PAGE_SYNTAX_POLICY,
         "paragraph_policy": PARAGRAPH_POLICY,
-        "alignment_policy": "content-match-v2-exact-identity",
-        "entity_policy": "entities-ptbr-v1",
-        "text_projection_policy": "parser-visible-leaves-v2",
+        "alignment_policy": "content-match-v3-exact-first-layered",
+        "entity_policy": "entities-ptbr-v2",
+        "text_projection_policy": "parser-visible-leaves-v3-page-anchored-micro",
         "html_table_policy": HTML_TABLE_POLICY,
-        "table_metric_policy": "all-cell-anchors-v2",
+        "table_metric_policy": "all-cell-anchors-v3-token-dice",
         "aggregation_policy": AGGREGATION_POLICY,
         "comparability_policy": COMPARABILITY_POLICY,
         "edit_distance_policy": EDIT_DISTANCE_POLICY,
@@ -207,7 +221,8 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
     doc.operational["run_selected_pages"] = selected_pages_from_run(request.run_metadata)
     metadata = corpus_page_metadata(request.manifesto_path)
     run_pages = run_page_metadata(request.run_metadata)
-    _populate_quality(doc, request, ref_scoped, hyp_scoped)
+    ref_by_page = _parse_scoped_pages(ref_scoped, "reference")
+    hyp_by_page = _parse_scoped_pages(hyp_scoped, "hypothesis")
 
     page_args = [
         (
@@ -215,6 +230,8 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
             ref_scoped[page],
             hyp_scoped.get(page, ""),
             page in hyp_scoped,
+            ref_by_page[page],
+            hyp_by_page.get(page, []),
             request.max_text_edit_cells,
             request.max_alignment_pairs,
         )
@@ -236,6 +253,9 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
         for arg in page_args:
             r = _evaluate_single_page(arg)
             page_results[r["page"]] = r
+
+    _populate_document(doc, request, ref_scoped, hyp_scoped, ref_by_page, hyp_by_page,
+                       [page_results[page] for page in effective_selected_pages])
 
     for page in effective_selected_pages:
         r = page_results[page]
@@ -260,14 +280,13 @@ def evaluate_document(request: EvaluationRequest) -> V2DocumentMetrics:
 def _populate_quality(
     doc: V2DocumentMetrics, request: EvaluationRequest,
     ref_scoped: dict[int, str], hyp_scoped: dict[int, str],
-) -> None:
-    """Same metric pipeline at document and page scope; no recursive evaluation.
+    ref_nodes: list[MarkdownNode], hyp_nodes: list[MarkdownNode],
+) -> list | None:
+    """Full metric pipeline for one page, with its own budgets.
 
-    Page diagnostics have independent budgets and page-local alignment. They do
-    not replace document metrics (e.g. inter-page order or entity displacement).
+    Returns the page-local alignment pairs, or None when the alignment hit
+    its resource limit. The document view reuses them (see _populate_document).
     """
-    ref_nodes = _parse_scoped_pages(ref_scoped, "reference")
-    hyp_nodes = _parse_scoped_pages(hyp_scoped, "hypothesis")
     ref_text = pages_markdown(ref_scoped)
     hyp_text = pages_markdown(hyp_scoped)
     # --- Block alignment ---
@@ -294,19 +313,7 @@ def _populate_quality(
         compute_structure_metrics(pairs, ref_nodes, hyp_nodes, max_edit_cells=request.max_text_edit_cells)
         if alignment_error is None else compute_structure_metrics([], [], [])
     )
-    doc.structure = {k: v for k, v in struct.to_dict().items()
-                     if k != "pairwise_reading_order_accuracy"
-                     and k != "block_type_confusion"}
-    doc.reading_order = {
-        "pairwise_reading_order_accuracy": struct.reading_order.to_dict()
-            if struct.reading_order else {},
-    }
-    if alignment_error is not None:
-        for group in (doc.structure, doc.reading_order):
-            for metric in group.values():
-                metric.update(value=None, status="resource_limit", coverage=None,
-                              counts={"ref_nodes": len(ref_nodes), "hyp_nodes": len(hyp_nodes)},
-                              warnings=[alignment_error])
+    _set_structure(doc, struct, alignment_error, len(ref_nodes), len(hyp_nodes))
 
     # --- Table metrics ---
     tables: TableMetrics = compute_table_metrics(
@@ -325,16 +332,102 @@ def _populate_quality(
         hyp_page_nums=set(hyp_scoped),
         hyp_raw_text=hyp_text,
         ref_raw_text=ref_text,
+        text_recall=text.coverage_recall,
     )
     doc.integrity = integrity.to_dict()
+    _finish(doc, alignment_summary, alignment_error, len(ref_nodes), len(hyp_nodes))
+    return pairs if alignment_error is None else None
 
+
+def _populate_document(
+    doc: V2DocumentMetrics, request: EvaluationRequest,
+    ref_scoped: dict[int, str], hyp_scoped: dict[int, str],
+    ref_by_page: dict[int, list[MarkdownNode]], hyp_by_page: dict[int, list[MarkdownNode]],
+    pages: list[dict],
+) -> None:
+    """Document view, page-anchored (policy page-anchored-micro-v1).
+
+    Sequential and aligned text rates sum the pages' S/D/I counts. Structure
+    and reading order use the union of the page-local alignments with global
+    order indices, so inversions between pages remain measurable. Tables,
+    critical data, token coverage and integrity compare the whole document.
+    Budgets apply per page; document-level recomputation gets one per page.
+    """
+    ref_nodes = [n for nodes in ref_by_page.values() for n in nodes]
+    hyp_nodes = [n for nodes in hyp_by_page.values() for n in nodes]
+    budget = request.max_text_edit_cells * max(len(pages), 1)
+    failed = [page["page"] for page in pages if page["pairs"] is None]
+    alignment_error = (f"Block alignment exceeded its budget on pages {failed}" if failed else None)
+    pairs = [] if failed else [pair for page in pages for pair in page["pairs"]]
+    alignment_summary = AlignmentSummary.from_pairs(pairs, len(ref_nodes), len(hyp_nodes))
+
+    # --- Text metrics (Group 1) ---
+    page_text = [page["result"]["quality"]["text"] for page in pages]
+    ref_tokens = Counter(normalize(CanonicalDocument.from_nodes(ref_nodes).visible_text).split())
+    hyp_tokens = Counter(normalize(CanonicalDocument.from_nodes(hyp_nodes).visible_text).split())
+    normalized = page_anchored_edit_rate([t["cer_sequential_normalized"] for t in page_text],
+                                         "MET-TX02", NormProfile.UNICODE_LAYOUT, "chars")
+    text = TextMetrics(
+        cer_raw=page_anchored_edit_rate([t["cer_markdown_raw"] for t in page_text],
+                                        "MET-TX01", NormProfile.RAW, "chars"),
+        cer_normalized=normalized,
+        cer_visible=replace(normalized, definition_id="MET-TX03",
+                            normalization_profile=NormProfile.VISIBLE_TEXT.value,
+                            counts=dict(normalized.counts), warnings=list(normalized.warnings)),
+        wer_sequential=page_anchored_edit_rate([t["wer_sequential"] for t in page_text],
+                                               "MET-TX04", NormProfile.UNICODE_LAYOUT, "words"),
+        aligned_block_text_cer=page_anchored_aligned_cer([t["aligned_block_text_cer"] for t in page_text]),
+        coverage_recall=text_coverage_recall(ref_nodes, hyp_nodes, ref_tokens=ref_tokens, hyp_tokens=hyp_tokens),
+        coverage_precision=text_coverage_precision(ref_nodes, hyp_nodes,
+                                                   ref_tokens=ref_tokens, hyp_tokens=hyp_tokens),
+    )
+    doc.text = text.to_dict()
+
+    # --- Structure and reading order over the union of page alignments ---
+    _set_structure(doc, compute_structure_metrics(pairs, ref_nodes, hyp_nodes, max_edit_cells=budget)
+                   if alignment_error is None else compute_structure_metrics([], [], []),
+                   alignment_error, len(ref_nodes), len(hyp_nodes))
+
+    doc.tables = compute_table_metrics(ref_nodes, hyp_nodes, max_edit_cells=budget).to_dict()
+    doc.critical_data = compute_critical_data_metrics(ref_nodes, hyp_nodes).to_dict()
+    doc.integrity = compute_integrity_metrics(
+        ref_nodes, hyp_nodes,
+        selected_pages=set(ref_scoped),
+        selected_reference=set(ref_scoped),
+        hyp_page_nums=set(hyp_scoped),
+        hyp_raw_text=pages_markdown(hyp_scoped),
+        ref_raw_text=pages_markdown(ref_scoped),
+        text_recall=text.coverage_recall,
+    ).to_dict()
+    _finish(doc, alignment_summary, alignment_error, len(ref_nodes), len(hyp_nodes))
+
+
+def _set_structure(doc: V2DocumentMetrics, struct: StructureMetrics, alignment_error: str | None,
+                   ref_count: int, hyp_count: int) -> None:
+    doc.structure = {k: v for k, v in struct.to_dict().items()
+                     if k != "pairwise_reading_order_accuracy"
+                     and k != "block_type_confusion"}
+    doc.reading_order = {
+        "pairwise_reading_order_accuracy": struct.reading_order.to_dict()
+            if struct.reading_order else {},
+    }
+    if alignment_error is not None:
+        for group in (doc.structure, doc.reading_order):
+            for metric in group.values():
+                metric.update(value=None, status="resource_limit", coverage=None,
+                              counts={"ref_nodes": ref_count, "hyp_nodes": hyp_count},
+                              warnings=[alignment_error])
+
+
+def _finish(doc: V2DocumentMetrics, alignment_summary: AlignmentSummary, alignment_error: str | None,
+            ref_count: int, hyp_count: int) -> None:
     doc.operational["alignment_summary"] = alignment_summary.to_dict()
     if alignment_error is not None:
         # Empty pairs above are an unavailable computation, never an extraction
         # with zero matches. Do not publish its empty summary as observed data.
         doc.operational["alignment_summary"] = {
             "status": "resource_limit", "reason": alignment_error,
-            "total_ref": len(ref_nodes), "total_hyp": len(hyp_nodes),
+            "total_ref": ref_count, "total_hyp": hyp_count,
         }
 
     # --- Eligibility ---

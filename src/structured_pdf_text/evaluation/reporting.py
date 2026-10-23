@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import json
-import math
 from copy import deepcopy
 from pathlib import Path
 
-from .aggregation import _is_applicable_value
+from .aggregation import _finite_number as finite_number, _is_applicable_value
 from .reference_inputs import page_number
 
 REPORTING_POLICY = "canonical-page-diagnostics-v1"
@@ -55,15 +54,6 @@ def corpus_page_metadata(path: Path | None) -> dict[int, dict]:
 def run_page_metadata(metadata: dict) -> dict[int, dict]:
     """Preserve observed page outcomes without substituting corpus labels."""
     return _page_entries(metadata, "run manifest")
-
-
-def finite_number(value: object) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    try:
-        return math.isfinite(value)
-    except OverflowError:
-        return False
 
 
 def metric_value(data: dict, path: str) -> float | None:

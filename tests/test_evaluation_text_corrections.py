@@ -234,7 +234,8 @@ def test_text_resource_failure_is_explicit_and_prevents_ranking():
 
 def test_alignment_budget_is_not_reported_as_all_blocks_missing():
     body = "Alfa\n\nBeta"
-    result = evaluate(EvaluationRequest(body, body.replace("Alfa", "# Alfa"), max_alignment_pairs=1))
+    # Exact content needs no candidates; two retyped blocks need 2×2 > 1.
+    result = evaluate(EvaluationRequest(body, "# Alfa\n\n# Beta", max_alignment_pairs=1))
     assert result["quality"]["text"]["cer_sequential_normalized"]["value"] == 0
     assert result["quality"]["text"]["aligned_block_text_cer"]["status"] == "resource_limit"
     for group in ("structure", "reading_order"):

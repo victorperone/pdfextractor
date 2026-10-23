@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from array import array
 
-from .edit_distance import EditDistanceBudget, _band_cells
+from .edit_distance import EditDistanceBudget, _band_cells, bit_parallel_distance
 
 PARAGRAPH_POLICY = "page-token-spans-exact-gaps-v1"
 
@@ -12,8 +12,10 @@ def matching_gaps(ref, hyp, ref_gaps: set[int], hyp_gaps: set[int],
                   budget: EditDistanceBudget) -> set[tuple[int, int]]:
     """Requested vertices on the exact Levenshtein path: diagonal > delete > insert.
 
-    Traceback uses one byte per evaluated state plus four bytes per row.
-    All attempted bands consume the shared budget before allocation.
+    Every optimal path lies within |i-j| <= distance: a first pass of width
+    |n-m| is exact when its terminal distance fits; otherwise the exact
+    bit-parallel distance fixes the final width. Traceback uses one byte per
+    evaluated state plus four bytes per row; each band is reserved first.
     """
     nr, nh = len(ref), len(hyp)
     if ref == hyp:
@@ -22,38 +24,46 @@ def matching_gaps(ref, hyp, ref_gaps: set[int], hyp_gaps: set[int],
         return {(0, j) for j in hyp_gaps} if 0 in ref_gaps else set()
     if not nh:
         return {(i, 0) for i in ref_gaps} if 0 in hyp_gaps else set()
-    width = max(abs(nr - nh), 1)
     infinity = nr + nh + 1
+    width = max(abs(nr - nh), 1)
     while True:
         cells = _band_cells(nr, nh, width)
         budget.reserve(cells)
         trace = bytearray(cells)
         offsets = array("I")
-        previous = {}
-        offset = 0
+        previous: list[int] = []
+        previous_lo = offset = 0
         for i in range(nr + 1):
             lo, hi = max(0, i - width), min(nh, i + width)
             offsets.append(offset)
-            current = {}
+            current = [infinity] * (hi - lo + 1)
+            previous_hi = previous_lo + len(previous) - 1
+            token = ref[i - 1] if i else None
             for j in range(lo, hi + 1):
                 if i == 0:
                     distance, direction = j, 3
                 elif j == 0:
                     distance, direction = i, 2
-                elif ref[i - 1] == hyp[j - 1]:
-                    distance, direction = previous.get(j - 1, infinity), 1
                 else:
-                    choices = (previous.get(j - 1, infinity),
-                               previous.get(j, infinity), current.get(j - 1, infinity))
-                    best = min(range(3), key=choices.__getitem__)
-                    distance, direction = choices[best] + 1, best + 1
-                current[j] = distance
+                    diagonal = previous[j - 1 - previous_lo] if j - 1 >= previous_lo else infinity
+                    if token == hyp[j - 1]:
+                        distance, direction = diagonal, 1
+                    else:
+                        above = previous[j - previous_lo] if j <= previous_hi else infinity
+                        left = current[j - 1 - lo] if j > lo else infinity
+                        if diagonal <= above and diagonal <= left:
+                            distance, direction = diagonal + 1, 1
+                        elif above <= left:
+                            distance, direction = above + 1, 2
+                        else:
+                            distance, direction = left + 1, 3
+                current[j - lo] = distance
                 trace[offset + j - lo] = direction
             offset += hi - lo + 1
-            previous = current
-        if previous[nh] <= width:
+            previous, previous_lo = current, lo
+        if previous[nh - previous_lo] <= width:
             break
-        width = min(max(nr, nh), width * 2)
+        width = bit_parallel_distance(ref, hyp)
     result = set()
     i, j = nr, nh
     while True:

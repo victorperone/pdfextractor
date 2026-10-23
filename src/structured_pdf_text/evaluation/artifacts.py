@@ -1,7 +1,7 @@
 """Immutable evaluation artifacts with explicit input identity and publication lock.
 
-An existing namespace can be extended for the same evaluation (e.g. legacy
-diagnostics after regrade). Previously published bytes are never replaced.
+An existing namespace can be extended for the same evaluation (e.g. the
+other CLI's filename aliases). Previously published bytes are never replaced.
 The journal is committed last; an interrupted, unjournaled file fails closed.
 """
 from __future__ import annotations
@@ -44,9 +44,7 @@ def reserved_filenames(engine: str, run_id: str) -> set[str]:
     return {f"{prefix}_{name}_{run_id}.{extension}"
             for name in {engine, engine.replace('-', '_')}
             for prefix, extension in (("metrics", "json"), ("metrics_v3", "json"),
-                                      ("metrics_legacy", "json"), ("errors", "md"),
-                                      ("errors_v3", "md"), ("errors_legacy", "md"),
-                                      ("delta_v1v2", "md"))}
+                                      ("errors", "md"), ("errors_v3", "md"))}
 
 
 def _digest(content: bytes) -> str:
@@ -86,7 +84,6 @@ class Artifact:
     filename: str
     content: str
     fallback_filename: str | None = None
-    source_sha256: str | None = None  # Optional delta-report input identity.
 
 
 def _paths(directory: Path, namespace: str) -> tuple[Path, Path]:
@@ -184,9 +181,6 @@ def publish_artifacts(directory: Path, namespace: str, identity: str,
                 or not isinstance(artifact.content, str) or not _safe_name(artifact.filename)
                 or artifact.fallback_filename is not None and not _safe_name(artifact.fallback_filename)):
             raise ArtifactPublicationError("Invalid artifact filename or role")
-        if artifact.source_sha256 is not None and (not isinstance(artifact.source_sha256, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", artifact.source_sha256)):
-            raise ArtifactPublicationError("Invalid artifact source SHA-256")
     if reserved_names is not None and any(not _safe_name(name) for name in reserved_names):
         raise ArtifactPublicationError("Invalid reserved artifact filename")
     directory.mkdir(parents=True, exist_ok=True)
@@ -209,9 +203,6 @@ def publish_artifacts(directory: Path, namespace: str, identity: str,
                     raise ArtifactPublicationError(f"Artifact name is already owned by another role: {artifact.filename}")
             if name in records and records[name]["role"] != artifact.role:
                 raise ArtifactPublicationError(f"Artifact fallback is already owned by another role: {name}")
-            previous = next((entry for entry in records.values() if entry["role"] == artifact.role), None)
-            if previous and previous.get("source_sha256") != artifact.source_sha256:
-                raise ArtifactPublicationError(f"Artifact source changed for role {artifact.role}; use a new run-id")
             previous_name = next((key for key, entry in original_records.items()
                                   if entry["role"] == artifact.role), None)
             previous_content = ((directory / previous_name).read_bytes().decode("utf-8")
@@ -229,8 +220,7 @@ def publish_artifacts(directory: Path, namespace: str, identity: str,
                 # Copy a same-role publication when adding a filename alias.
                 content = previous_content if previous_content is not None else artifact.content
                 pending[name] = content
-                records[name] = {"role": artifact.role, "sha256": _digest(content.encode("utf-8")),
-                                 "source_sha256": artifact.source_sha256}
+                records[name] = {"role": artifact.role, "sha256": _digest(content.encode("utf-8"))}
             output[artifact.role] = target
         written = []
         try:

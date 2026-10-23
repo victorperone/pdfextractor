@@ -163,9 +163,7 @@ def test_cli_scope_and_operational_metadata_match_public_api(tmp_path, script):
                           "benchmark_status": "partial", "selected_pages": [1],
                           "timings": {"ocr_s": 2}, "memory": {"peak_rss_mb": 64}}.items():
         assert operational[key] == expected
-    if script == "compute_metrics.py":
-        legacy = json.loads((tmp_path / "out" / "metrics_audit_r1.json").read_text())
-        assert legacy["grupo5_dados_criticos"]["currency_f1"] == 1
+    assert data["quality"]["critical_data"]["currency"]["value"] == 1
 
 
 @pytest.mark.parametrize("script", CLIS)
@@ -335,13 +333,14 @@ elif name in ('compute_metrics.py', 'compare_engines.py'):
 @pytest.mark.parametrize("module_name", ["compute_metrics", "regrade_existing"])
 def test_unexpected_canonical_error_is_reported_without_output(tmp_path, monkeypatch, capsys, module_name):
     import importlib
+    from structured_pdf_text.evaluation import cli as evaluation_cli
     module = importlib.import_module(f"scripts.{module_name}")
     args = inputs(tmp_path)
 
     def fail(_request):
         raise RuntimeError("Synthetic canonical failure")
 
-    monkeypatch.setattr(module, "evaluate_document", fail)
+    monkeypatch.setattr(evaluation_cli, "evaluate_document", fail)
     monkeypatch.setattr(sys, "argv", [module_name, *map(str, args)])
     assert module.main() == 1
     assert "Synthetic canonical failure" in capsys.readouterr().err

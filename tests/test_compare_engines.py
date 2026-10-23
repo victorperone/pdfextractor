@@ -7,115 +7,32 @@ from pathlib import Path
 from evaluation_contract_helpers import comparison_result
 
 from scripts.compare_engines import (
-    _comparability_key,
-    _comparability_key_v2,
-    _detect_schema,
-    _get_value_v2,
+    _get_value,
     _render_comparison_table,
-    _render_comparison_table_v2,
     _validate_comparability,
-    _validate_comparability_v2,
     _validate_schema_homogeneity,
 )
 
 
-def _run(**updates):
-    data = {
-        "pdf_sha256": "pdf-sha",
-        "reference_sha256": "reference-sha",
-        "manifest_sha256": "manifest-sha",
-        "mode": "balanced",
-        "benchmark_protocol_id": "protocol-v1",
-        "selected_pages": [1, 2],
-        "pages_selected": 2,
-        "pages_selected_but_missing": [],
-        "missing_pages_penalised": False,
-        "benchmark_status": "valid",
-        "grupo1_texto": {"cer_text_only": 0.0},
-    }
-    data.update(updates)
-    return data
-
-
-def test_missing_page_and_partial_status_do_not_make_same_input_incomparable():
-    complete = _run()
-    partial = _run(
-        benchmark_status="partial",
-        pages_selected_but_missing=[2],
-        missing_pages_penalised=True,
-        pages_selected_and_present=1,
-        grupo1_texto={"cer_text_only": 0.5},
-    )
-
-    assert _comparability_key(complete) == _comparability_key(partial)
-    assert _validate_comparability(
-        [("engine-a", complete), ("engine-b", partial)], allow_partial=False
-    ) == []
-    report = _render_comparison_table([("engine-a", complete), ("engine-b", partial)])
-    assert "partial" in report
-    assert "0.5000" in report
-
-
-def test_different_pdf_is_not_comparable():
-    errors = _validate_comparability(
-        [("engine-a", _run()), ("engine-b", _run(pdf_sha256="other-pdf"))],
-        allow_partial=False,
-    )
-
-    assert any("pdf_sha256" in error for error in errors)
-
-
-def test_different_reference_or_manifest_is_not_comparable():
-    errors = _validate_comparability(
-        [
-            ("engine-a", _run()),
-            ("engine-b", _run(reference_sha256="other-reference")),
-            ("engine-c", _run(manifest_sha256="other-manifest")),
-        ],
-        allow_partial=False,
-    )
-
-    assert any("reference_sha256" in error for error in errors)
-    assert any("manifest_sha256" in error for error in errors)
-
-
-def test_different_selected_page_sets_are_not_comparable():
-    errors = _validate_comparability(
-        [("engine-a", _run()), ("engine-b", _run(selected_pages=[3, 4]))],
-        allow_partial=False,
-    )
-
-    assert any("selected_pages" in error for error in errors)
-
-
-def test_same_page_count_with_different_page_numbers_is_not_comparable():
-    errors = _validate_comparability(
-        [("engine-a", _run()), ("engine-b", _run(selected_pages=[10, 11]))],
-        allow_partial=False,
-    )
-
-    assert any("selected_pages" in error for error in errors)
-
-
 def test_canonical_comparator_uses_operational_protocol_and_input_page_scope():
-    a = _v2_run("engine-a")
-    b = _v2_run("engine-b")
+    a = _canonical_run("engine-a")
+    b = _canonical_run("engine-b")
     for run in (a, b):
         run["operational"]["benchmark_protocol_id"] = "protocol-v1"
         run["inputs"]["selected_pages"] = [1, 2]
 
-    assert _validate_comparability_v2([("engine-a", a), ("engine-b", b)]) == []
+    assert _validate_comparability([("engine-a", a), ("engine-b", b)]) == []
 
 
 def test_canonical_comparator_rejects_different_benchmark_protocol():
-    a = _v2_run("engine-a")
-    b = _v2_run("engine-b")
+    a = _canonical_run("engine-a")
+    b = _canonical_run("engine-b")
     for run in (a, b):
         run["operational"]["benchmark_protocol_id"] = "protocol-v1"
         run["inputs"]["selected_pages"] = [1, 2]
     b["operational"]["benchmark_protocol_id"] = "protocol-v2"
 
-    errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+    errors = _validate_comparability([("engine-a", a), ("engine-b", b)])
     assert any("benchmark_protocol_id" in error for error in errors)
 
 
@@ -151,57 +68,12 @@ def test_compare_engines_cli_routes_evaluation_3_to_canonical_comparison(tmp_pat
     assert "engine-a" in output.read_text(encoding="utf-8")
 
 
-def test_comparison_requires_exact_page_list_for_multiple_runs():
-    errors = _validate_comparability(
-        [("engine-a", _run()), ("engine-b", _run(selected_pages=None))],
-        allow_partial=False,
-    )
-
-    assert any("exact selected page list" in error for error in errors)
-
-
-def test_condition_lists_are_split_and_profile_recovery_metadata_is_reported():
-    report = _render_comparison_table([
-        ("rapidocr-onnx", _run(
-            stability_status="recovered",
-            recovery_count=2,
-            elapsed_s=12.5,
-            memory={"peak_rss_bytes": 1024 * 1024},
-            engine_identity={
-                "runtime": "onnxruntime", "profile": "latin/pt-compatible",
-                "language": "pt", "extra": {"rec_model": "latin.onnx"},
-            },
-            per_page=[{
-                "conditions": ["small_text", "low_contrast"],
-                "family": "OCR de tabelas",
-                "cer_text_only": 0.1,
-                "wer": 0.2,
-                "deletion_rate": 0.1,
-                "currency_f1": 0.9,
-                "identifier_f1": 0.8,
-                "cell_cer": 0.1,
-                "missing_page_rate": 1.0,
-                "easyocr_fallback_rate": 0.0,
-            }],
-        ))
-    ])
-    assert "small_text" in report and "low_contrast" in report
-    assert "OCR de tabelas" in report
-    assert "latin/pt-compatible" in report
-    assert "recovered" in report and "2" in report
-    assert "Peak RSS MB" in report
-
-
 # ---------------------------------------------------------------------------
-# V2 schema detection and homogeneity
+# Schema homogeneity
 # ---------------------------------------------------------------------------
 
-def _v2_run(engine: str = "test_engine", **overrides) -> dict:
-    """Minimal valid evaluation-3.0.0 metrics document for testing.
-
-    Named _v2_run for backwards-compatibility with existing test code that
-    calls this fixture; the schema is now evaluation-3.0.0 (canonical).
-    """
+def _canonical_run(engine: str = "test_engine", **overrides) -> dict:
+    """Minimal evaluation-3.0.0 metrics document for testing."""
     doc = {
         "schema_version": "evaluation-3.0.0",
         "evaluator": {
@@ -252,26 +124,12 @@ def _v2_run(engine: str = "test_engine", **overrides) -> dict:
     return doc
 
 
-class TestDetectSchema:
-    def test_v3_detected(self):
-        assert _detect_schema(_v2_run()) == "v3"
-
-    def test_v2_detected_for_legacy_schema(self):
-        assert _detect_schema({"schema_version": "evaluation-v2.0"}) == "v2"
-
-    def test_v1_detected_when_no_schema_version(self):
-        assert _detect_schema(_run()) == "v1"
-
-    def test_v1_detected_when_wrong_schema_version(self):
-        assert _detect_schema({"schema_version": "v1.0"}) == "v1"
-
-
 class TestSchemaHomogeneity:
     def test_all_v3_passes(self):
         """evaluation-3.0.0 runs are accepted for comparison."""
         errors = _validate_schema_homogeneity([
-            ("engine-a", _v2_run("engine-a")),
-            ("engine-b", _v2_run("engine-b")),
+            ("engine-a", _canonical_run("engine-a")),
+            ("engine-b", _canonical_run("engine-b")),
         ])
         assert errors == []
 
@@ -286,44 +144,44 @@ class TestSchemaHomogeneity:
 
     def test_all_v1_rejected(self):
         """V1 (no schema_version) runs are rejected."""
-        errors = _validate_schema_homogeneity([("engine-a", _run()), ("engine-b", _run())])
+        errors = _validate_schema_homogeneity([("engine-a", {"grupo1_texto": {}}), ("engine-b", {"grupo1_texto": {}})])
         assert len(errors) == 2
         assert all("regrade_existing.py" in e for e in errors)
 
     def test_mixed_v1_v3_rejected(self):
         """V1 and V3 runs cannot be compared — both sides must be v3."""
         errors = _validate_schema_homogeneity([
-            ("engine-a", _run()),
-            ("engine-b", _v2_run("engine-b")),
+            ("engine-a", {"grupo1_texto": {}}),
+            ("engine-b", _canonical_run("engine-b")),
         ])
         assert len(errors) >= 1
         assert any("regrade_existing.py" in e for e in errors)
 
 
-class TestComparabilityV2:
+class TestComparability:
     def test_identical_runs_are_comparable(self):
-        errors = _validate_comparability_v2([
-            ("engine-a", _v2_run("engine-a")),
-            ("engine-b", _v2_run("engine-b")),
+        errors = _validate_comparability([
+            ("engine-a", _canonical_run("engine-a")),
+            ("engine-b", _canonical_run("engine-b")),
         ])
         assert errors == []
 
     def test_single_run_always_comparable(self):
-        assert _validate_comparability_v2([("engine-a", _v2_run())]) == []
+        assert _validate_comparability([("engine-a", _canonical_run())]) == []
 
     def test_different_reference_effective_sha_rejected(self):
         """Different reference_effective_sha256 → runs are not comparable."""
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         b["inputs"]["reference_effective_sha256"] = "different-eff-sha"
-        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        errors = _validate_comparability([("engine-a", a), ("engine-b", b)])
         assert any("reference_effective_sha256" in e for e in errors)
 
     def test_different_selected_pages_rejected(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         b["inputs"]["selected_pages"] = [4, 5, 6]
-        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        errors = _validate_comparability([("engine-a", a), ("engine-b", b)])
         assert any("selected_pages" in e for e in errors)
 
     def test_different_pdf_manifest_or_mode_rejected(self):
@@ -332,106 +190,106 @@ class TestComparabilityV2:
             ("manifest_sha256", "other-manifest"),
             ("mode", "fast"),
         ):
-            a = _v2_run("engine-a")
-            b = _v2_run("engine-b")
+            a = _canonical_run("engine-a")
+            b = _canonical_run("engine-b")
             b["inputs"][field] = value
-            errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+            errors = _validate_comparability([("engine-a", a), ("engine-b", b)])
             assert any(field in error for error in errors)
 
     def test_missing_input_identity_fails_closed(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         for run in (a, b):
             run["inputs"]["pdf_sha256"] = None
-        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        errors = _validate_comparability([("engine-a", a), ("engine-b", b)])
         assert sum("pdf_sha256" in error for error in errors) >= 2
 
     def test_malformed_digest_and_unsupported_reference_protocol_rejected(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         b["inputs"]["manifest_sha256"] = "not-a-digest"
         b["inputs"]["reference_serialization_version"] = "reference-effective-v0"
-        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        errors = _validate_comparability([("engine-a", a), ("engine-b", b)])
         assert any("manifest_sha256" in error and "SHA-256" in error for error in errors)
         assert any("reference serialization protocol" in error for error in errors)
 
     def test_engine_output_failures_do_not_change_comparability(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         b["inputs"]["selected_missing_pages"] = [3]
         b["evaluation"]["status"] = "partial"
-        assert _validate_comparability_v2([("engine-a", a), ("engine-b", b)]) == []
+        assert _validate_comparability([("engine-a", a), ("engine-b", b)]) == []
 
     def test_comparability_key_is_order_independent(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         # Change page order — should still be equal after sorting
         b["inputs"]["selected_pages"] = [3, 1, 2]
-        errors = _validate_comparability_v2([("engine-a", a), ("engine-b", b)])
+        errors = _validate_comparability([("engine-a", a), ("engine-b", b)])
         assert errors == []
 
 
-class TestGetValueV2:
+class TestGetValue:
     def test_reads_quality_text_metric(self):
-        data = _v2_run()
-        assert _get_value_v2(data, "text.cer_sequential_normalized") == 0.05
+        data = _canonical_run()
+        assert _get_value(data, "text.cer_sequential_normalized") == 0.05
 
     def test_reads_integrity_metric(self):
-        data = _v2_run()
-        assert _get_value_v2(data, "integrity.duplicate_excess_rate") == 0.0
+        data = _canonical_run()
+        assert _get_value(data, "integrity.duplicate_excess_rate") == 0.0
 
     def test_returns_none_for_missing_key(self):
-        data = _v2_run()
-        assert _get_value_v2(data, "text.nonexistent_metric") is None
+        data = _canonical_run()
+        assert _get_value(data, "text.nonexistent_metric") is None
 
     def test_returns_none_for_na_metric(self):
-        data = _v2_run()
+        data = _canonical_run()
         data["quality"]["text"]["aligned_block_text_cer"] = {"value": None, "status": "not_applicable"}
-        assert _get_value_v2(data, "text.aligned_block_text_cer") is None
+        assert _get_value(data, "text.aligned_block_text_cer") is None
 
 
-class TestRenderComparisonTableV2:
+class TestRenderComparisonTable:
     def test_renders_without_error(self):
-        report = _render_comparison_table_v2([
-            ("engine-a", _v2_run("engine-a")),
-            ("engine-b", _v2_run("engine-b")),
+        report = _render_comparison_table([
+            ("engine-a", _canonical_run("engine-a")),
+            ("engine-b", _canonical_run("engine-b")),
         ])
         assert "evaluation-3.0.0" in report
         assert "engine-a" in report and "engine-b" in report
 
     def test_shows_all_section_headers(self):
-        report = _render_comparison_table_v2([("engine-a", _v2_run())])
+        report = _render_comparison_table([("engine-a", _canonical_run())])
         assert "MET-TX01" in report
         assert "Estrutura Markdown" in report
         assert "Dados Críticos" in report
         assert "Integridade" in report
 
     def test_bolds_best_value_higher_is_better(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         # Engine-b has better coverage recall
         b["quality"]["text"]["text_coverage_recall"] = {"value": 0.99, "status": "ok", "direction": "higher_is_better"}
-        report = _render_comparison_table_v2([("engine-a", a), ("engine-b", b)])
+        report = _render_comparison_table([("engine-a", a), ("engine-b", b)])
         assert "**0.9900**" in report
 
     def test_bolds_best_value_lower_is_better(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         # Engine-a has lower (better) CER
         a["quality"]["text"]["cer_sequential_normalized"] = {"value": 0.01, "status": "ok", "direction": "lower_is_better"}
         b["quality"]["text"]["cer_sequential_normalized"] = {"value": 0.10, "status": "ok", "direction": "lower_is_better"}
-        report = _render_comparison_table_v2([("engine-a", a), ("engine-b", b)])
+        report = _render_comparison_table([("engine-a", a), ("engine-b", b)])
         assert "**0.0100**" in report
 
     def test_shows_rank_eligibility_in_metadata(self):
-        a = _v2_run("engine-a")
-        b = _v2_run("engine-b")
+        a = _canonical_run("engine-a")
+        b = _canonical_run("engine-b")
         b["evaluation"]["rank_eligible"] = False
-        report = _render_comparison_table_v2([("engine-a", a), ("engine-b", b)])
+        report = _render_comparison_table([("engine-a", a), ("engine-b", b)])
         assert "sim" in report and "não" in report
 
     def test_na_values_shown_as_dash(self):
-        data = _v2_run("engine-a")
+        data = _canonical_run("engine-a")
         data["quality"]["tables"] = {}  # no table metrics
-        report = _render_comparison_table_v2([("engine-a", data)])
+        report = _render_comparison_table([("engine-a", data)])
         assert "—" in report

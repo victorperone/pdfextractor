@@ -15,9 +15,12 @@ Span-protection: each position in the visible text is claimed by at most one
 category.  Priority order (highest first):
   1. identifiers (CPF, CNPJ, process numbers)
   2. currency (R$, BRL)
-  3. dates
+  3. dates (calendar-valid only; invalid date spellings remain numbers)
   4. percent
   5. numeric (plain numbers, after all higher-priority spans removed)
+
+Extraction reads the parser's leaf text as-is (layout normalization only);
+no second Markdown extraction is applied to already visible text.
 
 This prevents "R$ 1.234,00" from also matching as a numeric, or "30%" from
 matching as both percent and numeric.
@@ -32,7 +35,7 @@ A01  R$ 1234,00 vs R$ 1235,00 → F1=0 (Decimal comparison fixes truncation)
 from __future__ import annotations
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Sequence
@@ -118,7 +121,9 @@ _DAYS_IN_MONTH = {1:31, 2:29, 3:31, 4:30, 5:31, 6:30,
 # ---------------------------------------------------------------------------
 
 def _visible(text: str) -> str:
-    return normalize(text, NormProfile.VISIBLE_TEXT)
+    """Leaf text is already parser-visible; a second Markdown extraction would
+    erase literal '*', '_', '#', '>' or '[x](y)' content. Layout only."""
+    return normalize(text, NormProfile.UNICODE_LAYOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -127,31 +132,16 @@ def _visible(text: str) -> str:
 
 def _mask_spans(text: str, pattern: re.Pattern) -> str:
     """Replace all matches of *pattern* with space padding of the same length."""
-    result = list(text)
-    for m in pattern.finditer(text):
-        for i in range(m.start(), m.end()):
-            result[i] = " "
-    return "".join(result)
+    return pattern.sub(lambda m: " " * (m.end() - m.start()), text)
 
 
-def _extract_currency(text: str) -> list[str]:
-    """Extract currency tokens as 'SYMBOL:canonical_decimal'.
-
-    Uses format(d, 'f') instead of str(d.normalize()) to avoid scientific
-    notation (e.g. Decimal('1234').normalize() → '1.234E+3' which str() gives
-    '1.234E+3' but format('f') gives '1234').
-    """
-    v = _visible(text)
-    results = []
-    for m in _CURRENCY_RE.finditer(v):
-        symbol = m.group(1)
-        raw_value = m.group(2).replace(".", "").replace(",", ".")
-        try:
-            dec = format(Decimal(raw_value).normalize(), "f")
-        except InvalidOperation:
-            dec = raw_value
-        results.append(f"{symbol}:{dec}")
-    return results
+def _canonical_decimal(raw: str) -> str:
+    """pt-BR decimal → canonical string; format 'f' avoids scientific notation."""
+    value = raw.replace(".", "").replace(",", ".")
+    try:
+        return format(Decimal(value).normalize(), "f")
+    except InvalidOperation:
+        return value
 
 
 def _is_valid_date(day: int, month: int, year: int) -> bool:
@@ -165,49 +155,6 @@ def _is_valid_date(day: int, month: int, year: int) -> bool:
     return 1 <= day <= max_d and 1000 <= year <= 9999
 
 
-def _extract_dates(text: str) -> list[str]:
-    """Extract valid pt-BR dates as canonical 'YYYY-MM-DD' strings."""
-    v = _visible(text)
-    # Remove currency and identifier spans first to avoid false date matches
-    v = _mask_spans(v, _CURRENCY_RE)
-    v = _mask_spans(v, _CPF_RE)
-    v = _mask_spans(v, _CNPJ_RE)
-    v = _mask_spans(v, _PROCESS_RE)
-    results = []
-    for m in _DATE_RE.finditer(v):
-        if m.group(1):  # DD/MM/YYYY or DD-MM-YYYY
-            d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        else:           # YYYY-MM-DD
-            y, mo, d = int(m.group(4)), int(m.group(5)), int(m.group(6))
-        if _is_valid_date(d, mo, y):
-            results.append(f"{y:04d}-{mo:02d}-{d:02d}")
-    return results
-
-
-def _extract_percent(text: str) -> list[str]:
-    """Extract percent tokens as canonical 'canonical_decimal%' strings.
-
-    A06 fix: percent is its own category; '30%' is different from '30'.
-    Span protection: percent spans are removed before numeric extraction.
-    """
-    v = _visible(text)
-    # Remove higher-priority spans first
-    v = _mask_spans(v, _CURRENCY_RE)
-    v = _mask_spans(v, _CPF_RE)
-    v = _mask_spans(v, _CNPJ_RE)
-    v = _mask_spans(v, _PROCESS_RE)
-    v = _mask_spans(v, _DATE_RE)
-    results = []
-    for m in _PERCENT_RE.finditer(v):
-        raw = m.group(1).replace(".", "").replace(",", ".")
-        try:
-            dec = format(Decimal(raw).normalize(), "f")
-        except InvalidOperation:
-            dec = raw
-        results.append(f"{dec}%")
-    return results
-
-
 def _canonical_number(raw: str) -> str:
     """pt-BR numeric string → canonical decimal string (for comparison)."""
     s = raw.strip()
@@ -217,25 +164,6 @@ def _canonical_number(raw: str) -> str:
         return format(Decimal(s).normalize(), "f")
     except InvalidOperation:
         return raw
-
-
-def _extract_numbers(text: str) -> list[str]:
-    """Extract numeric tokens (plain integers/decimals) with canonical form.
-
-    A08 fix: recognises integers of any length (not just 4+ digits).
-    Span protection: removes currency, CPF, CNPJ, process, dates, and percent
-    spans before matching so those values are not double-counted.
-    """
-    v = _visible(text)
-    # Remove all higher-priority spans (order matters)
-    v = _mask_spans(v, _CURRENCY_RE)
-    v = _mask_spans(v, _CPF_RE)
-    v = _mask_spans(v, _CNPJ_RE)
-    v = _mask_spans(v, _PROCESS_RE)
-    v = _mask_spans(v, _DATE_RE)
-    v = _mask_spans(v, _PERCENT_RE)
-    return [_canonical_number(m.group(1)) for m in _NUM_RE.finditer(v)
-            if m.group(1).strip()]
 
 
 def _canonical_cpf(raw: str) -> str:
@@ -248,17 +176,83 @@ def _canonical_cnpj(raw: str) -> str:
     return digits if len(digits) == 14 else raw
 
 
+_CLASSES = ("currency", "dates", "percent", "numeric", "cpf", "cnpj", "process_numbers")
+
+
+def _extract_all(text: str) -> dict[str, list[str]]:
+    """Every class from one pass, with span protection in priority order.
+
+    Identifiers (CPF, CNPJ, process numbers) read the text; each later class
+    reads it with all higher-priority spans masked: currency, then valid
+    dates, then percent, then plain numbers. Invalid dates stay numbers.
+    """
+    v = _visible(text)
+    values: dict[str, list[str]] = {}
+    # CPF tokens preserve leading zeros (A38-style: '00123' ≠ '123').
+    values["cpf"] = [_canonical_cpf(m.group(1)) for m in _CPF_RE.finditer(v)]
+    values["cnpj"] = [_canonical_cnpj(m.group(1)) for m in _CNPJ_RE.finditer(v)]
+    values["process_numbers"] = [m.group(1) for m in _PROCESS_RE.finditer(v)]
+    masked = v
+    for pattern in (_CPF_RE, _CNPJ_RE, _PROCESS_RE):
+        masked = _mask_spans(masked, pattern)
+    values["currency"] = [f"{m.group(1)}:{_canonical_decimal(m.group(2))}"
+                          for m in _CURRENCY_RE.finditer(masked)]
+    masked = _mask_spans(masked, _CURRENCY_RE)
+    dates, spans = [], []
+    for m in _DATE_RE.finditer(masked):
+        if m.group(1):  # DD/MM/YYYY or DD-MM-YYYY
+            d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:           # YYYY-MM-DD
+            y, mo, d = int(m.group(4)), int(m.group(5)), int(m.group(6))
+        if _is_valid_date(d, mo, y):
+            dates.append(f"{y:04d}-{mo:02d}-{d:02d}")
+            spans.append(m.span())
+    values["dates"] = dates
+    for start, end in spans:
+        masked = masked[:start] + " " * (end - start) + masked[end:]
+    # A06 fix: percent is its own category; '30%' is different from '30'.
+    values["percent"] = [f"{_canonical_decimal(m.group(1))}%" for m in _PERCENT_RE.finditer(masked)]
+    masked = _mask_spans(masked, _PERCENT_RE)
+    # A08 fix: integers of any length.
+    values["numeric"] = [_canonical_number(m.group(1)) for m in _NUM_RE.finditer(masked)
+                         if m.group(1).strip()]
+    values["identifiers_combined"] = (
+        [f"cpf:{v}" for v in values["cpf"]] + [f"cnpj:{v}" for v in values["cnpj"]]
+        + [f"proc:{v}" for v in values["process_numbers"]]
+    )
+    return values
+
+
+def _extract_currency(text: str) -> list[str]:
+    """Currency tokens as 'SYMBOL:canonical_decimal'."""
+    return _extract_all(text)["currency"]
+
+
+def _extract_dates(text: str) -> list[str]:
+    """Valid pt-BR dates as canonical 'YYYY-MM-DD' strings."""
+    return _extract_all(text)["dates"]
+
+
+def _extract_percent(text: str) -> list[str]:
+    """Percent tokens as canonical 'canonical_decimal%' strings."""
+    return _extract_all(text)["percent"]
+
+
+def _extract_numbers(text: str) -> list[str]:
+    """Plain integers/decimals, after higher-priority spans are masked."""
+    return _extract_all(text)["numeric"]
+
+
 def _extract_cpf(text: str) -> list[str]:
-    """Extract CPF tokens preserving leading zeros (A38-style: '00123' ≠ '123')."""
-    return [_canonical_cpf(m.group(1)) for m in _CPF_RE.finditer(_visible(text))]
+    return _extract_all(text)["cpf"]
 
 
 def _extract_cnpj(text: str) -> list[str]:
-    return [_canonical_cnpj(m.group(1)) for m in _CNPJ_RE.finditer(_visible(text))]
+    return _extract_all(text)["cnpj"]
 
 
 def _extract_process_numbers(text: str) -> list[str]:
-    return [m.group(1) for m in _PROCESS_RE.finditer(_visible(text))]
+    return _extract_all(text)["process_numbers"]
 
 
 # ---------------------------------------------------------------------------
@@ -310,75 +304,31 @@ def _prf_multiset(
 
 
 # ---------------------------------------------------------------------------
-# Text joining helper — uses CanonicalDocument to avoid A07 (triple-counting)
+# Leaf-node extraction — uses CanonicalDocument to avoid A07 (triple-counting)
 # ---------------------------------------------------------------------------
 
-def _text_from_nodes(nodes: Sequence[MarkdownNode]) -> str:
-    """Join visible_text from leaf nodes only (A07 fix: no ancestor duplication)."""
-    # Import here to avoid circular import at module level
-    from structured_pdf_text.evaluation.canonical_document import CanonicalDocument
-    doc = CanonicalDocument.from_nodes(nodes)
-    return doc.visible_text
+def _document_and_page_values(nodes: Sequence[MarkdownNode]) -> tuple[dict, dict]:
+    """(document values, 'page:value' values) for every class, extracted once.
 
-
-# ---------------------------------------------------------------------------
-# Per-class extraction + metric
-# ---------------------------------------------------------------------------
-
-def _metric_for_class(
-    ref_text: str,
-    hyp_text: str,
-    extractor,
-    definition_id: str,
-) -> MetricResult:
-    ref_vals = extractor(ref_text)
-    hyp_vals = extractor(hyp_text)
-    return _prf_multiset(Counter(ref_vals), Counter(hyp_vals), definition_id)
-
-
-def _page_f1_for_class(
-    ref_nodes: Sequence[MarkdownNode],
-    hyp_nodes: Sequence[MarkdownNode],
-    extractor,
-    definition_id: str,
-) -> MetricResult:
-    """Compute page-aware F1: multiset over (page_number, canonical_value) pairs.
-
-    Each entity occurrence is tagged with its page number.  A value on page 1
-    is distinct from the same value on page 2, so transpositions across pages
-    are penalized.
-
-    When nodes have page=None (no page markers in document), returns the same
-    result as document F1 (page information unavailable → falls back gracefully).
+    The document view joins all leaf texts; the page view tags each occurrence
+    with its page so transpositions across pages are penalised. Without page
+    information every value is tagged with page 0 (falls back to the document).
     """
     from structured_pdf_text.evaluation.canonical_document import CanonicalDocument
-
-    def _extract_with_page(nodes: Sequence[MarkdownNode]) -> list[str]:
-        """Return list of 'page:value' tagged entity strings."""
-        doc = CanonicalDocument.from_nodes(nodes)
-        results: list[str] = []
-        pages_seen: set[int | None] = {n.page for n in doc.leaf_nodes}
-
-        if pages_seen == {None}:
-            # No page information: fall back to document-level (page=0 sentinel)
-            text = doc.visible_text
-            return [f"0:{v}" for v in extractor(text)]
-
-        # Group leaf nodes by page
-        from collections import defaultdict
-        nodes_by_page: dict[int | None, list[MarkdownNode]] = defaultdict(list)
-        for n in doc.leaf_nodes:
-            nodes_by_page[n.page].append(n)
-
-        for page_num, page_nodes in sorted(nodes_by_page.items(), key=lambda x: x[0] or 0):
-            page_text = " ".join(n.visible_text.strip() for n in page_nodes if n.visible_text.strip())
-            p = page_num if page_num is not None else 0
-            results.extend(f"{p}:{v}" for v in extractor(page_text))
-        return results
-
-    ref_vals = _extract_with_page(ref_nodes)
-    hyp_vals = _extract_with_page(hyp_nodes)
-    return _prf_multiset(Counter(ref_vals), Counter(hyp_vals), definition_id)
+    doc = CanonicalDocument.from_nodes(nodes)
+    document = _extract_all(doc.visible_text)
+    if {n.page for n in doc.leaf_nodes} == {None}:
+        return document, {key: [f"0:{v}" for v in vals] for key, vals in document.items()}
+    nodes_by_page: dict[int | None, list[MarkdownNode]] = defaultdict(list)
+    for n in doc.leaf_nodes:
+        nodes_by_page[n.page].append(n)
+    paged: dict[str, list[str]] = defaultdict(list)
+    for page_num, page_nodes in sorted(nodes_by_page.items(), key=lambda x: x[0] or 0):
+        page_text = " ".join(n.visible_text.strip() for n in page_nodes if n.visible_text.strip())
+        p = page_num if page_num is not None else 0
+        for key, vals in _extract_all(page_text).items():
+            paged[key].extend(f"{p}:{v}" for v in vals)
+    return document, paged
 
 
 # ---------------------------------------------------------------------------
@@ -392,9 +342,6 @@ class CriticalDataMetrics:
     Each category has a ``document_f1`` (multiset global, ignores page) and
     a ``page_f1`` (multiset tagged with page number, penalizes cross-page transposition).
     When page information is unavailable, ``page_f1`` equals ``document_f1``.
-
-    The legacy fields (numeric, currency, …) remain as ``document_f1`` aliases
-    for backwards compatibility with callers that read only the document view.
     """
     # Document-level F1 (multiset global — page-agnostic, spec §9.4 "document_f1")
     numeric:              MetricResult | None = None   # MET-CD01
@@ -434,15 +381,6 @@ class CriticalDataMetrics:
         return result
 
 
-def _all_ids_extractor(text: str) -> list[str]:
-    """Combined identifier extractor: CPF + CNPJ + process numbers."""
-    return (
-        [f"cpf:{v}" for v in _extract_cpf(text)]
-        + [f"cnpj:{v}" for v in _extract_cnpj(text)]
-        + [f"proc:{v}" for v in _extract_process_numbers(text)]
-    )
-
-
 def compute_critical_data_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
@@ -473,44 +411,14 @@ def compute_critical_data_metrics(
     Span-protection: identifiers > currency > dates > percent > numeric.
     Leaf-node projection via CanonicalDocument prevents A07 triple-counting.
     """
-    ref_text = _text_from_nodes(ref_nodes)
-    hyp_text = _text_from_nodes(hyp_nodes)
-
-    # Document-level F1 (global multiset, page-agnostic)
-    numeric          = _metric_for_class(ref_text, hyp_text, _extract_numbers,         "MET-CD01")
-    currency         = _metric_for_class(ref_text, hyp_text, _extract_currency,        "MET-CD02")
-    dates            = _metric_for_class(ref_text, hyp_text, _extract_dates,           "MET-CD03")
-    cpf              = _metric_for_class(ref_text, hyp_text, _extract_cpf,             "MET-CD04")
-    cnpj             = _metric_for_class(ref_text, hyp_text, _extract_cnpj,            "MET-CD05")
-    process_numbers  = _metric_for_class(ref_text, hyp_text, _extract_process_numbers, "MET-CD06")
-    ids_combined     = _metric_for_class(ref_text, hyp_text, _all_ids_extractor,       "MET-CD07")
-    percent          = _metric_for_class(ref_text, hyp_text, _extract_percent,         "MET-CD08")
-
-    # Page-level F1 ((page, value) multiset — penalises transpositions)
-    numeric_page     = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_numbers,         "MET-CD01-page")
-    currency_page    = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_currency,        "MET-CD02-page")
-    dates_page       = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_dates,           "MET-CD03-page")
-    cpf_page         = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_cpf,             "MET-CD04-page")
-    cnpj_page        = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_cnpj,            "MET-CD05-page")
-    proc_page        = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_process_numbers, "MET-CD06-page")
-    ids_page         = _page_f1_for_class(ref_nodes, hyp_nodes, _all_ids_extractor,       "MET-CD07-page")
-    percent_page     = _page_f1_for_class(ref_nodes, hyp_nodes, _extract_percent,         "MET-CD08-page")
-
-    return CriticalDataMetrics(
-        numeric                  = numeric,
-        currency                 = currency,
-        percent                  = percent,
-        dates                    = dates,
-        cpf                      = cpf,
-        cnpj                     = cnpj,
-        process_numbers          = process_numbers,
-        identifiers_combined     = ids_combined,
-        numeric_page             = numeric_page,
-        currency_page            = currency_page,
-        percent_page             = percent_page,
-        dates_page               = dates_page,
-        cpf_page                 = cpf_page,
-        cnpj_page                = cnpj_page,
-        process_numbers_page     = proc_page,
-        identifiers_combined_page= ids_page,
-    )
+    ref_doc, ref_page = _document_and_page_values(ref_nodes)
+    hyp_doc, hyp_page = _document_and_page_values(hyp_nodes)
+    ids = {"numeric": "MET-CD01", "currency": "MET-CD02", "dates": "MET-CD03", "cpf": "MET-CD04",
+           "cnpj": "MET-CD05", "process_numbers": "MET-CD06", "identifiers_combined": "MET-CD07",
+           "percent": "MET-CD08"}
+    fields = {}
+    for key, definition in ids.items():
+        fields[key] = _prf_multiset(Counter(ref_doc[key]), Counter(hyp_doc[key]), definition)
+        fields[f"{key}_page"] = _prf_multiset(Counter(ref_page[key]), Counter(hyp_page[key]),
+                                              f"{definition}-page")
+    return CriticalDataMetrics(**fields)

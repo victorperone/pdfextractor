@@ -1,4 +1,4 @@
-"""Independent exhaustive/brute oracles for exact shortcuts and legacy adapters."""
+"""Independent exhaustive/brute oracles for exact evaluator shortcuts."""
 from __future__ import annotations
 
 import itertools
@@ -9,8 +9,6 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.compute_metrics import _parse_md_tables, compute_structure_metrics as legacy_structure
-from scripts.compute_metrics import compute_table_metrics as legacy_tables
 from structured_pdf_text.evaluation import EvaluationRequest, evaluate
 from structured_pdf_text.evaluation import block_alignment as blocks
 from structured_pdf_text.evaluation import table_metrics as tables
@@ -60,8 +58,21 @@ def test_identity_shortcut_handles_large_documents_with_tiny_candidate_budget():
     assert result["quality"]["reading_order"]["pairwise_reading_order_accuracy"]["value"] == 1
 
 
-@pytest.mark.parametrize("hyp", ["# Alfa\n\nBeta", "Beta\n\nAlfa", "Alfa\n\nBeta\n\nExtra"])
-def test_nonidentity_documents_still_fail_closed_at_candidate_budget(hyp):
+@pytest.mark.parametrize("hyp", ["Beta\n\nAlfa", "Alfa\n\nBeta\n\nExtra"])
+def test_exact_content_pairs_need_no_fuzzy_candidate_budget(hyp):
+    ref_nodes = parse_document("Alfa\n\nBeta", origin="reference")
+    hyp_nodes = parse_document(hyp, origin="hypothesis")
+    pairs = blocks.align_blocks(ref_nodes, hyp_nodes, max_candidate_pairs=1)
+    ref_by_id = {n.node_id: n for n in ref_nodes}
+    hyp_by_id = {n.node_id: n for n in hyp_nodes}
+    matched = [p for p in pairs if p.hypothesis_id and p.reference_id]
+    assert len(matched) == 2
+    assert all(ref_by_id[p.reference_id].visible_text == hyp_by_id[p.hypothesis_id].visible_text
+               for p in matched)
+
+
+@pytest.mark.parametrize("hyp", ["Alfa!\n\nBeta!", "Beta!\n\nAlfa?"])
+def test_fuzzy_remainder_still_fails_closed_at_candidate_budget(hyp):
     ref_nodes = parse_document("Alfa\n\nBeta", origin="reference")
     hyp_nodes = parse_document(hyp, origin="hypothesis")
     with pytest.raises(blocks.AlignmentResourceLimit):
@@ -122,26 +133,6 @@ def test_table_identity_matching_does_not_hide_topology_changes():
     result = evaluate(EvaluationRequest(ref, hyp))["quality"]["tables"]
     assert result["table_detection_f1"]["value"] == 1
     assert result["table_column_count_accuracy"]["value"] == 0
-
-
-def test_legacy_adapter_preserves_all_empty_cells():
-    body = "| A | B |\n|---|---|\n| | |"
-    assert _parse_md_tables(body) == [[["A", "B"], ["", ""]]]
-    assert legacy_tables("", body)["cell_ref_count"] == 4
-
-
-@pytest.mark.parametrize("body,expected", [
-    (r"| A | B |" + "\n|---|---|\n" + r"| a\|b | c |", [[["A", "B"], ["a|b", "c"]]]),
-    ("a | b\nc | d", []), ("```\n| A | B |\n|---|---|\n| 1 | 2 |\n```", []),
-    ("<table><tr><td>A</td><td></td></tr></table>", [[["A", ""]]]),
-])
-def test_legacy_adapter_uses_canonical_grammar(body, expected):
-    assert _parse_md_tables(body) == expected
-
-
-def test_legacy_heading_cer_measures_spelling_errors():
-    metric = legacy_structure("# Titulo correto", "# Título correto")
-    assert metric["heading_text_cer"] > 0
 
 
 @pytest.mark.parametrize("version,stem,reference,pages", [

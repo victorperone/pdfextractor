@@ -220,27 +220,24 @@ class TestT36LegacySchemaRejected:
         path.write_text(json.dumps(doc), encoding="utf-8")
 
     def test_v2_legacy_rejected(self, tmp_path):
-        from scripts.compare_engines import _detect_schema, _validate_schema_homogeneity
+        from scripts.compare_engines import _validate_schema_homogeneity
         legacy_doc = {"schema_version": "evaluation-v2.0"}
-        assert _detect_schema(legacy_doc) == "v2"
         errors = _validate_schema_homogeneity([("engine-a", legacy_doc)])
         assert len(errors) >= 1
         assert any("regrade_existing.py" in e for e in errors)
 
     def test_v1_no_schema_rejected(self, tmp_path):
-        from scripts.compare_engines import _detect_schema, _validate_schema_homogeneity
+        from scripts.compare_engines import _validate_schema_homogeneity
         v1_doc = {"engine": "test", "grupo1_texto": {"cer_text_only": 0.2}}
-        assert _detect_schema(v1_doc) == "v1"
         errors = _validate_schema_homogeneity([("engine-a", v1_doc)])
         assert len(errors) >= 1
         assert any("regrade_existing.py" in e for e in errors)
 
     def test_v3_accepted(self, tmp_path):
-        from scripts.compare_engines import _detect_schema, _validate_schema_homogeneity
+        from scripts.compare_engines import _validate_schema_homogeneity
         v3_doc = {"schema_version": "evaluation-3.0.0",
                   "evaluator": {"metric_definitions_version": "3.0.0"},
                   "inputs": {"reference_effective_sha256": "abc", "reference_serialization_version": "reference-effective-v1"}}
-        assert _detect_schema(v3_doc) == "v3"
         errors = _validate_schema_homogeneity([("engine-a", v3_doc)])
         assert errors == []
 

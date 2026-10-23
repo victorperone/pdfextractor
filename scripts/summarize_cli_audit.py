@@ -11,10 +11,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from audit_cli_execution import save
-from compute_metrics import (
-    _strip_md, _strip_page_header, _normalize, _lev_distance,
-    compute_critical_data_metrics,
-)
+from structured_pdf_text.evaluation import CanonicalDocument, EvaluationRequest, evaluate
+from structured_pdf_text.evaluation.markdown_parser import parse_page
+from structured_pdf_text.evaluation.reference_inputs import document_pages
 
 
 def lines(path):
@@ -124,29 +123,35 @@ def quality(directory, reference_pages, page_modes, expected_controls):
     literal_by_group = defaultdict(lambda: defaultdict(Counter))
     for number, reference in reference_pages.items():
         hyp = hyp_pages.get(number, "")
-        ref = _strip_page_header(reference)
-        text_ref, text_hyp = _strip_md(ref), _strip_md(hyp)
-        edits = _lev_distance(list(text_hyp), list(text_ref))
-        ref_words, hyp_words = _normalize(ref).split(), _normalize(hyp).split()
-        word_edits = _lev_distance(hyp_words, ref_words)
+        ref = document_pages(reference)[number]
+        page = evaluate(EvaluationRequest(ref_text=f"## Página {number}\n\n{ref}",
+                                          hyp_text=f"## Página {number}\n\n{hyp}"))
+        text = page["quality"]["text"]
+        visible, words = text["cer_sequential_visible"]["counts"], text["wer_sequential"]["counts"]
+        # Canonical leaf projection; resource-limited edits stay unavailable.
+        edits, word_edits = visible.get("edit_distance"), words.get("edit_distance")
+        text_ref = CanonicalDocument.from_nodes(parse_page(ref, number, "reference")).visible_text
+        text_hyp = CanonicalDocument.from_nodes(parse_page(hyp, number, "hypothesis")).visible_text
         reference_control = f"QA-P{number:03}"
-        critical = compute_critical_data_metrics(text_hyp, text_ref)
+        critical = {key: metric["value"] for key, metric in page["quality"]["critical_data"].items()
+                    if not key.endswith("_page")}
         literals = critical_counts(text_hyp, text_ref)
         controls = hyp.count(reference_control)
         expected_control = expected_controls.get(number, True)
         entries.append({"page": number, "mode": page_modes.get(number),
-                        "reference_chars": len(text_ref), "hypothesis_chars": len(text_hyp),
-                        "char_edits": edits, "cer_text_only": edits / max(1, len(text_ref)),
-                        "word_edits": word_edits, "reference_words": len(ref_words),
-                        "wer": word_edits / max(1, len(ref_words)),
+                        "reference_chars": visible["ref_chars"], "hypothesis_chars": visible["hyp_chars"],
+                        "char_edits": edits, "cer_text_only": text["cer_sequential_visible"]["value"],
+                        "word_edits": word_edits, "reference_words": words["ref_words"],
+                        "wer": text["wer_sequential"]["value"],
                         "control_expected": expected_control,
                         "control_occurrences": controls,
                         "critical_data": critical,
                         "critical_literal_counts": literals,
                         "hypothesis_sha256": hashlib.sha256(hyp.encode()).hexdigest()})
         for group in ("all", page_modes.get(number, "unknown")):
-            totals[group].update(char_edits=edits, reference_chars=len(text_ref),
-                                 word_edits=word_edits, reference_words=len(ref_words),
+            totals[group].update(char_edits=edits or 0, reference_chars=visible["ref_chars"],
+                                 word_edits=word_edits or 0, reference_words=words["ref_words"],
+                                 edit_unavailable_pages=int(edits is None or word_edits is None),
                                  pages=1, control_pages_expected=int(expected_control),
                                  control_pages_present=int(expected_control and controls > 0),
                                  control_pages_duplicated=int(expected_control and controls > 1))
@@ -157,12 +162,14 @@ def quality(directory, reference_pages, page_modes, expected_controls):
                           "wer": values["word_edits"] / max(1, values["reference_words"])}
                   for group, values in totals.items()}
     for group, records in critical_by_group.items():
+        # Mean of applicable canonical F1 values; N/A pages are excluded.
         aggregated[group]["critical_data_macro"] = {
-            key: sum(record[key] for record in records) / len(records)
+            key: (sum(values) / len(values) if values else None)
             for key in records[0]
+            for values in [[record[key] for record in records if record[key] is not None]]
         }
         aggregated[group]["critical_literals_micro"] = critical_rates(literal_by_group[group])
-    return {"normalization": "Existing compute_metrics._strip_md and _normalize; decorative furniture retained as requested; page delimiters removed; no ground-truth-specific text corrections. Existing critical metrics use per-page multiset regex matching and macro averaging, including their perfect-score convention when a reference category is absent. Additional critical_literals_micro matches per-page multisets of currency values, signed percentages, quantity fields and the synthetic OCR-VALIDAÇÃO identifiers; signs, zeroes and identifier case are preserved, whitespace inside numeric spellings is ignored. False positives on pages without reference values are counted; undefined rates are null. Controls count exact literal substrings; only manifest-expected controls enter coverage. These metrics do not isolate OCR from title/furniture/configuration differences, and the provided reference includes prose annotations for the blank page.",
+    return {"normalization": "Canonical evaluation-3.0.0 page metrics (parser-visible leaf projection, unicode_layout CER/WER); decorative furniture retained as requested; page delimiters removed; no ground-truth-specific text corrections. Critical metrics are the canonical document F1 per page, macro-averaged over applicable pages only. Additional critical_literals_micro matches per-page multisets of currency values, signed percentages, quantity fields and the synthetic OCR-VALIDAÇÃO identifiers; signs, zeroes and identifier case are preserved, whitespace inside numeric spellings is ignored. False positives on pages without reference values are counted; undefined rates are null. Controls count exact literal substrings; only manifest-expected controls enter coverage. These metrics do not isolate OCR from title/furniture/configuration differences, and the provided reference includes prose annotations for the blank page.",
             "aggregate": aggregated, "pages": entries,
             "document_status": document["diagnostics"]["status"]}
 

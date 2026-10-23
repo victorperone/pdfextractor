@@ -104,12 +104,14 @@ def test_both_clis_can_extend_same_publication_without_overwriting_roles(tmp_pat
     journal_path = next((tmp_path / "out").glob(".evaluation-*.json"))
     journal = json.loads(journal_path.read_text())
     roles = {entry["role"] for entry in journal["artifacts"].values()}
-    assert roles == {"canonical_metrics", "legacy_metrics", "canonical_errors", "legacy_errors"}
+    assert roles == {"canonical_metrics", "canonical_errors"}
     slug = engine.replace("-", "_")
     canonical = json.loads((tmp_path / "out" / f"metrics_v3_{slug}_r1.json").read_text())
     assert canonical["schema_version"] == "evaluation-3.0.0"
-    legacy_files = [name for name, record in journal["artifacts"].items() if record["role"] == "legacy_metrics"]
-    assert "grupo1_texto" in json.loads((tmp_path / "out" / legacy_files[0]).read_text())
+    aliases = [name for name, record in journal["artifacts"].items() if record["role"] == "canonical_metrics"]
+    assert len(aliases) == 2
+    assert {(tmp_path / "out" / name).read_bytes() for name in aliases} == {
+        (tmp_path / "out" / f"metrics_v3_{slug}_r1.json").read_bytes()}
     stable = snapshot(tmp_path / "out")
     assert cli(first, args).returncode == cli(second, args).returncode == 0
     assert snapshot(tmp_path / "out") == stable
@@ -236,37 +238,6 @@ def test_damage_is_not_silently_repaired_or_overwritten(tmp_path, problem):
     before = snapshot(out)
     assert cli(CLIS[1], args).returncode != 0
     assert snapshot(out) == before
-
-
-@pytest.mark.parametrize("bad_delta", ["missing", "{invalid", "[]"])
-def test_invalid_delta_input_is_validated_before_any_publication(tmp_path, bad_delta):
-    args = prepared(tmp_path)
-    delta = tmp_path / "v1.json"
-    if bad_delta != "missing":
-        delta.write_text(bad_delta)
-    args += ["--v1-metrics", str(delta)]
-    result = cli(CLIS[1], args)
-    assert result.returncode != 0
-    assert snapshot(tmp_path / "out") == {}
-
-
-def test_delta_can_be_added_but_its_source_cannot_change(tmp_path):
-    args = prepared(tmp_path)
-    assert cli(CLIS[1], args).returncode == 0
-    initial = snapshot(tmp_path / "out")
-    v1 = tmp_path / "v1.json"
-    v1.write_text(json.dumps({"heading_f1": 1}))
-    args += ["--v1-metrics", str(v1)]
-    assert cli(CLIS[1], args).returncode == 0
-    for name, value in initial.items():
-        if not name.startswith(".evaluation-"):
-            assert snapshot(tmp_path / "out")[name] == value
-    before = snapshot(tmp_path / "out")
-    assert cli(CLIS[1], args).returncode == 0
-    assert snapshot(tmp_path / "out") == before
-    v1.write_text(json.dumps({"heading_f1": 0}))
-    assert cli(CLIS[1], args).returncode != 0
-    assert snapshot(tmp_path / "out") == before
 
 
 def test_all_artifact_conflicts_are_preflighted_before_writing(tmp_path):
@@ -434,6 +405,6 @@ def test_changed_canonical_result_with_same_identity_cannot_mix_old_metrics_with
     with pytest.raises(ArtifactPublicationError, match="Canonical result changed"):
         publish_artifacts(tmp_path, "ns", IDENTITY, [
             Artifact("canonical_metrics", "metrics.json", json_text(changed)),
-            Artifact("delta_report", "delta.md", "new report based on changed result"),
+            Artifact("canonical_errors", "errors.md", "new report based on changed result"),
         ])
     assert snapshot(tmp_path) == before

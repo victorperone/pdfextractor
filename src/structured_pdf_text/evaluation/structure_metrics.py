@@ -11,12 +11,12 @@ MET-S02  heading_level_match_rate     fraction of matched headings with correct 
 MET-S03  heading_text_cer             char-level error rate on matched heading pairs
                                        (uses visible_text; mismatched level does NOT block CER —
                                        T24: '# Título correto' vs '# Titulo correto' → CER > 0)
-MET-S04  paragraph_detection_f1      P/R/F1 for paragraph blocks
+MET-S04  paragraph_detection_f1      P/R/F1 for paragraph blocks (not inside list items/quotes)
 MET-S05  list_group_detection_f1     P/R/F1 for list container blocks
 MET-S06  list_item_detection_f1      P/R/F1 for list item blocks
 MET-S07  list_hierarchy_accuracy     fraction of matched items with correct depth
 MET-S08  pairwise_reading_order_acc  fraction of ref ordered pairs preserved in hyp
-                                      (universe: all textual units)
+                                      (universe: matched terminal text units)
 MET-S09  block_type_confusion        dict mapping (expected, observed) mismatches
 MET-S10  block_order_pairwise_acc    pairwise order accuracy for structural blocks only
                                       (universe: heading/paragraph/table/list/code —
@@ -29,7 +29,6 @@ MET-SL04 ordered_list_ordinal_accuracy  ordinal index accuracy for numbered list
 """
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -37,6 +36,7 @@ from .edit_distance import DEFAULT_MAX_EDIT_CELLS, EditDistanceBudget, EditDista
 from .paragraph_boundaries import matching_gaps, paragraph_stream
 from .order_counts import concordance_counts
 
+from structured_pdf_text.evaluation.block_alignment import leaf_flags
 from structured_pdf_text.evaluation.models import (
     AlignedPair,
     AlignmentStatus,
@@ -45,11 +45,6 @@ from structured_pdf_text.evaluation.models import (
     MetricStatus,
     NodeKind,
 )
-
-# Regex to extract ordinal index from ordered-list item visible_text.
-# Matches leading "1." / "1)" on legacy manually constructed nodes.
-_ORDINAL_RE = re.compile(r"^\s*(\d+)[.)]\s")
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -280,6 +275,16 @@ def heading_text_cer(
 # MET-S04: Paragraph detection
 # ---------------------------------------------------------------------------
 
+_PARAGRAPH_HOSTS = frozenset({NodeKind.LIST_ITEM, NodeKind.BLOCKQUOTE})
+
+
+def _paragraph_blocks(nodes: Sequence[MarkdownNode]) -> set[str]:
+    """Paragraph blocks; a list item's or quote's own paragraphs are its text."""
+    kinds = {n.node_id: n.kind for n in nodes}
+    return {n.node_id for n in nodes
+            if n.kind == NodeKind.PARAGRAPH and kinds.get(n.parent_id) not in _PARAGRAPH_HOSTS}
+
+
 def paragraph_detection_f1(
     pairs: Sequence[AlignedPair],
     ref_nodes: Sequence[MarkdownNode],
@@ -292,8 +297,8 @@ def paragraph_detection_f1(
     preserve boundaries; wrong splits/merges cannot be perfect detections.
     Internal cuts also receive separate boundary P/R/F1 (MET-S11).
     """
-    ref_paras = {n.node_id for n in ref_nodes if n.kind == NodeKind.PARAGRAPH}
-    hyp_paras = {n.node_id for n in hyp_nodes if n.kind == NodeKind.PARAGRAPH}
+    ref_paras = _paragraph_blocks(ref_nodes)
+    hyp_paras = _paragraph_blocks(hyp_nodes)
 
     ref_to_hyp: dict[str, str] = {}
     for p in pairs:
@@ -464,11 +469,6 @@ def list_metrics(
         if rn.ordered_list:
             rordinal = rn.metadata.get("ordered_ordinal")
             hordinal = hn.metadata.get("ordered_ordinal") if hn.ordered_list else None
-            # Compatibility for manually constructed nodes predating metadata.
-            if rordinal is None and (m_ref := _ORDINAL_RE.match(ref_text)):
-                rordinal = int(m_ref[1])
-            if hordinal is None and hn.ordered_list and (m_hyp := _ORDINAL_RE.match(hyp_text)):
-                hordinal = int(m_hyp[1])
             if rordinal is not None:
                 ordinal_total += 1
                 if rordinal == hordinal:
@@ -564,20 +564,26 @@ def list_metrics(
 
 def pairwise_reading_order_accuracy(
     pairs: Sequence[AlignedPair],
+    ref_nodes: Sequence[MarkdownNode] | None = None,
 ) -> MetricResult:
     """MET-S08: Fraction of ref ordered pairs whose relative order is preserved in hyp.
 
     For all matched pairs (ri, rj) where ri appears before rj in the reference,
     count how many have hyp_order(ri) < hyp_order(rj).
 
-    This is equivalent to Kendall's τ normalised to [0, 1].
+    This is equivalent to Kendall's τ normalised to [0, 1]. With *ref_nodes*,
+    the universe is the terminal text units: a container precedes its own
+    descendants by construction, so container pairs would inflate agreement.
     """
+    leaves = (None if ref_nodes is None else
+              {n.node_id for n, leaf in zip(ref_nodes, leaf_flags(ref_nodes)) if leaf})
     # Collect matched pairs with both orders defined
     matched = [
         p for p in pairs
         if p.status in (AlignmentStatus.MATCHED, AlignmentStatus.AMBIGUOUS)
         and p.reference_order is not None
         and p.hypothesis_order is not None
+        and (leaves is None or p.reference_id in leaves)
     ]
 
     n = len(matched)
@@ -743,7 +749,7 @@ def compute_structure_metrics(
         heading_cer    = heading_text_cer(pairs, ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
         paragraph      = paragraph_detection_f1(pairs, ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
         lists          = list_metrics(pairs, ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
-        reading_order  = pairwise_reading_order_accuracy(pairs),
+        reading_order  = pairwise_reading_order_accuracy(pairs, ref_nodes),
         block_order    = block_order_pairwise_accuracy(pairs, ref_nodes, hyp_nodes),
         type_confusion = block_type_confusion(pairs),
     )

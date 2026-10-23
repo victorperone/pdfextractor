@@ -2,7 +2,10 @@
 
 All metrics require MarkdownNode lists produced by the canonical parser.
 Table detection uses content-based 1:1 matching with a minimum similarity
-threshold — not min(n_ref, n_hyp) counting.
+threshold — not min(n_ref, n_hyp) counting. Table similarity is the Dice
+coefficient of the cells' word multisets (case-folded, order-independent), so
+reordered rows or columns never make a table undetected. Matching tolerates
+case; the cell metrics themselves compare text case-sensitively, like MET-TX.
 
 Metrics
 -------
@@ -14,9 +17,9 @@ MET-T05  cell_content_exact_match    exact pairs over paired/missing/extra cells
 MET-T06  cell_alignment_accuracy     correctly placed content matches over all cells
 MET-T07  cell_cer                    edits over all reference characters, including losses/insertions
 MET-T12  cell_span_accuracy          rowspan/colspan agreement over all cells
-MET-T08  table_content_f1            multiset coverage of cell text (no positional requirement)
+MET-T08  table_content_f1            multiset coverage of non-empty cell text (no positional requirement)
 MET-T09  table_row_order_accuracy    pairwise row order accuracy within matched tables
-MET-T10  table_column_order_accuracy pairwise column order accuracy within matched tables
+MET-T10  table_column_order_accuracy pairwise column order of content-matched cells, all matched rows
 MET-T11  table_page_location_accuracy fraction of matched tables where hyp page == ref page;
                                        separate from detection F1 — a table may be detected but
                                        placed on the wrong page (spec §7.4 / T20)
@@ -52,11 +55,17 @@ TABLE_MATCH_THRESHOLD = 0.40
 # ---------------------------------------------------------------------------
 
 def _norm(text: str) -> str:
-    return normalize(text, NormProfile.UNICODE_LAYOUT).lower()
+    """Cell text as compared by the metrics (case-sensitive, like MET-TX)."""
+    return normalize(text, NormProfile.UNICODE_LAYOUT)
+
+
+def _match_norm(text: str) -> str:
+    """Cell text as compared when pairing tables, rows and cells."""
+    return _norm(text).lower()
 
 
 def _text_sim(a: str, b: str) -> float:
-    na, nb = _norm(a), _norm(b)
+    na, nb = _match_norm(a), _match_norm(b)
     if na == nb:
         return 1.0
     if not na or not nb:
@@ -125,7 +134,7 @@ def _build_parent_map(nodes: Sequence[MarkdownNode]) -> dict[str | None, list[Ma
 # ---------------------------------------------------------------------------
 
 def _table_cell_texts(table: MarkdownNode, parent_map: dict) -> tuple[str, ...]:
-    return tuple(_norm(cell.visible_text)
+    return tuple(_match_norm(cell.visible_text)
                  for row in _children_of_kind(table, parent_map, NodeKind.TABLE_ROW)
                  for cell in _children_of_kind(row, parent_map, NodeKind.TABLE_CELL))
 
@@ -137,23 +146,34 @@ def _table_similarity(
     hyp_map: dict[str | None, list[MarkdownNode]],
 ) -> float:
     """Content-based similarity between two table nodes [0, 1]."""
-    ref_texts = _table_cell_texts(ref_table, ref_map)
-    hyp_texts = _table_cell_texts(hyp_table, hyp_map)
+    return _texts_similarity(ref_table, hyp_table, _table_cell_texts(ref_table, ref_map),
+                             _table_cell_texts(hyp_table, hyp_map))
 
-    # Page consistency bonus
+
+def _texts_similarity(
+    ref_table: MarkdownNode, hyp_table: MarkdownNode,
+    ref_texts: tuple[str, ...], hyp_texts: tuple[str, ...],
+) -> float:
+    return _tokens_similarity(ref_table, hyp_table, _cell_tokens(ref_texts), _cell_tokens(hyp_texts))
+
+
+def _cell_tokens(texts: tuple[str, ...]) -> Counter:
+    return Counter(token for text in texts for token in text.split())
+
+
+def _tokens_similarity(
+    ref_table: MarkdownNode, hyp_table: MarkdownNode, ref_tokens: Counter, hyp_tokens: Counter,
+) -> float:
+    """Dice of cell-word multisets plus a same-page bonus; order-independent."""
     page_ok = (ref_table.page == hyp_table.page) if (ref_table.page and hyp_table.page) else None
-
-    if not ref_texts and not hyp_texts:
+    if not ref_tokens and not hyp_tokens:
         return 1.0 if page_ok is not False else 0.5
-    if not ref_texts or not hyp_texts:
+    if not ref_tokens or not hyp_tokens:
         return 0.0
-
-    combined_ref = " ".join(ref_texts)
-    combined_hyp = " ".join(hyp_texts)
-    text_sim = (1.0 if combined_ref == combined_hyp else
-                difflib.SequenceMatcher(None, combined_ref, combined_hyp, autojunk=False).ratio())
+    common = sum((ref_tokens & hyp_tokens).values())
+    dice = 2 * common / (sum(ref_tokens.values()) + sum(hyp_tokens.values()))
     page_bonus = 0.1 if page_ok else 0.0
-    return min(1.0, text_sim + page_bonus)
+    return min(1.0, dice + page_bonus)
 
 
 # ---------------------------------------------------------------------------
@@ -170,16 +190,20 @@ def _match_tables(
     """Greedy 1:1 matching; returns list of (ref, hyp, score)."""
     if not ref_tables or not hyp_tables:
         return []
+    ref_texts = [_table_cell_texts(t, ref_map) for t in ref_tables]
+    hyp_texts = [_table_cell_texts(t, hyp_map) for t in hyp_tables]
     if (threshold <= 1 and len(ref_tables) == len(hyp_tables)
-            and all(rt.page == ht.page and _table_cell_texts(rt, ref_map) == _table_cell_texts(ht, hyp_map)
-                    for rt, ht in zip(ref_tables, hyp_tables))):
+            and all(rt.page == ht.page and rx == hx
+                    for rt, ht, rx, hx in zip(ref_tables, hyp_tables, ref_texts, hyp_texts))):
         return [(rt, ht, 1.0) for rt, ht in zip(ref_tables, hyp_tables)]
 
     # Build score matrix
+    ref_tokens = [_cell_tokens(texts) for texts in ref_texts]
+    hyp_tokens = [_cell_tokens(texts) for texts in hyp_texts]
     scores: list[tuple[float, int, int]] = []
     for ri, rt in enumerate(ref_tables):
         for hi, ht in enumerate(hyp_tables):
-            s = _table_similarity(rt, ht, ref_map, hyp_map)
+            s = _tokens_similarity(rt, ht, ref_tokens[ri], hyp_tokens[hi])
             if s >= threshold:
                 scores.append((s, ri, hi))
     scores.sort(key=lambda x: x[0], reverse=True)
@@ -197,21 +221,49 @@ def _match_tables(
 
 
 # ---------------------------------------------------------------------------
+# Shared matching context: tables and rows are matched once per evaluation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _TableContext:
+    ref_map: dict[str | None, list[MarkdownNode]]
+    hyp_map: dict[str | None, list[MarkdownNode]]
+    ref_tables: list[MarkdownNode]
+    hyp_tables: list[MarkdownNode]
+    matched: list[tuple[MarkdownNode, MarkdownNode, float]]
+    _rows: dict[tuple[str, str], tuple[list[MarkdownNode], list[MarkdownNode],
+                                       list[tuple[MarkdownNode, MarkdownNode]]]] = field(default_factory=dict)
+
+    @classmethod
+    def build(cls, ref_nodes: Sequence[MarkdownNode], hyp_nodes: Sequence[MarkdownNode]) -> "_TableContext":
+        ref_map, hyp_map = _build_parent_map(ref_nodes), _build_parent_map(hyp_nodes)
+        ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
+        hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
+        return cls(ref_map, hyp_map, ref_tables, hyp_tables,
+                   _match_tables(ref_tables, hyp_tables, ref_map, hyp_map))
+
+    def rows(self, ref_table: MarkdownNode, hyp_table: MarkdownNode):
+        """(ref rows, hyp rows, greedy row pairs) of one matched table pair."""
+        key = (ref_table.node_id, hyp_table.node_id)
+        if key not in self._rows:
+            ref_rows = _children_of_kind(ref_table, self.ref_map, NodeKind.TABLE_ROW)
+            hyp_rows = _children_of_kind(hyp_table, self.hyp_map, NodeKind.TABLE_ROW)
+            self._rows[key] = (ref_rows, hyp_rows, _match_rows(ref_rows, hyp_rows))
+        return self._rows[key]
+
+
+# ---------------------------------------------------------------------------
 # MET-T01: Table detection
 # ---------------------------------------------------------------------------
 
 def table_detection_f1(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, context: _TableContext | None = None,
 ) -> dict[str, MetricResult]:
     """MET-T01: Table detection P/R/F1 with content-based 1:1 matching."""
-    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
-    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
-
-    ref_map = _build_parent_map(ref_nodes)
-    hyp_map = _build_parent_map(hyp_nodes)
-
-    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    ctx = context or _TableContext.build(ref_nodes, hyp_nodes)
+    ref_tables, hyp_tables, matched = ctx.ref_tables, ctx.hyp_tables, ctx.matched
     tp = len(matched)
     fn = len(ref_tables) - tp
     fp = len(hyp_tables) - tp
@@ -234,26 +286,20 @@ def table_detection_f1(
 def table_row_and_column_metrics(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, context: _TableContext | None = None,
 ) -> dict[str, MetricResult]:
     """MET-T02: row detection F1; MET-T03: column count accuracy."""
-    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
-    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
-
-    ref_map = _build_parent_map(ref_nodes)
-    hyp_map = _build_parent_map(hyp_nodes)
-
-    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    ctx = context or _TableContext.build(ref_nodes, hyp_nodes)
+    ref_tables, hyp_tables, matched = ctx.ref_tables, ctx.hyp_tables, ctx.matched
+    ref_map, hyp_map = ctx.ref_map, ctx.hyp_map
     total_tp_r = total_fp_r = total_fn_r = 0
     col_matched = 0
     # A missing/extra table is a failed dimension comparison, not N/A.
     col_total = len(ref_tables) + len(hyp_tables) - len(matched)
 
     for ref_t, hyp_t, _ in matched:
-        ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
-        hyp_rows = _children_of_kind(hyp_t, hyp_map, NodeKind.TABLE_ROW)
-
         # Row matching by content similarity within the pair
-        row_pairs = _match_rows(ref_rows, hyp_rows)
+        ref_rows, hyp_rows, row_pairs = ctx.rows(ref_t, hyp_t)
         tp_r = len(row_pairs)
         fn_r = len(ref_rows) - tp_r
         fp_r = len(hyp_rows) - tp_r
@@ -363,6 +409,7 @@ def cell_metrics(
     hyp_nodes: Sequence[MarkdownNode],
     *,
     max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
+    context: _TableContext | None = None,
 ) -> dict[str, MetricResult]:
     """MET-T04–T07/T12 over every cell, including unmatched rows/tables.
 
@@ -373,16 +420,12 @@ def cell_metrics(
     Merged cells carry text once per anchor.
     """
     budget = EditDistanceBudget(max_edit_cells)
-    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
-    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
-    ref_map, hyp_map = _build_parent_map(ref_nodes), _build_parent_map(hyp_nodes)
-    tables = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    ctx = context or _TableContext.build(ref_nodes, hyp_nodes)
+    ref_map, hyp_map = ctx.ref_map, ctx.hyp_map
     cell_pairs: list[tuple[MarkdownNode, MarkdownNode]] = []
     align_correct = 0
-    for rt, ht, _ in tables:
-        rows = _match_rows(_children_of_kind(rt, ref_map, NodeKind.TABLE_ROW),
-                           _children_of_kind(ht, hyp_map, NodeKind.TABLE_ROW))
-        for rr, hr in rows:
+    for rt, ht, _ in ctx.matched:
+        for rr, hr in ctx.rows(rt, ht)[2]:
             rc = _children_of_kind(rr, ref_map, NodeKind.TABLE_CELL)
             hc = _children_of_kind(hr, hyp_map, NodeKind.TABLE_CELL)
             # Anchor coordinates matter when spans reserve columns in a row.
@@ -476,26 +519,21 @@ def _pairwise_order_accuracy(indices: list[tuple[int, int]]) -> tuple[int, int]:
 def table_row_order_accuracy(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, context: _TableContext | None = None,
 ) -> MetricResult:
     """MET-T09: Pairwise row order accuracy within matched tables.
 
     For each matched table pair, align rows by content, then measure the
     fraction of row pairs where ref order == hyp order.
     """
-    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
-    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
-    ref_map = _build_parent_map(ref_nodes)
-    hyp_map = _build_parent_map(hyp_nodes)
-
-    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    ctx = context or _TableContext.build(ref_nodes, hyp_nodes)
+    matched = ctx.matched
     if not matched:
         return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T09", {})
 
     total_concordant = total_pairs = 0
     for ref_t, hyp_t, _ in matched:
-        ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
-        hyp_rows = _children_of_kind(hyp_t, hyp_map, NodeKind.TABLE_ROW)
-        row_pairs = _match_rows(ref_rows, hyp_rows)
+        ref_rows, hyp_rows, row_pairs = ctx.rows(ref_t, hyp_t)
         if len(row_pairs) < 2:
             continue
         # Map matched row pairs to (ref_position, hyp_position) index pairs
@@ -519,41 +557,35 @@ def table_row_order_accuracy(
 def table_column_order_accuracy(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, context: _TableContext | None = None,
 ) -> MetricResult:
     """MET-T10: Pairwise column order accuracy within matched tables.
 
-    For each matched table pair, align columns by content profile (using
-    the first matched row as a proxy), then measure concordant column pairs.
+    In every matched row pair, non-empty cells are paired by content; their
+    column coordinates must keep the reference order. Counts sum over rows.
     """
-    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
-    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
-    ref_map = _build_parent_map(ref_nodes)
-    hyp_map = _build_parent_map(hyp_nodes)
-
-    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    ctx = context or _TableContext.build(ref_nodes, hyp_nodes)
+    ref_map, hyp_map, matched = ctx.ref_map, ctx.hyp_map, ctx.matched
     if not matched:
         return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T10", {})
 
+    def anchors(row: MarkdownNode, pmap: dict) -> list[tuple[int, MarkdownNode]]:
+        # Blank cells carry no evidence of which column they came from.
+        return [(cell.metadata.get("column_index", i), cell)
+                for i, cell in enumerate(_children_of_kind(row, pmap, NodeKind.TABLE_CELL))
+                if _norm(cell.visible_text)]
+
     total_concordant = total_pairs = 0
     for ref_t, hyp_t, _ in matched:
-        ref_rows = _children_of_kind(ref_t, ref_map, NodeKind.TABLE_ROW)
-        hyp_rows = _children_of_kind(hyp_t, hyp_map, NodeKind.TABLE_ROW)
-
-        # Use header row (index 0) for column alignment when available
-        row_pairs = _match_rows(ref_rows, hyp_rows)
-        if not row_pairs:
-            continue
-        ref_hdr, hyp_hdr = row_pairs[0]
-
-        ref_cells = _children_of_kind(ref_hdr, ref_map, NodeKind.TABLE_CELL)
-        hyp_cells = _children_of_kind(hyp_hdr, hyp_map, NodeKind.TABLE_CELL)
-        col_pairs = _match_cells_by_content(ref_cells, hyp_cells)
-        if len(col_pairs) < 2:
-            continue
-
-        c, t = _pairwise_order_accuracy(col_pairs)
-        total_concordant += c
-        total_pairs      += t
+        for ref_row, hyp_row in ctx.rows(ref_t, hyp_t)[2]:
+            ref_cells, hyp_cells = anchors(ref_row, ref_map), anchors(hyp_row, hyp_map)
+            col_pairs = _match_cells_by_content([c for _, c in ref_cells], [c for _, c in hyp_cells])
+            if len(col_pairs) < 2:
+                continue
+            c, t = _pairwise_order_accuracy([(ref_cells[ri][0], hyp_cells[hi][0])
+                                             for ri, hi in col_pairs])
+            total_concordant += c
+            total_pairs      += t
 
     if total_pairs == 0:
         return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T10",
@@ -576,8 +608,9 @@ def table_content_f1(
     ref_cells = [n for n in ref_nodes if n.kind == NodeKind.TABLE_CELL]
     hyp_cells = [n for n in hyp_nodes if n.kind == NodeKind.TABLE_CELL]
 
-    ref_counter = Counter(_norm(c.visible_text) for c in ref_cells)
-    hyp_counter = Counter(_norm(c.visible_text) for c in hyp_cells)
+    # Empty cells are structure (MET-T04), not content: two blanks are no match.
+    ref_counter = Counter(text for c in ref_cells if (text := _norm(c.visible_text)))
+    hyp_counter = Counter(text for c in hyp_cells if (text := _norm(c.visible_text)))
 
     tp = sum((ref_counter & hyp_counter).values())
     fp = sum(hyp_counter.values()) - tp
@@ -597,6 +630,7 @@ def table_content_f1(
 def table_page_location_accuracy(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, context: _TableContext | None = None,
 ) -> MetricResult:
     """MET-T11: Fraction of matched tables where hyp page equals ref page.
 
@@ -608,12 +642,7 @@ def table_page_location_accuracy(
     - Pairs where either side has page=None are excluded (not penalised).
     - If no matched pairs have page information, status=not_applicable.
     """
-    ref_tables = [n for n in ref_nodes if n.kind == NodeKind.TABLE]
-    hyp_tables = [n for n in hyp_nodes if n.kind == NodeKind.TABLE]
-    ref_map = _build_parent_map(ref_nodes)
-    hyp_map = _build_parent_map(hyp_nodes)
-
-    matched = _match_tables(ref_tables, hyp_tables, ref_map, hyp_map)
+    matched = (context or _TableContext.build(ref_nodes, hyp_nodes)).matched
     if not matched:
         return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-T11",
                             {"matched_table_pairs": 0})
@@ -689,12 +718,13 @@ def compute_table_metrics(
     -------
     TableMetrics dataclass with all metric results.
     """
+    context = _TableContext.build(ref_nodes, hyp_nodes)
     return TableMetrics(
-        detection     = table_detection_f1(ref_nodes, hyp_nodes),
-        rows_columns  = table_row_and_column_metrics(ref_nodes, hyp_nodes),
-        cells         = cell_metrics(ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
+        detection     = table_detection_f1(ref_nodes, hyp_nodes, context=context),
+        rows_columns  = table_row_and_column_metrics(ref_nodes, hyp_nodes, context=context),
+        cells         = cell_metrics(ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells, context=context),
         content_f1    = table_content_f1(ref_nodes, hyp_nodes),
-        row_order     = table_row_order_accuracy(ref_nodes, hyp_nodes),
-        col_order     = table_column_order_accuracy(ref_nodes, hyp_nodes),
-        page_location = table_page_location_accuracy(ref_nodes, hyp_nodes),
+        row_order     = table_row_order_accuracy(ref_nodes, hyp_nodes, context=context),
+        col_order     = table_column_order_accuracy(ref_nodes, hyp_nodes, context=context),
+        page_location = table_page_location_accuracy(ref_nodes, hyp_nodes, context=context),
     )

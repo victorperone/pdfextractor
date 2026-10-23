@@ -4,7 +4,7 @@ Metrics
 -------
 MET-I01  duplicate_excess_rate      fraction of content blocks exceeding ref multiplicity
 MET-I02  missing_page_rate          fraction of selected pages absent from hypothesis
-MET-I03  page_content_coverage_recall  multiset token recall of canonical visible text
+MET-I03  page_content_coverage_recall  copy of MET-TX06 (multiset visible-token recall)
 MET-I04  markdown_validity          parse error and construct counts (descriptive)
 MET-I05  header_footer_heuristic    edge-content repetition (diagnostic only, not in score)
 
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Sequence
 
 from structured_pdf_text.evaluation.models import (
@@ -145,40 +145,24 @@ def missing_page_rate(
 def page_content_coverage_recall(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, text_recall: MetricResult | None = None,
 ) -> MetricResult:
-    """MET-I03: Multiset word-token recall of canonical visible text.
+    """MET-I03: integrity view of MET-TX06 (canonical visible-token recall).
 
-    Includes literal code and counts each terminal text unit once. Text is
-    normalized and lowercased; token multiplicity matters, order does not.
-    Character counts are diagnostic; recall = recovered tokens / reference tokens.
+    Includes literal code and counts each terminal text unit once; token
+    multiplicity matters, order does not. The value, status and token counts
+    are TX06's (computed once and copied); character counts are diagnostic.
     """
     from .canonical_document import CanonicalDocument
-    ref_text = _norm(CanonicalDocument.from_nodes(ref_nodes).visible_text)
-    hyp_text = _norm(CanonicalDocument.from_nodes(hyp_nodes).visible_text)
-
-    ref_len = len(ref_text)
-    if ref_len == 0:
-        if len(hyp_text) == 0:
-            return _make_result(None, MetricStatus.NOT_APPLICABLE, "MET-I03",
-                                {"ref_chars": 0, "hyp_chars": 0, "correct_absence": True}, direction="higher_is_better")
-        return _make_result(0.0, MetricStatus.FALSE_POSITIVE_ONLY, "MET-I03",
-                            {"ref_chars": 0, "hyp_chars": len(hyp_text)}, direction="higher_is_better")
-
-    # Token-level multiset recall (word tokens)
-    ref_tokens = Counter(ref_text.split())
-    hyp_tokens = Counter(hyp_text.split())
-    tp_tokens = sum((ref_tokens & hyp_tokens).values())
-    total_ref_tokens = sum(ref_tokens.values())
-
-    recall = tp_tokens / total_ref_tokens if total_ref_tokens > 0 else None
-    status = MetricStatus.OK if total_ref_tokens > 0 else MetricStatus.NOT_APPLICABLE
-
-    return _make_result(
-        recall, status, "MET-I03",
-        {"ref_chars": ref_len, "hyp_chars": len(hyp_text),
-         "ref_tokens": total_ref_tokens, "tp_tokens": tp_tokens},
-        direction="higher_is_better",
-    )
+    from .text_metrics import text_coverage_recall
+    recall = text_recall if text_recall is not None else text_coverage_recall(ref_nodes, hyp_nodes)
+    ref_text = normalize(CanonicalDocument.from_nodes(ref_nodes).visible_text, NormProfile.UNICODE_LAYOUT)
+    hyp_text = normalize(CanonicalDocument.from_nodes(hyp_nodes).visible_text, NormProfile.UNICODE_LAYOUT)
+    # Schema 3.0.0 records integrity metrics without a normalization profile.
+    result = replace(recall, definition_id="MET-I03", normalization_profile=None,
+                     warnings=list(recall.warnings),
+                     counts={**recall.counts, "ref_chars": len(ref_text), "hyp_chars": len(hyp_text)})
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +174,10 @@ class MarkdownValidityReport:
     """Diagnostic counts for Markdown structural validity."""
     parse_errors:            int = 0
     unclosed_fences:         int = 0
-    page_marker_errors:      int = 0
+    page_marker_errors:      int = 0   # schema 3.0.0 field; markers are validated at input
     duplicate_page_markers:  int = 0
-    unsupported_constructs:  int = 0
-    validity_status:         str = "valid"   # "valid" | "warnings" | "invalid"
+    unsupported_constructs:  int = 0   # schema 3.0.0 field; the parser has none to report
+    validity_status:         str = "valid"   # "valid" | "invalid"
     warnings:                list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -229,13 +213,7 @@ def markdown_validity_report(text: str) -> MarkdownValidityReport:
         for p, c in dups.items():
             report.warnings.append(f"duplicate_page_marker: '## Página {p}' appears {c}×")
 
-    # Determine validity_status
-    if report.parse_errors > 0:
-        report.validity_status = "invalid"
-    elif report.warnings:
-        report.validity_status = "warnings"
-    else:
-        report.validity_status = "valid"
+    report.validity_status = "invalid" if report.parse_errors else "valid"
 
     return report
 
@@ -291,20 +269,22 @@ def edge_content_diagnostic(
     header_candidates: Counter = Counter()
     footer_candidates: Counter = Counter()
 
-    for page_text in pages:
+    # Repetition across pages is undefined for a single page.
+    for page_text in pages if len(pages) > 1 else ():
         page_lines = [ln.strip() for ln in page_text.split("\n") if ln.strip()]
         for ln in page_lines[:edge_lines]:
             header_candidates[ln.lower()] += 1
         for ln in page_lines[-edge_lines:]:
             footer_candidates[ln.lower()] += 1
 
-    n_pages = max(len(pages), 1)
+    n_pages = len(pages)
 
+    # A line seen once is not a repetition, whatever the page count.
     for line, count in header_candidates.items():
-        if count / n_pages >= repetition_threshold and line not in ref_lines:
+        if count >= 2 and count / n_pages >= repetition_threshold and line not in ref_lines:
             diag.suspected_header_lines += 1
     for line, count in footer_candidates.items():
-        if count / n_pages >= repetition_threshold and line not in ref_lines:
+        if count >= 2 and count / n_pages >= repetition_threshold and line not in ref_lines:
             diag.suspected_footer_lines += 1
 
     # Isolated numbers (potential page numbers): present in hyp but absent from ref
@@ -352,6 +332,7 @@ def compute_integrity_metrics(
     hyp_page_nums: set[int] | None = None,
     hyp_raw_text: str | None = None,
     ref_raw_text: str | None = None,
+    text_recall: MetricResult | None = None,
 ) -> IntegrityMetrics:
     """Compute all integrity metrics.
 
@@ -373,7 +354,7 @@ def compute_integrity_metrics(
             selected_pages or set(), selected_reference, hyp_page_nums
         )
 
-    cov = page_content_coverage_recall(ref_nodes, hyp_nodes)
+    cov = page_content_coverage_recall(ref_nodes, hyp_nodes, text_recall=text_recall)
 
     validity: MarkdownValidityReport | None = None
     if hyp_raw_text is not None:

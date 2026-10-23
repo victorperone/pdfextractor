@@ -25,6 +25,7 @@ with the same input produce the same IDs.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from markdown_it import MarkdownIt
 from markdown_it.tree import SyntaxTreeNode
@@ -70,8 +71,12 @@ _TYPE_TO_KIND: dict[str, NodeKind] = {
 # Text extraction
 # ---------------------------------------------------------------------------
 
-def _extract_visible_text(node: SyntaxTreeNode) -> str:
-    """Join inline runs contiguously and separate structural child blocks."""
+def _extract_visible_text(node: SyntaxTreeNode, *, own_list_item: bool = False) -> str:
+    """Join inline runs contiguously and separate structural child blocks.
+
+    ``own_list_item`` excludes nested lists: they are separate items, so a
+    parent item's text is only its own content.
+    """
     tok = node.token
     if tok and tok.type == "inline":
         return "".join(
@@ -82,7 +87,21 @@ def _extract_visible_text(node: SyntaxTreeNode) -> str:
         )
     if tok and tok.type in ("text", "text_special", "code_inline", "fence", "code_block"):
         return tok.content
-    return " ".join(filter(None, (_extract_visible_text(child) for child in node.children)))
+    return " ".join(filter(None, (_extract_visible_text(child) for child in node.children
+                                  if not (own_list_item and child.type in ("bullet_list", "ordered_list")))))
+
+
+@lru_cache(maxsize=16)
+def _page_lines(body: str) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    """Source lines of one page body and their cumulative start offsets.
+
+    Every node of a page reuses one split; ``str`` caches its own hash.
+    """
+    lines = tuple(source_lines(body))
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    return lines, tuple(offsets)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +143,7 @@ def _walk(
         tok = node.token
         offset = page_body_offset
         if tok.map:
-            offset += sum(map(len, source_lines(page_body)[:tok.map[0]]))
+            offset += _page_lines(page_body)[1][tok.map[0]]
         html_nodes = parse_html_block(_raw_lines(page_body, tok), origin=origin, page=page,
                                      start_seq=counter[0], parent_id=parent_id,
                                      source_offset=offset)
@@ -165,12 +184,12 @@ def _walk(
     src_start = page_body_offset
     src_end   = page_body_offset
     if tok and tok.map:
-        lines = source_lines(page_body)
+        offsets = _page_lines(page_body)[1]
         s_line, e_line = tok.map
-        src_start = page_body_offset + sum(map(len, lines[:s_line]))
-        src_end   = page_body_offset + sum(map(len, lines[:e_line]))
+        src_start = page_body_offset + offsets[min(s_line, len(offsets) - 1)]
+        src_end   = page_body_offset + offsets[min(e_line, len(offsets) - 1)]
 
-    visible_raw = _extract_visible_text(node)
+    visible_raw = _extract_visible_text(node, own_list_item=kind == NodeKind.LIST_ITEM)
     # The parser already projected Markdown. Reinterpreting the result as
     # Markdown would erase literal code markers and escaped punctuation.
     visible     = normalize(visible_raw, NormProfile.UNICODE_LAYOUT)
@@ -240,7 +259,7 @@ def _walk(
 def _raw_lines(body: str, tok) -> str:
     """Return the raw Markdown source lines for a token."""
     if tok and tok.map:
-        lines = source_lines(body)
+        lines = _page_lines(body)[0]
         s, e = tok.map
         return re.sub(r"(?:\r\n|\r|\n)\Z", "", "".join(lines[s:e]))
     return ""

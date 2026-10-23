@@ -9,8 +9,6 @@ Profiles
 raw              NFC + CRLF→LF only.  No collapsing, no stripping.
 unicode_layout   raw + collapse intra-line repeated spaces + strip trailing WS.
 visible_text     Extract readable content from Markdown (headings, cells, etc.).
-entity_surface   Tokenise typed entities preserving exact surface form.
-entity_canonical Semantic normalisation per entity type (numbers, dates, …).
 
 The profile applied to any metric is recorded in MetricResult.normalization_profile
 so that comparisons across runs are always traceable.
@@ -19,6 +17,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
 from structured_pdf_text.evaluation.models import NormProfile
 
@@ -103,13 +102,21 @@ def normalize(text: str, profile: NormProfile = NormProfile.UNICODE_LAYOUT) -> s
 
     Notes
     -----
-    * entity_surface and entity_canonical require a tokeniser that
-      understands the document type (pt-BR).  This function applies only
-      the text-level normalisation; entity extraction is handled by the
-      critical_data module.
-    * Profiles are additive: each profile includes the transforms of the
-      profile to its left in the enum definition order.
+    Profiles are additive: each profile includes the transforms of the
+    profile to its left in the enum definition order. Typed entity
+    normalisation is handled by the critical_data module.
     """
+    profile = NormProfile(profile)
+    # Node texts repeat across metrics; whole documents are not retained.
+    if len(text) <= _CACHED_TEXT_LENGTH:
+        return _cached_normalize(text, profile)
+    return _normalize(text, profile)
+
+
+_CACHED_TEXT_LENGTH = 4096
+
+
+def _normalize(text: str, profile: NormProfile) -> str:
     if profile == NormProfile.RAW:
         return _nfc(_crlf(text))
 
@@ -120,10 +127,7 @@ def normalize(text: str, profile: NormProfile = NormProfile.UNICODE_LAYOUT) -> s
         base = _collapse_spaces(_nfc(_crlf(text))).strip()
         return _collapse_spaces(_visible_text(base)).strip()
 
-    if profile in (NormProfile.ENTITY_SURFACE, NormProfile.ENTITY_CANONICAL):
-        # For now, entity-level normalisation uses visible_text as base.
-        # The actual entity value extraction and canonical form is done by
-        # the critical_data module using typed patterns.
-        return normalize(text, NormProfile.VISIBLE_TEXT)
-
     return _nfc(_crlf(text))
+
+
+_cached_normalize = lru_cache(maxsize=1 << 16)(_normalize)

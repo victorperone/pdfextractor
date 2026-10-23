@@ -2,15 +2,22 @@
 
 Algorithm (spec §4.1)
 ---------------------
-1. Build a similarity matrix between all ref and hyp top-level blocks.
-2. Run greedy score-descending assignment (Hungarian-lite) to obtain
-   a 1:1 bipartite matching.
+1. Exact phase: blocks with the same layer, kind, page and normalized text
+   are paired by occurrence order. Content identity takes precedence over
+   position, so reordered blocks are matched to their own text.
+2. Fuzzy phase: remaining blocks of the same layer (text leaves with leaves,
+   structural containers with containers) are scored, then assigned greedily
+   in score-descending order (Hungarian-lite) to obtain a 1:1 matching.
 3. Mark ambiguous pairs where the second-best candidate scored within
    AMBIGUITY_MARGIN of the selected match.
 4. Emit AlignedPair for every ref node (MATCHED/AMBIGUOUS/UNMATCHED)
    and every unmatched hyp node (EXTRA).
 5. Detect SPLIT and MERGE provenance when one ref maps to many hyp
    or many ref map to one hyp — recorded in pair.reasons.
+
+Leaves follow CanonicalDocument: terminal text kinds without children. A
+leaf never competes with its ancestors, so the leaf pairs alone cover every
+terminal text unit exactly once.
 
 Similarity score (spec §4.2)
 -----------------------------
@@ -38,6 +45,7 @@ from structured_pdf_text.evaluation.models import (
     NormProfile,
 )
 from structured_pdf_text.evaluation.normalization import normalize
+from structured_pdf_text.evaluation.canonical_document import _LEAF_KINDS
 
 # ---------------------------------------------------------------------------
 # Weights and thresholds
@@ -251,6 +259,12 @@ def _identity_pairs(R: list[MarkdownNode], H: list[MarkdownNode], min_score: flo
     return result
 
 
+def leaf_flags(nodes: Sequence[MarkdownNode]) -> list[bool]:
+    """True for terminal text units (CanonicalDocument leaves) in *nodes*."""
+    parents = {n.parent_id for n in nodes if n.parent_id is not None}
+    return [n.kind in _LEAF_KINDS and n.node_id not in parents for n in nodes]
+
+
 def align_blocks(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
@@ -286,35 +300,59 @@ def align_blocks(
     identity = _identity_pairs(R, H, min_score, ambiguity_margin)
     if identity is not None:
         return identity
-    if nr * nh > max_candidate_pairs:
-        raise AlignmentResourceLimit(
-            f"Block alignment requires {nr * nh} pairs; budget is {max_candidate_pairs}"
-        )
     if nr == 0 and nh == 0:
         return []
 
+    ref_leaf, hyp_leaf = leaf_flags(R), leaf_flags(H)
+    matched_ref: dict[int, _Candidate] = {}
+    matched_hyp: set[int] = set()
+
     # ------------------------------------------------------------------ #
-    # Step 1/2: score candidates once; no duplicate R × H score matrix.
+    # Step 1: exact content, paired by occurrence order within each key.
     # ------------------------------------------------------------------ #
-    # Collect all valid candidates above min_score
-    candidates: list[_Candidate] = []
+    def key(node: MarkdownNode, leaf: bool) -> tuple:
+        return leaf, node.kind, node.page, normalize(node.visible_text, NormProfile.UNICODE_LAYOUT)
+
+    exact: dict[tuple, list[int]] = {}
+    for hi in range(nh - 1, -1, -1):
+        exact.setdefault(key(H[hi], hyp_leaf[hi]), []).append(hi)
     for ri in range(nr):
-        for hi in range(nh):
+        queue = exact.get(key(R[ri], ref_leaf[ri]))
+        if queue:
+            hi = queue.pop()
+            sc, reasons = compute_pair_score(R[ri], H[hi], ri, nr, hi, nh)
+            if sc >= min_score:
+                matched_ref[ri] = _Candidate(ri, hi, sc, reasons)
+                matched_hyp.add(hi)
+
+    # ------------------------------------------------------------------ #
+    # Step 2: score the remaining same-layer candidates once.
+    # ------------------------------------------------------------------ #
+    left_ref = [ri for ri in range(nr) if ri not in matched_ref]
+    left_hyp = [hi for hi in range(nh) if hi not in matched_hyp]
+    leaves_r = sum(ref_leaf[ri] for ri in left_ref)
+    leaves_h = sum(hyp_leaf[hi] for hi in left_hyp)
+    work = leaves_r * leaves_h + (len(left_ref) - leaves_r) * (len(left_hyp) - leaves_h)
+    if work > max_candidate_pairs:
+        raise AlignmentResourceLimit(
+            f"Block alignment requires {work} pairs; budget is {max_candidate_pairs}"
+        )
+    candidates: list[_Candidate] = []
+    for ri in left_ref:
+        for hi in left_hyp:
+            if ref_leaf[ri] != hyp_leaf[hi]:
+                continue
             sc, reasons = compute_pair_score(R[ri], H[hi], ri, nr, hi, nh)
             if sc >= min_score:
                 candidates.append(_Candidate(ri, hi, sc, reasons))
     candidates.sort(key=lambda c: c.score, reverse=True)
 
-    matched_ref: dict[int, _Candidate] = {}
-    matched_hyp: set[int] = set()
     second_best: dict[int, float] = {}   # ref_idx → best rejected score
 
     for cand in candidates:
         ri, hi = cand.ref_idx, cand.hyp_idx
         if ri in matched_ref or hi in matched_hyp:
             # Track second-best for ambiguity
-            if ri in matched_ref and hi not in matched_hyp:
-                pass  # hyp still free but ref taken
             if ri not in matched_ref:
                 second_best[ri] = max(second_best.get(ri, 0.0), cand.score)
             continue

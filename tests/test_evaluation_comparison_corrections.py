@@ -17,7 +17,7 @@ import pytest
 
 from evaluation_contract_helpers import comparison_result
 from scripts.compare_engines import (
-    _comparability_key_v2, _validate_comparability_v2, _validate_schema_homogeneity,
+    _comparability_key, _validate_comparability, _validate_schema_homogeneity,
 )
 from structured_pdf_text.evaluation import EvaluationRequest, evaluate
 from structured_pdf_text.evaluation.aggregation import (
@@ -57,7 +57,7 @@ def set_field(data, path, value):
 def compare(a, b):
     """Require identical decisions and diagnostics from API and CLI wrapper."""
     ok, reasons = check_comparability(a, b)
-    errors = _validate_comparability_v2([("a", a), ("b", b)])
+    errors = _validate_comparability([("a", a), ("b", b)])
     assert errors == reasons
     assert ok == (errors == [])
     return ok, reasons
@@ -222,7 +222,7 @@ def test_full_valid_identity_is_comparable_and_inputs_are_not_mutated():
     assert compare(a, b) == (True, [])
     assert compare(b, a) == (True, [])
     assert (a, b) == original
-    assert comparability_key(a) == _comparability_key_v2(a)
+    assert comparability_key(a) == _comparability_key(a)
 
 
 @pytest.mark.parametrize("path", _FIELDS)
@@ -232,7 +232,7 @@ def test_every_missing_required_field_fails_closed_even_if_missing_in_both(path)
         set_field(data, path, None)
     ok, reasons = compare(a, b)
     assert not ok and reasons
-    assert check_comparability(a, b, strict=False) == (ok, reasons)
+    assert check_comparability(a, b) == (ok, reasons)
 
 
 @pytest.mark.parametrize("path", _FIELDS)
@@ -349,11 +349,11 @@ def test_outcomes_source_paths_timestamps_and_engine_identity_are_not_comparison
 
 def test_single_run_and_repeated_engine_labels_are_still_validated():
     a = comparison_result()
-    assert _validate_comparability_v2([("a", a)]) == []
+    assert _validate_comparability([("a", a)]) == []
     invalid = copy.deepcopy(a)
     invalid["inputs"]["pdf_sha256"] = None
-    assert _validate_comparability_v2([("a", invalid)])
-    assert _validate_comparability_v2([("a", a), ("a", invalid)])
+    assert _validate_comparability([("a", invalid)])
+    assert _validate_comparability([("a", a), ("a", invalid)])
 
 
 def test_duplicate_label_cannot_hide_an_unsupported_schema():
@@ -409,7 +409,7 @@ def test_real_evaluator_documents_obey_shared_contract(tmp_path):
     a = evaluate(request)
     b = evaluate(replace(request, hyp_text="## Página 1\n\nTexto R$ 10,00",
                          engine="different", run_id="partial"))
-    assert a["evaluator"]["metric_definitions_version"] == "3.0.5"
+    assert a["evaluator"]["metric_definitions_version"] == "3.1.0"
     assert a["evaluator"]["aggregation_policy"] == "finite-numeric-outcomes-v1"
     assert compare(a, b) == (True, [])
     completed, output = cli(tmp_path, [a, b])

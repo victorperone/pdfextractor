@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.compare_engines import _get_value_v2, _render_comparison_table_v2
+from scripts.compare_engines import _get_value, _render_comparison_table
 from structured_pdf_text.evaluation import EvaluationRequest, evaluate
 from structured_pdf_text.evaluation.artifacts import publication_identity
 from structured_pdf_text.evaluation.reference_inputs import document_pages, pages_markdown
@@ -61,7 +61,7 @@ def request(tmp_path, **kwargs):
 
 
 def report(data, engine="rapidocr-test"):
-    return _render_comparison_table_v2([(engine, data)])
+    return _render_comparison_table([(engine, data)])
 
 
 def section(text, title):
@@ -165,12 +165,14 @@ def test_page_budgets_remain_explicit_when_document_and_page_exceed_limit():
     assert "| rapidocr-test | 1 |" not in section(text, "### Piores páginas por CER normalizado")
 
 
-def test_document_resource_limit_does_not_hide_available_page_diagnostics():
-    body = "## Página 1\n\nAlfa\n\n## Página 2\n\nBeta"
-    result = evaluate(EvaluationRequest(body, body.replace("Alfa", "# Alfa"), max_alignment_pairs=1))
+def test_page_resource_limit_does_not_hide_other_page_diagnostics():
+    body = "## Página 1\n\nAlfa\n\nGama\n\n## Página 2\n\nBeta"
+    hyp = "## Página 1\n\n# Alfa\n\n# Gama\n\n## Página 2\n\nBeta"
+    result = evaluate(EvaluationRequest(body, hyp, max_alignment_pairs=1))
     assert result["evaluation"]["status"] == "partial"
-    assert all(p["evaluation"]["status"] == "ok" for p in result["per_page"])
+    assert [p["evaluation"]["status"] for p in result["per_page"]] == ["partial", "ok"]
     assert not result["evaluation"]["rank_eligible"]
+    assert result["quality"]["structure"]["heading_detection_f1"]["status"] == "resource_limit"
 
 
 @pytest.mark.parametrize("data", [[], {"pages": None}, {"pages": [None]},
@@ -316,7 +318,7 @@ def test_precision_recall_and_denominator_zero_remain_distinct(tmp_path):
 @pytest.mark.parametrize("value,status", [(0, "false_positive_only"), (0, "false_negative_only"), (0.5, "ok")])
 def test_renderer_accepts_all_finite_applicable_statuses(value, status):
     data = {"quality": {"text": {"metric": {"value": value, "status": status}}}}
-    assert _get_value_v2(data, "text.metric") == value
+    assert _get_value(data, "text.metric") == value
 
 
 @pytest.mark.parametrize("value,status", [(0, "resource_limit"), (1, "invalid_input"),
@@ -324,7 +326,7 @@ def test_renderer_accepts_all_finite_applicable_statuses(value, status):
     (float("nan"), "ok"), (float("inf"), "ok"), (-float("inf"), "ok"), (None, "ok")])
 def test_renderer_excludes_unavailable_or_invalid_numeric_values(value, status):
     data = {"quality": {"text": {"metric": {"value": value, "status": status}}}}
-    assert _get_value_v2(data, "text.metric") is None
+    assert _get_value(data, "text.metric") is None
 
 
 def test_worst_pages_are_sorted_with_missing_pages_and_ties(tmp_path):
@@ -414,7 +416,7 @@ def test_real_corpus_reference_labels_and_canonical_page_identity(corpus, filena
 def test_same_engine_distinct_run_ids_do_not_collapse_columns():
     a = evaluate(EvaluationRequest("Texto", "Texto", engine="same", run_id="a"))
     b = evaluate(EvaluationRequest("Texto", "BAD", engine="same", run_id="b"))
-    text = _render_comparison_table_v2([("same", a), ("same", b)])
+    text = _render_comparison_table([("same", a), ("same", b)])
     assert "**same / a** | **same / b**" in text
     assert "| CER Sequential Normalized ↓ | **0.0000** | 1.0000 |" in text
 

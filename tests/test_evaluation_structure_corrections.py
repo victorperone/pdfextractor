@@ -313,7 +313,7 @@ def test_parser_identity_and_policy_provenance_are_current():
     result = evaluate(EvaluationRequest(ref_text="a", hyp_text="a"))
     assert version("markdown-it-py") in PARSER_VERSION
     assert result["evaluator"]["parser"] == PARSER_VERSION
-    assert result["evaluator"]["metric_definitions_version"] == "3.0.5"
+    assert result["evaluator"]["metric_definitions_version"] == "3.1.0"
     assert result["evaluator"]["page_syntax_policy"] == "top-level-page-markers-outside-code-html-v1"
     assert result["evaluator"]["paragraph_policy"] == "page-token-spans-exact-gaps-v1"
 

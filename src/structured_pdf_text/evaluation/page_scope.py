@@ -1,8 +1,7 @@
 """Page-set selection and classification (spec §3.1).
 
 This module implements the canonical page-scope computation so that all
-metric groups use the *same* selected set without ad-hoc intersection
-variants scattered across compute_metrics.py.
+metric groups use the *same* selected set without ad-hoc intersections.
 
 Usage
 -----

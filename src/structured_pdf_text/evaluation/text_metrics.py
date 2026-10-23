@@ -4,7 +4,7 @@ Metrics
 -------
 MET-TX01  cer_markdown_raw           CER on raw Markdown body (no page markers, no visible extraction)
 MET-TX02  cer_sequential_normalized  CER after unicode_layout normalisation of visible text
-MET-TX03  cer_sequential_visible     CER on parser-extracted visible text (leaf nodes only, no overlap)
+MET-TX03  cer_sequential_visible     same projection as TX02 (parser text is already visible); copied
 MET-TX04  wer_sequential             WER on normalised word tokens (leaf nodes only)
 MET-TX05  aligned_block_text_cer     CER per paired block (independent of position)
 MET-TX06  text_coverage_recall       token-level multiset recall (no order required)
@@ -22,7 +22,7 @@ Design notes
 - ``cer_sequential_visible`` and WER operate on the deduplicated leaf-node
   projection from CanonicalDocument: TABLE, TABLE_ROW, LIST container nodes
   are excluded so their text is not counted multiple times (bug A02 fix).
-- `aligned_block_text_cer` is computed only on MATCHED/AMBIGUOUS pairs;
+- `aligned_block_text_cer` uses the aligner's leaf pairs (MATCHED/AMBIGUOUS);
   unmatched ref nodes contribute FN chars, unmatched hyp nodes contribute FP
   chars via a synthetic empty-ref / empty-hyp pair (spec §4.3).
 - `text_coverage_*` use Counter intersection for multiset TP, so repeated
@@ -32,7 +32,7 @@ Design notes
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 from structured_pdf_text.evaluation.models import (
@@ -250,14 +250,18 @@ def cer_sequential(
     profile: NormProfile,
     definition_id: str,
     *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
+    ref_text: str | None = None, hyp_text: str | None = None,
 ) -> MetricResult:
     """CER on deduplicated visible text under the given normalisation profile.
 
     Uses CanonicalDocument leaf projection so container nodes (TABLE, LIST)
-    do not duplicate their children's text (bug A02 fix).
+    do not duplicate their children's text (bug A02 fix). Precomputed
+    projections may be supplied by the caller.
     """
-    ref_text = _collect_visible_text(ref_nodes)
-    hyp_text = _collect_visible_text(hyp_nodes)
+    if ref_text is None:
+        ref_text = _collect_visible_text(ref_nodes)
+    if hyp_text is None:
+        hyp_text = _collect_visible_text(hyp_nodes)
 
     ref_n = _norm(ref_text, profile)
     hyp_n = _norm(hyp_text, profile)
@@ -273,13 +277,14 @@ def wer_sequential(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
     *, max_edit_cells: int = DEFAULT_MAX_EDIT_CELLS,
+    ref_words: list[str] | None = None, hyp_words: list[str] | None = None,
 ) -> MetricResult:
     """WER on normalised word tokens (unicode_layout profile)."""
     profile = NormProfile.UNICODE_LAYOUT
-    ref_text = _collect_visible_text(ref_nodes)
-    hyp_text = _collect_visible_text(hyp_nodes)
-    ref_words = _norm(ref_text, profile).split()
-    hyp_words = _norm(hyp_text, profile).split()
+    if ref_words is None:
+        ref_words = _visible_tokens(ref_nodes)
+    if hyp_words is None:
+        hyp_words = _visible_tokens(hyp_nodes)
     return _wer_result(ref_words, hyp_words, "MET-TX04", profile, max_edit_cells)
 
 
@@ -306,7 +311,12 @@ def aligned_block_text_cer(
 
     ref_leaves = CanonicalDocument.from_nodes(ref_nodes).leaf_nodes
     hyp_leaves = CanonicalDocument.from_nodes(hyp_nodes).leaf_nodes
-    if pairs is None or len(ref_leaves) != len(ref_nodes) or len(hyp_leaves) != len(hyp_nodes):
+    if pairs is not None:
+        # The layered aligner pairs leaves only with leaves; their pairs cover
+        # every terminal text unit once. Container pairs carry no own text.
+        leaf_ids = {n.node_id for n in ref_leaves} | {n.node_id for n in hyp_leaves}
+        pairs = [p for p in pairs if p.reference_id in leaf_ids or p.hypothesis_id in leaf_ids]
+    else:
         # Structural parents must not compete with their descendants for text.
         try:
             kwargs = {} if max_alignment_pairs is None else {"max_candidate_pairs": max_alignment_pairs}
@@ -434,20 +444,26 @@ def aligned_block_text_cer(
 # MET-TX06 / TX07: text coverage recall and precision
 # ---------------------------------------------------------------------------
 
+def _visible_tokens(nodes: Sequence[MarkdownNode]) -> list[str]:
+    return _norm(_collect_visible_text(nodes), NormProfile.UNICODE_LAYOUT).split()
+
+
 def text_coverage_recall(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, ref_tokens: Counter | None = None, hyp_tokens: Counter | None = None,
 ) -> MetricResult:
     """MET-TX06: token-level multiset recall, order-independent (spec §4.3).
 
     recall = Σ min(ref_count, hyp_count) / Σ ref_count
     Uses leaf-only projection to avoid double-counting (bug A02 fix).
+    Precomputed token counters may be supplied by the caller.
     """
     profile = NormProfile.UNICODE_LAYOUT
-    ref_text = _collect_visible_text(ref_nodes)
-    hyp_text = _collect_visible_text(hyp_nodes)
-    ref_tokens = Counter(_norm(ref_text, profile).split())
-    hyp_tokens = Counter(_norm(hyp_text, profile).split())
+    if ref_tokens is None:
+        ref_tokens = Counter(_visible_tokens(ref_nodes))
+    if hyp_tokens is None:
+        hyp_tokens = Counter(_visible_tokens(hyp_nodes))
 
     n_ref = sum(ref_tokens.values())
     n_hyp = sum(hyp_tokens.values())
@@ -476,16 +492,17 @@ def text_coverage_recall(
 def text_coverage_precision(
     ref_nodes: Sequence[MarkdownNode],
     hyp_nodes: Sequence[MarkdownNode],
+    *, ref_tokens: Counter | None = None, hyp_tokens: Counter | None = None,
 ) -> MetricResult:
     """MET-TX07: token-level multiset precision, order-independent (spec §4.3).
 
     precision = Σ min(ref_count, hyp_count) / Σ hyp_count
     """
     profile = NormProfile.UNICODE_LAYOUT
-    ref_text = _collect_visible_text(ref_nodes)
-    hyp_text = _collect_visible_text(hyp_nodes)
-    ref_tokens = Counter(_norm(ref_text, profile).split())
-    hyp_tokens = Counter(_norm(hyp_text, profile).split())
+    if ref_tokens is None:
+        ref_tokens = Counter(_visible_tokens(ref_nodes))
+    if hyp_tokens is None:
+        hyp_tokens = Counter(_visible_tokens(hyp_nodes))
 
     n_ref = sum(ref_tokens.values())
     n_hyp = sum(hyp_tokens.values())
@@ -563,22 +580,96 @@ def compute_text_metrics(
     -------
     TextMetrics dataclass with all metric results.
     """
+    ref_text, hyp_text = _collect_visible_text(ref_nodes), _collect_visible_text(hyp_nodes)
+    ref_words = _norm(ref_text, NormProfile.UNICODE_LAYOUT).split()
+    hyp_words = _norm(hyp_text, NormProfile.UNICODE_LAYOUT).split()
+    ref_tokens, hyp_tokens = Counter(ref_words), Counter(hyp_words)
+    normalized = cer_sequential(
+        ref_nodes, hyp_nodes, NormProfile.UNICODE_LAYOUT, "MET-TX02",
+        max_edit_cells=max_edit_cells, ref_text=ref_text, hyp_text=hyp_text,
+    )
+    # Parser-visible text is already projected, so the visible profile reduces
+    # to unicode_layout (see _norm): MET-TX03 is the same CER, computed once.
+    visible = replace(normalized, definition_id="MET-TX03",
+                      normalization_profile=NormProfile.VISIBLE_TEXT.value,
+                      counts=dict(normalized.counts), warnings=list(normalized.warnings))
     return TextMetrics(
         cer_raw=cer_markdown_raw(ref_nodes, hyp_nodes,
             ref_markdown=ref_markdown, hyp_markdown=hyp_markdown, max_edit_cells=max_edit_cells),          # MET-TX01: raw body
-        cer_normalized=cer_sequential(
-            ref_nodes, hyp_nodes,
-            NormProfile.UNICODE_LAYOUT, "MET-TX02", max_edit_cells=max_edit_cells,
-        ),
-        cer_visible=cer_sequential(
-            ref_nodes, hyp_nodes,
-            NormProfile.VISIBLE_TEXT, "MET-TX03", max_edit_cells=max_edit_cells,
-        ),
-        wer_sequential=wer_sequential(ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells),
+        cer_normalized=normalized,
+        cer_visible=visible,
+        wer_sequential=wer_sequential(ref_nodes, hyp_nodes, max_edit_cells=max_edit_cells,
+                                      ref_words=ref_words, hyp_words=hyp_words),
         aligned_block_text_cer=aligned_block_text_cer(
             ref_nodes, hyp_nodes, pairs, max_edit_cells=max_edit_cells,
             max_alignment_pairs=max_alignment_pairs,
         ),
-        coverage_recall=text_coverage_recall(ref_nodes, hyp_nodes),
-        coverage_precision=text_coverage_precision(ref_nodes, hyp_nodes),
+        coverage_recall=text_coverage_recall(ref_nodes, hyp_nodes,
+                                             ref_tokens=ref_tokens, hyp_tokens=hyp_tokens),
+        coverage_precision=text_coverage_precision(ref_nodes, hyp_nodes,
+                                                   ref_tokens=ref_tokens, hyp_tokens=hyp_tokens),
     )
+
+
+# ---------------------------------------------------------------------------
+# Page-anchored document view (policy page-anchored-micro-v1)
+# ---------------------------------------------------------------------------
+
+_UNAVAILABLE = (MetricStatus.RESOURCE_LIMIT.value, MetricStatus.INVALID_INPUT.value)
+
+
+def _unavailable_pages(definition_id: str, profile: NormProfile, pages: list[dict]) -> MetricResult | None:
+    """A page whose metric could not be computed makes the document unavailable."""
+    failed = [page for page in pages if page["status"] in _UNAVAILABLE]
+    if not failed:
+        return None
+    status = (MetricStatus.RESOURCE_LIMIT if any(p["status"] == _UNAVAILABLE[0] for p in failed)
+              else MetricStatus.INVALID_INPUT)
+    result = _make_result(None, status, definition_id, "lower_is_better",
+                          {"unavailable_pages": len(failed)}, profile)
+    result.warnings = sorted({warning for page in failed for warning in page["warnings"]})
+    return result
+
+
+def page_anchored_edit_rate(
+    pages: Sequence[dict], definition_id: str, profile: NormProfile, unit: str,
+) -> MetricResult:
+    """Document CER/WER as Σ page edits / Σ page reference length.
+
+    Pages are aligned by page number, so content moved to another page counts
+    as a deletion on its page and an insertion on the other. *pages* are the
+    serialized page results of the same metric.
+    """
+    pages = list(pages)
+    unavailable = _unavailable_pages(definition_id, profile, pages)
+    if unavailable is not None:
+        return unavailable
+    S, D, I, n_ref, n_hyp = (sum(p["counts"][key] for p in pages)
+                             for key in ("S", "D", "I", f"ref_{unit}", f"hyp_{unit}"))
+    lengths = {f"ref_{unit}": n_ref, f"hyp_{unit}": n_hyp}
+    if n_ref == 0:
+        status = MetricStatus.NOT_APPLICABLE if n_hyp == 0 else MetricStatus.UNDEFINED_DENOMINATOR
+        return _make_result(None, status, definition_id, "lower_is_better",
+                            {"S": S, "D": D, "I": I, **lengths}, profile)
+    return _make_result((S + D + I) / n_ref, MetricStatus.OK, definition_id, "lower_is_better",
+                        {"S": S, "D": D, "I": I, **lengths, "edit_distance": S + D + I}, profile)
+
+
+def page_anchored_aligned_cer(pages: Sequence[dict]) -> MetricResult:
+    """MET-TX05 over the union of page-local block alignments."""
+    profile = NormProfile.UNICODE_LAYOUT
+    pages = list(pages)
+    unavailable = _unavailable_pages("MET-TX05", profile, pages)
+    if unavailable is not None:
+        return unavailable
+    keys = ("S", "D", "I", "ref_chars", "matched_blocks", "unmatched_ref", "extra_hyp")
+    totals = {key: sum(p["counts"][key] for p in pages) for key in keys}
+    if totals["ref_chars"] == 0:
+        # With no reference text, any hypothesis character is an insertion.
+        status = MetricStatus.NOT_APPLICABLE if totals["I"] == 0 else MetricStatus.UNDEFINED_DENOMINATOR
+        return _make_result(None, status, "MET-TX05", "lower_is_better", totals, profile)
+    distance = totals["S"] + totals["D"] + totals["I"]
+    blocks = totals["matched_blocks"] + totals["unmatched_ref"] + totals["extra_hyp"]
+    return _make_result(distance / totals["ref_chars"], MetricStatus.OK, "MET-TX05", "lower_is_better",
+                        {**totals, "edit_distance": distance}, profile,
+                        coverage=round(totals["matched_blocks"] / blocks, 4) if blocks else None)

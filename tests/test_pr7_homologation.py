@@ -8,7 +8,6 @@ Tests cover:
 - check_comparability guard
 - V2 envelope schema completeness
 - regrade_existing pipeline end-to-end
-- Delta V1×V2 report format
 """
 from __future__ import annotations
 
@@ -749,52 +748,19 @@ class TestRegradeScript:
         assert "Evaluation Error Report" in content
         assert "Quality Metrics Summary" in content
 
-    def test_regrade_delta_report(self, tmp_path):
-        """Delta report is generated when V1 metrics JSON is provided."""
+    def test_regrade_rejects_removed_v1_delta_option(self, tmp_path):
+        """The V1×V2 delta report was removed with the legacy calculator."""
         ref = tmp_path / "ref.md"
         hyp = tmp_path / "hyp.md"
-        v1 = tmp_path / "v1.json"
         ref.write_text(_REF_SIMPLE, encoding="utf-8")
         hyp.write_text(_HYP_PARTIAL, encoding="utf-8")
-
-        # Minimal fake V1 JSON
-        v1.write_text(json.dumps({
-            "schema_version": "v1",
-            "grupo2_estrutura_markdown": {
-                "heading_f1": 0.85,
-                "paragraph_boundary_f1": 0.72,
-                "list_detection_f1": 0.90,
-            },
-            "grupo3_tabelas": {
-                "table_f1": 0.95,
-                "cell_exact_match": 0.88,
-            },
-            "grupo4_ordem_integridade": {
-                "reading_order_accuracy": 0.80,
-            },
-            "grupo5_dados_criticos": {
-                "currency_f1": 0.91,
-                "date_f1": 0.85,
-            },
-        }), encoding="utf-8")
-
-        out = tmp_path / "out"
-        subprocess.run(
-            [sys.executable, str(_SCRIPT),
-             "--hypothesis", str(hyp),
-             "--reference", str(ref),
-             "--v1-metrics", str(v1),
-             "--engine", "pytest",
-             "--run-id", "deltarun",
-             "--output-dir", str(out),
-             "--quiet"],
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT), "--hypothesis", str(hyp), "--reference", str(ref),
+             "--v1-metrics", str(tmp_path / "v1.json"), "--output-dir", str(tmp_path / "out"), "--quiet"],
             capture_output=True, text=True, timeout=60,
         )
-        delta = out / "delta_v1v2_pytest_deltarun.md"
-        assert delta.exists()
-        content = delta.read_text()
-        assert "V1 × V2 Metric Delta Report" in content
-        assert "heading_f1" in content
+        assert result.returncode != 0
+        assert not (tmp_path / "out").exists()
 
     def test_regrade_manifesto_mode(self, tmp_path):
         """Regrade works with --manifesto instead of --reference."""

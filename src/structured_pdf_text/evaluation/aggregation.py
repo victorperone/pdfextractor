@@ -32,11 +32,6 @@ _COMPLETE_COUNT_STATUSES = _NUMERIC_STATUSES | {
 # Scalar helpers
 # ---------------------------------------------------------------------------
 
-_LOWER_IS_WORSE = frozenset({
-    "higher_is_better",
-})
-
-
 def _finite_number(value: object) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
@@ -293,17 +288,11 @@ class V2DocumentMetrics:
 # Comparability guard
 # ---------------------------------------------------------------------------
 
-def check_comparability(
-    result_a: dict,
-    result_b: dict,
-    *,
-    strict: bool = True,
-) -> tuple[bool, list[str]]:
+def check_comparability(result_a: dict, result_b: dict) -> tuple[bool, list[str]]:
     """Compare canonical v3 inputs and evaluator policies, failing closed.
 
     API and CLI use the same validator. Outcomes never change comparability;
-    missing/malformed provenance, legacy schemas and raw-hash fallbacks fail.
-    ``strict`` is retained for call compatibility: False does not bypass checks.
+    missing/malformed provenance, other schemas and raw-hash fallbacks fail.
     Diagnostic CLI bypass remains explicit via --skip-validation.
     """
     reasons = validate_comparison([("a", result_a), ("b", result_b)])
@@ -313,11 +302,6 @@ def check_comparability(
 # ---------------------------------------------------------------------------
 # Ranking eligibility rules
 # ---------------------------------------------------------------------------
-
-_P0_GATES: list[tuple[str, str]] = [
-    # (group_path, metric_key) that must NOT be status=invalid_input
-]
-
 
 def evaluate_rank_eligibility(doc: V2DocumentMetrics) -> tuple[bool, list[str]]:
     """Determine whether this result is eligible for ranking.

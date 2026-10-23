@@ -35,8 +35,6 @@ class NormProfile(str, Enum):
     RAW           = "raw"            # NFC + CRLF→LF only
     UNICODE_LAYOUT = "unicode_layout" # + collapse intra-line spaces
     VISIBLE_TEXT  = "visible_text"   # extract text content from Markdown syntax
-    ENTITY_SURFACE = "entity_surface" # typed tokenisation, surface preserved
-    ENTITY_CANONICAL = "entity_canonical"  # semantic normalisation by type
 
 
 class MetricStatus(str, Enum):

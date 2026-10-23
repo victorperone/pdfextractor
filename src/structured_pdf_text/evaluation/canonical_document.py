@@ -27,8 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from structured_pdf_text.evaluation.models import MarkdownNode, NodeKind, NormProfile
-from structured_pdf_text.evaluation.normalization import normalize
+from structured_pdf_text.evaluation.models import MarkdownNode, NodeKind
 
 
 # Kinds whose visible_text is the authoritative text for CER/WER.
@@ -43,31 +42,6 @@ _LEAF_KINDS: frozenset[NodeKind] = frozenset({
     NodeKind.BLOCKQUOTE,
     NodeKind.THEMATIC_BREAK,
 })
-
-_CONTAINER_KINDS: frozenset[NodeKind] = frozenset({
-    NodeKind.TABLE,
-    NodeKind.TABLE_ROW,
-    NodeKind.LIST,
-})
-
-
-def _is_leaf(node: MarkdownNode, all_nodes: Sequence[MarkdownNode]) -> bool:
-    """True if this node should contribute text to the canonical projection.
-
-    A node is a leaf for text purposes when:
-    1. Its kind is in _LEAF_KINDS, OR
-    2. It has no children AND is not in _CONTAINER_KINDS (unknown node types
-       with no children are treated as text leaves).
-    """
-    if node.kind in _LEAF_KINDS:
-        return True
-    if node.kind in _CONTAINER_KINDS:
-        return False
-    # UNKNOWN kind with no children: treat as leaf
-    if node.kind == NodeKind.UNKNOWN and not node.children:
-        return True
-    return False
-
 
 @dataclass
 class CanonicalDocument:
@@ -158,11 +132,3 @@ class CanonicalDocument:
             raw_markdown=raw_markdown,
             origin=origin,
         )
-
-    def nodes_for_page(self, page: int) -> list[MarkdownNode]:
-        """Return leaf nodes for a single page (all_nodes that match page)."""
-        return [n for n in self.leaf_nodes if n.page == page]
-
-    def all_nodes_for_page(self, page: int) -> list[MarkdownNode]:
-        """Return ALL nodes for a page (for structural metrics)."""
-        return [n for n in self.all_nodes if n.page == page]
