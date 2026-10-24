@@ -211,11 +211,16 @@ class NativeHeuristicLayoutEngine:
             for line in lines
             if not any(line.bbox.overlap_ratio(box) >= 0.50 for box in excluded)
         ]
-        if body_lines:
+        obstacles = [
+            prediction.bbox
+            for prediction in predictions
+            if prediction.kind not in {RegionKind.HEADER, RegionKind.FOOTER, RegionKind.DECORATIVE}
+        ]
+        for band in _body_bands(body_lines, obstacles):
             predictions.append(
                 LayoutRegionPrediction(
                     RegionKind.TEXT,
-                    _union_lines(body_lines, page_bbox),
+                    _union_lines(band, page_bbox),
                     confidence=0.72,
                     label="native_remaining_text",
                 )
@@ -230,6 +235,45 @@ class NativeHeuristicLayoutEngine:
                 )
             )
         return _normalize_predictions(predictions, page_bbox)
+
+
+def _body_bands(lines: list[Any], obstacles: list[BBox]) -> list[list[Any]]:
+    """Split body lines at figures, tables and headings that lie between them.
+
+    One union region spanning an obstacle places the text below it before the
+    obstacle in reading order. A cut is made only when the obstacle overlaps
+    the body horizontally and no body line sits beside it, so columns and text
+    wrapped around a figure keep the original single region.
+    """
+    if len(lines) < 2:
+        return [lines] if lines else []
+    left = min(line.bbox.x0 for line in lines)
+    right = max(line.bbox.x1 for line in lines)
+    heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    window = 3.0 * (median(heights) if heights else 10.0)
+    cuts: list[float] = []
+    for box in obstacles:
+        if min(box.x1, right) - max(box.x0, left) <= 0:
+            continue
+        if any(box.y0 <= line.bbox.cy <= box.y1 for line in lines):
+            continue
+        # Text in a parallel column next to the obstacle: the body continues
+        # around it, so a horizontal cut would interleave the columns.
+        if any(
+            (line.bbox.x1 < box.x0 or line.bbox.x0 > box.x1)
+            and box.y0 - window <= line.bbox.cy <= box.y1 + window
+            for line in lines
+        ):
+            continue
+        if not any(line.bbox.cy < box.y0 for line in lines) or not any(line.bbox.cy > box.y1 for line in lines):
+            continue
+        cuts.append(box.cy)
+    if not cuts:
+        return [lines]
+    bands: dict[int, list[Any]] = {}
+    for line in lines:
+        bands.setdefault(sum(cut < line.bbox.cy for cut in cuts), []).append(line)
+    return [bands[key] for key in sorted(bands)]
 
 
 def _semantic_predictions(
@@ -259,6 +303,26 @@ def _semantic_predictions(
 
     heights = [line.bbox.height for line in candidates if line.bbox.height > 0]
     typical_height = median(heights) if heights else 10.0
+
+    def typical_height_for(line: Any) -> float:
+        # With few candidate lines (a table claims the rest), a title must not
+        # be measured against itself: use the other lines' median.
+        if len(candidates) >= 10:
+            return typical_height
+        others = [other.bbox.height for other in candidates if other is not line and other.bbox.height > 0]
+        return median(others) if others else typical_height
+
+    # Body type size, one vote per regular-weight line over every non-edge
+    # line: table cells are body text too, and bold titles must not outvote
+    # the body they introduce.
+    line_font_sizes = []
+    for line in lines:
+        if id(line) in edge_ids or not line.text.strip() or _all_bold(line):
+            continue
+        sizes = [token.font_size for token in line.tokens if token.text.strip() and token.font_size and token.font_size > 0]
+        if sizes:
+            line_font_sizes.append(median(sizes))
+    typical_font_size = median(line_font_sizes) if line_font_sizes else None
     predictions: list[LayoutRegionPrediction] = []
     decorative_clusters = cluster_decorative_lines(candidates, page_bbox)
     decorative_line_ids = {
@@ -323,7 +387,10 @@ def _semantic_predictions(
             kind = RegionKind.CAPTION
             confidence = 0.78
             label = "native_caption_marker"
-        elif _is_title(line, text, page_bbox, typical_height):
+        elif _is_title(line, text, page_bbox, typical_height_for(line)) or (
+            _is_bold_subtitle(line, text, typical_font_size)
+            and not _has_line_beside(line, candidates)
+        ):
             kind = RegionKind.TITLE
             confidence = 0.74
             label = "native_heading_geometry"
@@ -333,15 +400,47 @@ def _semantic_predictions(
             label = "native_edge_annotation"
 
         if kind is not None:
+            bbox = line.bbox
+            if kind in {RegionKind.CAPTION, RegionKind.FOOTNOTE}:
+                bbox = BBox.union_all([item.bbox for item in _wrapped_lines(line, candidates)])
             predictions.append(
                 LayoutRegionPrediction(
                     kind=kind,
-                    bbox=_clamp_bbox(line.bbox.expand(3.0), page_bbox),
+                    bbox=_clamp_bbox(bbox.expand(3.0), page_bbox),
                     confidence=confidence,
                     label=label,
                 )
             )
     return predictions
+
+
+def _wrapped_lines(first: Any, candidates: list[Any]) -> list[Any]:
+    """*first* plus the lines that continue it when it wraps (notes, captions).
+
+    A continuation starts at the same left edge, directly below the previous
+    line, in the same type size, and follows a line without terminal
+    punctuation.
+    """
+    lines = [first]
+    sizes = [token.font_size for token in first.tokens if token.text.strip() and token.font_size]
+    size = median(sizes) if sizes else None
+    while not lines[-1].text.rstrip().endswith((".", "!", "?", ";", ":")):
+        last = lines[-1]
+        height = max(last.bbox.height, 1.0)
+        following = [
+            line for line in candidates
+            if line is not first and line not in lines
+            and abs(line.bbox.x0 - first.bbox.x0) <= 3.0
+            and 0.0 <= line.bbox.y0 - last.bbox.y1 <= 0.9 * height
+        ]
+        if not following:
+            break
+        line = min(following, key=lambda item: item.bbox.y0)
+        line_sizes = [token.font_size for token in line.tokens if token.text.strip() and token.font_size]
+        if size is not None and line_sizes and abs(median(line_sizes) - size) > 0.10 * size:
+            break
+        lines.append(line)
+    return lines
 
 
 def _is_decorative(line: Any, page_bbox: BBox, typical_height: float) -> bool:
@@ -446,6 +545,51 @@ def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> b
     return True
 
 
+def _is_bold_subtitle(line: Any, text: str, typical_font_size: float | None) -> bool:
+    """A short line set entirely in bold at a size above the body text.
+
+    Box heights vary with the glyphs present (no descenders, accents), so a
+    subtitle only slightly larger than the body fails the geometric height test
+    of :func:`_is_title`; the font metadata is the direct evidence.
+    """
+    if typical_font_size is None or not text or len(text) > 80:
+        return False
+    if text.endswith((".", ";", ":", ",")) or not any(character.isalpha() for character in text):
+        return False
+    # Highlighted values (amounts, codes) are emphasized content, not titles.
+    digits = sum(character.isdigit() for character in text)
+    if re.search(r"(?:R\$|US\$|€|£)", text) or digits >= 0.3 * sum(character.isalnum() for character in text):
+        return False
+    # "Label: CODE-123" is a form field, not a heading.
+    if re.search(r":\s*\S*\d\S*$", text):
+        return False
+    tokens = [token for token in line.tokens if token.text.strip()]
+    sizes = [token.font_size for token in tokens if token.font_size and token.font_size > 0]
+    if not tokens or len(sizes) != len(tokens):
+        return False
+    return _all_bold(line) and median(sizes) >= typical_font_size * 1.10
+
+
+def _all_bold(line: Any) -> bool:
+    tokens = [token for token in line.tokens if token.text.strip()]
+    return bool(tokens) and all(
+        (token.font_weight is not None and token.font_weight >= 600)
+        or (token.font_name and "bold" in token.font_name.casefold())
+        for token in tokens
+    )
+
+
+def _has_line_beside(line: Any, candidates: list[Any]) -> bool:
+    """Another line shares this line's row: a column or form layout, where a
+    bold label belongs to the flow of its own column."""
+    return any(
+        other is not line
+        and min(other.bbox.y1, line.bbox.y1) - max(other.bbox.y0, line.bbox.y0) >= 0.5 * min(other.bbox.height, line.bbox.height)
+        and (other.bbox.x1 < line.bbox.x0 or other.bbox.x0 > line.bbox.x1)
+        for other in candidates
+    )
+
+
 def _heading_style_score(line: Any, typical_height: float) -> int:
     """Compute an integer style score (0–3) indicating heading-like typography.
 
@@ -471,6 +615,10 @@ def _heading_style_score(line: Any, typical_height: float) -> int:
 def _is_caption(line: Any, text: str, lower: str, page_bbox: BBox) -> bool:
     marker = re.match(r"^(figura|fig\.?|gráfico|grafico|imagem|quadro|fonte|nota)\b", lower)
     if marker is None:
+        return False
+    # Labels are capitalized ("Quadro 2", "NOTA:"); a lowercase start is the
+    # continuation of a sentence wrapped onto this line ("quadro de ...").
+    if not text[:1].isupper():
         return False
     # A note in the middle of ordinary prose is not a footnote/caption.
     if line.bbox.y0 <= page_bbox.y0 + page_bbox.height * 0.12:
@@ -516,10 +664,21 @@ def _is_marginalia(line: Any, page_bbox: BBox) -> bool:
 
 def _table_boxes(page: NativePageEvidence) -> list[BBox]:
     from structured_pdf_text.tables.geometry import detect_path_table_candidates
-    return [
-        _clamp_bbox(candidate.bbox.expand(8.0), page.bbox)
-        for candidate in detect_path_table_candidates(page)
-    ]
+    images = [image.bbox for image in page.objects.images if image.bbox is not None]
+    boxes: list[BBox] = []
+    for candidate in detect_path_table_candidates(page):
+        grid, box = candidate.bbox, candidate.bbox.expand(8.0)
+        # The margin catches text touching the rules; it must not reach into
+        # an image just above or below, whose content precedes/follows it.
+        for image in images:
+            if image.x1 <= box.x0 or image.x0 >= box.x1:
+                continue
+            if grid.y0 - 1.0 <= image.y1 < grid.y0 + 8.0 and image.y0 < grid.y0:
+                box = BBox(box.x0, max(box.y0, min(image.y1, grid.y0)), box.x1, box.y1)
+            if grid.y1 - 8.0 < image.y0 <= grid.y1 + 1.0 and image.y1 > grid.y1:
+                box = BBox(box.x0, box.y0, box.x1, min(box.y1, max(image.y0, grid.y1)))
+        boxes.append(_clamp_bbox(box, page.bbox))
+    return boxes
 
 
 def _edge_band_lines(lines: list[Any], page_bbox: BBox | None = None, rotation: int = 0) -> tuple[list[Any], list[Any]]:

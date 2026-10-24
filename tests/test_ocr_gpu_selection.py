@@ -216,7 +216,7 @@ def test_rapidocr_gpu_library_failure_during_inference_retries_cpu_once(rapid_fa
     from structured_pdf_text.ocr.backends import rapidocr as backend
     engine = rapid_factory()
     calls = []
-    def infer(runtime, image):
+    def infer(runtime, image, **kwargs):
         cuda = runtime.params["EngineConfig.onnxruntime.use_cuda"]
         calls.append(cuda)
         if cuda:
@@ -234,13 +234,13 @@ def test_rapidocr_gpu_library_failure_during_inference_retries_cpu_once(rapid_fa
 def test_rapidocr_gpu_model_errors_and_oom_do_not_trigger_cpu_retry(rapid_factory, monkeypatch):
     from structured_pdf_text.ocr.backends import rapidocr as backend
     engine = rapid_factory()
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("Invalid model protobuf")
     monkeypatch.setattr(backend, "_run_rapidocr", fail)
     with pytest.raises(RuntimeError, match="protobuf"):
         engine._infer(object())
     assert engine.identity.device == "cuda"
-    def oom(*args):
+    def oom(*args, **kwargs):
         raise RuntimeError("CUDA out of memory")
     monkeypatch.setattr(backend, "_run_rapidocr", oom)
     with pytest.raises(ResourceExhaustedExtractionError):

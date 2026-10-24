@@ -11,6 +11,7 @@ fragment bbox (fallback). A TABLE region label alone is not sufficient.
 from __future__ import annotations
 
 import time
+from statistics import median
 from dataclasses import dataclass, replace
 
 from structured_pdf_text.document import (
@@ -20,8 +21,10 @@ from structured_pdf_text.document import (
     RegionKind,
     StructuredPage,
     StructuredTable,
+    TableMethod,
     TextLine,
     WritingDirection,
+    detect_inline_style,
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.assemble.conservation import line_identity
@@ -159,12 +162,6 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
             list_continuation_count += stats.continuation_count
             list_unassigned_line_count += stats.unassigned_line_count
 
-    _attach_table_source_line_claims(
-        blocks=blocks,
-        tables=physical_tables,
-        regions=page.regions,
-    )
-
     reading_decision = ReadingOrderDecision(
         region_order=tuple(r.region_id for r in ordered_regions),
         column_groups=diag_column_groups,
@@ -181,6 +178,15 @@ def assemble_page_content(page: StructuredPage) -> PageContentAssemblyResult:
         emitted_table_ids=emitted_table_ids,
     )
     blocks = _merge_orphan_blocks(blocks, orphan_blocks)
+    # A raster table can retain native rules without a TABLE text region.
+    # Its block is inserted above; attach ownership afterwards so conservation
+    # does not reinsert its already represented OCR rows as ordinary prose.
+    _attach_table_source_line_claims(
+        blocks=blocks,
+        tables=physical_tables,
+        regions=page.regions,
+    )
+    blocks = _place_visual_tables_between_prose(blocks, physical_tables)
 
     blocks = _reindex_blocks(blocks)
 
@@ -572,6 +578,48 @@ def _build_region_blocks(
     return blocks, claimed_count, table_fallbacks
 
 
+def _place_visual_tables_between_prose(blocks, tables):
+    """Anchor raster tables between observed preceding/following blocks.
+
+    Dedicated table regions can be visited after a prose region that straddles
+    them. Move only the table shell, preserving every prose block's graph order,
+    claims and identity. Ambiguous column/flow constraints leave it in place.
+    """
+    from structured_pdf_text.tables.cell_geometry import reading_coordinates
+
+    result = list(blocks)
+    visual = {table.table_id: table for table in tables if table.method == TableMethod.VISUAL_MODEL}
+    for block in blocks:
+        if block.table_id not in visual or block.kind != ContentKind.TABLE:
+            continue
+        coordinates = reading_coordinates(visual[block.table_id].cells)
+
+        def projected(box):
+            if coordinates is None:
+                return box
+            points = [coordinates(x, y) for x, y in (
+                (box.x0, box.y0), (box.x1, box.y0), (box.x1, box.y1), (box.x0, box.y1))]
+            return BBox(min(p[0] for p in points), min(p[1] for p in points),
+                        max(p[0] for p in points), max(p[1] for p in points))
+
+        table_box = projected(block.bbox)
+        remaining = [other for other in result if other is not block]
+        before, after = [], []
+        for index, other in enumerate(remaining):
+            box = projected(other.bbox)
+            overlap = min(table_box.x1, box.x1)-max(table_box.x0, box.x0)
+            if overlap < .5*min(table_box.width, box.width):
+                continue
+            if box.y1 <= table_box.y0:
+                before.append(index)
+            elif box.y0 >= table_box.y1:
+                after.append(index)
+        if before and after and max(before) < min(after):
+            remaining.insert(min(after), block)
+            result = remaining
+    return result
+
+
 def _table_intersects_region(
     table: StructuredTable,
     region: LayoutRegion,
@@ -671,7 +719,10 @@ def _emit_prose_blocks(
     """
     if not lines:
         return []
-    if kind in {ContentKind.TEXT, ContentKind.LIST}:
+    # OCR text inside a figure (scanned forms, checklists) can hold lists too.
+    if kind in {ContentKind.TEXT, ContentKind.LIST} or (
+        kind == ContentKind.FIGURE and region.ocr_lines and not region.native_lines
+    ):
         segmentation = segment_list_lines(lines, allow_single=kind == ContentKind.LIST)
     else:
         segmentation = None
@@ -680,10 +731,20 @@ def _emit_prose_blocks(
         from structured_pdf_text.text.lists import ListSegment
         source_segments = (ListSegment(tuple(lines), (), False),)
     blocks: list[PageContentBlock] = []
+    preformatted_units: set[int] = set()
     for segment in source_segments:
         from structured_pdf_text.text.lists import ListSegment
-        if segment.is_list or region.native_lines or not region.ocr_lines:
+        if segment.is_list or (not region.native_lines and not region.ocr_lines):
             paragraph_segments = [segment]
+        elif region.native_lines:
+            paragraph_segments = [segment]
+            if kind == ContentKind.TEXT:
+                paragraph_segments = []
+                for paragraph, is_code in _native_text_units(list(segment.lines)):
+                    unit = ListSegment(tuple(paragraph), (), False)
+                    if is_code:
+                        preformatted_units.add(id(unit))
+                    paragraph_segments.append(unit)
         else:
             from structured_pdf_text.ocr.reconstruct import segment_ocr_paragraphs
             paragraph_segments = [
@@ -692,7 +753,10 @@ def _emit_prose_blocks(
             ]
         for paragraph_index, paragraph_segment in enumerate(paragraph_segments, start=1):
             segment_lines = list(paragraph_segment.lines)
-            if paragraph_segment.is_list:
+            preformatted = id(paragraph_segment) in preformatted_units
+            if preformatted:
+                text = "\n".join(line.text.rstrip() for line in segment_lines).strip("\n")
+            elif paragraph_segment.is_list:
                 text = _normalized_lines_text(segment_lines)
             elif region.ocr_lines and not region.native_lines:
                 text = _normalized_ocr_paragraph_text(segment_lines)
@@ -724,9 +788,74 @@ def _emit_prose_blocks(
                     line_ids=[line_identity(line) for line in segment_lines],
                     suppressed=decorative_suppressed,
                     suppression_reason="decorative" if decorative_suppressed else None,
+                    preformatted=preformatted,
+                    inline_style=(detect_inline_style([token for line in segment_lines for token in line.tokens])
+                                  if block_kind in {ContentKind.TEXT, ContentKind.CAPTION, ContentKind.FOOTNOTE}
+                                  and not preformatted else None),
                 )
             )
     return blocks
+
+
+_MONOSPACE_FONT_MARKERS = ("mono", "courier", "consol", "menlo", "code")
+
+
+def _is_monospaced_line(line: TextLine) -> bool:
+    tokens = [token for token in line.tokens if token.text.strip()]
+    return bool(tokens) and all(
+        token.font_name and any(marker in token.font_name.casefold() for marker in _MONOSPACE_FONT_MARKERS)
+        for token in tokens
+    )
+
+
+def _native_text_units(lines: list[TextLine]) -> list[tuple[list[TextLine], bool]]:
+    """Paragraphs of native prose and verbatim runs of monospaced lines.
+
+    Two or more consecutive lines set entirely in a monospaced font form one
+    preformatted unit (records, code, hashes); everything else is split by
+    :func:`_native_paragraphs`.
+    """
+    runs: list[tuple[list[TextLine], bool]] = []
+    for line in lines:
+        mono = _is_monospaced_line(line)
+        if runs and runs[-1][1] == mono:
+            runs[-1][0].append(line)
+        else:
+            runs.append(([line], mono))
+    units: list[tuple[list[TextLine], bool]] = []
+    for run, mono in runs:
+        if mono and len(run) >= 2:
+            units.append((run, True))
+        else:
+            units.extend((paragraph, False) for paragraph in _native_paragraphs(run))
+    return units
+
+
+def _native_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
+    """Split ordered native prose lines at paragraph gaps.
+
+    Wrapped lines of one paragraph sit about half a line height apart; a
+    paragraph adds visibly more space. A break needs a gap above both
+    0.75 line height and the smaller of 1.5x the typical gap (so uniformly
+    spaced prose stays whole) and 1.2 line heights (so uniformly spaced
+    one-line paragraphs still separate). A line that starts above the previous
+    one (a column or lane change in reading order) also starts a paragraph.
+    """
+    if len(lines) < 2:
+        return [lines] if lines else []
+    gaps = [current.bbox.y0 - previous.bbox.y1 for previous, current in zip(lines, lines[1:])]
+    positive = [gap for gap in gaps if gap > 0]
+    heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    line_height = median(heights) if heights else 10.0
+    typical_gap = median(positive) if positive else 0.0
+    threshold = max(line_height * 0.75, min(typical_gap * 1.5, line_height * 1.2))
+    paragraphs: list[list[TextLine]] = [[lines[0]]]
+    for gap, previous, line in zip(gaps, lines, lines[1:]):
+        if gap > threshold or line.bbox.y1 <= previous.bbox.y0:
+            paragraphs.append([line])
+        else:
+            paragraphs[-1].append(line)
+    return paragraphs
 
 
 def _emit_prose_block(*args, **kwargs) -> list[PageContentBlock]:

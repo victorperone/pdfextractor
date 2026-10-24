@@ -332,6 +332,14 @@ text is already visible; it is computed once and copied. MET-I03 likewise copies
 MET-TX06. The evaluator records metric definitions version `3.1.0` and its
 resource policy.
 
+Add `--supplemental-audit` to either metric CLI to also write
+`audit_{engine}_{run_id}.json` (`critical-context-1.0.0`). This separate audit
+checks signed BRL/USD/EUR amounts with pt-BR separators, exact alphanumeric IDs,
+critical entities at table-cell coordinates, link destinations, checkbox states,
+and per-page alignment coverage, deletion and order. It also reports formatting
+counts for inspection. Canonical definitions `3.1.0` and their 69 scores stay
+unchanged; compare audit results only within the same audit version and scope.
+
 Document metrics are page-anchored (`parser-visible-leaves-v3-page-anchored-micro`):
 every selected page is evaluated once, in parallel, and the document CER/WER and
 aligned CER are Σ page edits / Σ page reference length. Content moved to another

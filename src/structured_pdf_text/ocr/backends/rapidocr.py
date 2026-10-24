@@ -30,13 +30,14 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import os
 from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Any
 
 from structured_pdf_text.document import OcrToken, SourceKind
-from structured_pdf_text.geometry import BBox
+from structured_pdf_text.geometry import BBox, Point
 from structured_pdf_text.ocr.backends._parser_utils import finite_confidence, quadrilateral_geometry, sha256_file
 from structured_pdf_text.ocr.contracts import (
     OCRBackendIdentity,
@@ -181,12 +182,26 @@ def _rapidocr_config_types():
     return EngineType, ModelType, OCRVersion
 
 
-def _run_rapidocr(engine: Any, img: Any) -> Any:
+def _run_rapidocr(engine: Any, img: Any, *, timings: dict | None = None) -> Any:
     """Run RapidOCR with CLAHE (LAB L-channel) preprocessing."""
     import numpy as np
+    start = time.perf_counter()
     arr = np.asarray(img)
     enhanced = _clahe_preprocess(arr)
-    return engine(enhanced)
+    prepared = time.perf_counter()
+    try:
+        result = engine(enhanced)
+    finally:
+        if timings is not None:
+            timings["preprocess_ms"] = (prepared-start)*1000
+            timings["runtime_ms"] = (time.perf_counter()-prepared)*1000
+    if timings is not None:
+        stages = getattr(result, "elapse_list", None)
+        if isinstance(stages, (list, tuple)) and len(stages) == 3:
+            for name, value in zip(("detection_ms", "classification_ms", "recognition_ms"), stages):
+                if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+                    timings[name] = float(value)*1000
+    return result
 
 
 def _extract_raw(out: Any) -> Any:
@@ -204,6 +219,42 @@ def _extract_raw(out: Any) -> Any:
     if hasattr(out, "__iter__") and not isinstance(out, (str, bytes)):
         return out
     return None
+
+
+class _RecognizedRows(list):
+    """One call's rows in source pixels and its reading orientation.
+
+    Keep the legacy list interface without mutable last-call state: callers
+    may recognize a second crop before converting the first result to tokens.
+    """
+
+    def __init__(self, rows=(), *, rotation: int = 0, row_rotations=()):
+        super().__init__(rows)
+        self.rotation = rotation
+        self.row_rotations = tuple(row_rotations)
+
+
+def _recognition_crop_rotations(rows, turns):
+    """Include RapidOCR 3.9.2's implicit CCW turn of tall recognition crops.
+
+    Its perspective crop uses the quadrilateral side lengths, truncates them
+    to integer pixels, and applies np.rot90 when height/width >= 1.5. The angle
+    classifier is disabled in this profile. Source boxes alone cannot describe
+    that additional reading orientation.
+    """
+    rotations = []
+    for row in rows:
+        extra = 0
+        try:
+            a, b, c, d = row[0]
+            width = int(max(math.dist(a, b), math.dist(c, d)))
+            height = int(max(math.dist(a, d), math.dist(b, c)))
+            if width > 0 and height / width >= 1.5:
+                extra = 1
+        except (TypeError, ValueError, IndexError, OverflowError):
+            pass
+        rotations.append(((turns + extra) * 90) % 360)
+    return tuple(rotations)
 
 
 def _quarter_turn_to_source(points, quarter_turns: int, height: int, width: int) -> list[list[float]]:
@@ -292,7 +343,9 @@ def _result_to_pipeline_tokens(
     if not raw:
         return []
     tokens = []
-    for item in raw:
+    rotation = getattr(raw, "rotation", 0)
+    row_rotations = getattr(raw, "row_rotations", ())
+    for index, item in enumerate(raw):
         try:
             if len(item) < 2:
                 continue
@@ -305,7 +358,7 @@ def _result_to_pipeline_tokens(
             continue
         if geometry is None:
             continue
-        _, (x0, y0, x1, y1) = geometry
+        polygon, (x0, y0, x1, y1) = geometry
         try:
             bbox = BBox(x0, y0, x1, y1)
         except (TypeError, ValueError):
@@ -314,6 +367,8 @@ def _result_to_pipeline_tokens(
             text=str(text), bbox=bbox,
             confidence=max(0.0, min(1.0, confidence if confidence is not None else 0.0)),
             language=language, source=source,
+            rotation=row_rotations[index] if index < len(row_rotations) else rotation,
+            polygon=tuple(Point(x, y) for x, y in polygon),
         ))
     return tokens
 
@@ -374,9 +429,15 @@ class RapidOCRBackend:
         box_thresh = settings.box_threshold
         det_thresh = settings.detector_threshold
         text_score = settings.text_score
-        from structured_pdf_text.ocr.pipelines.rapidocr.policy import ORIENTATION_POLICY
+        from structured_pdf_text.ocr.pipelines.rapidocr.policy import (
+            ORIENTATION_POLICY, SELECTION_MARK_POLICY, WATERMARK_POLICY,
+        )
         self._orientation_policy = ORIENTATION_POLICY
+        self._selection_mark_policy = SELECTION_MARK_POLICY
+        self._watermark_policy = WATERMARK_POLICY
+        self._watermark_rows = 0
         self._orientation_selected = {}
+        self.reset_page_diagnostics()
         self._effective_tuning = {
             "det_db_unclip_ratio": unclip,
             "det_db_box_thresh": box_thresh,
@@ -384,6 +445,8 @@ class RapidOCRBackend:
             "text_score": text_score,
             "orientation_classifier_enabled": False,
             "orientation_search": self._orientation_policy.identity(),
+            "selection_marks": self._selection_mark_policy.identity(),
+            "decorative_watermark": self._watermark_policy.identity(),
             "cudnn_conv_algo_search": _CUDNN_CONV_ALGO_SEARCH,
         }
         if self._unified:
@@ -507,7 +570,7 @@ class RapidOCRBackend:
 
     def _infer(self, image):
         try:
-            return _run_rapidocr(self._engine, image)
+            return _run_rapidocr(self._engine, image, timings=self._inference_timing)
         except Exception as exc:
             from structured_pdf_text.ocr.device import gpu_configuration_failure
             if not self._cuda_enabled or not gpu_configuration_failure(exc):
@@ -518,7 +581,27 @@ class RapidOCRBackend:
             self._cuda_enabled = False
             self._gpu_fallback_reason = f"cuda_runtime_failed:{type(exc).__name__}:{exc}"
             self._refresh_execution_device()
-            return _run_rapidocr(self._engine, image)
+            self._inference_timing["cpu_retry"] = True
+            return _run_rapidocr(self._engine, image, timings=self._inference_timing)
+
+    def reset_page_diagnostics(self) -> None:
+        self._recognition_calls = []
+        self._inference_timing = {}
+        self.last_pass_count = 0
+        self.last_batch_count = 0
+        self.last_attempt_errors = []
+        self.last_orientation_selected = 0
+        self.last_orientation_attempts = []
+
+    def consume_page_diagnostics(self) -> dict:
+        from copy import deepcopy
+
+        result = {"rapidocr_calls": len(self._recognition_calls),
+                  "orientation_decisions": deepcopy(self._recognition_calls),
+                  "runtime_stage_timing_source": "rapidocr.elapse_list",
+                  "internal_orientation_search": self._orientation_policy.identity()}
+        self.reset_page_diagnostics()
+        return result
 
     def _recognize_rows(self, image) -> list:
         """Return raw rows in the source image frame, searching turns only when needed.
@@ -530,29 +613,63 @@ class RapidOCRBackend:
         they reach the token parsers, so callers still receive crop coordinates.
         """
         import numpy as np
-        rows = _extract_raw(self._infer(image)) or []
+        attempts = []
+        self.last_pass_count = self.last_batch_count = 0
+        self.last_attempt_errors = []
+        self.last_orientation_attempts = attempts
+        self.last_orientation_selected = 0
+        decision = {"input_size": list(image.shape[:2]), "attempts": attempts, "selected_angle": 0}
+        self._recognition_calls.append(decision)
+
+        def run(frame, turns):
+            started = time.perf_counter()
+            self._inference_timing = {}
+            self.last_pass_count += 1
+            attempt = {"angle": turns*90}
+            attempts.append(attempt)
+            try:
+                observations = _extract_raw(self._infer(frame)) or []
+                mean, score = _reading_evidence(observations)
+                attempt.update(row_count=len(observations), mean_confidence=mean, weighted_characters=score)
+                return observations
+            except Exception as exc:
+                attempt["error_type"] = type(exc).__name__
+                self.last_attempt_errors.append(type(exc).__name__)
+                raise
+            finally:
+                attempt.update(self._inference_timing)
+                attempt["elapsed_ms"] = (time.perf_counter()-started)*1000
+                attempt["device"] = self._device
+
+        rows = run(image, 0)
+        rows, watermarks = self._watermark_policy.filter(image, rows)
+        self._watermark_rows += watermarks
         policy = self._orientation_policy
         upright_mean, upright_score = _reading_evidence(rows)
         if not rows or upright_mean >= policy.confidence_floor:
-            return rows
+            rows = self._selection_mark_policy.apply(image, rows)
+            return _RecognizedRows(rows, row_rotations=_recognition_crop_rotations(rows, 0))
         height, width = image.shape[0], image.shape[1]
         best_rows, best_turn, best_score = rows, 0, upright_score
         for quarter_turns in policy.alternatives:
             turned = np.ascontiguousarray(np.rot90(image, quarter_turns))
-            candidate = _extract_raw(self._infer(turned)) or []
+            candidate = run(turned, quarter_turns)
             mean, score = _reading_evidence(candidate)
             if mean < policy.confidence_floor or score < policy.minimum_gain * upright_score:
                 continue
             if score > best_score:
-                best_rows = _rows_to_source(candidate, quarter_turns, height, width)
+                best_rows = candidate
                 best_turn, best_score = quarter_turns, score
         if best_turn:
+            self.last_orientation_selected = decision["selected_angle"] = best_turn*90
             self._orientation_selected[best_turn] = self._orientation_selected.get(best_turn, 0) + 1
             logging.getLogger(__name__).info(
                 "RapidOCR orientation search selected %d quarter turn(s): upright_mean=%.3f upright_weighted=%.0f selected_weighted=%.0f",
                 best_turn, upright_mean, upright_score, best_score,
             )
-        return best_rows
+        row_rotations = _recognition_crop_rotations(best_rows, best_turn)
+        source_rows = _rows_to_source(best_rows, best_turn, height, width) if best_turn else best_rows
+        return _RecognizedRows(source_rows, rotation=best_turn * 90, row_rotations=row_rotations)
 
     def _refresh_execution_device(self) -> None:
         """Inspect live sessions; a construction-time provider list can go stale."""

@@ -61,7 +61,7 @@ from structured_pdf_text.tables.text_join import (
 )
 from structured_pdf_text.tables.cells import tokens_in_cell
 from structured_pdf_text.tables.relaxed import detect_relaxed_table
-from structured_pdf_text.tables.text_tracks import detect_borderless_table
+from structured_pdf_text.tables.text_tracks import complete_borderless_cells, detect_borderless_table
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +96,7 @@ def detect_tables_native(
             )
     else:
         for region in candidates:
-            grid = _detect_strict_grid(page, region.bbox)
+            grid = _detect_strict_grid(page, region.bbox, allow_single_cell=_scalar_identifier_region(region))
             if grid is None:
                 relaxed = detect_relaxed_table(page, region)
                 if relaxed is not None:
@@ -131,6 +131,7 @@ def detect_tables_native(
         )
         if borderless is not None:
             tables.append(borderless)
+    complete_borderless_cells(tables, regions or [])
     if allow_textpage_recovery:
         for table in tables:
             for cell in table.cells:
@@ -147,7 +148,22 @@ def _region_overlaps_table(region: LayoutRegion, table: StructuredTable) -> bool
     )
 
 
-def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
+def _scalar_identifier_region(region: LayoutRegion) -> bool:
+    """A boxed scalar identifier is distinct from a paragraph callout/code.
+
+    This does not classify a frame on its own: the strict detector still
+    requires all four connected rules around the native value.
+    """
+    lines = [line for line in region.native_lines if line.text.strip()]
+    if len(lines) != 1:
+        return False
+    text = lines[0].text.strip()
+    return (len(text) <= 80 and any(c.isalpha() for c in text)
+            and any(c.isdigit() for c in text)
+            and all(c.isalnum() or c in "-_./" for c in text))
+
+
+def _detect_strict_grid(page: NativePageEvidence, limit: BBox, *, allow_single_cell: bool = False) -> _Grid | None:
     """Attempt to reconstruct a ruled table grid from path objects inside *limit*.
 
     Paths are separated into horizontal candidates (height <= *thickness*,
@@ -200,14 +216,22 @@ def _detect_strict_grid(page: NativePageEvidence, limit: BBox) -> _Grid | None:
         h_y0 = min(path.cy for path in horizontal)
         h_y1 = max(path.cy for path in horizontal)
         grid_height = max(h_y1 - h_y0, 1.0)
+    # A single-row table is shorter than the usual 30 pt separator minimum;
+    # without taller separators its own ruled height sets the minimum.
+    minimum_vertical = 30.0 if vertical_seeds else max(8.0, min(30.0, grid_height * 0.90))
     vertical = [
         path
         for path in paths
-        if path.width <= thickness and path.height >= max(30.0, grid_height * 0.50)
+        if path.width <= thickness and path.height >= max(minimum_vertical, grid_height * 0.50)
     ]
     x_edges = _cluster_edges([path.cx for path in vertical], tolerance=max(2.0, thickness))
     y_edges = _cluster_edges([path.cy for path in horizontal], tolerance=max(2.0, thickness))
     if len(x_edges) < 2 or len(y_edges) < 2:
+        return _detect_rectangular_grid(paths, limit)
+    if (not allow_single_cell and len(x_edges) == 2 and len(y_edges) == 2
+            and max(y_edges) - min(y_edges) < page.bbox.height * 0.12):
+        # One short ruled box is a frame (callout, boxed note) as often as a
+        # table; compact multi-cell grids are kept.
         return _detect_rectangular_grid(paths, limit)
     x0 = min(path.x0 for path in horizontal + vertical)
     y0 = min(path.y0 for path in horizontal + vertical)
@@ -456,7 +480,8 @@ def _cell_text_preserving_vertical_lines(
         vertically_spaced = vertical_span >= median_height * 4.0
         if narrow_column and vertically_spaced and len(single_glyphs) >= len(visible) * 0.7:
             ordered = sorted(single_glyphs, key=lambda token: (token.bbox.cy, token.bbox.cx))
-            return "<br>".join(token.text.strip() for token in ordered)
+            # Line breaks are content; the renderer owns their Markdown form.
+            return "\n".join(token.text.strip() for token in ordered)
     token_ids = {id(token) for token in tokens}
     if not token_ids:
         return ""
@@ -469,10 +494,12 @@ def _cell_text_preserving_vertical_lines(
         assigned_ids.update(id(token) for token in line_tokens)
         visible_line_ids = {id(token) for token in line.tokens if token.text.strip()}
         selected_visible_ids = {id(token) for token in line_tokens if token.text.strip()}
-        if visible_line_ids and visible_line_ids.issubset(selected_visible_ids):
+        if (visible_line_ids and visible_line_ids.issubset(selected_visible_ids)
+                and _same_glyphs(line.text, line.tokens)):
             # PDFium's line assembly already preserves punctuation placement,
             # baseline offsets and intra-word spacing. Keep that source text
-            # when the cell owns the complete line.
+            # when the cell owns the complete line and the text is exactly
+            # those glyphs (textpage reconciliation can span other columns).
             fragment = line.text.strip()
         else:
             ordered_line_tokens = sorted(line_tokens, key=lambda token: token.bbox.x0)
@@ -489,6 +516,10 @@ def _cell_text_preserving_vertical_lines(
     if unassigned:
         fragments.append(join_table_tokens(unassigned))
     return " ".join(fragment for fragment in fragments if fragment).strip()
+
+
+def _same_glyphs(text: str, tokens: list) -> bool:
+    return "".join(text.split()) == "".join("".join(token.text for token in tokens).split())
 
 
 def _segment_exists_at_x(

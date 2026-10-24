@@ -44,6 +44,9 @@ from structured_pdf_text.document import NativePageEvidence
 from structured_pdf_text.geometry import BBox
 
 
+_MIN_VERTICAL_RULE = 15.0
+
+
 @dataclass(frozen=True, slots=True)
 class TableGeometryCandidate:
     bbox: BBox
@@ -70,9 +73,11 @@ def detect_path_table_candidates(
         p for p in paths
         if p.height <= 4.0 and p.width >= page.bbox.width * 0.20
     ]
+    # Compact ruled frames (one or two rows) are tables too; the component
+    # check still requires two rules on each axis to connect.
     vertical = [
         p for p in paths
-        if p.width <= 4.0 and p.height >= page.bbox.height * 0.12
+        if p.width <= 4.0 and p.height >= min(page.bbox.height * 0.12, _MIN_VERTICAL_RULE)
     ]
 
     if len(horizontal) < 2 or len(vertical) < 2:
@@ -82,11 +87,17 @@ def detect_path_table_candidates(
     components = _connected_components(horizontal, vertical)
 
     candidates: list[TableGeometryCandidate] = []
+    images = [image.bbox for image in page.objects.images if image.bbox is not None]
     for h_segs, v_segs in components:
         if len(h_segs) < 2 or len(v_segs) < 2:
             continue
         all_in_component = list(h_segs) + list(v_segs)
         component_bbox = BBox.union_all(all_in_component)
+        compact = all(segment.height < page.bbox.height * 0.12 for segment in v_segs)
+        if compact and any(component_bbox.overlap_ratio(image) >= 0.30 for image in images):
+            # Rules around a raster table: its cells are pixels, so the
+            # visual table path owns it, not a text-less native grid.
+            continue
         confidence = min(0.95, 0.60 + 0.05 * min(len(h_segs) + len(v_segs), 7))
         candidates.append(
             TableGeometryCandidate(

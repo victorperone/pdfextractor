@@ -720,7 +720,8 @@ def test_partial_list_deduplication_rebuilds_list_structure() -> None:
             ocr_pages=0,
         ),
     )
-    assert "• item único" in render_markdown(document)
+    # Bullet glyphs render as Markdown list markers.
+    assert "- item único" in render_markdown(document)
 
 
 def test_fallback_uses_canonical_sidebar_order_not_region_storage_order() -> None:

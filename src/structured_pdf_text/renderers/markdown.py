@@ -6,6 +6,8 @@ blocks — this module only formats text and tables (INV-06).
 """
 from __future__ import annotations
 
+import re
+
 from structured_pdf_text.document import (
     ContentKind,
     PageContentBlock,
@@ -92,7 +94,8 @@ def _render_content_block(
 
     if block.kind == ContentKind.LIST and block.list_items:
         return "\n".join(
-            f"{'  ' * max(0, item.level)}{item.marker} {_escape_inline_text(item.text, context='list')}"
+            f"{'  ' * max(0, item.level)}{_markdown_list_marker(item.marker)} "
+            f"{_escape_inline_text(item.text, context='list')}"
             for item in block.list_items
         )
 
@@ -108,8 +111,18 @@ def _render_content_block(
     if block.kind == ContentKind.FIGURE:
         # No semantic representation yet. Preserve OCR text when present so it
         # is not silently lost. Empty figures produce no Markdown output.
-        return _escape_inline_text(block.text, context="paragraph") if block.text else ""
+        if not block.text:
+            return ""
+        text = _escape_inline_text(block.text, context="paragraph")
+        if getattr(block, "blockquote", False):
+            text = "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
+        return text
 
+    if getattr(block, "preformatted", False):
+        fence = "```"
+        while fence in block.text:
+            fence += "`"
+        return f"{fence}text\n{block.text}\n{fence}"
     text = _escape_inline_text(block.text, context="paragraph")
     # VQ-19: wrap text with inline style markers when block carries a dominant style.
     inline_style = getattr(block, "inline_style", None)
@@ -126,6 +139,22 @@ def _render_content_block(
     if link_uri and text:
         safe_uri = link_uri.replace(")", r"\)")
         return f"[{text}]({safe_uri})"
+    linked: list[tuple[int, int]] = []
+    for anchor, uri in getattr(block, "link_anchors", None) or []:
+        label = _escape_inline_text(anchor, context="paragraph")
+        position = text.find(label)
+        while position >= 0 and any(start < position + len(label) and position < end for start, end in linked):
+            position = text.find(label, position + 1)
+        if position < 0:
+            continue
+        safe_uri = uri.replace(")", r"\)")
+        link = f"[{label}]({safe_uri})"
+        shift = len(link) - len(label)
+        linked = [(start + shift, end + shift) if start >= position else (start, end) for start, end in linked]
+        linked.append((position, position + len(link)))
+        text = text[:position] + link + text[position + len(label):]
+    if getattr(block, "blockquote", False) and text:
+        text = "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
     return text
 
 
@@ -327,7 +356,7 @@ def _render_spanned_table_html(table: StructuredTable) -> str:
         value = _render_cell_html(cell.text)
         rows[cell.row].append(f"<{tag}{attribute_text}>{value}</{tag}>")
     body = "\n".join(
-        "  <tr>\n    " + "\n    ".join(cells) + "\n  </tr>"
+        ("  <tr>\n    " + "\n    ".join(cells) + "\n  </tr>") if cells else "  <tr></tr>"
         for cells in rows
     )
     return "<table>\n" + body + "\n</table>"
@@ -358,6 +387,25 @@ def _render_cell_html(text: str) -> str:
         return f"<ul>{items_html}</ul>"
     # Mixed or plain content: use <br> for newlines
     return _escape_html(text).replace("\n", "<br>")
+
+
+_BULLET_MARKERS = frozenset("•◦▪‣●○■□–—-*+·")
+_CHECKBOX_MARKERS = frozenset("☐☑☒")
+
+
+def _markdown_list_marker(marker: str) -> str:
+    """Markdown form of an observed list marker.
+
+    Bullet glyphs become ``-`` and check boxes keep their state glyph after a
+    ``-`` bullet. Any other observed marker (``1.``, ``a)``, ``1.1.``, roman
+    numerals) is emitted literally.
+    """
+    stripped = marker.strip()
+    if stripped in _BULLET_MARKERS:
+        return "-"
+    if stripped in _CHECKBOX_MARKERS:
+        return f"- {stripped}"
+    return stripped
 
 
 def _escape_cell(value: str) -> str:

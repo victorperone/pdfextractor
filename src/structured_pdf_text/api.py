@@ -27,6 +27,7 @@ from .config import (
 )
 from .document import (
     Baseline,
+    PageLink,
     ComplexityReason,
     DocumentMetadata,
     EvidenceRef,
@@ -105,6 +106,7 @@ from .text.line_detector import lines_to_text, reconstruct_native_lines, spacing
 from .visibility import (
     characters_inside_page,
     characters_occluded,
+    characters_without_ink,
     detect_opaque_occlusion_boxes,
 )
 from .geometry import BBox
@@ -354,33 +356,66 @@ class PdfTextExtractor:
                 opaque_occlusion_boxes: list[BBox] = []
                 redacted_character_count = 0
 
-                if self.config.enable_experimental_occlusion_redaction:
-                    opaque_occlusion_boxes = detect_opaque_occlusion_boxes(
-                        native_page,
-                        rendered_page,
-                    )
-                    visible_characters, redacted_character_count = characters_occluded(
+                inkless_character_count = 0
+
+                if self.config.enable_experimental_occlusion_redaction and rendered_page is not None:
+                    # Paint-order check per glyph, in the modes that render:
+                    # covered, same-color, clipped or invisible glyphs leave no
+                    # ink, while text drawn over a solid fill remains visible.
+                    hidden_glyphs = source.hidden_glyphs(
+                        page_index,
                         visible_characters,
-                        opaque_occlusion_boxes,
-                    )
+                        native_page.bbox,
+                        native_page.objects.rotation,
+                    ) if visible_characters else frozenset()
+                    if hidden_glyphs is not None:
+                        visible_characters, inkless_character_count = characters_without_ink(
+                            visible_characters,
+                            hidden_glyphs,
+                        )
+                        redacted_character_count = inkless_character_count
+                    else:
+                        # Pixel heuristic for PDFium builds that cannot attribute
+                        # glyphs to text objects (it mistakes light text on
+                        # light fills for redaction, hence only a fallback).
+                        opaque_occlusion_boxes = detect_opaque_occlusion_boxes(
+                            native_page,
+                            rendered_page,
+                        )
+                        visible_characters, redacted_character_count = characters_occluded(
+                            visible_characters,
+                            opaque_occlusion_boxes,
+                        )
 
                 timings["visibility_ms"] = (
                     time.perf_counter() - visibility_start
                 ) * 1000
 
                 # The PDF textpage contains the original native text,
-                # including characters that experimental occlusion detection
-                # may just have removed. Never reconcile against that
-                # unfiltered textpage after any character was suppressed.
+                # including characters that were just suppressed. Never
+                # reconcile against that unfiltered textpage; after any
+                # suppression, rebuild it from the kept characters (their
+                # concatenation is the textpage text), so spacing recovery
+                # still works but rejected glyphs cannot come back.
                 textpage_reconciliation_disabled_for_redaction = (
                     (redacted_character_count > 0 or outside_page_character_count > 0)
                 )
 
-                textpage_for_reconciliation = (
-                    None
-                    if textpage_reconciliation_disabled_for_redaction
-                    else native_page.extracted_text
-                )
+                # Every later consumer (layout, tables, figures, fusion) sees
+                # only visible glyphs; rejected evidence cannot be resurrected.
+                # The unfiltered evidence stays available as diagnostics.
+                source_native_page = native_page
+                if textpage_reconciliation_disabled_for_redaction:
+                    kept = {character.char_index for character in visible_characters}
+                    native_page = replace(
+                        native_page,
+                        characters=tuple(visible_characters),
+                        extracted_text="".join(
+                            character.text for character in source_native_page.characters
+                            if character.char_index in kept or character.text.isspace()
+                        ),
+                    )
+                textpage_for_reconciliation = native_page.extracted_text
 
                 reconstruct_start = time.perf_counter()
                 native_lines = reconstruct_native_lines(
@@ -929,7 +964,8 @@ class PdfTextExtractor:
                     tables = detect_tables_native(
                         native_page,
                         regions,
-                        allow_textpage_recovery=outside_page_character_count == 0,
+                        # The filtered view's textpage holds visible glyphs only.
+                        allow_textpage_recovery=True,
                     ) if self.config.enable_tables else []
                     _clear_occluded_table_cells(tables, opaque_occlusion_boxes)
                 except FatalExtractionError:
@@ -951,9 +987,13 @@ class PdfTextExtractor:
                 # in image areas not already covered by a native table bbox.  This
                 # allows hybrid pages (e.g. V5-P019/P024) to have both a native-ruled
                 # table and a separate raster table on the same page.
+                # Thin ruling lines disappear in the complexity thumbnail.
+                # Reuse the OCR raster already rendered for authorized work;
+                # this neither schedules OCR nor renders a native-only page.
+                table_structure_image = ocr_image if ocr_image is not None else rendered_page
                 _should_run_visual = (
                     self.config.enable_tables
-                    and rendered_page is not None
+                    and table_structure_image is not None
                     and _has_uncovered_image_area(native_page, tables)
                 )
                 # VQ-22: detect multiple visual tables — one attempt per uncovered
@@ -963,11 +1003,15 @@ class PdfTextExtractor:
                 # not already covered by a native or previously detected visual table.
                 _visual_candidates: list = []  # StructuredTable results
                 if _should_run_visual:
+                    structure_tokens = _table_structure_tokens(
+                        ocr_lines, regions, page_index, native_page.bbox,
+                        native_page.objects.rotation,
+                    )
                     try:
                         visual_table = detect_visual_table(
                             native_page,
-                            rendered_page,
-                            tokens=[token for line in ocr_lines for token in line.tokens],
+                            table_structure_image,
+                            tokens=structure_tokens,
                             page_rotation=native_page.objects.rotation,
                         )
                         if visual_table is not None:
@@ -989,7 +1033,7 @@ class PdfTextExtractor:
 
                 # VQ-22: for each image region not yet explained by any detected table,
                 # try a crop-based visual detection to find additional raster tables.
-                if _should_run_visual and rendered_page is not None:
+                if _should_run_visual and table_structure_image is not None:
                     all_accepted_bboxes = [
                         f.bbox
                         for t in tables + _visual_candidates
@@ -1009,10 +1053,10 @@ class PdfTextExtractor:
                             extra_id = f"page-{page_index + 1}:visual-grid-{len(_visual_candidates) + 1}"
                             extra = detect_visual_table_in_region(
                                 native_page,
-                                rendered_page,
+                                table_structure_image,
                                 img_box,
                                 table_id=extra_id,
-                                tokens=[token for line in ocr_lines for token in line.tokens],
+                                tokens=structure_tokens,
                             )
                             if extra is not None:
                                 _visual_candidates.append(extra)
@@ -1022,8 +1066,30 @@ class PdfTextExtractor:
                                 )
                         except FatalExtractionError:
                             raise
-                        except Exception:
+                        except Exception as exc:
+                            raise_if_resource_exhausted(
+                                exc, page_index=page_index, stage="visual_table_region_detection",
+                                details=_process_memory_snapshot(),
+                            )
+                            warnings.append(
+                                f"Visual table region detection unavailable: {type(exc).__name__}: {exc}"
+                            )
                             continue
+
+                if _should_run_visual:
+                    from .tables.ocr_tracks import detect_ocr_track_tables
+
+                    try:
+                        _visual_candidates.extend(detect_ocr_track_tables(
+                            native_page, regions, table_structure_image,
+                            tables + _visual_candidates,
+                        ))
+                    except FatalExtractionError:
+                        raise
+                    except Exception as exc:
+                        raise_if_resource_exhausted(exc, page_index=page_index, stage="ocr_table_structure")
+                        warnings.append(f"OCR table structure unavailable: {type(exc).__name__}: {exc}")
+                        partial_reasons.append("ocr_table_structure_unavailable")
 
                 for visual_table in _visual_candidates:
                     # Discard if the detected visual grid overlaps substantially
@@ -1048,7 +1114,7 @@ class PdfTextExtractor:
                     try:
                         refined = _refine_visual_table_ocr(
                             engine=self.ocr_engine,
-                            page_image=ocr_image,
+                            page_image=table_structure_image,
                             page=native_page,
                             page_index=page_index,
                             table=visual_table,
@@ -1087,12 +1153,26 @@ class PdfTextExtractor:
                         ocr_passes_total = (ocr_passes_total or 0) + table_passes
                         ocr_batches_total = (ocr_batches_total or 0) + table_batches
                     tables = tables + [visual_table]
+                empty_native_grids = [table for table in tables
+                                      if table.method != TableMethod.VISUAL_MODEL
+                                      and not any(cell.text.strip() for cell in table.cells)]
                 consumed_table_ocr = _merge_ocr_region_tokens_into_table_cells(
                     tables=tables,
                     regions=regions,
                     page_index=page_index,
                 )
                 if consumed_table_ocr:
+                    if table_structure_image is not None and empty_native_grids:
+                        from .ocr.image_views import canonicalize_page_image
+                        from .tables.headers import infer_visual_header_rows
+
+                        canonical = canonicalize_page_image(table_structure_image, native_page.objects.rotation)
+                        try:
+                            for table in empty_native_grids:
+                                table.header_rows = infer_visual_header_rows(table.cells, canonical, native_page.bbox)
+                        finally:
+                            if canonical is not table_structure_image and hasattr(canonical, "close"):
+                                canonical.close()
                     unmatched_ocr_tokens = [
                         token
                         for token in unmatched_ocr_tokens
@@ -1282,8 +1362,8 @@ class PdfTextExtractor:
                     page_index=page_index,
                     strategy=actual_strategy,
                     reasons=sorted(complexity.reasons, key=lambda item: item.value),
-                    native_chars=len(native_page.characters),
-                    native_text_length=len(native_page.extracted_text or ""),
+                    native_chars=len(source_native_page.characters),
+                    native_text_length=len(source_native_page.extracted_text or ""),
                     ocr_tokens_added=len(ocr_tokens) + cell_tokens_added,
                     conflicts=len(fusion.conflicts) if fusion else 0,
                     tables=len(tables),
@@ -1303,6 +1383,7 @@ class PdfTextExtractor:
                             _bbox_to_dict(box) for box in opaque_occlusion_boxes
                         ],
                         "redacted_native_characters": redacted_character_count,
+                        "inkless_native_characters": inkless_character_count,
                         "outside_page_native_characters": outside_page_character_count,
                         "layout_engine": type(self.layout_engine).__name__ if len(regions) > 0 else None,
                         "ocr_requested": ocr_any_requested,
@@ -1466,9 +1547,17 @@ class PdfTextExtractor:
                         # after page-boundary and visual-occlusion filtering.
                         raw_text=lines_to_text(native_lines),
                         native_evidence=(
-                            native_page if self.config.retain_native_evidence else None
+                            source_native_page if self.config.retain_native_evidence else None
                         ),
                         page_rotation=native_page.objects.rotation,
+                        links=[
+                            PageLink(annotation.bbox, annotation.link_uri)
+                            for annotation in native_page.objects.annotations
+                            if annotation.subtype == "link"
+                            and annotation.link_uri
+                            and annotation.bbox is not None
+                        ],
+                        rule_boxes=_rule_boxes(native_page),
                     )
                 )
             metadata = DocumentMetadata(
@@ -2955,11 +3044,11 @@ def _refine_visual_table_ocr(
         try:
             if not result.tokens:
                 return None
-            refined_table = detect_visual_table(
-                page=page, image=page_image, table_id=table.table_id,
-                tokens=list(result.tokens), page_rotation=page_rotation,
+            refined_table = detect_visual_table_in_region(
+                page=page, image=page_image, region=table_bbox, table_id=table.table_id,
+                tokens=list(result.tokens),
             )
-            target.stage_candidate(refined_table if refined_table is not None else table)
+            target.stage_candidate(_preserve_visual_grid(table, refined_table))
             engine.integrate_selected_tokens(result.tokens, target)
             return table, target.ocr_lines, target.ocr_tokens, result.ocr_passes, result.ocr_batches
         except IntegrationRejected:
@@ -2972,22 +3061,65 @@ def _refine_visual_table_ocr(
     ]
     if not refined_tokens:
         return None
-    refined_table = detect_visual_table(
+    refined_table = detect_visual_table_in_region(
         page=page,
         image=page_image,
+        region=table_bbox,
         table_id=table.table_id,
         tokens=refined_tokens,
-        page_rotation=page_rotation,
     )
-    if refined_table is None:
-        # Keep the original grid and only replace its cell text through the
-        # refined token stream in the hybrid region.
-        refined_table = table
+    refined_table = _preserve_visual_grid(table, refined_table)
     refined_fusion = fuse_native_and_ocr(native_lines, refined_tokens)
     unmatched = list(refined_fusion.unmatched_ocr_tokens)
     lines = reconstruct_ocr_lines(unmatched, page_index, page.bbox, page_rotation=page_rotation)
     lines = _rebuild_table_ocr_lines(refined_table, lines, page_index)
     return refined_table, lines, unmatched, result.ocr_passes, result.ocr_batches
+
+
+def _table_structure_tokens(ocr_lines, regions, page_index, page_bbox, page_rotation=0):
+    """Collect already integrated OCR, including recovery local to a figure.
+
+    Regional OCR does not necessarily populate the page-wide ``ocr_lines``.
+    Structure discovery must see that accepted evidence without scheduling a
+    new pass or reading an embedded image behind the composed page.
+    """
+    lines = list(ocr_lines)
+    for region in regions:
+        # Lines may predate critical-data refinement. The final accepted token
+        # view is authoritative, including an empty view after rejection.
+        lines.extend(reconstruct_ocr_lines(
+            region.ocr_tokens, page_index, page_bbox, page_rotation=page_rotation,
+        ))
+    tokens = []
+    seen = set()
+    by_text = {}
+    for line in lines:
+        for token in line.tokens:
+            key = token.evidence_id or (token.text, token.bbox)
+            if key in seen:
+                continue
+            seen.add(key)
+            # The same accepted observation can also be represented by its
+            # regional line. Keep distinct text/locations, including conflicts.
+            if any(box.iou(token.bbox) >= .9 for box in by_text.get(token.text, ())):
+                continue
+            tokens.append(token)
+            by_text.setdefault(token.text, []).append(token.bbox)
+    return tokens
+
+
+def _preserve_visual_grid(original, candidate):
+    """Text-only refinement cannot discard already observed separators.
+
+    The same structure raster is sampled in a tighter crop; rounding or crop
+    thresholds can make a thin rule disappear there. Keep the finer observed
+    grid and let the core reassign fresh OCR evidence to its existing cells.
+    """
+    if (candidate is None or candidate.row_count < original.row_count
+            or candidate.column_count < original.column_count
+            or len(candidate.cells) < len(original.cells)):
+        return original
+    return candidate
 
 
 def _refine_figure_ocr(
@@ -3305,6 +3437,20 @@ def _layout_regions_if_requested(
             details=_process_memory_snapshot(),
         )
         return [f"Layout detection unavailable: {type(exc).__name__}: {exc}"]
+
+
+def _rule_boxes(page: Any) -> list[BBox]:
+    """Vector-path boxes that can mark quotes: thin vertical bars and frames."""
+    boxes: list[BBox] = []
+    for path in page.objects.paths:
+        box = path.bbox
+        if box is None or box.area <= 0 or box.area > page.bbox.area * 0.5:
+            continue
+        bar = box.width <= 8.0 and box.height >= 8.0 and box.height >= 3.0 * box.width
+        frame = box.width >= 60.0 and box.height >= 12.0
+        if bar or frame:
+            boxes.append(box)
+    return boxes
 
 
 def _clear_occluded_table_cells(tables: list[Any], boxes: list[BBox]) -> None:

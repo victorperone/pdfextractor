@@ -13,8 +13,9 @@ Features analysed per region
 - TITLE detection: OCR line height ratio vs document body median.
 - LIST detection: bullet/numbered prefix patterns (§32 complement).
 - CAPTION detection: short text below/above a TABLE or FIGURE region.
-- HEADER/FOOTER detection: position near page top/bottom + repetition
-  across pages (complements existing header/footer logic).
+- HEADER/FOOTER detection: a compact region wholly near the page top/bottom
+  (complements existing header/footer logic; repetition is confirmed later
+  per line, see ``assemble.repeated_regions``).
 - Unknown → TEXT downgrade: regions that are still UNKNOWN but have
   OCR lines are promoted to TEXT so they participate in reading order.
 
@@ -119,6 +120,9 @@ def _region_height_ratio(region: LayoutRegion, body_median: float) -> float:
 _TITLE_HEIGHT_RATIO_THRESHOLD = 1.3   # OCR line height >= 1.3× body → title candidate
 _LIST_RATIO_THRESHOLD = 0.5           # ≥50% of lines start with a bullet → list region
 _HEADER_FOOTER_BAND = 0.10            # top/bottom 10% of page height
+# Furniture is compact: the whole region must stay near its edge. A body region
+# that merely starts (or ends) inside the band is not a header (or footer).
+_HEADER_FOOTER_EXTENT = 0.15
 
 
 def _reclassify_one(
@@ -158,13 +162,13 @@ def _reclassify_one(
         if ratio >= _TITLE_HEIGHT_RATIO_THRESHOLD:
             kind = RegionKind.TITLE
 
-    # HEADER/FOOTER detection via position.
+    # HEADER/FOOTER detection via position, for compact edge regions only.
     if kind == RegionKind.TEXT and page_height > 0:
         top_frac = region.bbox.y0 / page_height
         bot_frac = region.bbox.y1 / page_height
-        if top_frac < _HEADER_FOOTER_BAND:
+        if top_frac < _HEADER_FOOTER_BAND and bot_frac <= _HEADER_FOOTER_EXTENT:
             kind = RegionKind.HEADER
-        elif bot_frac > (1.0 - _HEADER_FOOTER_BAND):
+        elif bot_frac > (1.0 - _HEADER_FOOTER_BAND) and top_frac >= 1.0 - _HEADER_FOOTER_EXTENT:
             kind = RegionKind.FOOTER
 
     if kind == region.kind:

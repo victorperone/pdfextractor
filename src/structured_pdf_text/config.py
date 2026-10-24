@@ -144,9 +144,12 @@ class ExtractorConfig:
             adjacent pages into a single logical table.
         enable_complexity_render: Render a downscaled page image for
             complexity analysis.  Disabling skips the ink-ratio signal.
-        enable_experimental_occlusion_redaction: Remove native text visually
-            covered by solid opaque objects. Enabled by default and guarded by
-            rendered-pixel uniformity checks.
+        enable_experimental_occlusion_redaction: Publish native glyphs only
+            when they leave visible ink. In modes that render the page, each
+            glyph is checked against a raster without its text object (paint
+            order: covered, same-color, clipped and invisible glyphs are
+            removed, text over fills is kept). Enabled by default; native/fast
+            modes do not render and keep all native text.
         complexity_render_scale: Scale factor for complexity analysis renders
             (default 0.5 × OCR render scale).
         ocr_render_scale: Optional scale override for OCR rendering. When omitted,

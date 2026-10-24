@@ -18,6 +18,7 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
+from .cell_geometry import contains_point, overlaps, reading_coordinates, valid_polygon
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +147,8 @@ def validate_table_geometry(
             continue
         if cell.bbox.width <= 0 or cell.bbox.height <= 0:
             reasons.append("cell_bbox_non_positive")
+        if getattr(cell, "polygon", None) is not None and not valid_polygon(cell):
+            reasons.append("invalid_cell_polygon")
         if candidate_bbox is not None and not _contains_with_tolerance(candidate_bbox, cell.bbox):
             reasons.append("cell_outside_candidate_bbox")
 
@@ -165,9 +168,7 @@ def validate_table_geometry(
     if source_tokens:
         token_coverage = sum(
             any(
-                cell.bbox is not None
-                and cell.bbox.x0 <= token.bbox.cx <= cell.bbox.x1
-                and cell.bbox.y0 <= token.bbox.cy <= cell.bbox.y1
+                contains_point(cell, token.bbox.cx, token.bbox.cy)
                 for cell in cells
             )
             for token in source_tokens
@@ -253,19 +254,21 @@ def build_table_construction_diagnostics(
 
 def _row_centers(table: StructuredTable) -> list[float]:
     output: list[float] = []
+    coordinates = reading_coordinates(table.cells)
     for row in range(max(table.row_count, 0)):
         boxes = [cell.bbox for cell in table.cells if cell.row == row and cell.bbox is not None]
         if boxes:
-            output.append(median(box.cy for box in boxes))
+            output.append(median(coordinates(box.cx, box.cy)[1] if coordinates else box.cy for box in boxes))
     return output
 
 
 def _column_anchors(table: StructuredTable) -> list[float]:
     output: list[float] = []
+    coordinates = reading_coordinates(table.cells)
     for column in range(max(table.column_count, 0)):
         boxes = [cell.bbox for cell in table.cells if cell.col == column and cell.bbox is not None]
         if boxes:
-            output.append(median(box.x0 for box in boxes))
+            output.append(median(coordinates(box.cx, box.cy)[0] if coordinates else box.x0 for box in boxes))
     return output
 
 
@@ -321,6 +324,7 @@ def _source_assignment_metrics(
     if not source_lines or not cells:
         return 1.0, 1.0, 0
     line_rows: list[tuple[float, int]] = []
+    coordinates = reading_coordinates(cells)
     column_conflicts = 0
     assignment_conflicts = 0
     for line in source_lines:
@@ -338,10 +342,13 @@ def _source_assignment_metrics(
                 assignment_conflicts += len(tokens)
             continue
         row_values = [cell.row for cell, _ in assignments]
-        line_rows.append((line.bbox.cy, _median_int(row_values)))
+        line_y = (median(coordinates(token.bbox.cx, token.bbox.cy)[1] for _, token in assignments)
+                  if coordinates else line.bbox.cy)
+        line_rows.append((line_y, _median_int(row_values)))
         ordered = sorted(
             assignments,
-            key=lambda item: item[1].bbox.x0,
+            key=lambda item: (coordinates(item[1].bbox.cx, item[1].bbox.cy)[0]
+                              if coordinates else item[1].bbox.x0),
             reverse=writing_direction == WritingDirection.RIGHT_TO_LEFT,
         )
         columns = [cell.col for cell, _ in ordered]
@@ -376,6 +383,7 @@ def _monotonicity_from_ordered_columns(
     """
     total = 0
     valid = 0
+    coordinates = reading_coordinates(cells)
     for line in source_lines:
         tokens = [token for token in line.tokens if token.text.strip()]
         if candidate_bbox is not None:
@@ -388,7 +396,8 @@ def _monotonicity_from_ordered_columns(
         assignments = [(cell, token) for cell, token in assignments if cell is not None]
         ordered = sorted(
             assignments,
-            key=lambda item: item[1].bbox.x0,
+            key=lambda item: (coordinates(item[1].bbox.cx, item[1].bbox.cy)[0]
+                              if coordinates else item[1].bbox.x0),
             reverse=writing_direction == WritingDirection.RIGHT_TO_LEFT,
         )
         columns = [cell.col for cell, _ in ordered]
@@ -403,16 +412,15 @@ def _cell_for_token(token: TextToken, cells: list):
     containing = [
         cell
         for cell in cells
-        if cell.bbox is not None
-        and cell.bbox.x0 <= token.bbox.cx <= cell.bbox.x1
-        and cell.bbox.y0 <= token.bbox.cy <= cell.bbox.y1
+        if contains_point(cell, token.bbox.cx, token.bbox.cy)
     ]
     if containing:
         return min(containing, key=lambda cell: cell.bbox.area)
     overlaps = [
         cell
         for cell in cells
-        if cell.bbox is not None and cell.bbox.intersection(token.bbox) is not None
+        if getattr(cell, "polygon", None) is None
+        and cell.bbox is not None and cell.bbox.intersection(token.bbox) is not None
     ]
     if not overlaps:
         return None
@@ -434,9 +442,8 @@ def _has_unexpected_overlap(cells: list) -> bool:
         for second in cells[index + 1 :]:
             if second.bbox is None:
                 continue
-            if first.bbox.intersection(second.bbox) is None:
-                continue
-            return True
+            if overlaps(first, second):
+                return True
     return False
 
 

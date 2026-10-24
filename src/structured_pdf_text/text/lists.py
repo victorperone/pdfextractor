@@ -144,6 +144,9 @@ def segment_list_lines(lines: list[TextLine], *, allow_single: bool = False) -> 
     median_height = median(line_heights) if line_heights else 10.0
     indent_tolerance = max(3.0, 0.25 * median_height)
 
+    # The measure of the block: a wrapped line could not take the next word.
+    wrap_right = max(line.bbox.x1 for line in all_lines)
+
     def level(x0: float) -> int:
         return min(range(len(indent_centers)), key=lambda index: abs(indent_centers[index] - x0))
 
@@ -186,7 +189,9 @@ def segment_list_lines(lines: list[TextLine], *, allow_single: bool = False) -> 
                 )
                 list_positions.add(extra_position)
                 continue
-            if _is_continuation(line, extra, median_height, indent_tolerance):
+            if _is_continuation(
+                line, extra, median_height, indent_tolerance, last=item_lines[-1], wrap_right=wrap_right,
+            ):
                 item_lines.append(extra)
                 list_positions.add(extra_position)
                 assignments[extra_position] = ListLineAssignment(
@@ -252,21 +257,54 @@ def _item_text(lines: list[TextLine], marker: str) -> str:
     return " ".join([first_text, *(line.text.strip() for line in lines[1:] if line.text.strip())])
 
 
-def _is_continuation(previous: TextLine, extra: TextLine, median_height: float, tolerance: float) -> bool:
+def _is_continuation(
+    previous: TextLine,
+    extra: TextLine,
+    median_height: float,
+    tolerance: float,
+    *,
+    last: TextLine | None = None,
+    wrap_right: float | None = None,
+) -> bool:
     """Return True when ``extra`` is a wrapped continuation of the ``previous`` item.
 
     Checks that the line has no marker of its own, sits within one line-height
-    below the previous line, and starts at approximately the same x position as
-    the text body of the previous item (not its marker).
+    below the item's last line (``last``, default ``previous``), and starts at
+    approximately the same x position as the text body of the item (hanging
+    indent). A line flush with the marker itself is a continuation only when
+    the item's last line was wrapped: the first word of ``extra`` would not
+    have fit before ``wrap_right`` (the right edge of the block), the line
+    runs on without terminal punctuation and ``extra`` does not start with a
+    capital letter.
     """
     if parse_list_marker(extra.text) is not None or not extra.text.strip():
         return False
-    gap = extra.bbox.y0 - previous.bbox.y1
+    last = last or previous
+    gap = extra.bbox.y0 - last.bbox.y1
     if gap < -0.35 * median_height or gap > 1.45 * median_height:
         return False
     text_start = _text_start_x(previous, parse_list_marker(previous.text)[0] if parse_list_marker(previous.text) else "•")
     aligned = abs(extra.bbox.x0 - text_start) <= max(tolerance, 0.70 * median_height)
-    return aligned and len(extra.text.strip()) <= 240
+    flush_with_marker = (
+        wrap_right is not None
+        # A wrapped sentence continues in lowercase; a capitalized line flush
+        # with a short item starts new content (a field, a sentence). Only a
+        # full prose measure (about 40 line heights) may wrap before a name.
+        and (not extra.text.strip()[:1].isupper() or last.bbox.width >= 40.0 * max(last.bbox.height, 1.0))
+        and _was_wrapped(last, extra, wrap_right)
+        and abs(extra.bbox.x0 - previous.bbox.x0) <= tolerance
+        and not last.text.rstrip().endswith((".", "!", "?", ";", ":"))
+        and gap <= 0.9 * median_height
+    )
+    return (aligned or flush_with_marker) and len(extra.text.strip()) <= 240
+
+
+def _was_wrapped(last: TextLine, extra: TextLine, right_edge: float) -> bool:
+    words = extra.text.split()
+    if not words:
+        return False
+    character_width = extra.bbox.width / max(len(extra.text.strip()), 1)
+    return right_edge - last.bbox.x1 < (len(words[0]) + 1) * character_width
 
 
 def _is_inferred_nested_item(parent: TextLine, extra: TextLine, median_height: float, tolerance: float) -> bool:

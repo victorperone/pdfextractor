@@ -88,31 +88,31 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
         lines = region.native_lines or region.ocr_lines
         all_lines.extend(lines)
         if region.kind == RegionKind.HEADER or region.edge_role == "top_candidate":
-            for line in lines:
-                candidates.append(("header", line))
-                explicit_ids.add(id(line))
+            role = "header"
         elif region.kind == RegionKind.FOOTER or region.edge_role == "bottom_candidate":
-            for line in lines:
-                candidates.append(("footer", line))
-                explicit_ids.add(id(line))
+            role = "footer"
+        else:
+            continue
+        for line in lines:
+            explicit_ids.add(id(line))
+            # A region label is not evidence for every line it contains: each
+            # suppressible line must itself sit at the page edge, in the same
+            # visual frame (/Rotate) used to confirm its repetition.
+            if _at_edge(line, page, role):
+                candidates.append((role, line))
 
-    if not all_lines:
-        return candidates
-
-    page_height = max(page.bbox.height, 1.0)
-    # Keep candidate collection aligned with _stable_edge_position's 8% limit;
-    # otherwise headers between 6% and 8% never reach the repetition check.
-    edge_band = max(24.0, page_height * 0.08)
-    top = page.bbox.y0 + edge_band
-    bottom = page.bbox.y1 - edge_band
-
+    # Edge bands of the other regions use the same visual (/Rotate) test, so
+    # an occurrence that is not at the visual edge is never a candidate: it
+    # can neither veto a repeated signature nor be suppressed.
     for line in all_lines:
         if id(line) in explicit_ids:
             continue
-        if line.bbox.cy <= top:
-            candidates.append(("header", line))
-        elif line.bbox.cy >= bottom:
-            candidates.append(("footer", line))
+        for role in ("header", "footer"):
+            near, far = _edge_extent(line, page, role)
+            # Band membership by the line center, as for the edge band itself.
+            if (near + far) / 2 <= _EDGE_FRACTION and _at_edge(line, page, role):
+                candidates.append((role, line))
+                break
 
     return candidates
 
@@ -171,26 +171,57 @@ def _normalize_signature(text: str) -> str:
             "<page-number>",
             value,
         )
+    # Unlabelled "018 / 095" pagination: a line that is only a page counter
+    # over a fixed total. Other numbers stay part of the signature.
+    value = re.sub(r"^\d{1,4}(\s*/\s*\d{1,4})$", r"<page-number>\1", value)
 
     value = re.sub(r"\s+", " ", value)
     return value.strip(" -|·")
+
+
+_EDGE_FRACTION = 0.08
+# Furniture lines are compact: the side facing the body must stay close to the
+# edge as well. A line that starts at the edge but spans into the page (e.g. a
+# horizontal line on a /Rotate 90 page, vertical in the visual frame) is body.
+_EDGE_EXTENT_FRACTION = 0.12
+
+
+def _visual_box(line: TextLine, page: StructuredPage):
+    """Line box and page height in the upright (visual) frame of the page."""
+    box = line.bbox
+    if page.page_rotation % 360:
+        box = box.rotate_to_visual(page.page_rotation, page.bbox.width, page.bbox.height)
+        page_height = page.bbox.width if page.page_rotation % 180 else page.bbox.height
+    else:
+        page_height = page.bbox.height
+    return box, max(page_height, 1.0)
+
+
+def _edge_extent(line: TextLine, page: StructuredPage, role: str) -> tuple[float, float]:
+    """(near, far) visual distances of a line from its role's edge, as page fractions."""
+    box, page_height = _visual_box(line, page)
+    if role == "header":
+        near, far = box.y0, box.y1
+    else:
+        near, far = page_height - box.y1, page_height - box.y0
+    return max(near, 0.0) / page_height, max(far, 0.0) / page_height
+
+
+def _at_edge(line: TextLine, page: StructuredPage, role: str) -> bool:
+    near, far = _edge_extent(line, page, role)
+    return near <= _EDGE_FRACTION and far <= _EDGE_EXTENT_FRACTION
 
 
 def _stable_edge_position(
     values: list[tuple[str, TextLine, StructuredPage]],
 ) -> bool:
     normalized = []
-    edge_distances = []
-    for _, line, page in values:
-        box = line.bbox
-        if page.page_rotation % 360:
-            box = box.rotate_to_visual(page.page_rotation, page.bbox.width, page.bbox.height)
-            page_height = page.bbox.width if page.page_rotation % 180 else page.bbox.height
-        else:
-            page_height = page.bbox.height
-        normalized.append(box.cy / max(page_height, 1.0))
-        edge_distances.append(min(box.y0, page_height - box.y1) / max(page_height, 1.0))
-    if not normalized or max(edge_distances) > 0.08:
+    for kind, line, page in values:
+        if not _at_edge(line, page, kind):
+            return False
+        box, page_height = _visual_box(line, page)
+        normalized.append(box.cy / page_height)
+    if not normalized:
         return False
     return max(normalized) - min(normalized) <= 0.035
 

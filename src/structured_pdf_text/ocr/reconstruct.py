@@ -517,7 +517,10 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
     consecutive lines ``prev`` and ``curr``:
 
     1. **Large vertical gap** — ``gap > 1.4 × median_gap`` (significantly
-       larger than the typical inter-line spacing indicates a paragraph break).
+       larger than the typical inter-line spacing indicates a paragraph break)
+       or ``gap > 0.75 × median line height`` (uniformly spaced form fields
+       and labels, where every gap equals the median, are separate units;
+       wrapped prose lines are much closer than that).
     2. **First-line indent** — ``curr.bbox.x0`` is at least ``indent_ths``
        further right than the paragraph's running left edge (common in
        indented first-line paragraphs).
@@ -552,7 +555,9 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
         if gap > 0:
             gaps.append(gap)
     median_gap = median(gaps) if gaps else 0.0
-    gap_threshold = max(median_gap * 1.4, 1.0)
+    line_heights = [line.bbox.height for line in lines if line.bbox.height > 0]
+    absolute_gap = (median(line_heights) if line_heights else 10.0) * 0.75
+    gap_threshold = max(min(median_gap * 1.4, absolute_gap), 1.0)
 
     # Compute line widths for ragged-right detection.
     widths = [line.bbox.width for line in lines if line.bbox.width > 0]

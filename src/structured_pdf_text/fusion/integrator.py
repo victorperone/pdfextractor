@@ -66,6 +66,7 @@ def cell_evidence_snapshot(cell: TableCell) -> tuple:
         ),
         cell.text,
         cell.confidence,
+        getattr(cell, "polygon", None),
         tuple(
             (
                 token.evidence_id,
@@ -230,6 +231,7 @@ class NativeOCRIntegrator:
                 staged_text,
                 staged_tokens,
                 staged_confidence,
+                polygon=cell.polygon,
             ))
 
             # All fallible work is complete. Keep the previous cell untouched
@@ -387,14 +389,28 @@ def merge_ocr_region_tokens_into_table_cells(
         cells = [cell for cell in table.cells if cell.bbox is not None]
         if not cells:
             continue
+        empty_grid = not any(cell.text.strip() or any(t.text.strip() for t in cell.tokens) for cell in cells)
         for region in regions:
-            if not region.ocr_tokens or region.kind == RegionKind.TABLE:
+            if not region.ocr_tokens or (region.kind == RegionKind.TABLE and not empty_grid):
                 continue
-            matching_cells = [
-                cell for cell in cells
-                if region.bbox.overlap_ratio(cell.bbox) >= 0.80
-                and cell.bbox.overlap_ratio(region.bbox) >= 0.75
-            ]
+            # The image region must lie essentially inside one cell: most of it
+            # in that cell and little in any other (a stamp may slightly cross
+            # the rule). It need not fill its cell; token centers decide the
+            # target cell.
+            overlaps = sorted(
+                ((region.bbox.overlap_ratio(cell.bbox), index) for index, cell in enumerate(cells)),
+                reverse=True,
+            )
+            if empty_grid:
+                # A PDF may expose vector rules around wholly raster cells.
+                # The accepted image OCR then covers several cells instead
+                # of a stamp inside one. Preserve the stronger native grid
+                # and attach only observations physically inside its cells.
+                matching_cells = cells
+            else:
+                if not overlaps or overlaps[0][0] < 0.60 or (len(overlaps) > 1 and overlaps[1][0] > 0.35):
+                    continue
+                matching_cells = [cells[overlaps[0][1]]]
             if not matching_cells:
                 continue
             for token in region.ocr_tokens:
@@ -402,6 +418,7 @@ def merge_ocr_region_tokens_into_table_cells(
                     candidate for candidate in matching_cells
                     if candidate.bbox.x0 <= token.bbox.cx <= candidate.bbox.x1
                     and candidate.bbox.y0 <= token.bbox.cy <= candidate.bbox.y1
+                    and (not empty_grid or token.bbox.overlap_ratio(candidate.bbox) >= .80)
                 ), None)
                 if cell is None:
                     continue

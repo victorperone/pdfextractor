@@ -11,6 +11,7 @@ from __future__ import annotations
 from structured_pdf_text.document import (
     LayoutRegion,
     NativePageEvidence,
+    PageLink,
     PageDiagnostics,
     StructuredPage,
     StructuredTable,
@@ -30,6 +31,8 @@ def assemble_page(
     raw_text: str,
     native_evidence: NativePageEvidence | None = None,
     page_rotation: int = 0,
+    links: list[PageLink] | None = None,
+    rule_boxes: list[BBox] | None = None,
 ) -> StructuredPage:
     """Build a provisional StructuredPage.
 
@@ -84,4 +87,6 @@ def assemble_page(
         native_evidence=native_evidence,
         page_rotation=page_rotation,
         content_blocks=[],  # filled by assemble_document() via assemble_page_content()
+        links=list(links or []),
+        rule_boxes=list(rule_boxes or []),
     )

@@ -148,7 +148,9 @@ class TestMixedVisualTablesIntegration:
         assert markdown.count("Papel") == 1
         assert markdown.count("Caneta") == 1
         assert not document.pages[0].diagnostics.warnings
-        assert (400, 600) in calls and (345, 120) in calls
+        # Discovery reuses the existing 3x OCR raster, not its 1x complexity
+        # thumbnail. Mapping back to the same canonical cells is unchanged.
+        assert (1200, 1800) in calls and (1035, 360) in calls
         assert len(engine.calls) > 1  # Includes work discovered after initial OCR.
 
     def test_visual_table_overlapping_native_is_discarded(self, tmp_path, monkeypatch):
@@ -157,9 +159,16 @@ class TestMixedVisualTablesIntegration:
 
         calls = install_table_structure(monkeypatch, duplicate_native=True)
         document, _ = extract_hybrid(hybrid_table_pdf(tmp_path / "overlap.pdf"))
-        assert (400, 600) in calls
-        assert len(document.pages[0].tables) == 1
-        assert document.pages[0].tables[0].method == TableMethod.STRICT_GRID
+        assert (1200, 1800) in calls
+        native = [table for table in document.pages[0].tables if table.method == TableMethod.STRICT_GRID]
+        assert len(native) == 1
+        native_box = native[0].page_fragments[0].bbox
+        # An independent OCR-track candidate may still recover the real
+        # raster table. The stub candidate overlapping the native grid must
+        # never survive alongside it.
+        assert all(table.page_fragments[0].bbox.intersection(native_box) is None
+                   for table in document.pages[0].tables if table is not native[0])
+        assert len(document.pages[0].tables) == 2
 
     def test_refined_grid_with_shifted_boxes_keeps_prior_figure_ownership(self, tmp_path, monkeypatch):
         """Real recognizers move boxes between passes while preserving cell text."""

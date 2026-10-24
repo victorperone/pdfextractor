@@ -2,9 +2,27 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 import re
 
 from structured_pdf_text.document import TextToken
+from structured_pdf_text.geometry import BBox
+
+
+@dataclass(frozen=True, slots=True)
+class _CellTextView:
+    text: str
+    bbox: BBox
+
+
+def _reading_cell_tokens(tokens):
+    rotations = {getattr(t, "rotation", 0) % 360 for t in tokens if t.text.strip()}
+    if len(rotations) != 1 or not rotations.issubset({90, 180, 270}):
+        return tokens
+    rotation = rotations.pop()
+    # A shared translation does not change ordering or spacing. Zero-size
+    # reference dimensions give the inverse turn without a page dependency.
+    return [_CellTextView(t.text, t.bbox.rotate_to_visual((-rotation) % 360, 0., 0.)) for t in tokens]
 
 
 def join_table_tokens(tokens: Iterable[TextToken]) -> str:
@@ -23,17 +41,34 @@ def join_table_tokens(tokens: Iterable[TextToken]) -> str:
     Returns the stripped assembled string.
     """
     source = [token for token in tokens if token.text]
+    source = _reading_cell_tokens(source)
     nonspace = [token for token in source if token.text.strip()]
     if nonspace and all(len(token.text.strip()) == 1 for token in nonspace):
         return _join_character_tokens(source)
-    ordered = sorted(
-        source,
-        key=lambda token: (token.bbox.x0, token.bbox.y0),
-    )
+    # A cell can contain several visual lines. Sorting all words by x first
+    # interleaves their contents (including amounts); order lines before words.
+    rows: list[list[TextToken]] = []
+    for token in sorted(source, key=lambda t: (t.bbox.y0, t.bbox.x0)):
+        matching = next((row for row in rows if any(
+            max(0., min(token.bbox.y1, t.bbox.y1)-max(token.bbox.y0, t.bbox.y0))
+            >= .3*min(token.bbox.height, t.bbox.height)
+            for t in row if min(token.bbox.height, t.bbox.height) > 0)), None)
+        if matching is None:
+            rows.append([token])
+        else:
+            matching.append(token)
+    ordered = [(row_index, token) for row_index, row in enumerate(rows)
+               for token in sorted(row, key=lambda t: (t.bbox.x0, t.bbox.y0))]
     output: list[str] = []
     previous: TextToken | None = None
-    for token in ordered:
+    previous_row = None
+    for row_index, token in ordered:
         text = token.text
+        if previous_row is not None and row_index != previous_row:
+            if output and not output[-1].endswith(" "):
+                output.append(" ")
+            previous = None
+        previous_row = row_index
         if not text.strip():
             if output and not output[-1].endswith(" "):
                 output.append(" ")
@@ -80,7 +115,9 @@ def recover_cell_text(text: str, extracted_text: str) -> str:
     Cell geometry determines ownership; the text-page stream often retains
     punctuation and word boundaries that character boxes lose. Only an exact
     compact match is accepted, so this cannot invent a value absent from the
-    immutable native text evidence.
+    immutable native text evidence. The match is case-sensitive: the glyphs
+    owned by the cell keep their case even when the page repeats the word
+    elsewhere with another capitalization.
     """
     target = _compact(text)
     if len(target) < 2:
@@ -102,9 +139,9 @@ def recover_cell_text(text: str, extracted_text: str) -> str:
 
 
 def _compact(value: str) -> str:
-    # Ignore whitespace and case only. Punctuation carries meaning in decimal
-    # values, signs and identifiers and must not be normalized away.
-    return "".join(value.casefold().split())
+    # Ignore whitespace only. Case, punctuation, decimal values, signs and
+    # identifiers carry meaning and must not be normalized away.
+    return "".join(value.split())
 
 
 def _join_character_tokens(tokens: list[TextToken]) -> str:

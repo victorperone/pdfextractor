@@ -35,6 +35,10 @@ from structured_pdf_text.document import (
     StructureTreeEvidence,
 )
 from structured_pdf_text.geometry import BBox, Point
+from structured_pdf_text.visibility import glyph_pixel_box, inkless_glyphs
+
+# Analysis raster for glyph visibility: thin glyphs need a few pixels each.
+GLYPH_VISIBILITY_SCALE = 2.0
 
 try:
     import pypdfium2 as pdfium
@@ -78,6 +82,9 @@ class PdfiumNativeEvidenceSource:
         self.config = config or ExtractorConfig()
         self.password = password
         self._doc: Any | None = None
+        # Separate handle whose pages are edited (text removed) for visibility
+        # analysis; the evidence document is never modified.
+        self._scratch_doc: Any | None = None
         self._context: DocumentContext | None = None
         self._metrics: dict[str, int] = {
             "document_acquisitions": 0,
@@ -272,6 +279,102 @@ class PdfiumNativeEvidenceSource:
             page.close()
 
     @_pdfium_serialized
+    def hidden_glyphs(
+        self,
+        page_index: int,
+        characters: Any,
+        page_bbox: BBox,
+        rotation: int = 0,
+        scale: float = GLYPH_VISIBILITY_SCALE,
+    ) -> frozenset[int] | None:
+        """Char indices whose glyphs leave no ink in the rendered page.
+
+        Returns None when this PDFium build cannot attribute glyphs to text
+        objects; callers then fall back to the pixel occlusion heuristic.
+
+        A glyph is visible only if removing its text object changes the page
+        raster inside its box, so paint order decides: a later opaque path or
+        image, a same-color background, clipping or an invisible render mode
+        all hide it. The page is rendered once as is and once without any text
+        object. Where a glyph overlaps a glyph of another text object (e.g. a
+        white label drawn over a redaction bar that covers the original text),
+        the ink is attributed by rendering without that single object.
+        """
+        if self._doc is None:
+            self.open()
+        if self._doc is None or pdfium_c is None:
+            raise RuntimeError("Document failed to open")
+        if not all(_has_raw_function(name) for name in (
+                "FPDFText_GetTextObject", "FPDFPage_RemoveObject", "FPDFFormObj_RemoveObject")):
+            return None
+        glyphs = [character for character in characters if character.text.strip()]
+        if not glyphs:
+            return frozenset()
+        if self._scratch_doc is None:
+            kwargs: dict[str, Any] = {} if self.password is None else {"password": self.password}
+            self._scratch_doc = pdfium.PdfDocument(str(self.path), **kwargs)
+            self._record_metric("document_acquisitions")
+        page = self._doc[page_index]
+        self._record_metric("page_acquisitions")
+        try:
+            width, height = (float(value) for value in page.get_size())
+            effective = _bounded_render_scale(width, height, float(scale), self.config)
+            full = self._render_gray(page, effective)
+            textpage = page.get_textpage()
+            self._record_metric("textpage_acquisitions")
+            try:
+                paths = {_handle_address(obj): path for path, obj in _text_object_paths(page.raw)}
+                owner = {
+                    character.char_index: paths.get(_handle_address(
+                        pdfium_c.FPDFText_GetTextObject(textpage.raw, character.char_index)))
+                    for character in glyphs
+                }
+            finally:
+                textpage.close()
+            boxes = {
+                character.char_index: box for character in glyphs
+                if (box := glyph_pixel_box(character.bbox, page_bbox, rotation, full.size)) is not None
+            }
+            hidden = inkless_glyphs(full, self._render_without(page_index, list(paths.values()), effective), boxes)
+            by_owner: dict[Any, list[int]] = {}
+            for index, path in owner.items():
+                by_owner.setdefault(path, []).append(index)
+            ambiguous = _objects_overlapping_other_text(boxes, owner, hidden)
+            for path in ambiguous:
+                own = {index: boxes[index] for index in by_owner[path] if index in boxes}
+                hidden |= inkless_glyphs(full, self._render_without(page_index, [path], effective), own)
+            return frozenset(hidden)
+        finally:
+            page.close()
+
+    def _render_gray(self, page: Any, scale: float) -> Any:
+        self._record_metric("render_calls")
+        bitmap = page.render(scale=scale, rev_byteorder=True)
+        try:
+            return bitmap.to_pil().convert("L")
+        finally:
+            bitmap.close()
+
+    def _render_without(self, page_index: int, paths: list[tuple[int, ...]], scale: float) -> Any:
+        """Render a scratch copy of the page without the given text objects."""
+        page = self._scratch_doc[page_index]
+        self._record_metric("page_acquisitions")
+        try:
+            # Deepest/last first keeps the remaining sibling indices valid.
+            for path in sorted(paths, reverse=True):
+                parent, get, remove = page.raw, pdfium_c.FPDFPage_GetObject, pdfium_c.FPDFPage_RemoveObject
+                for index in path[:-1]:
+                    parent = get(parent, index)
+                    get, remove = pdfium_c.FPDFFormObj_GetObject, pdfium_c.FPDFFormObj_RemoveObject
+                obj = get(parent, path[-1])
+                if remove(parent, obj):
+                    pdfium_c.FPDFPageObj_Destroy(obj)
+            # Edits are not persisted: the page is closed without regenerating content.
+            return self._render_gray(page, scale)
+        finally:
+            page.close()
+
+    @_pdfium_serialized
     def render_region(
         self,
         page_index: int,
@@ -382,6 +485,10 @@ class PdfiumNativeEvidenceSource:
 
     @_pdfium_serialized
     def close(self) -> None:
+        if self._scratch_doc is not None:
+            self._scratch_doc.close()
+            self._record_metric("ffi_calls_estimated")
+        self._scratch_doc = None
         if self._doc is not None:
             self._doc.close()
             self._record_metric("ffi_calls_estimated")
@@ -612,6 +719,55 @@ def _pdfium_version() -> str | None:
         pypdfium_version = "unknown"
     info = getattr(pdfium, "PDFIUM_INFO", None) if pdfium is not None else None
     return f"pypdfium2 {pypdfium_version}; PDFium {info}" if info else f"pypdfium2 {pypdfium_version}"
+
+
+def _handle_address(handle: Any) -> int | None:
+    return ctypes.cast(handle, ctypes.c_void_p).value if handle else None
+
+
+def _text_object_paths(container: Any, prefix: tuple[int, ...] = (), form: bool = False):
+    """(index path, handle) of every text object, including inside form XObjects."""
+    count = (pdfium_c.FPDFFormObj_CountObjects if form else pdfium_c.FPDFPage_CountObjects)(container)
+    get = pdfium_c.FPDFFormObj_GetObject if form else pdfium_c.FPDFPage_GetObject
+    for index in range(int(count)):
+        obj = get(container, index)
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind == pdfium_c.FPDF_PAGEOBJ_TEXT:
+            yield prefix + (index,), obj
+        elif kind == pdfium_c.FPDF_PAGEOBJ_FORM:
+            yield from _text_object_paths(obj, prefix + (index,), form=True)
+
+
+def _boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _objects_overlapping_other_text(
+    boxes: dict[int, tuple[int, int, int, int]],
+    owner: dict[int, Any],
+    hidden: set[int],
+    cell: int = 32,
+) -> set[Any]:
+    """Text objects with an inked glyph overlapping a glyph of another object.
+
+    Only those need a per-object render to attribute their ink. A coarse
+    pixel grid keeps the search linear in the number of glyphs.
+    """
+    grid: dict[tuple[int, int], list[int]] = {}
+    for index, (left, top, right, bottom) in boxes.items():
+        for gx in range(left // cell, (right - 1) // cell + 1):
+            for gy in range(top // cell, (bottom - 1) // cell + 1):
+                grid.setdefault((gx, gy), []).append(index)
+    ambiguous: set[Any] = set()
+    for members in grid.values():
+        for position, index in enumerate(members):
+            if index in hidden or owner[index] is None or owner[index] in ambiguous:
+                continue
+            box = boxes[index]
+            if any(owner[other] != owner[index] and _boxes_overlap(box, boxes[other])
+                   for other in members[:position] + members[position + 1:]):
+                ambiguous.add(owner[index])
+    return ambiguous
 
 
 def _bounded_render_scale(width: float, height: float, requested: float, config: ExtractorConfig) -> float:
@@ -1055,7 +1211,7 @@ def _extract_annotations(
             # VQ-20: extract URI for LINK annotations.
             link_uri: str | None = None
             if subtype == "link":
-                link_uri = _get_annotation_link_uri(annot)
+                link_uri = _get_annotation_link_uri(annot, getattr(getattr(page, "pdf", None), "raw", None))
             annotations.append(
                 AnnotationEvidence(
                     page_index,
@@ -1172,14 +1328,16 @@ def _get_annotation_object_count(annot: Any) -> int | None:
         return None
 
 
-def _get_annotation_link_uri(annot: Any) -> str | None:
+def _get_annotation_link_uri(annot: Any, document: Any = None) -> str | None:
     """Extract the URI target from a LINK annotation via PDFium.
 
-    VQ-20: tries two strategies in order:
-    1. ``FPDFAnnot_GetStringValue(annot, b"URI")`` — works when the annotation
+    VQ-20: tries three strategies in order:
+    1. ``FPDFAnnot_GetLink`` + ``FPDFLink_GetAction`` + ``FPDFAction_GetURIPath``
+       with the owning *document* — the public API path for LINK annotations.
+    2. ``FPDFAnnot_GetStringValue(annot, b"URI")`` — works when the annotation
        action dict is flattened as a string value by the binding.
-    2. ``FPDFAnnot_GetAction`` + ``FPDFAction_GetURIPath`` — the canonical path
-       through the action object tree.
+    3. ``FPDFAnnot_GetAction`` + ``FPDFAction_GetURIPath`` — builds that expose
+       the action object directly on the annotation.
 
     Returns None when the annotation has no URI action, is an internal link, or
     when the required PDFium functions are unavailable in this build.
@@ -1190,7 +1348,25 @@ def _get_annotation_link_uri(annot: Any) -> str | None:
     if pdfium_c is None:
         return None
 
-    # Strategy 1: FPDFAnnot_GetStringValue with key "URI"
+    get_link = getattr(pdfium_c, "FPDFAnnot_GetLink", None)
+    get_link_action = getattr(pdfium_c, "FPDFLink_GetAction", None)
+    get_uri_path = getattr(pdfium_c, "FPDFAction_GetURIPath", None)
+    if document and get_link is not None and get_link_action is not None and get_uri_path is not None:
+        try:
+            link = get_link(annot)
+            action = get_link_action(link) if link else None
+            if action:
+                size = int(get_uri_path(document, action, None, 0))
+                if size > 1:
+                    buffer = ctypes.create_string_buffer(size)
+                    get_uri_path(document, action, buffer, size)
+                    uri = buffer.raw[:size].rstrip(b"\x00").decode("latin-1", errors="replace").strip()
+                    if uri and _is_safe_uri(uri):
+                        return uri
+        except Exception as exc:
+            _rethrow_native_fatal(exc)
+
+    # Strategy 2: FPDFAnnot_GetStringValue with key "URI"
     get_string = getattr(pdfium_c, "FPDFAnnot_GetStringValue", None)
     if get_string is not None:
         try:
@@ -1209,9 +1385,8 @@ def _get_annotation_link_uri(annot: Any) -> str | None:
         except Exception as exc:
             _rethrow_native_fatal(exc)
 
-    # Strategy 2: FPDFAnnot_GetAction → FPDFAction_GetURIPath
+    # Strategy 3: FPDFAnnot_GetAction → FPDFAction_GetURIPath
     get_action = getattr(pdfium_c, "FPDFAnnot_GetAction", None)
-    get_uri_path = getattr(pdfium_c, "FPDFAction_GetURIPath", None)
     if get_action is not None and get_uri_path is not None:
         try:
             action = get_action(annot)

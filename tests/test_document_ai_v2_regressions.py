@@ -71,7 +71,8 @@ def test_synthetic_redaction_hides_occluded_text(synthetic_regression_pdf: Path)
     assert page.diagnostics.facts["textpage_reconciliation_disabled_for_redaction"] is True
 
 
-@pytest.mark.parametrize("band_width", [120, 600])
+# The text spans x=40..128.7 (Helvetica 12): both bands contain every glyph.
+@pytest.mark.parametrize("band_width", [135, 600])
 def test_redaction_preserves_visible_white_text_on_large_black_fill(
     tmp_path: Path,
     band_width: int,

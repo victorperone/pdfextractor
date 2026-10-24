@@ -4,6 +4,7 @@ from structured_pdf_text.assemble.conservation import line_identity
 from structured_pdf_text.document import Baseline, EvidenceRef, SourceKind, TextLine, TextToken, WritingDirection
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.tables.text_join import join_table_tokens
+from .cell_geometry import contains_point
 
 
 def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int, *, bind_cell_evidence: bool = False) -> list[TextLine]:
@@ -27,15 +28,28 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int,
     # top of already-canonical bboxes would produce a double-rotation.  Source geometry
     # validated by _validate_detected_tables is the sole authority for cell order.
     cell_tokens: dict[tuple[int, int], list[TextToken]] = {}
+    owners = {}
+    for cell in table.cells:
+        for token in cell.tokens:
+            owners.setdefault((token.evidence_id, token.text, token.bbox), []).append(cell)
+    assigned = {}
+    seen = set()
+    for token in source_tokens:
+        key = (token.evidence_id, token.text, token.bbox)
+        identity = key if token.evidence_id else id(token)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        candidates = [cell for cell in table.cells if contains_point(cell, token.bbox.cx, token.bbox.cy)]
+        if not candidates:
+            continue
+        preferred = [cell for cell in candidates if any(cell is owner for owner in owners.get(key, ()))]
+        owner = min(preferred or candidates, key=lambda cell: (cell.bbox.area, cell.row, cell.col))
+        assigned.setdefault((owner.row, owner.col), []).append(token)
     for cell in table.cells:
         if cell.bbox is None:
             continue
-        selected = [
-            token
-            for token in source_tokens
-            if cell.bbox.x0 <= token.bbox.cx <= cell.bbox.x1
-            and cell.bbox.y0 <= token.bbox.cy <= cell.bbox.y1
-        ]
+        selected = assigned.get((cell.row, cell.col), [])
         while selected and selected[0].text.isspace():
             selected.pop(0)
         while selected and selected[-1].text.isspace():

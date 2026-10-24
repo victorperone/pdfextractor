@@ -145,6 +145,7 @@ def assemble_document(
         # VQ-20: propagate link URIs from LINK annotations to overlapping blocks.
         # Uses native_evidence annotations already extracted by pdfium_source.
         blocks = _propagate_link_uris(blocks, page)
+        blocks = _mark_quoted_blocks(blocks, page)
         old_block_ids = {id(block): block.block_id for block in blocks}
         blocks = _reindex_blocks(blocks)
         owner_id_remap = {
@@ -477,42 +478,142 @@ def _propagate_link_uris(
     blocks: list,
     page: StructuredPage,
 ) -> list:
-    """VQ-20: assign link_uri to blocks whose bbox is covered by a LINK annotation.
+    """VQ-20: attach LINK annotation URIs to the blocks that show their anchors.
 
-    Iterates annotations from ``page.native_evidence`` and, for each LINK annotation
-    that carries a ``link_uri``, finds blocks whose center falls inside the annotation
-    bbox. The first matching URI wins; only PARAGRAPH/TITLE/FIGURE/LIST blocks are
-    considered (TABLE blocks use cell-level URIs if needed in the future).
-
-    The match uses the block center rather than full bbox overlap to avoid incorrectly
-    annotating a large paragraph that merely shares part of its bbox with a small link
-    annotation covering only one word.
+    A block lying (almost) entirely inside the annotation becomes a link as a
+    whole. Otherwise each annotation is matched against the lines of the
+    block: the
+    glyphs whose centers lie inside the rectangle form the anchor text, so a
+    link covering one line (or part of one) of a paragraph keeps its own label.
+    Only PARAGRAPH/TITLE/FIGURE/LIST-like blocks are considered; TABLE blocks
+    are left untouched.
     """
-    if page.native_evidence is None:
+    links = [(link.bbox, link.uri) for link in page.links]
+    if not links and page.native_evidence is not None:
+        links = [
+            (annot.bbox, annot.link_uri)
+            for annot in page.native_evidence.objects.annotations
+            if annot.subtype == "link" and annot.link_uri and annot.bbox is not None
+        ]
+    if not links:
         return blocks
 
-    link_annotations = [
-        annot
-        for annot in page.native_evidence.objects.annotations
-        if annot.subtype == "link" and annot.link_uri and annot.bbox is not None
-    ]
-    if not link_annotations:
-        return blocks
-
+    lines_by_id = {
+        line.line_id: line
+        for region in page.regions
+        for line in (*region.native_lines, *region.ocr_lines)
+        if line.line_id
+    }
     result: list = []
     for block in blocks:
-        uri: str | None = None
-        if not block.suppressed:
-            for annot in link_annotations:
-                assert annot.bbox is not None
-                if (
-                    annot.bbox.x0 <= block.bbox.cx <= annot.bbox.x1
-                    and annot.bbox.y0 <= block.bbox.cy <= annot.bbox.y1
-                ):
-                    uri = annot.link_uri
-                    break
+        if block.suppressed or block.kind == ContentKind.TABLE:
+            result.append(block)
+            continue
+        uri = next((
+            target for box, target in links
+            if block.bbox.overlap_ratio(box.expand(1.0)) >= 0.8
+        ), None)
         if uri is not None:
             result.append(dataclasses.replace(block, link_uri=uri))
-        else:
-            result.append(block)
+            continue
+        anchors: list[tuple[str, str]] = []
+        block_text = " ".join(block.text.split())
+        for box, target in links:
+            for line_id in block.line_ids:
+                line = lines_by_id.get(line_id)
+                if line is None or line.bbox.overlap_ratio(box) <= 0.0:
+                    continue
+                anchor = _link_anchor_text(line, box)
+                if anchor and anchor in block_text and (anchor, target) not in anchors:
+                    anchors.append((anchor, target))
+        result.append(dataclasses.replace(block, link_anchors=anchors) if anchors else block)
     return result
+
+
+def _mark_quoted_blocks(blocks: list, page: StructuredPage) -> list:
+    """Mark prose set off by a quote bar or by a frame drawn around it alone.
+
+    A quote bar is a thin vertical rule just left of the paragraph spanning
+    most of its height. A frame must enclose the paragraph closely and hold no
+    other content block. Lists, tables, headings and verbatim blocks are
+    never marked.
+    """
+    if not page.rule_boxes:
+        return blocks
+    rules = page.rule_boxes
+
+    def isolated(rule: BBox) -> bool:
+        # Table grids repeat rules: parallel bars over the same rows, or
+        # frames touching their neighbour cells. A quote mark stands alone.
+        if rule.width <= 8.0:
+            return not any(
+                other is not rule and other.width <= 8.0
+                and min(other.y1, rule.y1) - max(other.y0, rule.y0) >= 0.8 * min(other.height, rule.height)
+                for other in rules
+            )
+        return not any(other is not rule and other.intersection(rule.expand(2.0)) is not None for other in rules)
+
+    visible = [block for block in blocks if not block.suppressed]
+    result: list = []
+    for block in blocks:
+        box = block.bbox
+        # Native prose over a background image is emitted as a FIGURE block.
+        prose = block.kind == ContentKind.TEXT or (
+            block.kind == ContentKind.FIGURE and block.line_ids
+            and all(line_id.startswith("native:") for line_id in block.line_ids)
+        )
+        if (block.suppressed or not prose or block.preformatted
+                or box.height <= 0 or not block.text.strip()):
+            result.append(block)
+            continue
+        quoted = False
+        for rule in rules:
+            if not isolated(rule):
+                continue
+            vertical = min(rule.y1, box.y1) - max(rule.y0, box.y0)
+            if (rule.width <= 8.0 and rule.x1 <= box.x0 + 1.0 and box.x0 - rule.x1 <= 24.0
+                    and vertical >= 0.8 * box.height and rule.height <= box.height * 3.0 + 24.0):
+                quoted = True
+                break
+            frame = rule.expand(1.0)
+            if (rule.width > 8.0
+                    and frame.x0 <= box.x0 and frame.y0 <= box.y0 and box.x1 <= frame.x1 and box.y1 <= frame.y1
+                    and box.x0 - rule.x0 <= 24.0 and box.y0 - rule.y0 <= 20.0 and rule.y1 - box.y1 <= 20.0
+                    and not any(
+                        other is not block and rule.x0 <= other.bbox.cx <= rule.x1
+                        and rule.y0 <= other.bbox.cy <= rule.y1
+                        for other in visible
+                    )):
+                quoted = True
+                break
+        result.append(dataclasses.replace(block, blockquote=True) if quoted else block)
+    return result
+
+
+def _link_anchor_text(line, box: BBox) -> str:
+    inside = [
+        token for token in line.tokens
+        if token.text.strip()
+        and box.x0 - 1.0 <= token.bbox.cx <= box.x1 + 1.0
+        and box.y0 - 1.0 <= token.bbox.cy <= box.y1 + 1.0
+    ]
+    if not inside:
+        return ""
+    visible = [token for token in line.tokens if token.text.strip()]
+    if len(inside) == len(visible):
+        return " ".join(line.text.split())
+    # Keep the line's own spacing: slice its text between the first and last
+    # inside glyph, located by the visible-glyph order.
+    first, last = visible.index(inside[0]), visible.index(inside[-1])
+    if last - first + 1 != len(inside):
+        return ""
+    text = line.text
+    positions = [index for index, char in enumerate(text) if not char.isspace()]
+    glyphs = [char for token in visible for char in token.text if not char.isspace()]
+    if len(positions) != len(glyphs):
+        return ""
+    offsets = [0]
+    for token in visible:
+        offsets.append(offsets[-1] + sum(1 for char in token.text if not char.isspace()))
+    start, stop = offsets[first], offsets[last + 1]
+    return " ".join(text[positions[start]:positions[stop - 1] + 1].split())

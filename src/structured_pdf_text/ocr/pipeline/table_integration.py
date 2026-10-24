@@ -12,6 +12,7 @@ from structured_pdf_text.geometry import BBox
 from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
 from structured_pdf_text.tables.ocr_lines import _rebuild_table_ocr_lines
 from structured_pdf_text.tables.text_join import join_table_tokens
+from structured_pdf_text.tables.cell_geometry import contains_point, valid_polygon
 
 from .authorization import union_contains
 from .contracts import ProposalKind, TargetRef, WorkGoal, contains
@@ -120,13 +121,15 @@ def stage_visual_table(selections, target, evidence_order=()):
             raise IntegrationRejected("Visual table draft contains invalid cell geometry or indices")
         if not math.isfinite(cell.confidence) or not 0. <= cell.confidence <= 1.:
             raise IntegrationRejected("Visual table cell confidence is invalid")
+        if not valid_polygon(cell):
+            raise IntegrationRejected("Visual table cell polygon is invalid")
         if cell.text != join_table_tokens(cell.tokens):
             raise IntegrationRejected("Visual table cell text lacks matching token evidence")
         for token in cell.tokens:
             key = token.text, token.bbox
             if key not in allowed or not contains(target.bbox, token.bbox):
                 raise IntegrationRejected("Visual table draft contains unobserved token evidence")
-            if not (cell.bbox.x0 <= token.bbox.cx <= cell.bbox.x1 and cell.bbox.y0 <= token.bbox.cy <= cell.bbox.y1):
+            if not contains_point(cell, token.bbox.cx, token.bbox.cy):
                 raise IntegrationRejected("Visual table token is assigned to a different cell")
             if key in source:
                 if key in used:

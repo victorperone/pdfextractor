@@ -479,7 +479,7 @@ def _run_tiled_regional_ocr(
 
     while grid_n <= _TILE_MAX_GRID:
         tile_bboxes = _tile_bboxes_for_grid(crop_w, crop_h, grid_n)
-        grid_tokens: list[OcrToken] = []
+        tile_groups: list[tuple[BBox, tuple[OcrToken, ...]]] = []
         grid_attempts: list[RegionRefinementAttempt] = []
         grid_passes = 0
         grid_batches = 0
@@ -573,8 +573,9 @@ def _run_tiled_regional_ocr(
                 continue
 
             if canonical_output:
-                grid_tokens.extend(tokens)
+                mapped_tokens = tokens
             else:
+                mapped_tokens = []
                 for token in tokens:
                     mapped = _map_token_to_page(
                         token,
@@ -584,7 +585,8 @@ def _run_tiled_regional_ocr(
                         page_bbox=page_bbox,
                         page_rotation=request.page_rotation,
                     )
-                    grid_tokens.append(mapped)
+                    mapped_tokens.append(mapped)
+            tile_groups.append((tile_region_bbox, tuple(mapped_tokens)))
 
             grid_attempts.append(RegionRefinementAttempt(
                 scale_factor=scale, rotation=rotation,
@@ -601,7 +603,10 @@ def _run_tiled_regional_ocr(
         all_attempts.extend(grid_attempts)
         total_passes += grid_passes
         total_batches += grid_batches
-        deduped = _deduplicate_tiled_tokens(grid_tokens)
+        policy = getattr(getattr(engine, "recovery_policy", None), "candidates", None)
+        if not isinstance(policy, RegionalCandidatePolicy):
+            policy = LEGACY_CANDIDATE_POLICY
+        deduped = policy.compose_tiles(tuple(tile_groups))
         return deduped, all_attempts, total_passes, total_batches, any_resource_exhausted
 
     # All grids up to _TILE_MAX_GRID exhausted without a complete successful grid.

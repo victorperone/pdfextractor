@@ -16,6 +16,8 @@ three cooperating components:
 """
 from __future__ import annotations
 
+import re
+
 from collections import Counter
 from dataclasses import dataclass, replace
 from math import ceil
@@ -153,6 +155,12 @@ class ProseVsTableClassifier:
             _looks_like_code_row(" ".join(group.text for group in row))
             for row in rows
         ) / max(row_count, 1)
+        # Dot leaders connect an entry to its page number (tables of
+        # contents, indexes); the aligned page column is not a table track.
+        leader_ratio = sum(
+            _DOT_LEADER.search(" ".join(group.text for group in row)) is not None
+            for row in rows
+        ) / max(row_count, 1)
 
         reasons: list[str] = []
         if row_count < 3:
@@ -167,6 +175,8 @@ class ProseVsTableClassifier:
             reasons.append("continuous_prose_signal")
         if code_score >= 0.60:
             reasons.append("code_layout_signal")
+        if leader_ratio >= 0.50:
+            reasons.append("dot_leader_index")
         accepted = not reasons
         confidence = max(
             0.0,
@@ -195,6 +205,9 @@ class ProseVsTableClassifier:
             prose_score=round(prose_score, 6),
             code_score=round(code_score, 6),
         )
+
+
+_DOT_LEADER = re.compile(r"(?:[.·…]\s?){4,}")
 
 
 def _looks_like_code_row(text: str) -> bool:
@@ -235,6 +248,78 @@ def detect_borderless_table(
     )
 
 
+def detect_borderless_tables(
+    page: NativePageEvidence,
+    region: LayoutRegion,
+    table_id: str,
+) -> list[StructuredTable]:
+    """Return independent accepted runs, keeping the same admission policy.
+
+    OCR regions can contain several tables separated by captions. Picking
+    only the highest-scoring run discards the others even though each passed
+    the classifier independently.
+    """
+    candidates = sorted(
+        (c for c in _candidates(region) if c.assessment.accepted),
+        key=lambda c: (c.assessment.confidence, len(c.lines)), reverse=True,
+    )
+    tables = []
+    for candidate in candidates:
+        box = BBox.union_all([line.bbox for line in candidate.lines])
+        if any(box.overlap_ratio(t.page_fragments[0].bbox) >= .5 for t in tables):
+            continue
+        tables.append(_build_table(page, region, candidate, f"{table_id}-{len(tables)+1}"))
+    return tables
+
+
+def complete_borderless_cells(tables: list[StructuredTable], regions: list[LayoutRegion]) -> None:
+    """Associate detached native labels with established, otherwise populated rows.
+
+    Layout can split a first-column label from its numeric row. Recover only
+    an empty cell on an existing track, with the same baseline as at least two
+    populated neighbours. No text is read again, split, replaced or invented.
+    """
+    from structured_pdf_text.document import RegionKind, TableMethod
+
+    claimed = {id(token) for table in tables for cell in table.cells for token in cell.tokens}
+    lines = [line for region in regions
+             if region.kind in {RegionKind.TEXT, RegionKind.TABLE, RegionKind.UNKNOWN, RegionKind.LIST}
+             for line in region.native_lines if line.text.strip()]
+    for table in tables:
+        if table.method != TableMethod.TEXT_TRACKS:
+            continue
+        for cell in table.cells:
+            if cell.text.strip() or cell.bbox is None:
+                continue
+            neighbours = [c for c in table.cells if c.row == cell.row and c.text.strip() and c.tokens]
+            peers = [c for c in table.cells if c.col == cell.col and c.text.strip() and c.tokens]
+            if len(neighbours) < 2 or not peers:
+                continue
+            anchor = median(min(t.bbox.x0 for t in c.tokens if t.text.strip()) for c in peers)
+            baseline = median(median(t.bbox.cy for t in c.tokens if t.text.strip()) for c in neighbours)
+            height = median(t.bbox.height for c in neighbours for t in c.tokens if t.text.strip())
+            right_anchor = min((min(t.bbox.x0 for t in c.tokens if t.text.strip())
+                                for c in neighbours if c.col > cell.col), default=cell.bbox.x1)
+            candidates = {}
+            for line in lines:
+                visible = [t for t in line.tokens if t.text.strip()]
+                if not visible or any(id(t) in claimed for t in visible):
+                    continue
+                if (abs(line.bbox.x0-anchor) > max(4., cell.bbox.width*.12)
+                        or abs(line.bbox.cy-baseline) > max(2., height*.5)
+                        or line.bbox.x1 > right_anchor-4.
+                        or not cell.bbox.y0 <= line.bbox.cy <= cell.bbox.y1
+                        or len(line.text) > 100):
+                    continue
+                candidates[tuple(id(t) for t in visible)] = line
+            if len(candidates) == 1:
+                line = next(iter(candidates.values()))
+                cell.tokens = list(line.tokens)
+                cell.text = join_native_cell_tokens(cell.tokens)
+                cell.confidence = table.confidence
+                claimed.update(id(t) for t in cell.tokens)
+
+
 def _candidates(region: LayoutRegion) -> list[_Candidate]:
     """Segment *region* into table-candidate runs and classify each.
 
@@ -259,13 +344,22 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
     heights = [line.bbox.height for line in lines if line.bbox.height > 0]
     typical_height = median(heights) if heights else 10.0
     gap_threshold = max(7.0, typical_height * 0.85, region.bbox.width * 0.012)
+    # Rows of one table repeat at a regular pitch; only a gap clearly larger
+    # than that pitch (or the absolute floor) separates two runs.
+    grouped = [len(_cell_groups(line, gap_threshold)) >= 2 for line in lines]
+    row_gaps = [
+        current.bbox.y0 - previous.bbox.y1
+        for previous, current, both in zip(lines, lines[1:], (a and b for a, b in zip(grouped, grouped[1:])))
+        if both and current.bbox.y0 > previous.bbox.y1
+    ]
+    break_gap = max(18.0, typical_height * 2.4, 1.6 * median(row_gaps) if row_gaps else 0.0)
     runs: list[list[tuple[TextLine, tuple[_CellGroup, ...]]]] = []
     current: list[tuple[TextLine, tuple[_CellGroup, ...]]] = []
     previous: TextLine | None = None
     for line in lines:
         groups = _cell_groups(line, gap_threshold)
         vertical_break = previous is not None and (
-            line.bbox.y0 - previous.bbox.y1 > max(18.0, typical_height * 2.4)
+            line.bbox.y0 - previous.bbox.y1 > break_gap
         )
         if len(groups) < 2 or vertical_break:
             if len(current) >= 3:

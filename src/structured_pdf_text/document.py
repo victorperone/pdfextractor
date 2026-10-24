@@ -412,6 +412,9 @@ class TableCell:
     text: str
     tokens: list[TextToken]
     confidence: float
+    # Optional physical quadrilateral for a rectified raster cell. bbox remains
+    # its canonical envelope for existing consumers; ownership uses the polygon.
+    polygon: tuple[Point, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -548,12 +551,27 @@ class PageContentBlock:
     suppressed: bool = False
     suppression_reason: str | None = None
     # VQ-20: URI from a LINK annotation whose bbox overlaps this block.
-    # Populated by the assembler when native_evidence carries a LINK annotation.
+    # Populated by the assembler from the page's LINK annotations.
     link_uri: str | None = None
+    # Links covering only part of the block: (anchor text, URI) pairs whose
+    # anchor is the text of the glyphs inside the annotation rectangle.
+    link_anchors: list[tuple[str, str]] = field(default_factory=list)
+    # Lines set entirely in a monospaced font, kept verbatim (code, records).
+    preformatted: bool = False
+    # Paragraph set off by a quote bar or a frame drawn around it alone.
+    blockquote: bool = False
     # VQ-19: dominant inline style for this block, derived from native font
     # metadata. Values: None (unknown/mixed), "bold", "italic", "bold_italic".
     # The renderer uses this to wrap text with ** or * markers.
     inline_style: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PageLink:
+    """A LINK annotation target: its rectangle in page space and safe URI."""
+
+    bbox: BBox
+    uri: str
 
 
 @dataclass(slots=True)
@@ -568,6 +586,11 @@ class StructuredPage:
     native_evidence: NativePageEvidence | None = None
     page_rotation: int = 0
     content_blocks: list[PageContentBlock] = field(default_factory=list)
+    # Compact LINK targets, kept independently of the retained native dump.
+    links: list[PageLink] = field(default_factory=list)
+    # Boxes of thin vertical rules and frames drawn as vector paths; evidence
+    # for quotes/callouts, kept independently of the retained native dump.
+    rule_boxes: list[BBox] = field(default_factory=list)
 
 
 @dataclass(slots=True)

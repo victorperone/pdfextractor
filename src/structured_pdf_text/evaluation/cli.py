@@ -67,6 +67,8 @@ def _parser(profile: CliProfile) -> argparse.ArgumentParser:
     ap.add_argument("--run-id", default=None, help="Run identifier")
     ap.add_argument("--output-dir", type=Path, default=profile.default_output_dir)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--supplemental-audit", action="store_true",
+                    help="Publish versioned currency/ID/cell-context and per-page alignment diagnostics alongside canonical scores")
     return ap
 
 
@@ -102,6 +104,14 @@ def main(profile: CliProfile, argv: list[str] | None = None) -> int:
         return 1
 
     result = doc.to_dict()
+    supplemental = None
+    if args.supplemental_audit:
+        from .supplemental import audit_extraction
+        try:
+            supplemental = audit_extraction(ref_text, hyp_text, selected_pages=result["inputs"]["selected_pages"])
+        except Exception as exc:
+            print(f"ERROR: supplemental audit failed: {exc}", file=sys.stderr)
+            return 1
     names = {"engine": args.engine, "slug": args.engine.replace("-", "_"), "run_id": run_id}
 
     def name(template: str | None) -> str | None:
@@ -109,14 +119,17 @@ def main(profile: CliProfile, argv: list[str] | None = None) -> int:
 
     report = render_error_report(result, run_id=run_id, engine=args.engine,
                                  ref_path=args.reference, hyp_path=args.hypothesis)
+    artifacts = [Artifact("canonical_metrics", name(profile.metrics_name), json_text(result),
+                          name(profile.metrics_fallback)),
+                 Artifact("canonical_errors", name(profile.errors_name), report,
+                          name(profile.errors_fallback))]
+    if supplemental is not None:
+        artifacts.append(Artifact("supplemental_audit", name("audit_{slug}_{run_id}.json"), json_text(supplemental)))
     try:
         published = publish_artifacts(
             args.output_dir, namespace,
             publication_identity(result, ref_text=ref_text, hyp_text=hyp_text, run_metadata=run_metadata),
-            [Artifact("canonical_metrics", name(profile.metrics_name), json_text(result),
-                      name(profile.metrics_fallback)),
-             Artifact("canonical_errors", name(profile.errors_name), report,
-                      name(profile.errors_fallback))],
+            artifacts,
             reserved_names=reserved_filenames(args.engine, run_id),
         )
     except (ArtifactPublicationError, OSError, ValueError, TypeError) as exc:
@@ -127,6 +140,8 @@ def main(profile: CliProfile, argv: list[str] | None = None) -> int:
         evaluation = result["evaluation"]
         print(f"Metrics:      {published['canonical_metrics']}")
         print(f"Error report: {published['canonical_errors']}")
+        if supplemental is not None:
+            print(f"Supplemental audit: {published['supplemental_audit']}")
         print(f"schema_version: {result['schema_version']}")
         print(f"status:         {evaluation['status']}")
         print(f"rank_eligible:  {evaluation['rank_eligible']}")

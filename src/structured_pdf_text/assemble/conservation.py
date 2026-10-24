@@ -224,9 +224,20 @@ def record_content_conservation(
         key=lambda item: accepted_order.get(item[0], len(accepted_order)),
     )
     fallback_blocks: list[PageContentBlock] = []
+    rendered_evidence = _rendered_native_evidence(page, blocks, accepted_map)
     for index, (line_id, line) in enumerate(unaccounted, start=1):
         text = normalize_reading_text(line.text).strip()
         if not text:
+            continue
+        if not line_id.startswith("native:") and _repeats_rendered_evidence(line, rendered_evidence):
+            # An OCR re-reading of native text that is already rendered at the
+            # same place: the evidence is accounted for, not lost.
+            records[line_id] = ContentDispositionRecord(
+                line_id=line_id,
+                disposition=ContentDisposition.DEDUPLICATED,
+                owner_id=None,
+                reason="ocr_repeats_rendered_native_evidence",
+            )
             continue
         fb = PageContentBlock(
             block_id=f"page-{page.page_index + 1}:conservation-fallback-{index}",
@@ -293,6 +304,61 @@ def record_content_conservation(
         transformed_source_lines=len(transformed_sources),
     )
     return blocks, summary, tuple(records.values())
+
+
+def _compact_text(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _rendered_native_evidence(
+    page: StructuredPage,
+    blocks: list[PageContentBlock],
+    accepted_map: dict[str, TextLine],
+) -> list[tuple[BBox, str]]:
+    """Boxes and compact texts of native lines and table cells already rendered."""
+    evidence: list[tuple[BBox, str]] = []
+    rendered_tables = set()
+    for block in blocks:
+        if block.suppressed:
+            continue
+        if block.kind == ContentKind.TABLE and block.table_id:
+            rendered_tables.add(block.table_id)
+        for line_id in block.line_ids:
+            canonical = _canonical_line_id(line_id)
+            line = accepted_map.get(canonical)
+            if line is not None and canonical.startswith("native:"):
+                evidence.append((line.bbox, _compact_text(line.text)))
+    for table in page.tables:
+        if table.table_id not in rendered_tables:
+            continue
+        for cell in table.cells:
+            if cell.bbox is not None and cell.text and any(
+                not token.sources or any(ref.source.value.startswith("native") for ref in token.sources)
+                for token in cell.tokens
+            ):
+                evidence.append((cell.bbox, _compact_text(cell.text)))
+    return evidence
+
+
+def _repeats_rendered_evidence(line: TextLine, evidence: list[tuple[BBox, str]]) -> bool:
+    """OCR line placed over rendered native text that already contains it.
+
+    Overlay OCR (watermarks, stamps) clips words at its crop edges and may
+    append a residual fragment; at least 80% of its characters must belong to
+    words found in the overlapped native text.
+    """
+    words = [_compact_text(word) for word in line.text.split()]
+    words = [word for word in words if word]
+    total = sum(len(word) for word in words)
+    if total < 3 or line.bbox.area <= 0:
+        return False
+    for box, rendered in evidence:
+        overlap = line.bbox.intersection(box.expand(2.0))
+        if overlap is None or overlap.area < 0.5 * line.bbox.area:
+            continue
+        if sum(len(word) for word in words if word in rendered) >= 0.8 * total:
+            return True
+    return False
 
 
 def _resolve_duplicate_ownership(

@@ -373,7 +373,7 @@ def test_dedicated_figure_refinement_commits_stream_and_owner_together(has_regio
         pipeline.close()
 
 
-@pytest.mark.parametrize("defect", [None, "scope", "value", "unobserved", "owner", "duplicate_grid", "stale"])
+@pytest.mark.parametrize("defect", [None, "coarsened_grid", "scope", "value", "unobserved", "owner", "duplicate_grid", "stale"])
 def test_visual_table_refinement_validates_core_draft_before_atomic_commit(monkeypatch, defect):
     from copy import deepcopy
     from structured_pdf_text import api
@@ -398,7 +398,10 @@ def test_visual_table_refinement_validates_core_draft_before_atomic_commit(monke
         candidate.cells[0].text = left.text
         candidate.cells[1].tokens = [right]
         candidate.cells[1].text = right.text
-        if defect == "scope":
+        if defect == "coarsened_grid":
+            candidate.column_count = 1
+            candidate.cells = candidate.cells[:1]
+        elif defect == "scope":
             candidate.page_fragments[0].bbox = BBox(0, 0, 200, 100)
         elif defect == "unobserved":
             candidate.cells[0].tokens = [replace(left, text="inventado")]
@@ -410,7 +413,7 @@ def test_visual_table_refinement_validates_core_draft_before_atomic_commit(monke
         elif defect == "stale":
             table.confidence = .7
         return candidate
-    monkeypatch.setattr(api, "detect_visual_table", builder)
+    monkeypatch.setattr(api, "detect_visual_table_in_region", builder)
     pipeline = LegacyInjectedPipeline(Engine())
     source = SpySource()
     coordinator = PageCoordinator(pipeline, source, extraction_id="visual", document_id="doc",
@@ -421,8 +424,9 @@ def test_visual_table_refinement_validates_core_draft_before_atomic_commit(monke
     try:
         result = api._refine_visual_table_ocr(facade, Image.new("RGB", (200, 100)),
                                              SimpleNamespace(bbox=coordinator.page_bbox), 0, table, [], "adaptive")
-        assert bool(result) is (defect is None)
-        if defect is None:
+        accepted = defect in (None, "coarsened_grid")
+        assert bool(result) is accepted
+        if accepted:
             assert result[0] is table and table.cells[0].text == "AÇÃO"
             assert table.cells[1].text == old.text and result[1] and result[2]
             assert all(token.derived_from_ids for cell in table.cells for token in cell.tokens)
@@ -436,7 +440,7 @@ def test_visual_table_refinement_validates_core_draft_before_atomic_commit(monke
         requests = coordinator.diagnostics()["requests"]
         assert all(item["goal"] == "table" and not item["mandatory"] for item in requests)
         assert all(call[1] == box for call in source.calls)
-        assert sum(decision["outcome"] == "accepted" for item in requests for decision in item["integration_decisions"]) == int(defect is None)
+        assert sum(decision["outcome"] == "accepted" for item in requests for decision in item["integration_decisions"]) == int(accepted)
         assert not coordinator._deferred_tokens
     finally:
         facade.close()

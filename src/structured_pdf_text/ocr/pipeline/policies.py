@@ -269,6 +269,19 @@ class RegionalCandidatePolicy:
     position_coverage: float = .50
     textual_minimum_characters: int = 2
 
+    def compose_tiles(self, tile_groups):
+        """Select observations from completed tiles in canonical coordinates.
+
+        Each pair contains the tile's authorized rectangle and its observed
+        tokens. Selection never edits the underlying authorized observations.
+        Engines may specialize composition without changing other pipelines.
+        """
+        from structured_pdf_text.ocr.recovery import _deduplicate_tiled_tokens
+
+        return _deduplicate_tiled_tokens([
+            token for _bounds, tokens in tile_groups for token in tokens
+        ])
+
     def filter(self, tokens, request):
         filtered = [token for token in tokens if token.text.strip()
                     and (token.confidence is None or token.confidence >= request.min_confidence)]
