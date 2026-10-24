@@ -93,11 +93,7 @@ def _render_content_block(
         return f"{prefix} {_escape_inline_text(text, context='heading')}" if text else ""
 
     if block.kind == ContentKind.LIST and block.list_items:
-        return "\n".join(
-            f"{'  ' * max(0, item.level)}{_markdown_list_marker(item.marker)} "
-            f"{_escape_inline_text(item.text, context='list')}"
-            for item in block.list_items
-        )
+        return _render_list_items(block.list_items)
 
     if block.kind == ContentKind.TABLE:
         table = table_map.get(block.table_id or "")
@@ -123,9 +119,10 @@ def _render_content_block(
         while fence in block.text:
             fence += "`"
         return f"{fence}text\n{block.text}\n{fence}"
-    text = _escape_inline_text(block.text, context="paragraph")
+    styled_runs = getattr(block, "styled_runs", None)
+    text = _render_styled_runs(styled_runs) if styled_runs else _escape_inline_text(block.text, context="paragraph")
     # VQ-19: wrap text with inline style markers when block carries a dominant style.
-    inline_style = getattr(block, "inline_style", None)
+    inline_style = None if styled_runs else getattr(block, "inline_style", None)
     if inline_style and text:
         if inline_style == "bold_italic":
             text = f"***{text}***"
@@ -391,6 +388,58 @@ def _render_cell_html(text: str) -> str:
 
 _BULLET_MARKERS = frozenset("•◦▪‣●○■□–—-*+·")
 _CHECKBOX_MARKERS = frozenset("☐☑☒")
+
+
+def _render_styled_runs(runs) -> str:
+    """Markdown for (text, style) runs; markers wrap the words, not spaces."""
+    parts: list[str] = []
+    for text, style in runs:
+        if text == "\n":
+            parts.append("\n")
+            continue
+        escaped = _escape_inline_text(text, context="paragraph") if not parts or parts[-1].endswith("\n") else (
+            _escape_inline_text("x" + text, context="paragraph")[1:]
+        )
+        core = escaped.strip()
+        if not core or not style:
+            parts.append(escaped)
+            continue
+        lead = escaped[: len(escaped) - len(escaped.lstrip())]
+        trail = escaped[len(escaped.rstrip()):]
+        if "b" in style and "i" in style:
+            core = f"***{core}***"
+        elif "b" in style:
+            core = f"**{core}**"
+        elif "i" in style:
+            core = f"*{core}*"
+        if "s" in style:
+            core = f"~~{core}~~"
+        if "u" in style:
+            core = f"<u>{core}</u>"
+        parts.append(f"{lead}{core}{trail}")
+    return "".join(parts)
+
+
+def _render_list_items(items) -> str:
+    """Nest each item under the content column of its parent.
+
+    CommonMark attaches a sublist to an item only when it is indented to the
+    parent's content start: two spaces under ``- `` but three under ``1. ``
+    and four under ``10. ``. A fixed width per level turns children of ordered
+    items into separate root lists.
+    """
+    lines: list[str] = []
+    # (level, content column) of the open ancestors.
+    ancestors: list[tuple[int, int]] = []
+    for item in items:
+        level = max(0, item.level)
+        while ancestors and ancestors[-1][0] >= level:
+            ancestors.pop()
+        indent = ancestors[-1][1] if ancestors else 0
+        marker = _markdown_list_marker(item.marker)
+        lines.append(f"{' ' * indent}{marker} {_escape_inline_text(item.text, context='list')}")
+        ancestors.append((level, indent + len(marker) + 1))
+    return "\n".join(lines)
 
 
 def _markdown_list_marker(marker: str) -> str:

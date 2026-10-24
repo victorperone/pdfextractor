@@ -381,9 +381,15 @@ class PdfiumNativeEvidenceSource:
         bbox: BBox,
         scale: float,
         page_bbox: BBox | None = None,
-        page_rotation: int = 0,
+        page_rotation: int | None = None,
     ) -> Any:
-        """Rasterize a PDF-coordinate region at the requested source scale."""
+        """Rasterize a PDF-coordinate region at the requested source scale.
+
+        *page_rotation* is the rotation of the caller's page frame relative to
+        the rendered (displayed) page; it defaults to the page's ``/Rotate``.
+        A page analysed in its upright reading frame passes that frame's
+        rotation so the crop is not turned a second time.
+        """
         if self._doc is None:
             self.open()
         if self._doc is None:
@@ -404,7 +410,10 @@ class PdfiumNativeEvidenceSource:
             clipped = bbox.intersection(page_bbox)
             if clipped is None or clipped.area <= 0:
                 raise ValueError("Requested PDF region does not intersect the page raster")
-            rotation = int(getattr(page, "get_rotation", lambda: 0)() or 0) % 360
+            rotation = (
+                int(page_rotation) % 360 if page_rotation is not None
+                else int(getattr(page, "get_rotation", lambda: 0)() or 0) % 360
+            )
             visual = clipped.rotate_to_visual(rotation, page_bbox.width, page_bbox.height)
             visual_width = page_bbox.height if rotation in (90, 270) else page_bbox.width
             visual_height = page_bbox.width if rotation in (90, 270) else page_bbox.height

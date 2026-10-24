@@ -560,6 +560,10 @@ class PageContentBlock:
     preformatted: bool = False
     # Paragraph set off by a quote bar or a frame drawn around it alone.
     blockquote: bool = False
+    # Mixed emphasis: (text, style) runs covering the block text, style being
+    # a combination of "b" (bold), "i" (italic), "u" (underline) and "s"
+    # (strike-through), or "" for plain text. Empty when not mixed.
+    styled_runs: list[tuple[str, str]] = field(default_factory=list)
     # VQ-19: dominant inline style for this block, derived from native font
     # metadata. Values: None (unknown/mixed), "bold", "italic", "bold_italic".
     # The renderer uses this to wrap text with ** or * markers.
@@ -591,6 +595,8 @@ class StructuredPage:
     # Boxes of thin vertical rules and frames drawn as vector paths; evidence
     # for quotes/callouts, kept independently of the retained native dump.
     rule_boxes: list[BBox] = field(default_factory=list)
+    # Thin horizontal strokes (underline/strike-through evidence).
+    stroke_boxes: list[BBox] = field(default_factory=list)
 
 
 @dataclass(slots=True)

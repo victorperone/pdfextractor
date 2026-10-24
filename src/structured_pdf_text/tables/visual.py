@@ -99,6 +99,9 @@ def detect_visual_table(
     grid = structure_engine.recognize(recognition_image)
     if grid is None:
         return None
+    grid = _without_sliver_slots(grid)
+    if len(grid.x_edges) < 2 or len(grid.y_edges) < 2:
+        return None
     width, height = _image_size(image)
     if orientation:
         from .visual_alignment import IDENTITY
@@ -192,6 +195,34 @@ def detect_visual_table(
         method=TableMethod.VISUAL_MODEL,
         header_rows=infer_visual_header_rows(cells, image, raster_bbox),
     )
+
+
+def _without_sliver_slots(grid: VisualGrid) -> VisualGrid:
+    """Collapse separators closer than a third of the typical pitch.
+
+    Double rules, a shaded band edge and its rule, or a JPEG ringing line
+    yield two separators one or two pixels apart; the slot between them is
+    not a row or column of the table. Legitimately empty rows keep their
+    normal height and are unaffected.
+    """
+    def collapse(edges: tuple[float, ...]) -> tuple[float, ...]:
+        if len(edges) < 4:
+            return edges
+        gaps = sorted(b - a for a, b in zip(edges, edges[1:]))
+        typical = gaps[len(gaps) // 2]
+        minimum = max(2.0, typical * 0.35)
+        groups: list[list[float]] = [[edges[0]]]
+        for value in edges[1:]:
+            if value - groups[-1][-1] < minimum:
+                groups[-1].append(value)
+            else:
+                groups.append([value])
+        return tuple(sum(group) / len(group) for group in groups)
+
+    x_edges, y_edges = collapse(tuple(grid.x_edges)), collapse(tuple(grid.y_edges))
+    if x_edges == tuple(grid.x_edges) and y_edges == tuple(grid.y_edges):
+        return grid
+    return replace(grid, x_edges=x_edges, y_edges=y_edges)
 
 
 def _mapped_rectangle(x0, y0, x1, y1, transform):

@@ -51,6 +51,7 @@ from structured_pdf_text.document import (
     TableFragment,
     TableMethod,
     TextLine,
+    WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.tables.headers import infer_header_rows
@@ -149,7 +150,7 @@ def _region_overlaps_table(region: LayoutRegion, table: StructuredTable) -> bool
 
 
 def _scalar_identifier_region(region: LayoutRegion) -> bool:
-    """A boxed scalar identifier is distinct from a paragraph callout/code.
+    """A boxed scalar value (identifier or status word) is not a callout/code.
 
     This does not classify a frame on its own: the strict detector still
     requires all four connected rules around the native value.
@@ -158,9 +159,11 @@ def _scalar_identifier_region(region: LayoutRegion) -> bool:
     if len(lines) != 1:
         return False
     text = lines[0].text.strip()
-    return (len(text) <= 80 and any(c.isalpha() for c in text)
-            and any(c.isdigit() for c in text)
-            and all(c.isalnum() or c in "-_./" for c in text))
+    if len(text) > 80 or not all(c.isalnum() or c in "-_./" for c in text):
+        return False
+    # An identifier (letters and digits) or a single status word such as
+    # "Autorizado"; sentences, code and notes carry spaces or punctuation.
+    return any(c.isalpha() for c in text) and (any(c.isdigit() for c in text) or len(text) >= 3)
 
 
 def _detect_strict_grid(page: NativePageEvidence, limit: BBox, *, allow_single_cell: bool = False) -> _Grid | None:
@@ -470,7 +473,16 @@ def _cell_text_preserving_vertical_lines(
     """
     visible = [token for token in tokens if token.text.strip()]
     single_glyphs = [token for token in visible if len(token.text.strip()) == 1]
-    if len(single_glyphs) >= 5:
+    visible_ids = {id(token) for token in visible}
+    # Rotated text (glyphs turned 90/270 degrees) is one vertical line whose
+    # token order already follows the reading direction; only upright
+    # letters stacked one per line are serialized as a glyph column.
+    rotated_line = any(
+        line.direction == WritingDirection.TOP_TO_BOTTOM
+        and sum(id(token) in visible_ids for token in line.tokens) >= 0.7 * len(visible)
+        for line in lines
+    )
+    if len(single_glyphs) >= 5 and not rotated_line:
         median_width = median(token.bbox.width for token in single_glyphs)
         median_height = median(token.bbox.height for token in single_glyphs)
         centers_x = [token.bbox.cx for token in single_glyphs]
@@ -487,11 +499,26 @@ def _cell_text_preserving_vertical_lines(
         return ""
     fragments: list[str] = []
     assigned_ids: set[int] = set()
+    raised = _raised_mark_lines(lines, token_ids)
     for line in sorted(lines, key=lambda item: (item.bbox.y0, item.bbox.x0)):
+        if id(line) in raised.marks:
+            continue
         line_tokens = [token for token in line.tokens if id(token) in token_ids]
         if not line_tokens:
             continue
         assigned_ids.update(id(token) for token in line_tokens)
+        extra = raised.attached.get(id(line), [])
+        if extra:
+            # Backticks, quotes and degree signs sit above the x-height and
+            # were split into their own line; put them back in x order.
+            assigned_ids.update(id(token) for token in extra)
+            merged = sorted([*line_tokens, *extra], key=lambda token: token.bbox.x0)
+            fragment = (join_native_cell_tokens(merged)
+                        if all(len(token.text.strip()) <= 1 for token in merged)
+                        else join_table_tokens(merged))
+            if fragment:
+                fragments.append(fragment)
+            continue
         visible_line_ids = {id(token) for token in line.tokens if token.text.strip()}
         selected_visible_ids = {id(token) for token in line_tokens if token.text.strip()}
         if (visible_line_ids and visible_line_ids.issubset(selected_visible_ids)
@@ -516,6 +543,45 @@ def _cell_text_preserving_vertical_lines(
     if unassigned:
         fragments.append(join_table_tokens(unassigned))
     return " ".join(fragment for fragment in fragments if fragment).strip()
+
+
+_RAISED_MARKS = frozenset("`'\"´^~°ºª’‘“”")
+
+
+@dataclass
+class _RaisedMarks:
+    marks: set[int]
+    attached: dict[int, list]
+
+
+def _raised_mark_lines(lines: list[TextLine], token_ids: set[int]) -> _RaisedMarks:
+    """Lines made only of raised marks, attached to the line right below.
+
+    The native line builder groups glyphs by vertical overlap; a backtick or
+    quote drawn above the x-height can end up as its own short line, which a
+    top-to-bottom join would move in front of the whole word it encloses.
+    """
+    owned = [(line, [token for token in line.tokens if id(token) in token_ids]) for line in lines]
+    owned = [(line, tokens) for line, tokens in owned if tokens]
+    result = _RaisedMarks(set(), {})
+    for line, tokens in owned:
+        visible = [token for token in tokens if token.text.strip()]
+        if not visible or not all(token.text.strip() in _RAISED_MARKS for token in visible):
+            continue
+        targets = [
+            other for other, other_tokens in owned
+            if other is not line and other_tokens
+            and not all(token.text.strip() in _RAISED_MARKS for token in other_tokens if token.text.strip())
+            and line.bbox.height <= 0.6 * max(other.bbox.height, 1.0)
+            and min(line.bbox.x1, other.bbox.x1) - max(line.bbox.x0, other.bbox.x0) > 0
+            and -2.0 <= other.bbox.y0 - line.bbox.y0 <= 0.8 * other.bbox.height
+        ]
+        if not targets:
+            continue
+        target = min(targets, key=lambda other: abs(other.bbox.y0 - line.bbox.y0))
+        result.marks.add(id(line))
+        result.attached.setdefault(id(target), []).extend(visible)
+    return result
 
 
 def _same_glyphs(text: str, tokens: list) -> bool:

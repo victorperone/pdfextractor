@@ -5,9 +5,20 @@ from uuid import uuid4
 from .contracts import Authorization, BBox, OCRPipelineResult, OCRWorkRequest, WorkScope, contains, identifier, valid_bbox
 
 
+# Coordinates derived through different float paths (rectification, scale
+# round trips) differ by ~1e-13 pt; that is rounding, not new area.
+_ROUNDING_TOLERANCE = 1e-6
+
+
 def union_contains(regions: tuple[BBox, ...], box: BBox) -> bool:
-    """Exact rectangle union containment using a sweep; never envelope/center."""
+    """Exact rectangle union containment using a sweep; never envelope/center.
+
+    Only floating-point rounding (``_ROUNDING_TOLERANCE``) is forgiven.
+    """
     valid_bbox(box)
+    eps = _ROUNDING_TOLERANCE
+    if box.width > 2 * eps and box.height > 2 * eps:
+        box = BBox(box.x0 + eps, box.y0 + eps, box.x1 - eps, box.y1 - eps)
     xs = sorted({box.x0, box.x1} | {x for r in regions for x in (r.x0, r.x1) if box.x0 < x < box.x1})
     for left, right in zip(xs, xs[1:]):
         intervals = sorted((max(box.y0, r.y0), min(box.y1, r.y1)) for r in regions if r.x0 <= left and right <= r.x1 and r.y0 < box.y1 and box.y0 < r.y1)

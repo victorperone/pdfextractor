@@ -604,6 +604,13 @@ def _region_pair_score(
             score += 5.0
         elif second.bbox.x1 <= first.bbox.x0 + tolerance:
             score -= 5.0
+    elif first.bbox.y1 <= second.bbox.y0 + tolerance and first.bbox.x1 <= second.bbox.x0 + tolerance:
+        # Wholly above and to the left precedes in column and row reading
+        # alike. (Above-right versus below-left is left to other evidence:
+        # columns read down before across.)
+        score += 4.0
+    elif second.bbox.y1 <= first.bbox.y0 + tolerance and second.bbox.x1 <= first.bbox.x0 + tolerance:
+        score -= 4.0
 
     first_order = _region_native_order(first)
     second_order = _region_native_order(second)

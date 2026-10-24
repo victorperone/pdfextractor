@@ -655,7 +655,9 @@ class RapidOCRBackend:
             turned = np.ascontiguousarray(np.rot90(image, quarter_turns))
             candidate = run(turned, quarter_turns)
             mean, score = _reading_evidence(candidate)
-            if mean < policy.confidence_floor or score < policy.minimum_gain * upright_score:
+            reason = policy.acceptance(upright_mean, upright_score, mean, score)
+            attempts[-1]["acceptance"] = reason
+            if reason is None:
                 continue
             if score > best_score:
                 best_rows = candidate

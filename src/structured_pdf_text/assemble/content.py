@@ -10,6 +10,7 @@ fragment bbox (fallback). A TABLE region label alone is not sufficient.
 """
 from __future__ import annotations
 
+import re
 import time
 from statistics import median
 from dataclasses import dataclass, replace
@@ -755,7 +756,7 @@ def _emit_prose_blocks(
             segment_lines = list(paragraph_segment.lines)
             preformatted = id(paragraph_segment) in preformatted_units
             if preformatted:
-                text = "\n".join(line.text.rstrip() for line in segment_lines).strip("\n")
+                text = _verbatim_text(segment_lines)
             elif paragraph_segment.is_list:
                 text = _normalized_lines_text(segment_lines)
             elif region.ocr_lines and not region.native_lines:
@@ -808,23 +809,57 @@ def _is_monospaced_line(line: TextLine) -> bool:
     )
 
 
+def _verbatim_text(lines: list[TextLine]) -> str:
+    """Monospaced lines with their indentation restored from glyph positions.
+
+    Leading spaces have no glyph; the offset from the listing's left edge in
+    monospaced advances (0.6 em) gives them back, so nested code keeps its
+    structure. Blank lines inside the listing are kept.
+    """
+    while lines and not lines[-1].text.strip():
+        lines = lines[:-1]
+    while lines and not lines[0].text.strip():
+        lines = lines[1:]
+    if not lines:
+        return ""
+    sizes = [token.font_size for line in lines for token in line.tokens
+             if token.text.strip() and token.font_size and token.font_size > 0]
+    advance = 0.6 * median(sizes) if sizes else None
+    left = min(line.bbox.x0 for line in lines if line.text.strip())
+    output = []
+    for line in lines:
+        text = line.text.strip()
+        if not text:
+            output.append("")
+            continue
+        indent = int(round((line.bbox.x0 - left) / advance)) if advance else 0
+        output.append(" " * max(0, indent) + text)
+    return "\n".join(output)
+
+
+_CODE_SYNTAX = re.compile(r"[{}\[\]=();<>\"']")
+
+
 def _native_text_units(lines: list[TextLine]) -> list[tuple[list[TextLine], bool]]:
     """Paragraphs of native prose and verbatim runs of monospaced lines.
 
     Two or more consecutive lines set entirely in a monospaced font form one
-    preformatted unit (records, code, hashes); everything else is split by
-    :func:`_native_paragraphs`.
+    preformatted unit (records, code, hashes). A single monospaced line is
+    verbatim only with code syntax (braces, brackets, assignment, quotes);
+    a lone word or identifier in a monospaced font stays prose. Everything
+    else is split by :func:`_native_paragraphs`.
     """
     runs: list[tuple[list[TextLine], bool]] = []
     for line in lines:
-        mono = _is_monospaced_line(line)
+        # A blank line inside a code listing belongs to the listing.
+        mono = runs[-1][1] if runs and not line.text.strip() else _is_monospaced_line(line)
         if runs and runs[-1][1] == mono:
             runs[-1][0].append(line)
         else:
             runs.append(([line], mono))
     units: list[tuple[list[TextLine], bool]] = []
     for run, mono in runs:
-        if mono and len(run) >= 2:
+        if mono and (len(run) >= 2 or _CODE_SYNTAX.search(run[0].text)):
             units.append((run, True))
         else:
             units.extend((paragraph, False) for paragraph in _native_paragraphs(run))

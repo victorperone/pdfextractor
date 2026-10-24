@@ -14,6 +14,7 @@ single ``StructuredDocument``. Responsibilities:
 from __future__ import annotations
 
 import dataclasses
+from statistics import median
 import time
 
 from structured_pdf_text.document import (
@@ -146,6 +147,7 @@ def assemble_document(
         # Uses native_evidence annotations already extracted by pdfium_source.
         blocks = _propagate_link_uris(blocks, page)
         blocks = _mark_quoted_blocks(blocks, page)
+        blocks = _mark_styled_runs(blocks, page)
         old_block_ids = {id(block): block.block_id for block in blocks}
         blocks = _reindex_blocks(blocks)
         owner_id_remap = {
@@ -172,6 +174,15 @@ def assemble_document(
 
         page.diagnostics.facts.update(
             {
+                # ``reading_line_preservation_ok`` is measured on the reading
+                # order, before conservation; this is the final state after
+                # fallback/deduplication, with the fallback count beside it.
+                "reading_line_preservation_stage": "reading_order_before_conservation",
+                "content_preservation_final_ok": (
+                    conservation.unaccounted_lines == 0
+                    and conservation.duplicate_assignment_count == 0
+                ),
+                "content_preservation_fallback_lines": conservation.fallback_lines,
                 "content_block_count": len(blocks),
                 "content_text_block_count": sum(
                     1 for b in blocks if b.kind not in (ContentKind.TABLE, ContentKind.FIGURE)
@@ -587,6 +598,86 @@ def _mark_quoted_blocks(blocks: list, page: StructuredPage) -> list:
                 quoted = True
                 break
         result.append(dataclasses.replace(block, blockquote=True) if quoted else block)
+    return result
+
+
+def _token_style(token, strokes: list[BBox], top: float, baseline: float, links: list[BBox]) -> str:
+    """Emphasis of one glyph run; strokes are judged against its line.
+
+    *top*/*baseline* are the line's typical glyph top and bottom, so letters
+    with descenders or accents do not move the reference. Underline belongs
+    to a stroke at the baseline, strike-through to one through the middle.
+    A link's underline is the hyperlink's own decoration, not emphasis.
+    """
+    name = (token.font_name or "").casefold()
+    style = ""
+    if (token.font_weight is not None and token.font_weight >= 600) or any(
+        key in name for key in ("bold", "heavy", "black", "semibold", "demi")
+    ):
+        style += "b"
+    if any(key in name for key in ("italic", "oblique", "slanted")):
+        style += "i"
+    box = token.bbox
+    height = max(baseline - top, 1.0)
+    in_link = any(link.x0 <= box.cx <= link.x1 and link.y0 <= box.cy <= link.y1 for link in links)
+    for stroke in strokes:
+        covered = min(stroke.x1, box.x1) - max(stroke.x0, box.x0)
+        if covered < 0.5 * box.width:
+            continue
+        position = (stroke.cy - top) / height
+        if 0.9 <= position <= 1.45 and not in_link and "u" not in style:
+            style += "u"
+        elif 0.3 <= position <= 0.8 and "s" not in style:
+            style += "s"
+    return style
+
+
+def _mark_styled_runs(blocks: list, page: StructuredPage) -> list:
+    """Attach mixed emphasis runs from native font and stroke evidence.
+
+    Bold/italic come from the font of each glyph run; underline and
+    strike-through from a thin stroke under or through it. Runs are used only
+    when the block mixes styles and their text reproduces the block text, so
+    a style can never change or reorder the published words.
+    """
+    lines_by_id = {
+        line.line_id: line
+        for region in page.regions
+        for line in region.native_lines
+        if line.line_id
+    }
+    link_boxes = [link.bbox for link in page.links]
+    result: list = []
+    for block in blocks:
+        if (block.suppressed or block.preformatted or block.kind not in {
+                ContentKind.TEXT, ContentKind.CAPTION, ContentKind.FOOTNOTE} or not block.line_ids):
+            result.append(block)
+            continue
+        runs: list[tuple[str, str]] = []
+        lines = [lines_by_id.get(line_id) for line_id in block.line_ids]
+        if any(line is None for line in lines):
+            result.append(block)
+            continue
+        for index, line in enumerate(lines):
+            if index:
+                runs.append(("\n", ""))
+            glyphs = [token for token in line.tokens if token.text.strip()]
+            top = median([token.bbox.y0 for token in glyphs]) if glyphs else line.bbox.y0
+            baseline = median([token.bbox.y1 for token in glyphs]) if glyphs else line.bbox.y1
+            for token in line.tokens:
+                style = (_token_style(token, page.stroke_boxes, top, baseline, link_boxes)
+                         if token.text.strip() else None)
+                if style is None:
+                    style = runs[-1][1] if runs and runs[-1][0] != "\n" else ""
+                if runs and runs[-1][1] == style and runs[-1][0] != "\n":
+                    runs[-1] = (runs[-1][0] + token.text, style)
+                else:
+                    runs.append((token.text, style))
+        styles = {style for text, style in runs if text.strip()}
+        if len(styles) < 2 or "".join("".join(text for text, _ in runs).split()) != "".join(block.text.split()):
+            result.append(block)
+            continue
+        result.append(dataclasses.replace(block, styled_runs=runs, inline_style=None))
     return result
 
 

@@ -28,6 +28,7 @@ class RapidOCRPipeline(AuthorizedBackendPipeline):
             "lone_glyph_minimum_confidence": self.admission_policy.lone_glyph_minimum_confidence,
             "shape_glyph_minimum_confidence": self.admission_policy.shape_glyph_minimum_confidence,
             "shape_aspect_range": list(self.admission_policy.shape_aspect_range),
+            "lone_glyph_maximum_height": self.admission_policy.lone_glyph_maximum_height,
             "raster_boundary_policy": self.raster_boundary_policy.mode,
         }, "selection_marks": SELECTION_MARK_POLICY.identity(),
             "decorative_watermark": WATERMARK_POLICY.identity()})

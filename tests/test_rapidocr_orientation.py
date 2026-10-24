@@ -208,7 +208,7 @@ def test_authorized_page_path_returns_crop_coordinates_after_a_turn(backend):
 def test_orientation_identity_records_the_policy_that_produced_the_result(backend):
     tuning = backend.identity.extra["effective_tuning"]
 
-    assert tuning["orientation_search"]["policy_id"] == "rapidocr-orientation-search-v1"
+    assert tuning["orientation_search"]["policy_id"] == "rapidocr-orientation-search-v2"
     assert tuning["orientation_search"]["alternatives"] == [3, 1, 2]
     assert tuning["orientation_classifier_enabled"] is False
 

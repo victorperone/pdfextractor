@@ -62,21 +62,33 @@ def reconstruct_ocr_lines(
     virtual_boxes = {id(token): _virtual_bbox(token, page_bbox, page_width, page_height, page_rotation) for token in visible}
     heights = [box.height for box in virtual_boxes.values() if box.height > 0]
     tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.65)
+    # A skewed scan tilts every text line by the same angle. Grouping by the
+    # raw center then joins a cell with the next row's cells; measure the
+    # center along the dominant tilt instead (upright pages only).
+    slope = 0.0 if page_rotation % 360 else _dominant_slope(visible)
+
+    def level(token: OcrToken) -> float:
+        box = virtual_boxes[id(token)]
+        return box.cy - slope * box.cx
+
     groups: list[list[OcrToken]] = []
     centers: list[float] = []
-    for token in sorted(visible, key=lambda item: (virtual_boxes[id(item)].cy, virtual_boxes[id(item)].x0)):
-        virtual_box = virtual_boxes[id(token)]
+    for token in sorted(visible, key=lambda item: (level(item), virtual_boxes[id(item)].x0)):
+        center = level(token)
         best_index = min(
             range(len(centers)),
-            key=lambda index: abs(centers[index] - virtual_box.cy),
+            key=lambda index: abs(centers[index] - center),
             default=None,
         )
-        if best_index is None or abs(centers[best_index] - virtual_box.cy) > tolerance:
+        if best_index is None or abs(centers[best_index] - center) > tolerance:
             groups.append([token])
-            centers.append(virtual_box.cy)
+            centers.append(center)
         else:
             groups[best_index].append(token)
-            centers[best_index] = median(virtual_boxes[id(item)].cy for item in groups[best_index])
+            centers[best_index] = median(level(item) for item in groups[best_index])
+
+    if not page_rotation % 360:
+        groups = _split_at_prose_gutter(groups, virtual_boxes)
 
     lines: list[TextLine] = []
     for line_index, group in enumerate(groups):
@@ -348,6 +360,83 @@ def _inverse_visual_bbox(box: BBox, rotation: int, page_width: float, page_heigh
     if angle == 270:
         return BBox(page_width - box.y1, box.x0, page_width - box.y0, box.x1)
     return box
+
+
+def _split_at_prose_gutter(groups: list[list[OcrToken]], boxes: dict[int, BBox]) -> list[list[OcrToken]]:
+    """Split lines that cross the gutter between two prose columns.
+
+    A gutter is an empty vertical band shared by most multi-token lines.
+    Columns of prose carry one or two long observations of several words on
+    each side; table rows (many short cells) are never split here, so an
+    undetected table keeps its rows.
+    """
+    heights = [box.height for box in boxes.values() if box.height > 0]
+    minimum_gap = 1.5 * (median(heights) if heights else 10.0)
+    candidates: list[tuple[float, float]] = []
+    for group in groups:
+        ordered = sorted(group, key=lambda token: boxes[id(token)].x0)
+        for left, right in zip(ordered, ordered[1:]):
+            gap = (boxes[id(left)].x1, boxes[id(right)].x0)
+            if gap[1] - gap[0] >= minimum_gap:
+                candidates.append(gap)
+    if len(candidates) < 3:
+        return groups
+    best = None
+    for start, end in candidates:
+        center = (start + end) / 2.0
+        crossing = [group for group in groups
+                    if min(boxes[id(t)].x0 for t in group) < center < max(boxes[id(t)].x1 for t in group)]
+        clear = [group for group in crossing
+                 if not any(boxes[id(t)].x0 < center < boxes[id(t)].x1 for t in group)]
+        prose = [group for group in clear
+                 if _prose_side([t for t in group if boxes[id(t)].cx < center])
+                 and _prose_side([t for t in group if boxes[id(t)].cx > center])]
+        if len(prose) >= 3 and len(clear) >= 0.8 * len(crossing) and len(prose) >= 0.6 * len(clear):
+            if best is None or len(prose) > best[1]:
+                best = (center, len(prose))
+    if best is None:
+        return groups
+    center = best[0]
+    split: list[list[OcrToken]] = []
+    for group in groups:
+        left = [token for token in group if boxes[id(token)].cx < center]
+        right = [token for token in group if boxes[id(token)].cx >= center]
+        if left and right and not any(boxes[id(t)].x0 < center < boxes[id(t)].x1 for t in group):
+            split.extend((left, right))
+        else:
+            split.append(group)
+    return split
+
+
+def _prose_side(tokens: list[OcrToken]) -> bool:
+    """A column line reads as one or two long observations of several words;
+    a table row reads as many short cell observations."""
+    return 0 < len(tokens) <= 2 and sum(len(token.text.split()) for token in tokens) >= 5
+
+
+def _dominant_slope(tokens: list[OcrToken]) -> float:
+    """Shared tilt (dy/dx) of wide upright token quadrilaterals, else 0.
+
+    Requires several wide observations that agree; a single slanted label or
+    noise in short boxes never tilts the grouping of the page.
+    """
+    slopes = []
+    for token in tokens:
+        polygon = token.polygon
+        if token.rotation % 360 or polygon is None or len(polygon) < 2:
+            continue
+        (x0, y0), (x1, y1) = (polygon[0].x, polygon[0].y), (polygon[1].x, polygon[1].y)
+        width = x1 - x0
+        if width <= 0 or width < 3.0 * max(token.bbox.height, 1.0):
+            continue
+        slopes.append((y1 - y0) / width)
+    if len(slopes) < 3:
+        return 0.0
+    middle = median(slopes)
+    spread = median(abs(value - middle) for value in slopes)
+    if not 0.005 <= abs(middle) <= 0.2 or spread > max(0.004, abs(middle) * 0.35):
+        return 0.0
+    return middle
 
 
 def _line_angle(tokens: list[OcrToken]) -> float:

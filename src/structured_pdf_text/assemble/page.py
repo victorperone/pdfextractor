@@ -33,6 +33,7 @@ def assemble_page(
     page_rotation: int = 0,
     links: list[PageLink] | None = None,
     rule_boxes: list[BBox] | None = None,
+    stroke_boxes: list[BBox] | None = None,
 ) -> StructuredPage:
     """Build a provisional StructuredPage.
 
@@ -89,4 +90,5 @@ def assemble_page(
         content_blocks=[],  # filled by assemble_document() via assemble_page_content()
         links=list(links or []),
         rule_boxes=list(rule_boxes or []),
+        stroke_boxes=list(stroke_boxes or []),
     )

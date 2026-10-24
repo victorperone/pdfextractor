@@ -102,6 +102,7 @@ from .tables.validation import (
 from .tables.text_tracks import assess_borderless_region
 from .tables.text_join import join_table_tokens
 from .tables.ocr_lines import _rebuild_table_ocr_lines, _merge_short_table_fragments
+from .native.reading_frame import to_upright_frame, upside_down
 from .text.line_detector import lines_to_text, reconstruct_native_lines, spacing_diagnostics
 from .visibility import (
     characters_inside_page,
@@ -416,6 +417,15 @@ class PdfTextExtractor:
                         ),
                     )
                 textpage_for_reconciliation = native_page.extracted_text
+
+                # Content drawn upside down (shown upright by /Rotate 180) is
+                # analysed in the frame where its glyphs stand upright, so
+                # layout and reading order do not run from the last line up.
+                reading_frame_turned = upside_down(visible_characters)
+                if reading_frame_turned:
+                    native_page, visible_characters = to_upright_frame(
+                        native_page, tuple(visible_characters),
+                    )
 
                 reconstruct_start = time.perf_counter()
                 native_lines = reconstruct_native_lines(
@@ -1384,6 +1394,7 @@ class PdfTextExtractor:
                         ],
                         "redacted_native_characters": redacted_character_count,
                         "inkless_native_characters": inkless_character_count,
+                        "reading_frame_turned_half": reading_frame_turned,
                         "outside_page_native_characters": outside_page_character_count,
                         "layout_engine": type(self.layout_engine).__name__ if len(regions) > 0 else None,
                         "ocr_requested": ocr_any_requested,
@@ -1558,6 +1569,7 @@ class PdfTextExtractor:
                             and annotation.bbox is not None
                         ],
                         rule_boxes=_rule_boxes(native_page),
+                        stroke_boxes=_stroke_boxes(native_page),
                     )
                 )
             metadata = DocumentMetadata(
@@ -2748,7 +2760,6 @@ def _append_hybrid_ocr_regions(
 ) -> None:
     """Attach unmatched OCR to tables/remaining body without duplicating regions."""
     remaining = list(unmatched_lines)
-    table_boxes: list[BBox] = []
     for table in tables:
         if table.method != TableMethod.VISUAL_MODEL or not table.page_fragments:
             continue
@@ -2756,12 +2767,20 @@ def _append_hybrid_ocr_regions(
         if not boxes:
             continue
         table_bbox = BBox.union_all(boxes)
-        table_boxes.append(table_bbox)
         table_lines = [line for line in remaining if _line_in_box(line, table_bbox)]
         table_tokens = [token for token in unmatched_tokens if _line_in_box(token, table_bbox)]
         override = (table_ocr_overrides or {}).get(table.table_id)
         if override is not None:
             table_lines, table_tokens = override
+        # The axis-aligned box of a skewed grid also covers text just above
+        # or below it; a line none of whose glyphs lies in a cell stays prose.
+        outside = [line for line in table_lines if not _line_in_table_cells(line, table)]
+        if outside:
+            table_lines = [line for line in table_lines if _line_in_table_cells(line, table)]
+            outside_ids = {id(line) for line in outside}
+            remaining = [line for line in remaining if id(line) not in outside_ids] + outside
+            table_tokens = [token for token in table_tokens
+                            if _point_in_cells(table, token.bbox.cx, token.bbox.cy)]
         if not table_lines:
             continue
         table_lines = _rebuild_table_ocr_lines(table, table_lines, page_index)
@@ -2771,7 +2790,8 @@ def _append_hybrid_ocr_regions(
         table_region.layout_confidence = table.confidence
         table_region.ocr_tokens = table_tokens
         regions.append(table_region)
-        remaining = [line for line in remaining if not _line_in_box(line, table_bbox)]
+        remaining = [line for line in remaining
+                     if not (_line_in_box(line, table_bbox) and _line_in_table_cells(line, table))]
 
     # OCR from a region already classified as a figure must never fall through
     # into the page's body-text supplement. A figure refinement can be rejected
@@ -2797,10 +2817,13 @@ def _append_hybrid_ocr_regions(
         existing.ocr_tokens = list(figure_tokens)
         remaining = [line for line in remaining if not _line_in_box(line, figure_bbox)]
 
+    visual_tables = [table for table in tables
+                     if table.method == TableMethod.VISUAL_MODEL and table.page_fragments]
     remaining = [
         line
         for line in remaining
-        if not any(_line_in_box(line, box) for box in table_boxes + figure_boxes)
+        if not any(_line_in_box(line, box) for box in figure_boxes)
+        and not any(_line_in_table_cells(line, table) for table in visual_tables)
     ]
     if remaining:
         supplemental = full_page_text_region(page_index, page_bbox, [], complexity)
@@ -2809,7 +2832,8 @@ def _append_hybrid_ocr_regions(
         supplemental.ocr_tokens = [
             token
             for token in unmatched_tokens
-            if not any(_line_in_box(token, box) for box in table_boxes + figure_boxes)
+            if not any(_line_in_box(token, box) for box in figure_boxes)
+            and not any(_point_in_cells(table, token.bbox.cx, token.bbox.cy) for table in visual_tables)
         ]
         regions.append(supplemental)
 
@@ -2987,6 +3011,25 @@ def _table_writing_direction(lines: list[TextLine]) -> WritingDirection:
     if WritingDirection.TOP_TO_BOTTOM in directions:
         return WritingDirection.TOP_TO_BOTTOM
     return WritingDirection.LEFT_TO_RIGHT
+
+
+def _point_in_cells(table: Any, x: float, y: float) -> bool:
+    from .tables.cell_geometry import contains_point
+
+    return any(
+        contains_point(cell, x, y) if getattr(cell, "polygon", None) is not None
+        else (cell.bbox is not None and cell.bbox.x0 <= x <= cell.bbox.x1 and cell.bbox.y0 <= y <= cell.bbox.y1)
+        for cell in table.cells
+    )
+
+
+def _line_in_table_cells(line: Any, table: Any) -> bool:
+    """Most of the line's visible glyph centers fall inside the table's cells."""
+    tokens = [token for token in getattr(line, "tokens", ()) if token.text.strip()]
+    if not tokens:
+        return False
+    inside = sum(_point_in_cells(table, token.bbox.cx, token.bbox.cy) for token in tokens)
+    return inside >= 0.5 * len(tokens)
 
 
 def _line_in_box(value: Any, box: BBox) -> bool:
@@ -3451,6 +3494,15 @@ def _rule_boxes(page: Any) -> list[BBox]:
         if bar or frame:
             boxes.append(box)
     return boxes
+
+
+def _stroke_boxes(page: Any) -> list[BBox]:
+    """Thin horizontal strokes that can underline or strike through text."""
+    return [
+        path.bbox for path in page.objects.paths
+        if path.bbox is not None and 0 < path.bbox.height <= 2.5
+        and 4.0 <= path.bbox.width <= page.bbox.width * 0.6
+    ]
 
 
 def _clear_occluded_table_cells(tables: list[Any], boxes: list[BBox]) -> None:

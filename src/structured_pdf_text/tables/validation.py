@@ -327,6 +327,22 @@ def _source_assignment_metrics(
     coordinates = reading_coordinates(cells)
     column_conflicts = 0
     assignment_conflicts = 0
+    cell_boxes = [cell.bbox for cell in cells if getattr(cell, "bbox", None) is not None]
+    grid_bbox = BBox.union_all(cell_boxes) if cell_boxes else None
+    if coordinates is not None:
+        # Rotated/skewed grids: test against the grid's own axes, since an
+        # axis-aligned union of tilted cells reaches over nearby lines.
+        corners = [coordinates(point.x, point.y) for cell in cells for point in cell.polygon]
+        extent = (min(c[0] for c in corners), min(c[1] for c in corners),
+                  max(c[0] for c in corners), max(c[1] for c in corners))
+
+        def inside_grid(token) -> bool:
+            u, v = coordinates(token.bbox.cx, token.bbox.cy)
+            return extent[0] - 1.0 <= u <= extent[2] + 1.0 and extent[1] - 1.0 <= v <= extent[3] + 1.0
+    else:
+        def inside_grid(token) -> bool:
+            return grid_bbox is None or (grid_bbox.x0 <= token.bbox.cx <= grid_bbox.x1
+                                         and grid_bbox.y0 <= token.bbox.cy <= grid_bbox.y1)
     for line in source_lines:
         tokens = [token for token in line.tokens if token.text.strip()]
         if candidate_bbox is not None:
@@ -335,6 +351,9 @@ def _source_assignment_metrics(
                 if candidate_bbox.x0 <= token.bbox.cx <= candidate_bbox.x1
                 and candidate_bbox.y0 <= token.bbox.cy <= candidate_bbox.y1
             ]
+        # A caption or control line above the grid inside a page-wide
+        # candidate region is not an unassigned table token.
+        tokens = [token for token in tokens if inside_grid(token)]
         assignments = [(_cell_for_token(token, cells), token) for token in tokens]
         assignments = [(cell, token) for cell, token in assignments if cell is not None]
         if not assignments:

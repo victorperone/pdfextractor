@@ -347,10 +347,12 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
     # Rows of one table repeat at a regular pitch; only a gap clearly larger
     # than that pitch (or the absolute floor) separates two runs.
     grouped = [len(_cell_groups(line, gap_threshold)) >= 2 for line in lines]
+    # Touching or overlapping rows count as zero gaps: the typical gap must
+    # come from the table body, not from one isolated gap to a footer.
     row_gaps = [
-        current.bbox.y0 - previous.bbox.y1
+        max(0.0, current.bbox.y0 - previous.bbox.y1)
         for previous, current, both in zip(lines, lines[1:], (a and b for a, b in zip(grouped, grouped[1:])))
-        if both and current.bbox.y0 > previous.bbox.y1
+        if both
     ]
     break_gap = max(18.0, typical_height * 2.4, 1.6 * median(row_gaps) if row_gaps else 0.0)
     runs: list[list[tuple[TextLine, tuple[_CellGroup, ...]]]] = []
@@ -579,7 +581,11 @@ def _merge_same_baseline_lines(lines: list[TextLine]) -> list[TextLine]:
     tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.45)
     rows: list[list[TextLine]] = []
     for line in lines:
-        if rows and abs(line.bbox.cy - rows[-1][-1].bbox.cy) <= tolerance:
+        # Cells split into lines are side by side; two whole rows that only
+        # look close because the scan is skewed overlap horizontally.
+        if (rows and abs(line.bbox.cy - rows[-1][-1].bbox.cy) <= tolerance
+                and not any(min(line.bbox.x1, other.bbox.x1) - max(line.bbox.x0, other.bbox.x0) > 2.0
+                            for other in rows[-1])):
             rows[-1].append(line)
         else:
             rows.append([line])

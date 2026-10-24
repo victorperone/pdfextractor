@@ -22,12 +22,16 @@ from .order_counts import concordance_counts
 from .reference_inputs import document_pages
 from .table_metrics import _TableContext, _children_of_kind
 
-AUDIT_VERSION = "critical-context-1.0.0"
+# 1.1.0: a sentence comma after an amount is punctuation; USD amounts may use
+# en-US separators; "[x]"/"[ ]" count as check boxes only as task-list
+# markers at the start of a list item, not as literals in tables or prose.
+AUDIT_VERSION = "critical-context-1.1.0"
 _MONEY = re.compile(
     r"(?<![\w$€])(?P<before>[-+−]?)\s*(?P<unit>R\$|BRL|US\$|USD|€|EUR)"
     r"(?![A-Za-z])\s*(?P<after>[-+−]?)\s*(?P<number>\d[\d.,]*)(?P<tail>[\w.,]*)"
 )
 _NUMBER = re.compile(r"(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?\Z")
+_NUMBER_EN_US = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\Z")
 _LEXEME = re.compile(r"(?<!\w)\w+(?:[-./]\w+)*(?!\w)", re.UNICODE)
 _UNITS = {"R$": "BRL", "BRL": "BRL", "US$": "USD", "USD": "USD", "€": "EUR", "EUR": "EUR"}
 
@@ -39,14 +43,17 @@ def critical_entities(text: str) -> tuple[Counter, list[str]]:
     masked = list(text)
     for match in _MONEY.finditer(text):
         raw = match.group("number")
-        # A final sentence period is punctuation, not a thousands separator.
-        if raw.endswith(".") and not raw.endswith(".."):
+        # A final sentence period or comma is punctuation, not a separator.
+        if raw.endswith((".", ",")) and not raw.endswith(("..", ",,", ".,", ",.")):
             raw = raw[:-1]
+        unit = _UNITS[match.group("unit")]
+        pt_br = _NUMBER.fullmatch(raw)
+        en_us = unit == "USD" and not pt_br and _NUMBER_EN_US.fullmatch(raw)
         if (match.group("before") and match.group("after") or match.group("tail")
-                or not _NUMBER.fullmatch(raw)):
+                or not (pt_br or en_us)):
             invalid.append(match.group().strip())
         else:
-            number = Decimal(raw.replace(".", "").replace(",", "."))
+            number = Decimal(raw.replace(",", "") if en_us else raw.replace(".", "").replace(",", "."))
             sign = match.group("before") or match.group("after")
             if sign in {"-", "−"}:
                 number = -number
@@ -55,7 +62,7 @@ def critical_entities(text: str) -> tuple[Counter, list[str]]:
                 value = value.rstrip("0").rstrip(".")
             if number == 0:
                 value = "0"
-            result[("currency", f"{_UNITS[match.group('unit')]}:{value}")] += 1
+            result[("currency", f"{unit}:{value}")] += 1
         masked[match.start():match.end()] = " "*(match.end()-match.start())
     for match in _LEXEME.finditer("".join(masked)):
         value = match.group()
@@ -142,13 +149,21 @@ def _representation(nodes):
     html = Links()
     bodies = [n.metadata["page_markdown"] for n in nodes if "page_markdown" in n.metadata]
     for body in bodies:
+        list_depth = 0
+        item_starts = False
         for token in _md.parse(body):
             if token.type in {"fence", "code_block", "blockquote_open"}:
                 styles[token.type] += 1
             if token.type == "html_block":
                 html.feed(token.content)
+            if token.type == "list_item_open":
+                list_depth += 1
+                item_starts = True
+            elif token.type == "list_item_close":
+                list_depth -= 1
             if token.type != "inline":
                 continue
+            first_text = True
             for child in token.children or []:
                 if child.type == "link_open":
                     hrefs[("href", child.attrGet("href"))] += 1
@@ -158,7 +173,13 @@ def _representation(nodes):
                     styles[child.type] += 1
                 elif child.type == "text":
                     for match in re.finditer(r"[☐☑☒]|\[(?:[ xX])\]", child.content):
+                        if match.group().startswith("[") and not (
+                                list_depth and item_starts and first_text
+                                and not child.content[:match.start()].strip()):
+                            continue  # a literal, not a task-list marker
                         marks[("checkbox", "unchecked" if match.group() in {"☐", "[ ]"} else "checked")] += 1
+                    first_text = False
+            item_starts = False
     # HTML explicitly records th/td; pipe tables have a header first row.
     parent_map = defaultdict(list)
     for node in nodes:
