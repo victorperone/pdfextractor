@@ -134,6 +134,14 @@ class TokenRefinementPolicy:
     critical_sufficient_score: float = .98
     critical_confidence_weight: float = .01
 
+    def prepare_visual_table(self, original, candidate):
+        """Propose a draft using observed evidence; core validation follows."""
+        return candidate
+
+    def accept_visual_table(self, original, candidate):
+        """Optional engine preference, before mandatory core validation."""
+        return True
+
     def needs_critical(self, token, data_type):
         from structured_pdf_text.ocr.critical_data import CriticalDataRefiner
 

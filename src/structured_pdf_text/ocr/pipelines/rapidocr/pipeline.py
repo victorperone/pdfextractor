@@ -31,6 +31,7 @@ class RapidOCRPipeline(AuthorizedBackendPipeline):
             "lone_glyph_maximum_height": self.admission_policy.lone_glyph_maximum_height,
             "raster_boundary_policy": self.raster_boundary_policy.mode,
         }, "selection_marks": SELECTION_MARK_POLICY.identity(),
+            "table_refinement": self.token_refinement_policy.identity(),
             "decorative_watermark": WATERMARK_POLICY.identity()})
 
     def __init__(self, resolved, backend):

@@ -85,7 +85,71 @@ INTEGRATION_POLICY = ConservativeIntegrationPolicy("rapidocr-integration-v1")
 
 CELL_POLICY = CellRecoveryPolicy()
 
-TOKEN_REFINEMENT_POLICY = TokenRefinementPolicy()
+@dataclass(frozen=True, slots=True)
+class RapidOCRTokenRefinementPolicy(TokenRefinementPolicy):
+    """A regional rereading must conserve confident decimal-comma observations.
+
+    Bare decimals are not typed currency/percentage values in the core. A
+    different crop alone is no evidence that their separator was wrong. Keep
+    the observations of a conflicting cell, while other cells can improve.
+    Dots alone are ambiguous (decimal point, thousands or code separator),
+    so this preference does not freeze them against a regional rereading.
+    """
+
+    decimal_confidence: float = .95
+
+    def identity(self):
+        return {"policy_id": "rapidocr-decimal-conservation-v2",
+                "minimum_existing_confidence": self.decimal_confidence,
+                "minimum_cell_iou": .80, "composition": "preserve_conflicting_cell",
+                "protected_surface": "decimal_comma"}
+
+    def _decimal_conflicts(self, original, candidate):
+        from collections import Counter
+        import re
+
+        decimal = re.compile(r"(?<![\w.,])[+-]?\d+(?:\.\d{3})*,\d+(?:\s*[%‰])?(?![\w.,])")
+        for old in original.cells:
+            protected = Counter(
+                re.sub(r"\s+", "", match.group())
+                for token in old.tokens if (token.confidence or 0.) >= self.decimal_confidence
+                for match in decimal.finditer(token.text)
+            )
+            if not protected or old.bbox is None:
+                continue
+            matching = [cell for cell in candidate.cells if cell.bbox is not None
+                        and cell.row == old.row and cell.col == old.col
+                        and cell.rowspan == old.rowspan and cell.colspan == old.colspan
+                        and old.bbox.iou(cell.bbox) >= .80]
+            if not matching:
+                continue  # A changed grid is still checked by core conservation.
+            observed = Counter(re.sub(r"\s+", "", match.group())
+                               for cell in matching for match in decimal.finditer(cell.text))
+            if protected - observed:
+                yield old, matching[0]
+
+    def prepare_visual_table(self, original, candidate):
+        from copy import deepcopy
+
+        conflicts = list(self._decimal_conflicts(original, candidate))
+        if not conflicts:
+            return candidate
+        draft = deepcopy(candidate)
+        for old, conflicting in conflicts:
+            selected = next(cell for cell in draft.cells
+                            if (cell.row, cell.col) == (conflicting.row, conflicting.col))
+            # Keep complete, actually observed cell evidence, never repair
+            # punctuation by editing strings or mix pieces of two readings.
+            selected.tokens = deepcopy(old.tokens)
+            selected.text = old.text
+            selected.confidence = old.confidence
+        return draft
+
+    def accept_visual_table(self, original, candidate):
+        return next(self._decimal_conflicts(original, candidate), None) is None
+
+
+TOKEN_REFINEMENT_POLICY = RapidOCRTokenRefinementPolicy()
 FIGURE_SEGMENTATION_POLICY = FigureSegmentationPolicy()
 RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy("trim")
 
@@ -228,7 +292,8 @@ class RapidOCRSelectionMarkPolicy:
     the row keeps its reading and only its left edge moves past the box.
     """
 
-    policy_id: str = "rapidocr-selection-marks-v1"
+    policy_id: str = "rapidocr-selection-marks-v2"
+    unseeded_inner_maximum_words: int = 8
     # Box rules are often one pixel wide at OCR scale; antialiased rule pixels
     # stay around 150-200, so ink is anything clearly darker than paper.
     dark_level: int = 170
@@ -246,6 +311,8 @@ class RapidOCRSelectionMarkPolicy:
 
     def identity(self) -> dict:
         return {"policy_id": self.policy_id, "dark_level": self.dark_level,
+                "unseeded_inner_maximum_words": self.unseeded_inner_maximum_words,
+                "inner_marked_requires_form_evidence": True,
                 "side_fraction": [self.minimum_side_fraction, self.maximum_side_fraction],
                 "minimum_edge_ink": self.minimum_edge_ink, "maximum_ring_ink": self.maximum_ring_ink,
                 "minimum_corner_ink": self.minimum_corner_ink, "maximum_gap_ink": self.maximum_gap_ink,
@@ -317,6 +384,15 @@ class RapidOCRSelectionMarkPolicy:
         height = y1 - y0
         if height <= 4 or (x1 - x0) < height * 4 or len(text.split()) < 2:
             return [row]
+        # A recovered/recognized option on this baseline establishes a form
+        # row. Prose has no such evidence: do not scan long sentences, and
+        # accept only a genuinely empty square in short unseeded labels.
+        form_row = any(mark in text for mark in "☐☑☒□■口") or any(
+            abs((box[1] + box[3]) * .5 - (y0 + y1) * .5) <= height * .5
+            and x0 - height * 3 <= box[0] <= x1 for box in found_boxes
+        )
+        if not form_row and len(text.split()) > self.unseeded_inner_maximum_words:
+            return [row]
         oy0, oy1 = max(0, int(y0 - height * .30) - 4), min(pixels.shape[0], int(y1 + height * .30) + 4)
         ox0, ox1 = max(0, int(x0) - 4), min(pixels.shape[1], int(x1) + 4)
         crop = pixels[oy0:oy1, ox0:ox1]
@@ -328,6 +404,8 @@ class RapidOCRSelectionMarkPolicy:
         for left, top, right, bottom in sorted(boxes):
             symbol = self._state(dark, (left, top, right, bottom))
             found = (left + ox0, top + oy0, right + ox0, bottom + oy0)
+            if not form_row and symbol != "☐":
+                continue
             if symbol is None or any(_overlaps(found, existing) for existing in found_boxes):
                 continue
             start, end, piece = pieces[-1]
@@ -366,7 +444,7 @@ class RapidOCRSelectionMarkPolicy:
         wy0, wy1 = max(3, int(y0 - height * .30)), min(rows_px - 3, int(y1 + height * .30))
         wx0, wx1 = max(3, int(left_min)), min(cols_px - 3, int(left_max) + largest)
         if wy1 - wy0 < smallest or wx1 - wx0 < smallest:
-            return None
+            return []
         window = dark[wy0:wy1, wx0:wx1]
         down = np.zeros(window.shape, dtype=np.int32)
         right = np.zeros(window.shape, dtype=np.int32)
@@ -376,57 +454,62 @@ class RapidOCRSelectionMarkPolicy:
             right[:, c] = window[:, c] * ((right[:, c + 1] if c + 1 < window.shape[1] else 0) + 1)
         minimum_run = int(np.ceil(smallest * self.minimum_edge_ink))
         corners = np.argwhere((down >= minimum_run) & (right >= minimum_run))
+        # The former scalar lookup returned zero just beyond the window;
+        # preserve its two-pixel edge tolerance without indexing past it.
+        down = np.pad(down, ((0, 1), (0, 1)))
+        right = np.pad(right, ((0, 1), (0, 1)))
 
+        # Validate all corners for a given side together. Dense raster rows
+        # used to execute millions of Python scalar integral/run lookups.
+        # Array bounds and all geometric tests remain identical; no candidate
+        # is truncated and the memory bound is one window plus its corners.
         def ink(ax0, ay0, ax1, ay1):
             area = (ax1 - ax0) * (ay1 - ay0)
-            if area <= 0:
-                return 1.0
             total = integral[ay1, ax1] - integral[ay0, ax1] - integral[ay1, ax0] + integral[ay0, ax0]
-            return float(total) / area
-
-        def run(array, r, c):
-            return int(array[r, c]) if 0 <= r < array.shape[0] and 0 <= c < array.shape[1] else 0
+            return np.divide(total, area, out=np.ones(np.broadcast_shapes(np.shape(total), np.shape(area))), where=area > 0)
 
         found = []
-        for r, c in corners:
-            top, left = wy0 + int(r), wx0 + int(c)
-            if left > left_max:
+        for side in range(smallest, largest + 1):
+            r, c = corners.T
+            valid = ((wx0 + c <= left_max) & (r + side - 2 < window.shape[0])
+                     & (c + side - 2 < window.shape[1]))
+            r, c = r[valid], c[valid]
+            need = side * self.minimum_edge_ink
+            valid = ((down[r, c] >= need) & (right[r, c] >= need)
+                     & (np.maximum(down[r, c + side - 1], down[r, c + side - 2]) >= need)
+                     & (np.maximum(right[r + side - 1, c], right[r + side - 2, c]) >= need))
+            top, left = wy0 + r[valid], wx0 + c[valid]
+            bottom, rightmost = top + side, left + side
+            valid = (bottom + 2 < rows_px) & (rightmost + 2 < cols_px) & (top >= 2) & (left >= 2)
+            top, left, bottom, rightmost = (arr[valid] for arr in (top, left, bottom, rightmost))
+            if not top.size:
                 continue
-            limit = min(largest, int(min(down[r, c], right[r, c]) / self.minimum_edge_ink))
-            for side in range(smallest, limit + 1):
-                need = side * self.minimum_edge_ink
-                if max(run(down, r, c + side - 1), run(down, r, c + side - 2)) < need:
-                    continue
-                if max(run(right, r + side - 1, c), run(right, r + side - 2, c)) < need:
-                    continue
-                bottom, rightmost = top + side, left + side
-                if bottom + 2 >= rows_px or rightmost + 2 >= cols_px or top < 2 or left < 2:
-                    continue
-                corner_ink = min(ink(left, top, left + 2, top + 2), ink(rightmost - 2, top, rightmost, top + 2),
-                                 ink(left, bottom - 2, left + 2, bottom), ink(rightmost - 2, bottom - 2, rightmost, bottom))
-                if corner_ink < self.minimum_corner_ink:
-                    continue
-                ring = max(ink(left - 1, top - 2, rightmost + 1, top - 1), ink(left - 1, bottom + 1, rightmost + 1, bottom + 2),
-                           ink(left - 2, top - 1, left - 1, bottom + 1), ink(rightmost + 1, top - 1, rightmost + 2, bottom + 1))
-                if ring > self.maximum_ring_ink:
-                    continue
-                # Grid rules continue past a cell's corners; a drawn box's
-                # sides stop there. Check each side's outward extension.
-                reach = max(3, side // 4)
-                extensions = (
-                    ink(left, max(0, top - reach), left + 2, top - 1), ink(rightmost - 2, max(0, top - reach), rightmost, top - 1),
-                    ink(left, bottom + 1, left + 2, min(rows_px, bottom + reach)), ink(rightmost - 2, bottom + 1, rightmost, min(rows_px, bottom + reach)),
-                    ink(max(0, left - reach), top, left - 1, top + 2), ink(max(0, left - reach), bottom - 2, left - 1, bottom),
-                    ink(rightmost + 1, top, min(cols_px, rightmost + reach), top + 2), ink(rightmost + 1, bottom - 2, min(cols_px, rightmost + reach), bottom),
-                )
-                if max(extensions) > 0.34:
-                    continue
-                gap = max(2, int(side * .25))
-                if ink(rightmost + 2, top, min(cols_px, rightmost + 2 + gap), bottom) > self.maximum_gap_ink:
-                    continue
-                if inner and ink(max(0, left - 2 - gap), top, left - 2, bottom) > self.maximum_gap_ink:
-                    continue
-                found.append((1.0 - ring, left, top, side))
+            corner_ink = np.minimum.reduce((ink(left, top, left + 2, top + 2),
+                ink(rightmost - 2, top, rightmost, top + 2), ink(left, bottom - 2, left + 2, bottom),
+                ink(rightmost - 2, bottom - 2, rightmost, bottom)))
+            ring = np.maximum.reduce((ink(left - 1, top - 2, rightmost + 1, top - 1),
+                ink(left - 1, bottom + 1, rightmost + 1, bottom + 2),
+                ink(left - 2, top - 1, left - 1, bottom + 1), ink(rightmost + 1, top - 1, rightmost + 2, bottom + 1)))
+            reach = max(3, side // 4)
+            extensions = np.maximum.reduce((
+                ink(left, np.maximum(0, top - reach), left + 2, top - 1),
+                ink(rightmost - 2, np.maximum(0, top - reach), rightmost, top - 1),
+                ink(left, bottom + 1, left + 2, np.minimum(rows_px, bottom + reach)),
+                ink(rightmost - 2, bottom + 1, rightmost, np.minimum(rows_px, bottom + reach)),
+                ink(np.maximum(0, left - reach), top, left - 1, top + 2),
+                ink(np.maximum(0, left - reach), bottom - 2, left - 1, bottom),
+                ink(rightmost + 1, top, np.minimum(cols_px, rightmost + reach), top + 2),
+                ink(rightmost + 1, bottom - 2, np.minimum(cols_px, rightmost + reach), bottom)))
+            gap = max(2, int(side * .25))
+            valid = ((corner_ink >= self.minimum_corner_ink) & (ring <= self.maximum_ring_ink)
+                     & (extensions <= .34)
+                     & (ink(rightmost + 2, top, np.minimum(cols_px, rightmost + 2 + gap), bottom) <= self.maximum_gap_ink))
+            if inner:
+                valid &= ink(np.maximum(0, left - 2 - gap), top, left - 2, bottom) <= self.maximum_gap_ink
+            found.extend((1. - float(score), int(x), int(y), side)
+                         for score, x, y in zip(ring[valid], left[valid], top[valid]))
+        # Preserve the old corner-first order when candidates tie.
+        found.sort(key=lambda item: (item[2], item[1], item[3]))
         boxes: list = []
         for _, left, top, side in sorted(found, key=lambda item: -item[0]):
             box = (float(left), float(top), float(left + side), float(top + side))

@@ -3091,7 +3091,11 @@ def _refine_visual_table_ocr(
                 page=page, image=page_image, region=table_bbox, table_id=table.table_id,
                 tokens=list(result.tokens),
             )
-            target.stage_candidate(_preserve_visual_grid(table, refined_table))
+            candidate = _preserve_visual_grid(table, refined_table)
+            prepared = engine.token_refinement_policy.prepare_visual_table(table, candidate)
+            if not engine.token_refinement_policy.accept_visual_table(table, prepared):
+                return None
+            target.stage_candidate(prepared, preserve_cell_evidence=prepared is not candidate)
             engine.integrate_selected_tokens(result.tokens, target)
             return table, target.ocr_lines, target.ocr_tokens, result.ocr_passes, result.ocr_batches
         except IntegrationRejected:

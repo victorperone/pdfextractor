@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, fields
 import math
 from types import SimpleNamespace
 
-from structured_pdf_text.document import OcrToken, StructuredTable
+from structured_pdf_text.document import Baseline, OcrToken, StructuredTable, TextLine, WritingDirection
 from structured_pdf_text.fusion.conservation import _refinement_conserves_content
 from structured_pdf_text.fusion.integrator import IntegrationRejected, cell_evidence_snapshot, ocr_tokens_snapshot, prepare_cell_evidence
 from structured_pdf_text.fusion.token_fusion import fuse_native_and_ocr
@@ -41,6 +41,7 @@ class VisualTableTarget:
     ocr_lines: list = field(default_factory=list)
     ocr_tokens: list = field(default_factory=list)
     expected_snapshot: tuple | None = None
+    preserve_cell_evidence: bool = False
     binding_snapshot: tuple | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self):
@@ -58,7 +59,8 @@ class VisualTableTarget:
 
     def metadata(self):
         return (self.target, self.bbox, self.visible_target, id(self.table),
-                table_snapshot(self.candidate_table) if self.candidate_table is not None else None)
+                table_snapshot(self.candidate_table) if self.candidate_table is not None else None,
+                self.preserve_cell_evidence)
 
     def snapshot(self):
         from .integrator import _line_snapshot
@@ -66,12 +68,15 @@ class VisualTableTarget:
         return (table_snapshot(self.table), _line_snapshot(self.native_lines),
                 _line_snapshot(self.ocr_lines), ocr_tokens_snapshot(self.ocr_tokens))
 
-    def stage_candidate(self, table):
+    def stage_candidate(self, table, *, preserve_cell_evidence=False):
         if self.snapshot() != self.expected_snapshot or self.metadata() != self.binding_snapshot:
             raise IntegrationRejected("Table evidence changed before its draft was prepared")
         if not isinstance(table, StructuredTable):
             raise IntegrationRejected("A visual table draft must be a structured table")
+        if type(preserve_cell_evidence) is not bool:
+            raise IntegrationRejected("Visual table evidence selection must be explicit")
         self.candidate_table = deepcopy(table)
+        self.preserve_cell_evidence = preserve_cell_evidence
         self.binding_snapshot = self.metadata()
 
 
@@ -113,6 +118,7 @@ def stage_visual_table(selections, target, evidence_order=()):
     source = {(token.text, token.bbox): value for token, value in zip(evidence, ids)}
     allowed = set(source) | {(token.text, token.bbox) for cell in target.table.cells for token in cell.tokens}
     used = set()
+    draft_seen = set()
     for cell in table.cells:
         if (cell.bbox is None or not contains(target.bbox, cell.bbox)
                 or any(type(value) is not int for value in (cell.row, cell.col, cell.rowspan, cell.colspan))
@@ -131,6 +137,9 @@ def stage_visual_table(selections, target, evidence_order=()):
                 raise IntegrationRejected("Visual table draft contains unobserved token evidence")
             if not contains_point(cell, token.bbox.cx, token.bbox.cy):
                 raise IntegrationRejected("Visual table token is assigned to a different cell")
+            if target.preserve_cell_evidence and key in draft_seen:
+                raise IntegrationRejected("Visual table draft repeats selected cell evidence")
+            draft_seen.add(key)
             if key in source:
                 if key in used:
                     raise IntegrationRejected("Visual table draft assigns one OCR observation to multiple cells")
@@ -140,10 +149,25 @@ def stage_visual_table(selections, target, evidence_order=()):
                and cell.col < other.col + other.colspan and other.col < cell.col + cell.colspan
                for other in table.cells[index + 1:]):
             raise IntegrationRejected("Visual table draft has overlapping grid ownership")
-    fusion = fuse_native_and_ocr(list(target.native_lines), evidence)
+    selected_evidence = evidence
+    retained = []
+    if target.preserve_cell_evidence:
+        # The validated draft may keep prior cell observations instead of a
+        # conflicting crop. Rebuilding from every new observation would undo
+        # that choice. Only observations checked against `allowed` above can
+        # enter this composition; core scope/ownership checks still apply.
+        selected_evidence = [token for token in evidence if (token.text, token.bbox) in used]
+        retained = [token for cell in table.cells for token in cell.tokens
+                    if (token.text, token.bbox) not in source]
+    fusion = fuse_native_and_ocr(list(target.native_lines), selected_evidence)
     tokens = list(fusion.unmatched_ocr_tokens)
+    tokens.extend(token for token in retained if isinstance(token, OcrToken))
     geometry = selections[0][0].scope.page_geometry
     lines = reconstruct_ocr_lines(tokens, page, geometry.bbox, page_rotation=geometry.rotation)
+    lines.extend(TextLine(tokens=[token], bbox=token.bbox, baseline=Baseline(y=token.bbox.y1),
+                          direction=WritingDirection.LEFT_TO_RIGHT,
+                          native_order_min=None, native_order_max=None)
+                 for token in retained if not isinstance(token, OcrToken))
     for line in lines:
         for token in line.tokens:
             value = source.get((token.text, token.bbox))
