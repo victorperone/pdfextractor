@@ -49,7 +49,86 @@ def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, li
         if not _stable_edge_position(check_selected) or not _stable_style(check_selected):
             continue
         confirmed[key] = sorted(by_page)
+    _confirm_ocr_variants(observations, confirmed)
     return confirmed
+
+
+# OCR furniture recurs with recognition noise ("GABARITO" read "CABAR O",
+# "·" read "•") and a page counter that may be read apart from the label.
+# Exact signatures then recur on one page each and nothing is confirmed.
+_OCR_VARIANT_SIMILARITY = 0.85
+_OCR_VARIANT_MINIMUM_LETTERS = 12
+_PAGE_COUNTER_REMNANT_RE = re.compile(r"<page-number>(?:\s+\S{1,3}\s+\d{1,4})?")
+
+
+def _ocr_variant_form(key: str) -> tuple[str, str, tuple[str, ...]]:
+    """(role, letters, digits) of a signature without its page counter.
+
+    Letters are compared with tolerance; any other number is semantic and
+    must match exactly, so "repetição 1" never joins "repetição 2".
+    """
+    role, _, text = key.partition(":")
+    text = _PAGE_COUNTER_REMNANT_RE.sub(" ", text)
+    letters = "".join(c for c in unicodedata.normalize("NFKD", text).casefold() if c.isalpha())
+    return role, letters, tuple(re.findall(r"\d+", text))
+
+
+def _confirm_ocr_variants(
+    observations: dict[str, list[tuple[int, str, TextLine, StructuredPage]]],
+    confirmed: dict[str, list[int]],
+) -> None:
+    """Confirm OCR furniture whose signatures differ only by recognition noise.
+
+    Only OCR observations take part: native text is exact evidence. Signatures
+    with identical letters once the page counter is removed form one group;
+    a group seen on two pages is an anchor. A one-page variant joins the most
+    similar anchor of its role and numbers, so a page title (unique per page)
+    never anchors anything. Each group must still pass the position and style
+    checks. A bare page counter read apart from its label is furniture on the
+    pages where a same-role line was confirmed.
+    """
+    from difflib import SequenceMatcher
+
+    groups: dict[tuple[str, str, tuple[str, ...]], list[str]] = {}
+    counters: list[str] = []
+    for key, values in sorted(observations.items()):
+        if any((line.line_id or "").startswith("native:") for _, _, line, _ in values):
+            continue
+        form = _ocr_variant_form(key)
+        if not form[1]:
+            counters.append(key)
+        elif len(form[1]) >= _OCR_VARIANT_MINIMUM_LETTERS:
+            groups.setdefault(form, []).append(key)
+
+    def pages_of(keys):
+        return {page for key in keys for page, *_ in observations[key]}
+
+    anchors = {form: list(keys) for form, keys in groups.items() if len(pages_of(keys)) >= 2}
+    for form, keys in groups.items():
+        if form in anchors:
+            continue
+        scored = [(SequenceMatcher(None, form[1], anchor[1]).ratio(), anchor) for anchor in anchors
+                  if anchor[0] == form[0] and anchor[2] == form[2]]
+        best = max(scored, default=None)
+        if best is not None and best[0] >= _OCR_VARIANT_SIMILARITY:
+            anchors[best[1]].extend(keys)
+    for members in anchors.values():
+        by_page: dict[int, tuple[str, TextLine, StructuredPage]] = {}
+        for key in members:
+            for page_index, kind, line, page in observations[key]:
+                by_page.setdefault(page_index, (kind, line, page))
+        selected = list(by_page.values())
+        if not _stable_edge_position(selected) or not _stable_style(selected):
+            continue
+        for key in members:
+            confirmed[key] = sorted(set(confirmed.get(key, ())) | set(by_page))
+    for key in counters:
+        role = key.partition(":")[0]
+        companion = {page for other, pages in confirmed.items()
+                     if other.startswith(role + ":") and _ocr_variant_form(other)[1] for page in pages}
+        pages = {page for page, *_ in observations[key]} & companion
+        if pages:
+            confirmed[key] = sorted(set(confirmed.get(key, ())) | pages)
 
 
 def repeated_line_keys(page: StructuredPage) -> dict[str, str]:

@@ -101,6 +101,8 @@ from .tables.validation import (
 )
 from .tables.text_tracks import assess_borderless_region
 from .tables.text_join import join_table_tokens
+from .tables.grid_repair import repair_missing_dividers
+from .tables.value_surfaces import harmonize_value_surfaces
 from .tables.ocr_lines import _rebuild_table_ocr_lines, _merge_short_table_fragments
 from .native.reading_frame import to_upright_frame, upside_down
 from .text.line_detector import lines_to_text, reconstruct_native_lines, spacing_diagnostics
@@ -1547,6 +1549,9 @@ class PdfTextExtractor:
                         **complexity.facts,
                     },
                 )
+                # Last: earlier stages rebuild cell text from OCR lines.
+                for table in tables:
+                    harmonize_value_surfaces(table)
                 pages.append(
                     assemble_page(
                         page_index=page_index,
@@ -2902,19 +2907,29 @@ def _validate_detected_tables(
     validation_facts: list[dict[str, Any]] = []
     construction_facts: list[dict[str, Any]] = []
     provenance_facts: list[dict[str, Any]] = []
-    for table in tables:
+    for original in tables:
         source_lines = _source_lines_for_table(
-            table,
+            original,
             regions,
             extra_lines,
             table_ocr_overrides,
         )
         direction = _table_writing_direction(source_lines)
+        # An OCR table may have lost a divider in the scan; the repaired grid
+        # is kept only when it passes the same validation.
+        table = repair_missing_dividers(original)
         validation = validate_table_geometry(
             table,
             writing_direction=direction,
             source_lines=source_lines,
         )
+        if table is not original and not validation.valid:
+            table = original
+            validation = validate_table_geometry(
+                table,
+                writing_direction=direction,
+                source_lines=source_lines,
+            )
         construction = build_table_construction_diagnostics(
             table,
             source_lines=source_lines,
@@ -3092,6 +3107,8 @@ def _refine_visual_table_ocr(
                 tokens=list(result.tokens),
             )
             candidate = _preserve_visual_grid(table, refined_table)
+            if candidate is table:
+                candidate = _project_reading_onto_grid(table, result.tokens)
             prepared = engine.token_refinement_policy.prepare_visual_table(table, candidate)
             if not engine.token_refinement_policy.accept_visual_table(table, prepared):
                 return None
@@ -3167,6 +3184,27 @@ def _preserve_visual_grid(original, candidate):
             or len(candidate.cells) < len(original.cells)):
         return original
     return candidate
+
+
+def _project_reading_onto_grid(table, tokens):
+    """The kept grid with each cell holding the reread tokens it contains.
+
+    The core reassigns the reread evidence to the kept grid; projecting it
+    first lets the engine policy compare each cell's two readings before
+    staging. Unchanged cells stage exactly as before.
+    """
+    from copy import deepcopy
+    from .tables.cell_geometry import contains_point
+
+    projected = deepcopy(table)
+    for cell in projected.cells:
+        if cell.bbox is None:
+            continue
+        cell.tokens = [token for token in tokens if contains_point(cell, token.bbox.cx, token.bbox.cy)]
+        cell.text = join_table_tokens(cell.tokens)
+        cell.confidence = (sum(token.confidence or 0. for token in cell.tokens) / len(cell.tokens)
+                           if cell.tokens else cell.confidence)
+    return projected
 
 
 def _refine_figure_ocr(

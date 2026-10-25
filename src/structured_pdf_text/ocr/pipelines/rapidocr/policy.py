@@ -1,5 +1,6 @@
 """RapidOCR-owned recovery schedule, matching the pre-migration path."""
 from dataclasses import dataclass
+import re
 import math
 from structured_pdf_text.ocr.pipeline.contracts import WorkGoal
 from structured_pdf_text.ocr.quality import _union_area
@@ -85,37 +86,54 @@ INTEGRATION_POLICY = ConservativeIntegrationPolicy("rapidocr-integration-v1")
 
 CELL_POLICY = CellRecoveryPolicy()
 
+_DECIMAL_COMMA = re.compile(r"(?<![\w.,])[+-]?\d+(?:\.\d{3})*,\d+(?:\s*[%‰])?(?![\w.,])")
+
+
+def _reading_confidence(tokens) -> float:
+    values = [token.confidence or 0. for token in tokens if token.text.strip()]
+    return sum(values) / len(values) if values else 0.
+
+
 @dataclass(frozen=True, slots=True)
 class RapidOCRTokenRefinementPolicy(TokenRefinementPolicy):
-    """A regional rereading must conserve confident decimal-comma observations.
+    """A regional rereading replaces a cell reading only on better evidence.
 
-    Bare decimals are not typed currency/percentage values in the core. A
-    different crop alone is no evidence that their separator was wrong. Keep
-    the observations of a conflicting cell, while other cells can improve.
-    Dots alone are ambiguous (decimal point, thousands or code separator),
-    so this preference does not freeze them against a regional rereading.
+    A different crop alone is no evidence that an observed reading was wrong:
+    near-equal confidences read `Jul` as `Jui`, `C` as `c` or `81,25` as
+    `B1,25`. Keep the observations of a conflicting cell, while other cells
+    can improve:
+
+    - a rereading that only moves the decimal separator keeps the reading
+      with a pt-BR decimal comma, whichever of the two it is;
+    - any other character change needs a mean confidence gain of
+      `confidence_gain`.
+
+    A rereading that adds content (more than one character) always replaces
+    the cell: keeping the prior reading would drop its new observations.
+    Empty cells always remain eligible for recovery.
     """
 
-    decimal_confidence: float = .95
+    confidence_gain: float = .02
 
     def identity(self):
-        return {"policy_id": "rapidocr-decimal-conservation-v2",
-                "minimum_existing_confidence": self.decimal_confidence,
+        return {"policy_id": "rapidocr-cell-reading-conservation-v3",
                 "minimum_cell_iou": .80, "composition": "preserve_conflicting_cell",
-                "protected_surface": "decimal_comma"}
+                "separator_only": "prefer_decimal_comma", "added_content": "replace",
+                "minimum_confidence_gain": self.confidence_gain}
 
-    def _decimal_conflicts(self, original, candidate):
-        from collections import Counter
-        import re
+    def _keeps_prior(self, old, new) -> bool:
+        old_text, new_text = "".join(old.text.split()), "".join(new.text.split())
+        if old_text == new_text or not old_text or len(new_text) > len(old_text) + 1:
+            return False
+        if re.sub(r"[.,]", "", old_text) == re.sub(r"[.,]", "", new_text):
+            old_comma, new_comma = bool(_DECIMAL_COMMA.search(old.text)), bool(_DECIMAL_COMMA.search(new.text))
+            if old_comma != new_comma:
+                return old_comma
+        return _reading_confidence(new.tokens) < _reading_confidence(old.tokens) + self.confidence_gain
 
-        decimal = re.compile(r"(?<![\w.,])[+-]?\d+(?:\.\d{3})*,\d+(?:\s*[%‰])?(?![\w.,])")
+    def _conflicts(self, original, candidate):
         for old in original.cells:
-            protected = Counter(
-                re.sub(r"\s+", "", match.group())
-                for token in old.tokens if (token.confidence or 0.) >= self.decimal_confidence
-                for match in decimal.finditer(token.text)
-            )
-            if not protected or old.bbox is None:
+            if old.bbox is None:
                 continue
             matching = [cell for cell in candidate.cells if cell.bbox is not None
                         and cell.row == old.row and cell.col == old.col
@@ -123,15 +141,13 @@ class RapidOCRTokenRefinementPolicy(TokenRefinementPolicy):
                         and old.bbox.iou(cell.bbox) >= .80]
             if not matching:
                 continue  # A changed grid is still checked by core conservation.
-            observed = Counter(re.sub(r"\s+", "", match.group())
-                               for cell in matching for match in decimal.finditer(cell.text))
-            if protected - observed:
+            if self._keeps_prior(old, matching[0]):
                 yield old, matching[0]
 
     def prepare_visual_table(self, original, candidate):
         from copy import deepcopy
 
-        conflicts = list(self._decimal_conflicts(original, candidate))
+        conflicts = list(self._conflicts(original, candidate))
         if not conflicts:
             return candidate
         draft = deepcopy(candidate)
@@ -146,7 +162,7 @@ class RapidOCRTokenRefinementPolicy(TokenRefinementPolicy):
         return draft
 
     def accept_visual_table(self, original, candidate):
-        return next(self._decimal_conflicts(original, candidate), None) is None
+        return next(self._conflicts(original, candidate), None) is None
 
 
 TOKEN_REFINEMENT_POLICY = RapidOCRTokenRefinementPolicy()

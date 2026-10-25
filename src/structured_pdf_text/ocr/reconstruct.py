@@ -60,12 +60,16 @@ def reconstruct_ocr_lines(
         return []
     page_width, page_height = _page_size(visible, page_bbox)
     virtual_boxes = {id(token): _virtual_bbox(token, page_bbox, page_width, page_height, page_rotation) for token in visible}
-    heights = [box.height for box in virtual_boxes.values() if box.height > 0]
-    tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.65)
     # A skewed scan tilts every text line by the same angle. Grouping by the
     # raw center then joins a cell with the next row's cells; measure the
     # center along the dominant tilt instead (upright pages only).
     slope = 0.0 if page_rotation % 360 else _dominant_slope(visible)
+    # The axis-aligned box of a tilted observation is taller than its text by
+    # |slope| * width; a wide title would otherwise widen the tolerance until
+    # its wrapped second line joins the next line.
+    heights = [max(box.height - abs(slope) * box.width, box.height * 0.35)
+               for box in virtual_boxes.values() if box.height > 0]
+    tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.65)
 
     def level(token: OcrToken) -> float:
         box = virtual_boxes[id(token)]
@@ -663,6 +667,16 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
     for i in range(1, len(lines)):
         prev = lines[i - 1]
         curr = lines[i]
+
+        # Rule 0: font size change. On a skewed scan every box is taller than
+        # its text by |slope| * width, so only a narrower line that is still
+        # clearly taller proves larger type (a wrapped title above a label).
+        narrow, wide = sorted((prev, curr), key=lambda line: line.bbox.width)
+        if narrow.bbox.height > 1.3 * wide.bbox.height > 0:
+            paragraphs.append(current_group)
+            current_group = [curr]
+            current_left = curr.bbox.x0
+            continue
 
         # Rule 1: large vertical gap.
         gap = curr.bbox.y0 - prev.bbox.y1

@@ -156,7 +156,10 @@ def stage_visual_table(selections, target, evidence_order=()):
         # conflicting crop. Rebuilding from every new observation would undo
         # that choice. Only observations checked against `allowed` above can
         # enter this composition; core scope/ownership checks still apply.
-        selected_evidence = [token for token in evidence if (token.text, token.bbox) in used]
+        # Observations outside every cell were never in conflict; dropping
+        # them would lose content next to the table.
+        selected_evidence = [token for token in evidence if (token.text, token.bbox) in used
+                             or not any(contains_point(cell, token.bbox.cx, token.bbox.cy) for cell in table.cells)]
         retained = [token for cell in table.cells for token in cell.tokens
                     if (token.text, token.bbox) not in source]
     fusion = fuse_native_and_ocr(list(target.native_lines), selected_evidence)
