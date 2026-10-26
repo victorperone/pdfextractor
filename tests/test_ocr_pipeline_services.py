@@ -1166,14 +1166,16 @@ def test_real_one_pixel_crop_is_nonempty_and_keeps_geometry(tmp_path):
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
 @pytest.mark.parametrize("shift", [0, 17])
 @pytest.mark.parametrize("outside", [False, True])
-def test_rapidocr_boundary_policy_keeps_edge_detections_in_exact_scope(rotation, shift, outside):
+@pytest.mark.parametrize("engine,provider", [("rapidocr", "onnxruntime"), ("easyocr", None)])
+def test_engine_boundary_policy_keeps_edge_detections_in_exact_scope(rotation, shift, outside, engine, provider):
     from structured_pdf_text.ocr.pipelines.rapidocr.pipeline import RapidOCRPipeline
+    from structured_pdf_text.ocr.pipelines.easyocr.pipeline import EasyOCRPipeline
 
     page = BBox(shift, shift, 595.2755737304688+shift, 841.8897705078125+shift)
     box = BBox(148.8188934326172+shift, 280.6300048828125+shift,
                319.9439656985153+shift, 451.7550683757603+shift)
     registry, request, auth = make_work(page_bbox=page, rotation=rotation, regions=(box,),
-                                       selection=EngineSelection("rapidocr", "onnxruntime"), render_scale=6.,
+                                       selection=EngineSelection(engine, provider), render_scale=6.,
                                        resource_allocation=ResourceAllocation(max_live_raster_bytes=64*1024*1024))
     class EdgeDetector:
         def recognize_page(self, image, page_index, page_bbox=None, **kwargs):
@@ -1186,7 +1188,8 @@ def test_rapidocr_boundary_policy_keeps_edge_detections_in_exact_scope(rotation,
                              "pt-BR", SourceKind.OCR_REGION, polygon=corners)]
         def close(self):
             pass
-    pipeline = RapidOCRPipeline(SimpleNamespace(engine="rapidocr", provider="onnxruntime",
+    pipeline_type = RapidOCRPipeline if engine == "rapidocr" else EasyOCRPipeline
+    pipeline = pipeline_type(SimpleNamespace(engine=engine, provider=provider,
                                 settings=SimpleNamespace(render_scale=6.)), EdgeDetector())
     try:
         with AuthorizedOCRServices(SpySource(), registry, request.selection,

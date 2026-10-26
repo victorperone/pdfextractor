@@ -454,6 +454,17 @@ def _propagate_fatal_error(exc: BaseException) -> None:
     raise_if_resource_exhausted(exc, stage="easyocr")
 
 
+def _propagate_optional_inference_error(exc: BaseException) -> None:
+    """Keep optional inference from hiding fatal or CUDA setup failures.
+
+    Device failures must reach the existing CPU-retry boundary. Ordinary
+    optional recognition failures can still leave prior observations intact.
+    """
+    _propagate_fatal_error(exc)
+    if gpu_configuration_failure(exc):
+        raise exc
+
+
 class _DetectionCachingReader:
     """Reuse detection only for identical pixels and detector parameters.
 
@@ -1133,7 +1144,43 @@ _ORIENTATION_MAX_LOW_CONF_RATIO = 0.75
 _ORIENTATION_MIN_HORIZONTAL_RATIO = 0.75
 
 
-def _orientation_rotated_evidence_sufficient(tokens: "list[OcrToken]") -> bool:
+def _orientation_character_confidence(token: OcrToken) -> float | None:
+    """Length-aware proxy used only to compare EasyOCR orientations.
+
+    EasyOCR1.7.2 custom_mean = prod(p) ** (2/sqrt(nonblank_steps)).
+    Native line confidences therefore shrink with line length. Predicted
+    characters approximate nonblank steps here; this is a ranking proxy,
+    not a calibrated probability, and never rewrites stored observations.
+    """
+    import math
+    probability = finite_confidence(token.confidence)
+    if probability is None:
+        return None
+    characters = len("".join(token.text.split()))
+    if not characters or probability == 0:
+        return 0.
+    return probability ** (1. / (2. * math.sqrt(characters)))
+
+
+def _orientation_metrics(tokens, *, character_confidence=False):
+    if not character_confidence:
+        return _candidate_metrics(tokens)
+    from dataclasses import replace
+    return _candidate_metrics([
+        replace(token, confidence=_orientation_character_confidence(token))
+        for token in tokens
+    ])
+
+
+def _orientation_character_mass(tokens, *, character_confidence=True):
+    import math
+    return sum(
+        len("".join(token.text.split())) * ((_orientation_character_confidence(token) if character_confidence else token.confidence) or 0.)
+        for token in tokens if token.bbox.area > 0 and all(math.isfinite(value) for value in (token.bbox.x0, token.bbox.y0, token.bbox.x1, token.bbox.y1))
+    )
+
+
+def _orientation_rotated_evidence_sufficient(tokens: "list[OcrToken]", *, character_confidence: bool = False) -> bool:
     """Return True when a rotated candidate has sufficient evidence to replace upright.
 
     Uses the same quality criteria as :func:`_orientation_candidate_can_replace_upright`
@@ -1147,11 +1194,11 @@ def _orientation_rotated_evidence_sufficient(tokens: "list[OcrToken]") -> bool:
     """
     if not tokens:
         return False
-    m = _candidate_metrics(tokens)
+    m = _orientation_metrics(tokens, character_confidence=character_confidence)
     return (
         m["token_count"] >= _ORIENTATION_MIN_TOKENS
         and m["char_count"] >= _ORIENTATION_MIN_CHARS
-        and m["mean_confidence"] >= _ORIENTATION_MIN_MEAN_CONFIDENCE
+        and m["mean_confidence"] >= (0.75 if character_confidence else _ORIENTATION_MIN_MEAN_CONFIDENCE)
         and m["low_conf_ratio"] <= _ORIENTATION_MAX_LOW_CONF_RATIO
     )
 
@@ -1161,6 +1208,8 @@ def _orientation_candidate_can_replace_upright(
     tokens: "list[OcrToken]",
     score: float,
     best_score: float,
+    reference_character_mass: float | None = None,
+    character_confidence: bool = False,
 ) -> bool:
     """Return True only when a rotated candidate has sufficient evidence and a better score.
 
@@ -1169,9 +1218,19 @@ def _orientation_candidate_can_replace_upright(
     ``horizontal_ratio`` — see that function's docstring for the rationale)
     and its quality score strictly exceeds the current best.
     """
-    if not tokens or score <= best_score:
+    if reference_character_mass is None:
+        return bool(tokens) and score > best_score and _orientation_rotated_evidence_sufficient(tokens, character_confidence=character_confidence)
+    if not _orientation_rotated_evidence_sufficient(tokens, character_confidence=character_confidence):
         return False
-    return _orientation_rotated_evidence_sufficient(tokens)
+    mass = _orientation_character_mass(tokens, character_confidence=character_confidence)
+    # A few confident glyphs cannot discard a readable body. Compare against
+    # the current winning orientation, including a previously selected rotation.
+    if reference_character_mass >= 32 and mass < .60 * reference_character_mass:
+        return False
+    if score > best_score + .02:
+        return True
+    # A substantial body can outweigh a short, very confident fragment.
+    return mass >= 64 and mass >= 3 * max(reference_character_mass, 1.)
 
 
 def _adaptive_candidates(
@@ -1180,6 +1239,7 @@ def _adaptive_candidates(
     base_kwargs: "dict[str, Any]",
     *,
     record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
+    baseline_raw: "list[Any] | None" = None,
 ) -> "list[tuple[str, list[tuple[Any, Any, Any]]]]":
     """Run EasyOCR upright candidates for the adaptive quality policy.
 
@@ -1198,9 +1258,13 @@ def _adaptive_candidates(
     provided, so the caller can track per-call fallback statistics.
     """
     # Candidate A: default profile
-    raw_a, _fb_a = _run_easyocr(reader, img, **base_kwargs)
-    if record_call is not None:
-        record_call(_fb_a)
+    if baseline_raw is None:
+        raw_a, _fb_a = _run_easyocr(reader, img, **base_kwargs)
+        if record_call is not None:
+            record_call(_fb_a)
+    else:
+        # The orientation probe already ran and was recorded at this angle.
+        raw_a = baseline_raw
 
     # Candidate B: high-recall — lower detection thresholds
     hr_kwargs = dict(base_kwargs)
@@ -1222,7 +1286,7 @@ def _adaptive_candidates(
     return results
 
 
-def _orientation_quality_score(tokens: "list[OcrToken]") -> float:
+def _orientation_quality_score(tokens: "list[OcrToken]", *, character_confidence: bool = False) -> float:
     """Scalar quality score for orientation comparison (higher = better, max ~1.1).
 
     Combines confidence, content volume, and hallucination penalties so that
@@ -1231,7 +1295,7 @@ def _orientation_quality_score(tokens: "list[OcrToken]") -> float:
     """
     if not tokens:
         return 0.0
-    m = _candidate_metrics(tokens)
+    m = _orientation_metrics(tokens, character_confidence=character_confidence)
     return (
         m["mean_confidence"] * 0.40
         + m["lower_quartile_confidence"] * 0.25
@@ -1243,7 +1307,7 @@ def _orientation_quality_score(tokens: "list[OcrToken]") -> float:
     )
 
 
-def _orientation_quality_sufficient(tokens: "list[OcrToken]") -> bool:
+def _orientation_quality_sufficient(tokens: "list[OcrToken]", *, character_confidence: bool = False) -> bool:
     """Return True when upright orientation quality is good enough to skip rotation probes.
 
     Uses multi-dimensional quality metrics rather than token count alone, so pages
@@ -1253,14 +1317,36 @@ def _orientation_quality_sufficient(tokens: "list[OcrToken]") -> bool:
     """
     if not tokens:
         return False
-    m = _candidate_metrics(tokens)
+    m = _orientation_metrics(tokens, character_confidence=character_confidence)
     return (
         m["token_count"] >= _ORIENTATION_MIN_TOKENS
         and m["char_count"] >= _ORIENTATION_MIN_CHARS
-        and m["mean_confidence"] >= _ORIENTATION_MIN_MEAN_CONFIDENCE
+        and m["mean_confidence"] >= (0.80 if character_confidence else _ORIENTATION_MIN_MEAN_CONFIDENCE)
         and m["low_conf_ratio"] <= _ORIENTATION_MAX_LOW_CONF_RATIO
         and m["horizontal_ratio"] >= _ORIENTATION_MIN_HORIZONTAL_RATIO
     )
+
+
+_STRIP_MINIMUM_ASPECT = 3.0
+_STRIP_MAXIMUM_LINE_HEIGHTS = 3.5
+_STRIP_MINIMUM_CONFIDENCE = 0.50
+
+
+def _single_line_strip(img: "Any", tokens: "list[OcrToken]") -> bool:
+    """True for a wide crop holding one confidently read upright text line."""
+    from statistics import median
+
+    shape = getattr(img, "shape", None)
+    if not shape or len(shape) < 2 or not tokens:
+        return False
+    height, width = shape[0], shape[1]
+    heights = [token.bbox.height for token in tokens if token.bbox.height > 0]
+    if not heights or width < _STRIP_MINIMUM_ASPECT * height:
+        return False
+    if height > _STRIP_MAXIMUM_LINE_HEIGHTS * median(heights):
+        return False
+    confidences = [finite_confidence(token.confidence) or 0. for token in tokens]
+    return sum(confidences) / len(confidences) >= _STRIP_MINIMUM_CONFIDENCE
 
 
 def _adaptive_with_orientation_selection(
@@ -1271,6 +1357,7 @@ def _adaptive_with_orientation_selection(
     language: str,
     *,
     record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
+    character_confidence: bool = False,
 ) -> "tuple[list[tuple[str, list[OcrToken]]], dict[str, Any]]":
     """Adaptive candidates with global orientation selection (B1/R73).
 
@@ -1294,27 +1381,49 @@ def _adaptive_with_orientation_selection(
         for label, raw in upright_raw
     ]
 
-    # 3. Assess upright quality across all upright candidates combined
-    upright_tokens = [t for _, tokens in upright_pipeline for t in tokens]
-    upright_score = _orientation_quality_score(upright_tokens)
+    # Each preprocessing hypothesis describes the same pixels. Assess it
+    # independently, using a length-aware CTC proxy rather than pooling copies.
+    measurements = [
+        (label, tokens, _orientation_quality_score(tokens, character_confidence=character_confidence),
+         _orientation_quality_sufficient(tokens, character_confidence=character_confidence)
+         and _orientation_quality_sufficient(tokens))
+        for label, tokens in upright_pipeline
+    ]
+    sufficient_candidates = [item for item in measurements if item[3]]
+    representative = max(sufficient_candidates or measurements,
+                         key=lambda item: item[2], default=("default", [], 0., False))
+    upright_tokens, upright_score = representative[1], representative[2]
+    upright_sufficient = bool(sufficient_candidates)
+    # A one-line strip (a value, cell or label crop) never holds the three
+    # tokens a rotation needs to replace upright; probing it only costs calls.
+    single_line_strip = not upright_sufficient and _single_line_strip(img, upright_tokens)
+    upright_sufficient = upright_sufficient or single_line_strip
+    upright_mass = max((_orientation_character_mass(tokens, character_confidence=character_confidence) for _, tokens in upright_pipeline), default=0.)
     attempts: list[dict[str, Any]] = [
         {
             "angle": 0,
             "score": round(upright_score, 4),
-            "token_count": len(upright_tokens),
-            "sufficient": _orientation_quality_sufficient(upright_tokens),
+            "token_count": sum(len(tokens) for _, tokens in upright_pipeline),
+            "quality_token_count": len(upright_tokens),
+            "quality_candidate_id": representative[0],
+            "character_mass": round(upright_mass, 4),
+            "sufficient": upright_sufficient,
+            "candidate_token_counts": {label: len(tokens) for label, tokens in upright_pipeline},
+            "single_line_strip": single_line_strip,
         }
     ]
     selected_pipeline = upright_pipeline
     selected_angle = 0
 
-    if not _orientation_quality_sufficient(upright_tokens):
+    if not upright_sufficient:
         # 4. Probe rotations — one pass per angle with base_kwargs
         try:
             import numpy as _np
             _arr_base = _np.asarray(img)
             best_rot_score = upright_score
+            best_rot_mass = upright_mass
             best_rot_result: "tuple[str, list[OcrToken]] | None" = None
+            best_rot_raw = None
 
             for _angle, _rot_label in ((90, "rot90"), (180, "rot180"), (270, "rot270")):
                 try:
@@ -1331,35 +1440,59 @@ def _adaptive_with_orientation_selection(
                             language,
                             token_rotation=_token_rotation_from_applied_correction(_angle),
                         )
-                        _rot_score = _orientation_quality_score(_rot_tokens)
+                        _rot_score = _orientation_quality_score(_rot_tokens, character_confidence=character_confidence)
+                        _rot_mass = _orientation_character_mass(_rot_tokens, character_confidence=character_confidence)
                         attempts.append({
                             "angle": _angle,
                             "score": round(_rot_score, 4),
                             "token_count": len(_rot_tokens),
-                            "sufficient": _orientation_rotated_evidence_sufficient(_rot_tokens),
+                            "sufficient": _orientation_rotated_evidence_sufficient(_rot_tokens, character_confidence=character_confidence),
+                            "character_mass": round(_rot_mass, 4),
                         })
                         if _orientation_candidate_can_replace_upright(
                             tokens=_rot_tokens,
                             score=_rot_score,
                             best_score=best_rot_score,
+                            reference_character_mass=best_rot_mass if character_confidence else None,
+                            character_confidence=character_confidence,
                         ):
                             best_rot_score = _rot_score
+                            best_rot_mass = _rot_mass
                             best_rot_result = (_rot_label, _rot_tokens)
+                            best_rot_raw = _raw_rot
                     else:
                         attempts.append({"angle": _angle, "score": 0.0, "token_count": 0, "sufficient": False})
                 except Exception as _exc:
-                    _propagate_fatal_error(_exc)
+                    _propagate_optional_inference_error(_exc)
         except Exception as _exc:
-            _propagate_fatal_error(_exc)
+            _propagate_optional_inference_error(_exc)
 
         # 5. If a rotation beats upright quality, use ONLY that rotation's tokens
         if best_rot_result is not None:
             _rot_label, _rot_tokens_list = best_rot_result
             selected_pipeline = [(_rot_label, _rot_tokens_list)]
             selected_angle = {"rot90": 90, "rot180": 180, "rot270": 270}[_rot_label]
+            if character_confidence:
+                # Give the chosen orientation the same adaptive treatment as
+                # upright. Reuse its probe; never fuse losing orientations.
+                corrected = _rotate_image(img, selected_angle)
+                corrected_h, corrected_w = corrected.shape[:2]
+                variants = _adaptive_candidates(
+                    reader, corrected, base_kwargs, record_call=record_call,
+                    baseline_raw=best_rot_raw,
+                )
+                selected_pipeline = [
+                    (label, _result_to_pipeline_tokens(
+                        _remap_raw_for_rotation(raw, selected_angle, corrected_h, corrected_w),
+                        page_index, language,
+                        token_rotation=_token_rotation_from_applied_correction(selected_angle),
+                    ))
+                    for label, raw in variants
+                ]
 
     orientation_diag: dict[str, Any] = {
         "selected_angle": selected_angle,
+        "confidence_policy": "ctc-length-proxy-v1" if character_confidence else "native",
         "attempts": attempts,
     }
     return selected_pipeline, orientation_diag
@@ -2000,7 +2133,7 @@ def _exhaustive_with_orientation_selection(
                 else:
                     attempts.append({"angle": _angle, "score": 0.0, "token_count": 0, "sufficient": False})
             except Exception as _exc:
-                _propagate_fatal_error(_exc)
+                _propagate_optional_inference_error(_exc)
 
     orientation_diag: "dict[str, Any]" = {
         "selected_angle": selected_angle,
@@ -2038,6 +2171,16 @@ def _exhaustive_with_orientation_selection(
     return pipeline_candidates, orientation_diag
 
 
+def _rereads_existing(token: "OcrToken", existing: "list[OcrToken]", coverage: float = 0.30) -> bool:
+    """True when ``token`` lies over an observation that is already kept."""
+    area = max(token.bbox.area, 1e-6)
+    for other in existing:
+        intersection = token.bbox.intersection(other.bbox)
+        if intersection is not None and intersection.area / area >= coverage:
+            return True
+    return False
+
+
 def _supplement_with_regional_orientation(
     reader: "Any",
     img: "Any",
@@ -2045,6 +2188,8 @@ def _supplement_with_regional_orientation(
     existing_tokens: "list[OcrToken]",
     page_index: int,
     language: str,
+    *,
+    record_call: "Callable[[dict[str, Any] | None], None] | None" = None,
 ) -> "list[OcrToken]":
     """VQ-14: supplement global OCR with regional passes for uncovered areas.
 
@@ -2073,13 +2218,20 @@ def _supplement_with_regional_orientation(
     covered = [[False] * GRID_COLS for _ in range(GRID_ROWS)]
 
     for token in existing_tokens:
-        # token.bbox is in image pixels via the coordinates module convention
-        # Use center point
-        cx = getattr(token.bbox, "cx", (token.bbox.x0 + token.bbox.x1) / 2)
-        cy = getattr(token.bbox, "cy", (token.bbox.y0 + token.bbox.y1) / 2)
-        col = min(int(cx / cell_w), GRID_COLS - 1) if cell_w > 0 else 0
-        row = min(int(cy / cell_h), GRID_ROWS - 1) if cell_h > 0 else 0
-        covered[row][col] = True
+        # token.bbox is in image pixels via the coordinates module convention.
+        # A line spans several cells: every cell its box crosses holds text.
+        # Marking only the centre left the rest "uncovered", and rereading
+        # those cells at 90/270 degrees mixed rotated noise into the body.
+        if cell_w <= 0 or cell_h <= 0:
+            covered[0][0] = True
+            continue
+        first_col = max(0, min(int(token.bbox.x0 / cell_w), GRID_COLS - 1))
+        last_col = max(0, min(int(max(token.bbox.x1 - 1e-6, token.bbox.x0) / cell_w), GRID_COLS - 1))
+        first_row = max(0, min(int(token.bbox.y0 / cell_h), GRID_ROWS - 1))
+        last_row = max(0, min(int(max(token.bbox.y1 - 1e-6, token.bbox.y0) / cell_h), GRID_ROWS - 1))
+        for row in range(first_row, last_row + 1):
+            for col in range(first_col, last_col + 1):
+                covered[row][col] = True
 
     supplemental: "list[OcrToken]" = []
 
@@ -2092,14 +2244,18 @@ def _supplement_with_regional_orientation(
             x0 = int(col * cell_w)
             x1 = min(img_w, int((col + 1) * cell_w))
             cell_crop = arr[y0:y1, x0:x1]
-            if cell_crop.size == 0:
+            if cell_crop.size == 0 or _np_sup.all(cell_crop == 255):
+                # An entirely white authorized crop contains no visible text.
+                # Preserve prior observations; do not invent rotated evidence.
                 continue
 
             for angle in (90, 270):
                 try:
                     rotated = _rotate_image(cell_crop, angle)
                     rot_h, rot_w = rotated.shape[:2]
-                    raw_rot, _ = _run_easyocr(reader, rotated, **base_kwargs)
+                    raw_rot, fallback = _run_easyocr(reader, rotated, **base_kwargs)
+                    if record_call is not None:
+                        record_call(fallback)
                     if not raw_rot:
                         continue
                     remapped_raw = _remap_raw_for_rotation(raw_rot, angle, rot_h, rot_w)
@@ -2113,18 +2269,22 @@ def _supplement_with_regional_orientation(
                         token_rotation=_token_rotation_from_applied_correction(angle),
                     )
                     # Admit only high-confidence tokens with real text
+                    admitted_here = False
                     for tok in rot_tokens:
                         if (
                             tok.confidence is not None
                             and tok.confidence >= 0.40
                             and len(tok.text.strip()) >= 2
+                            and not _rereads_existing(tok, existing_tokens)
                         ):
                             supplemental.append(tok)
-                    if supplemental:
+                            admitted_here = True
+                    if admitted_here:
                         # Mark this cell as covered to avoid double-processing
                         covered[row][col] = True
                         break
-                except Exception:
+                except Exception as exc:
+                    _propagate_optional_inference_error(exc)
                     continue
 
     return existing_tokens + supplemental
@@ -2222,7 +2382,10 @@ def _rebuild_reader_no_quantize(reader: "Any") -> "Any":
         lang = options.pop("lang_list")
         import easyocr as _easyocr  # type: ignore
         options.update(quantize=False, download_enabled=False, verbose=False)
-        return _easyocr.Reader(lang, **options)
+        rebuilt = _easyocr.Reader(lang, **options)
+        from structured_pdf_text.ocr.pipelines.easyocr.craft_postprocess import bind_craft_postprocessing
+        bind_craft_postprocessing(rebuilt)
+        return rebuilt
     except Exception as _optional_exc:
         _propagate_fatal_error(_optional_exc)
         return None
@@ -2380,6 +2543,10 @@ class EasyOCRBackend:
             "lang_list": list(self._langs), **kwargs,
         }
 
+        from structured_pdf_text.ocr.pipelines.easyocr.craft_postprocess import bind_craft_postprocessing
+        self._bounded_craft = bind_craft_postprocessing(self._reader)
+        self._ctc_length_confidence = _package_version("easyocr") == "1.7.2"
+
         # DBNet18 runtime state cached per instance.  None = not yet probed.
         # Populated lazily by _ensure_dbnet18_runtime(); never reset between pages.
         self._dbnet_runtime_state: bool | None = None
@@ -2399,6 +2566,8 @@ class EasyOCRBackend:
         logging.getLogger(__name__).warning("EasyOCR: CUDA unavailable during inference; retrying on CPU (%s)", exc)
         self._reader = _import_easyocr().Reader(languages, **options)
         self._reader._pdfextractor_init_options = {"lang_list": languages, **options}
+        from structured_pdf_text.ocr.pipelines.easyocr.craft_postprocess import bind_craft_postprocessing
+        self._bounded_craft = bind_craft_postprocessing(self._reader)
         self._quantize = self._cpu_quantize
         self._runtime_device = self._device = "cpu"
         self._gpu_fallback_reason = f"cuda_runtime_failed:{type(exc).__name__}:{exc}"
@@ -2533,6 +2702,11 @@ class EasyOCRBackend:
             extra={
                 "render_scale": self._config.effective_ocr_render_scale(),
                 "recognition_network": self._recog_network,
+                "craft_postprocessing": "bounded-components-v1" if getattr(self, "_bounded_craft", False) else "upstream",
+                "adaptive_orientation_evidence": ("ctc-length-and-content-conservation-v2"
+                                                  if getattr(self, "_ctc_length_confidence", False)
+                                                  else "independent-candidate-native-confidence-v1"),
+                "regional_blank_policy": "skip-white-cells-v1",
                 "gpu_requested": self._config.use_gpu,
                 "runtime_device": getattr(self, "_runtime_device", "cpu"),
                 "gpu_fallback_reason": getattr(self, "_gpu_fallback_reason", None),
@@ -2758,15 +2932,18 @@ class EasyOCRBackend:
                 # pages with mixed orientations (horizontal body + vertical stamp).
                 tokens = _supplement_with_regional_orientation(
                     self._reader, img, base_kwargs, tokens, page_index, self._language,
+                    record_call=self._record_call,
                 )
             else:
                 # B1/R73: adaptive with global orientation selection before fusion.
                 # Upright quality (confidence + content) drives the orientation probe;
                 # only the winning orientation's candidates enter _best_candidate —
                 # losing orientation tokens are excluded entirely.
+                orientation_options = ({"character_confidence": True}
+                                       if getattr(self, "_ctc_length_confidence", False) else {})
                 pipeline_candidates, _orient_diag = _adaptive_with_orientation_selection(
                     self._reader, img, base_kwargs, page_index, self._language,
-                    record_call=self._record_call,
+                    record_call=self._record_call, **orientation_options,
                 )
                 self._last_orientation_decision = _orient_diag
                 _call_index = len(self._orientation_decisions) + 1
@@ -2780,6 +2957,7 @@ class EasyOCRBackend:
                 # VQ-14: regional orientation supplement for adaptive path as well.
                 tokens = _supplement_with_regional_orientation(
                     self._reader, img, base_kwargs, tokens, page_index, self._language,
+                    record_call=self._record_call,
                 )
             # _easyocr_calls is incremented per-call inside _record_call; no aggregate here
         else:
