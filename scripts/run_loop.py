@@ -1,10 +1,10 @@
 """Tesseract optimization loop runner.
 
-Runs extract_worker.py + compute_metrics.py for V3, V5, V6, V7 sequentially,
+Runs extract_worker.py + compute_metrics.py for V3, V5, V6, V7, V8 sequentially,
 saving output to output/loop/tesseract/<run_id>/<corpus>/.
 
 Usage:
-    python scripts/run_loop.py <run_id> [--corpora V3 V5 V6 V7]
+    python scripts/run_loop.py <run_id> [--corpora V3 V5 V6 V7 V8]
     python scripts/run_loop.py 0001
     python scripts/run_loop.py 0001 --corpora V5 V6
 """
@@ -14,6 +14,7 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -26,8 +27,59 @@ from automation.config import CORPUS, CORPUS_MIN_COMMIT_GB, CORPUS_MIN_RAM_GB, C
 from automation.resource_guard import can_start_extraction, system_memory_status
 
 LOOP_ROOT = REPO_ROOT / "output" / "loop" / "tesseract"
-LOOP_CORPORA = ["V3", "V5", "V6", "V7"]
+LOOP_CORPORA = ["V3", "V5", "V6", "V7", "V8"]
 METRICS_TIMEOUT = 7200  # 2 h (V7 eval can take ~26 min)
+LOCK_FILE = LOOP_ROOT / ".run_lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with the given PID is currently running."""
+    try:
+        import psutil  # type: ignore[import]
+        return psutil.pid_exists(pid)
+    except ImportError:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+def _acquire_lock(run_id: str) -> None:
+    """Acquire the run lock file or exit with error if another run is active."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_FILE.exists():
+        try:
+            info = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+            pid = info.get("pid", 0)
+            existing_run = info.get("run_id", "?")
+        except Exception:
+            pid, existing_run = 0, "?"
+        if pid and _pid_alive(pid):
+            log.error(
+                "LOCK: run %s already active (PID %d). "
+                "Cannot start run %s concurrently. Exiting.",
+                existing_run, pid, run_id,
+            )
+            sys.exit(1)
+        log.warning("LOCK: removing stale lock from run %s (PID %d no longer alive).", existing_run, pid)
+        LOCK_FILE.unlink(missing_ok=True)
+    try:
+        with LOCK_FILE.open("x", encoding="utf-8") as fh:
+            json.dump({"run_id": run_id, "pid": os.getpid(), "started": _utcnow()}, fh)
+    except FileExistsError:
+        log.error("LOCK: race condition — lock file created by another process. Exiting.")
+        sys.exit(1)
+    log.info("LOCK: acquired for run %s (PID %d).", run_id, os.getpid())
+
+
+def _release_lock() -> None:
+    """Release the run lock file."""
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+        log.info("LOCK: released.")
+    except Exception as exc:
+        log.warning("LOCK: could not remove lock file: %s", exc)
 
 
 def _utcnow() -> str:
@@ -76,7 +128,7 @@ def _extract(corpus: str, out_dir: Path) -> bool:
     timeout = CORPUS_EXTRACT_TIMEOUT_S.get(corpus, 14400)
 
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(REPO_ROOT)
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(REPO_ROOT),
     )
     try:
         stdout, _ = proc.communicate(timeout=timeout)
@@ -164,9 +216,25 @@ def main() -> None:
     parser.add_argument("--corpora", nargs="+", default=LOOP_CORPORA, choices=list(CORPUS.keys()))
     args = parser.parse_args()
 
-    run_dir = LOOP_ROOT / args.run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    _acquire_lock(args.run_id)
+    try:
+        run_dir = LOOP_ROOT / args.run_id
+        if run_dir.exists():
+            log.error(
+                "Run directory %s already exists. "
+                "Reusing an existing run ID would overwrite its artefacts. Exiting.",
+                run_dir,
+            )
+            sys.exit(1)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _main_run(args)
+    finally:
+        _release_lock()
 
+
+def _main_run(args: argparse.Namespace) -> None:
+    """Execute one complete run after the lock has been acquired."""
+    run_dir = LOOP_ROOT / args.run_id
     log.info("Tesseract Loop Run %s — start [%s]", args.run_id, _utcnow())
     log.info("Corpora: %s", args.corpora)
 

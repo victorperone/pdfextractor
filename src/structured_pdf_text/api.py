@@ -1591,6 +1591,9 @@ class PdfTextExtractor:
             preserve_headers_footers=self.config.preserve_headers_footers,
             document_warnings=document_warnings,
         )
+        if self.config.ocr_engine == "tesseract":
+            from .ocr.tesseract.postprocess import apply_tesseract_postprocessors
+            apply_tesseract_postprocessors(document)
         document.diagnostics.facts["assemble_ms"] = (time.perf_counter() - assemble_start) * 1000
         document.diagnostics.facts["total_ms"] = (time.perf_counter() - document_start) * 1000
         memory_end = _process_memory_snapshot()
