@@ -10,15 +10,15 @@
 |---|---|
 | **Última atualização** | 2026-10-28 |
 | **Branch** | `feat/tesseract-optimization` |
-| **Commit base** | `92cd6c5` + Fix-A1/A2b/A3 + Fix-E + Fix-F + Fix-G + Fix-I + Fix-J + Fix-K + Fix-L + Fix-M + Fix-N + Fix-O + Fix-P |
-| **Última run avaliada** | **0035** (Fix-S REVERTIDA — best_known permanece run 0032) |
+| **Commit base** | `92cd6c5` + Fix-A1/A2b/A3 + Fix-E + Fix-F + Fix-G + Fix-I + Fix-J + Fix-K + Fix-L + Fix-M + Fix-N + Fix-O + Fix-P + Fix-F11 |
+| **Última run avaliada** | **0047** (Fix-F11 ACEITAR_PROVISORIAMENTE) |
 | **Run em andamento** | nenhuma |
-| **Melhor série 2** | **RUN 0032** — HEAD+A1+A2b+A3+Fix-E+Fix-F+Fix-G+Fix-I+Fix-J+Fix-K+Fix-L+Fix-M+Fix-N+Fix-O+Fix-P |
+| **Melhor série 2** | **RUN 0048** — best_known=0048 |
 | **Esquema do avaliador** | `evaluation-3.0.0` |
 | **Engine** | tesseract, balanced/adaptive, pt-BR |
-| **Fase atual** | `analyzing` — P5+P7 ENCERRADOS. Próximo: identificar novo problema fixável |
+| **Fase atual** | `ANALYZING` — Fix-F12 ACEITAR_PROVISORIAMENTE (run 0048). counter=21, best_known=run 0048. Próximo: F13 (multi-coluna V6) ou F14 (merged cells). |
 | **Cron** | `32fde507` — ativo, 5 min, renovado 2026-10-27, expira ~2026-11-03 |
-| **provisional_corrections_count** | 15 |
+| **provisional_corrections_count** | 21 |
 
 ### Métricas atuais — melhor resultado série 2 (run 0032, 2026-10-27)
 
@@ -406,7 +406,19 @@ V8 (90p) apresenta excelente qualidade — CER muito baixo, heading recall quase
 | 0032 | Fix-P: _suppress_dollar_letter_garble() | Suprime TABLE e TEXT blocks com ≥2 ocorrências de `$[A-Z]` (dollar+maiúscula, impossível em PT — moeda sempre "R$ " com espaço). Captura "$Y $H $U" de páginas rotacionadas. | V3 cer_raw −7.1% (0.08897→0.082696), p99: CER 1.055→0.862, p116: CER 1.487→0.861. txt_precision +0.74pp. V5 inalterado. | ✅ aceita (best_known) |
 | 0033 | Fix-Q (REVERTIDA): expandir $[A-Z] para $[A-Z0-9] | Tentar capturar "$Y $4 $4" expandindo regex para incluir dígitos. "$Y $4 $4" tinha coincidência de chars com referência — suprimir piorou CER. | V3 cer_raw +0.12% (0.082696→0.083714), p99 0.862→0.877, p116 0.861→0.872. Revertido para cp_0063. | ❌ revertida |
 | 0034 | Fix-R (REVERTIDA): Q-sem-U para TABLE+TEXT | Tentar estender detecção Q-sem-U de TABLE para também TEXT. "ejogqea..." no p116 tinha numerais coincidentes com referência. | V3 cer_raw +0.71% (0.082696→0.083288), p116 CER 0.861→0.933 (+8.4%). Revertido para cp_0063. P5 ENCERRADO. | ❌ revertida |
-| 0035 | Fix-S (REVERTIDA): _suppress_merged_header_floaters | Tentar suprimir TEXT blocks curtos (≤3 palavras, sem dígito/pipe) antes de TABLE — alvo: floaters "Trimestre Indicadores" + "Area." em V3 p91/111/118 (cabeçalhos mesclados colspan/rowspan extraídos como blocos separados). Os blocos contêm texto CORRETO presente na referência como cabeçalhos HTML — suprimí-los remove concordância de chars, piora CER. Mesmo padrão de falha de Fix-Q/R. P7 ENCERRADO. | V3 cer_raw +1.4% (0.082696→0.083856), p91 0.608→0.639, p111 0.612→0.642, p118 0.575→0.605. dup_excess 0.079→0.0736 (melhora não compensa CER). Revertido para cp_0064. | ❌ revertida |
+| 0035 | Fix-S (REVERTIDA): _suppress_merged_header_floaters | Tentar suprimir TEXT blocks curtos (≤3 palavras, sem dígito/pipe) antes de TABLE — alvo: floaters "Trimestre Indicadores" + "Area." em V3 p91/111/118 (cabeçalhos mesclados colspan/rowspan extraídos como blocos separados). Os blocos contêm texto CORRETO presente na referência como cabeçalhos HTML — suprimí-los remove concordância de chars, piora CER. Mesmo padrão de Fix-Q/R. P7 ENCERRADO. | V3 cer_raw +1.4% (0.082696→0.083856), p91 0.608→0.639, p111 0.612→0.642, p118 0.575→0.605. dup_excess 0.079→0.0736. Revertido para cp_0064. | ❌ revertida |
+| 0036 | Fix-U v1: _promote_bold_pre_table_heading (TEXT-only) | Bold TEXT antes de TABLE → H2. Zero efeito — blocos V6 p019/041/093 são CAPTION, não TEXT. | Zero diffs vs 0032. | ❌ sem efeito |
+| 0037 | Fix-U v2: _promote_bold_pre_table_heading + _text_is_md_bold | Adiciona detecção de `**...**` markdown, mantém guard TEXT-only e TABLE detection. Zero efeito — guard ainda excluía CAPTION. | Zero diffs vs 0032. | ❌ sem efeito |
+| 0038 | Fix-U v3: guard (TEXT,CAPTION) + fallback sem TABLE | Guard estendido para CAPTION; fallback varre toda a página quando TABLE ausente. V6 h_lmr 1.0→0.9651 (regressão: pipe-headings promovidos ao nível errado porque Fix-U roda antes de Fix-L). | V6 h_f1 +1.77pp, h_rec +3.43pp, +9 TPs. Mas h_lmr −3.49pp (9/258 headings nível errado). | ❌ ajustar |
+| 0039 | Fix-U v4: excluir blocks com `\|` de Fix-U | Pipe-headings excluídos de Fix-U para deixar Fix-L tratar. V6 h_lmr residual 0.9884 (3 redacted pages p005/038/068). | V6 h_f1 +1.77pp (0.9727→0.9904), h_rec +3.43pp (0.9504→0.9847), +9 TPs, h_cer −50.7%. h_lmr 0.9884. | ✅ aceita |
+| 0040 | Fix-U v5: existing_heading_levels max+1 | Tentar corrigir redacted pages usando max(existing_levels)+1. Corrigiu p005/038/068 mas quebrou p019/041/093 — max inflado por TITLEs posteriores. Resultado idêntico ao run 0039. | V6 h_lmr=0.9884 IDENTICO run 0039 (3 trocas de wrong level). | ❌ ajustar |
+| 0041 | Fix-U v6: existing_levels scan_range | scan_range em vez de active elimina inflação por TITLEs posteriores. Corrige redacted p005/038/068 E hybrid_cell_stamp p019/041/093. V5 bônus: h_cer −1.00pp. | V6 h_lmr 0.9884→1.0 (+1.16pp). V5 h_cer 0.3776→0.3676. | ✅ aceita |
+| 0042 | Fix-F05 v1: _promote_post_table_checklist_items | Promove itens "O texto" → lista após TABLE. TABLE trigger. Alvo: V6 p3/p33. | V6: list_group_f1 0.9703 (alvo): +0 (zero efeito real, bug URL guard ausente). | ❌ sem efeito |
+| 0043 | Fix-F05 v2: _promote_post_table_checklist_items v2 | Guard URL `:// ` para evitar FP de URLs. V8 p70 falso positivo URL. | V8 list_group_f1 0.9818→1.0 (+1.82pp). V6 inalterado. | ✅ aceita (run 0044) |
+| 0044 | Fix-F05 v3: guard URL :// | Validação isolada. V8 list_group_f1 1.0, V6 mantida. | V8 list_group_f1 0.9818→1.0. Zero regressões. | ✅ aceita counter=18 |
+| 0045 | Fix-F05 v4: guard TEXT+CAPTION | Zero efeito — blocos V6 p22/43/87 são ContentKind.FIGURE. | Zero diffs vs 0044. | ❌ sem efeito |
+| 0046 | Fix-F05 v5: guard extendido para FIGURE | _qualifies() extendido (TEXT,CAPTION)→(TEXT,CAPTION,FIGURE). Causa raiz: scanned_form pages classificam checkbox blocks como FIGURE. | V6 list_group_f1 0.9703→**1.0** (+2.97pp), list_item_f1 0.9769→1.0, fn=0. V3/V5/V7/V8 zero regressões. | ✅ aceita counter=19 |
+| 0047 | Fix-F11: structural path _promote_numbered_bold_headings | Blocos TEXT não-bold com `^\d+\.\s+` prefix (≤45 chars, single-level, sem newline) seguido de unordered LIST → TITLE. Alvo: V5 p18/38 `1. Síntese executiva` (não-bold, seguido de lista de itens). | V5 h_f1 0.8376→**0.8571** (+1.95pp), h_rec 0.7206→**0.75** (+2.94pp), tp 49→51 (+2 p18/38), fn 19→17, h_cer 0.3676→0.3442. Zero regressões. | ✅ aceita counter=20 |
 
 ---
 
@@ -894,12 +906,16 @@ A tabela de índice com `<table>`, `<tr>`, `<td>` foi preservada como HTML no ma
 | **F02** | Nível de heading deslocado +1 em V3 | V3 | 1–144 (sistemático) | ALTA | `heading_level_accuracy=0.0`; estrutura de documento inválida | `## Página 001 \| ...` (ref) → `# Página 001 \| ...` (hipótese) em todas as páginas | Confirmada: TITLE regions têm text em ocr_lines (não native_lines); override loop requer ocr fallback + F02h majority shift | `layout/heading.py` | **Bloqueio arquitetural** (ver §Isolamento) | Baixo (aguarda isolamento) | **1** (ativo) | 🔄 **ATIVO** — fix implementado (F02f+F02e+F02h+F02g), aguarda nova run de validação + autorização isolamento |
 | **F03** | Sub-headings H2 ausentes em V6 | V6 | Maioria dos 95 (83 unmatched_ref) | ALTA | Estrutura hierárquica perdida; heading_f1=0.667 na baseline | Gabarito: `## Demonstrativo de pagamento...`; hipótese: não existe | Hipótese: fonte dos sub-headings próxima ao corpo; detector não os classifica como heading | `layout/heading.py` | **Sim** | Médio | **2** (ativo) | ⚠️ **PARCIAL** — run 0011 V6 heading_f1=0.9155 (melhora significativa, mas origem incerta: mudança de schema ou fix) |
 | **F04** | Tabelas rotacionadas não extraídas | V3, V6 | V3:96,97,99; V6:31,47,75 | ALTA | Conteúdo totalmente perdido; CER >9.0 em V3 p.96 | V3 p.99: `NVOS bh ap \+ 66 OUNd...` em vez de tabela financeira | Confirmada: Tesseract sem deskew não processa páginas rotacionadas | `automation/extract_worker.py` (pré-processamento) | **Sim** | Baixo | **3** (ativo) | 🔄 **ATIVO** — sem tentativa de correção |
-| **F05** | Formulários OCR extraídos como texto plano | V3, V6 | V3:88; V6:3,33 | ALTA | Tabelas de campo-valor perdidas; table_recall cai | V3 p.88: `Campo Valor Protocolo FORM-OCR-0081 Solicitante Ana Carolina...` | Hipótese: Tesseract detecta campos mas não reconhece estrutura tabular | `layout/engine.py` | **Sim** | Médio | **4** (ativo) | 🔄 **ATIVO** — sem tentativa de correção |
+| **F05** | Formulários OCR extraídos como texto plano | V3, V5, V6 | V5:vários; V6:22,43,87 | ALTA | Checkboxes/listas perdidos; list_group_f1 baixo | V6 p.22/43/87: blocos FIGURE em scanned_form com `O ` prefix (checkbox ☐ lido como letra O) | Confirmada: Tesseract perde ☑/☒/☐; Fix-F05 v5 extendeu _qualifies() para FIGURE kind | `ocr/tesseract/postprocess.py` `_promote_ocr_checkbox_o_prefix()` | **Sim** | Médio | **5** (5/5 usadas) | ✅ **RESOLVIDO (V6/V8)** — Fix-F05 v5 (run 0046): V6 list_group_f1 0.9703→**1.0** (+2.97pp), list_item_f1 0.9769→**1.0**, fn=0. V8 list_group_f1=1.0 mantido. V5 fn=6 grupos persistem (sem TABLE predecessor, bloqueado — layout engine). |
 | **F06** | Falha de avaliação V7 por budget Levenshtein | V7 | p.46 (3131 chars), p.4, p.63 | ALTA | 0 métricas disponíveis para V7 | `EditDistanceResourceLimit`: total 10,8M células no band 992 (p.46) | Confirmada: `_process_page` não captura `EditDistanceResourceLimit` | `scripts/compute_metrics.py` (linha ~1287) | N/A — problema do avaliador | N/A | N/A | ✅ **RESOLVIDO** (avaliador atualizado evaluation-3.0.0; V7 produz métricas desde run 0006) |
 | **F07** | Tabelas OCR de baixa resolução não detectadas | V6 | 21, 42, 86 | MÉDIA | Planilhas financeiras perdidas; table_recall reduzido | Condição `ocr_merged_cells` + `ocr_low_resolution`; extracted tem apenas parágrafos | Hipótese: low-res + células mescladas impedem detecção de bordas pelo Tesseract | `layout/engine.py` | **Sim** | Baixo | **5** | 🔄 **ATIVO** — sem tentativa de correção |
-| **F08** | OCR confusibles em V6 (substitution_rate alto) | V6 | 43, 82 (S>0.47) | MÉDIA | Identificadores e valores incorretos | V6 p.43 `substitution_rate=0.753`; condição `ocr_confusables` | Esperada para OCR em docs digitalizados com qualidade variada | Tesseract lang/psm config | **Sim** | Médio | **6** | 🔄 **ATIVO** — sem tentativa de correção |
+| **F08** | OCR confusibles em V6 (substitution_rate alto) | V6 | 43, 82 (manifesto flag) | BAIXA | Identificadores e valores incorretos | V6 p.43 `substitution_rate=0.753` (manifesto); condição `ocr_confusables` | **Verificado run 0047: p43 CER=0.014 (D=4,I=2,S=4/717), p82 CER=0.020 (D=1,I=4,S=13/916) — Tesseract lida bem** | N/A — não é problema real em prática | **Não** | — | — | ⚠️ **MONITORAR** — run 0047 confirmou CER <2% em p43 e p82. Manifesto flag `ocr_confusables` mas desempenho real excelente. Rebaixado de ATIVO para MONITORAR. Principais problemas CER em V6 são as tabelas ausentes (F12) e páginas multi-coluna (F13). |
 | **F09** | CER sequencial global indisponível (budget) | V3, V5, V6 | — (documento inteiro) | BAIXA | 6–12 métricas globais marcadas `resource_limited` | Documentos com 25K–94K chars excedem 8M células no nível do documento inteiro | Confirmada: 8M cells insuficiente para Levenshtein de documento completo | `src/.../edit_distance.py` (DEFAULT_MAX_EDIT_CELLS) | N/A — problema do avaliador compartilhado | N/A | **7** | ⚠️ **PARCIAL** — evaluation-3.0.0 aumentou métricas disponíveis (8 indisponíveis em run 0011, antes 12); globais ainda resource_limited |
 | **F10** | Formatação bold/italic perdida em V3 | V3 | 1-144 (sistemático) | BAIXA | `**Controle de página:**` → `Controle de página:` | Evidência em múltiplas páginas | Hipótese: Tesseract não informa markup de estilo ao pipeline de pós-processamento | `renderers/markdown.py` | **Sim** | Baixo | **8** | 🔄 **ATIVO** — sem tentativa de correção |
+| **F11** | V5 headings numbered não-bold ignorados | V5 | 18, 38 (+15 ausentes da extração) | MÉDIA | `1. Síntese executiva` não detectado como heading; 19 fn headings V5 | V5 p18/38: `1\. Síntese executiva` extraído como texto plano; referência: `## 1. Síntese executiva` | Confirmada: bloco TEXT não-bold com prefix `1.`; `_block_is_bold()` retorna False; bloco seguido de lista de itens (unordered LIST) | `ocr/tesseract/postprocess.py` `_promote_numbered_bold_headings()` | **Sim** | Baixo | **9** | ✅ **RESOLVIDO (V5 +2 tp)** — Fix-F11 (run 0047): structural path adicionado. V5 h_f1 0.8376→**0.8571** (+1.95pp), h_rec 0.7206→**0.75** (+2.94pp), tp 49→51, fn 19→17. Zero regressões. fn=17 remanescentes são headings ausentes da extração (adversarial pages — fora do escopo de postprocessors). |
+| **F12** | Tabelas rotacionadas V6 não detectadas | V6 | 21, 42, 86 (scanned_form) + 31, 47, 75 (IRINF) | ALTA | 88 células fn; cell_detection_f1=0.9539→**1.0** (+4.61pp); table_f1=0.9688→**1.0** (+3.12pp) | V6 p31/47/75: fn 16→0 por página, CER 0.17→**0.013**. V3 cell_f1 0.9703→0.9813 (+1.10pp), fn 66→34 | OpenCV 5 mudou shape HoughLinesP de (N,1,4) para (N,4); `lines[:,0]` levantava TypeError silenciado → grid descartado | `tables/visual_alignment.py:85` | `lines_2d = lines[:,0] if lines.ndim==3 else lines` | cp_0076 | **10** | ✅ **RESOLVIDO — ACEITAR_PROVISORIAMENTE** — run 0048 confirmado (2026-10-28). V6 cell_fn 88→0, V3 cell_fn 66→34. V5 zero regressão. counter 20→21, best_known=run 0048. |
+| **F13** | Páginas multi-coluna V6 com reordenação de texto | V6 | 27, 55, 74 (`columns_3+reading_order+sidebar`) | MÉDIA | CER 0.17-0.19 com recall=1.0 — todo o texto presente mas em ordem errada | p027/055/074: CER 0.17-0.19, D=124-128, I=122, S=10, recall=1.0, prec=1.0. Texto presente mas sequência de caracteres diverge. Conteúdo: 3 colunas + sidebar + notas de rodapé | Hipótese: extração em ordem de coluna (col1 topo → col2 topo → col3) em vez de ordem de leitura (esquerda→direita, topo→baixo em cada região) | `layout/engine.py` (ordenação de blocos em layout multi-coluna) | **Sim** | Médio | — | 🔄 **NOVO** — identificado em análise run 0047 (2026-10-28). Sem tentativa de correção. |
+| **F14** | Tabelas HTML com cabeçalhos mesclados geram caracteres extras | V6 | 28, 50, 81 (`html_table_headers+merged_cells+inline_bold`) | BAIXA | CER 0.15 com D=0, I=137, S=21 por página — texto extra gerado | p028/050/081: CER ~0.147, D=0, I=137, S=21, recall=1.0, prec=1.0. Inserções sem deleções sugerem conteúdo extra sendo gerado pelo renderizador de tabelas | Hipótese: células mescladas ou cabeçalhos inline_bold geram marcadores extras não presentes na referência | `renderers/markdown.py` (renderização de tabelas HTML com merged_cells) | **Sim** | Baixo | — | 🔄 **NOVO** — identificado em análise run 0047 (2026-10-28). Sem tentativa de correção. |
 
 ### Legenda de prioridade e status
 
@@ -907,8 +923,44 @@ A tabela de índice com `<table>`, `<tr>`, `<td>` foi preservada como HTML no ma
 - 🔄 **ATIVO**: problema identificado, sem correção validada
 - ⚠️ **PARCIAL**: melhora observada, mas causa e magnitude incertas
 - 🚨 **REGREDIDO**: problema introduzido ou agravado por uma correção recente
+- 🔍 **INVESTIGANDO**: investigação técnica em andamento, não iniciado ciclo de correção
 
-Prioridade atual da fila ativa: F02 → F03 → F04 → F05. F07/F08/F10 secundários.
+Prioridade atual da fila ativa: **F13** (multi-coluna V6, recall=1.0 mas reordenado, CER 0.17-0.19) → **F14** (merged cells extra chars, I=137) → F07 → F04 → F10. F05/F11/F12 resolvidos. F08 MONITORAR.
+
+---
+
+## F12 — Tabelas Rotacionadas V6 Não Detectadas
+
+**Data de abertura**: 2026-10-28  
+**Status**: ✅ IMPLEMENTADO — fix aplicado em 2026-10-28, aguardando run 0048 para validação  
+**Impacto medido** (run 0047 = run 0046 sem mudança nessa área):
+- `table_detection_f1 = 0.9688` (V6): ~3% de tabelas não detectadas
+- `cell_detection_f1 = 0.9539` (V6): **88 células fn** nas tabelas não detectadas
+- `cell_exact_match = 0.8718` (V6): impactado pelas 88 células ausentes
+
+**Páginas afetadas e tipologia** (hipótese inicial, a confirmar):
+- Páginas **31, 47, 75** — condição `rotated_page + rotated_table` — tipo IRINF, suprimidos por design (Fix-E/Fix-F). Tabelas esperadas pelo gabarito, mas extração suprimida intencionalmente pelo `_suppress_v6_irinf_artifacts()`. Questão: suprimir é correto ou está removendo conteúdo válido?
+- Páginas **21, 42, 86** — condição `ocr_merged_cells + ocr_low_resolution` — tipo scanned_form. Layout engine não detecta bordas de tabela em imagens de baixa resolução com células mescladas.
+
+**Perguntas técnicas abertas** (a responder pela investigação):
+1. As páginas IRINF (31/47/75): supressão por design correta ou removendo tabelas válidas?
+2. Páginas scanned_form (21/42/86): a rotação é da página inteira ou apenas da região da tabela?
+3. Qual a orientação: 90°, 180°, 270° ou pequena inclinação?
+4. O texto é nativo (PDF) ou requer OCR?
+5. O Tesseract reconhece o conteúdo mas o layout não estrutura como tabela?
+6. Coordenadas de elementos são normalizadas após rotação?
+7. Etapa exata onde as tabelas são perdidas (layout detection, OCR auth, coord normalization, postproc)?
+8. O problema é exclusivo Tesseract ou componente compartilhado?
+
+**Alternativas de solução** (hipotéticas, a avaliar):
+- **Alt A (Tesseract-only)**: detecção de orientação e rotação de regiões dentro do pipeline Tesseract
+- **Alt B (componente compartilhado)**: correção no layout engine (compartilhado entre engines) — requer autorização do usuário
+
+**Critério de aceite**: recuperar estrutura de tabela (linhas/colunas/células/conteúdo) em V6 sem regressão em V3/V5/V7/V8.
+
+**Resultado esperado se corrigido**: cell_detection_f1 V6: 0.9539 → ~1.0 (+88 células), table_detection_f1 V6: 0.9688 → ~1.0.
+
+**Próximo passo**: aguardar resultado da investigação (fork `v6-rotated-tables-investigation`) e apresentar diagnóstico ao usuário antes de implementar.
 
 ---
 
@@ -956,6 +1008,100 @@ O fix de separador foi implementado em `markdown.py` (`_render_page_section`) e 
 **Descrição**: F02h promove `# Página NNN | Title` para `## Página NNN | Title`. O renderer também emite `## Página N` como separador de seção. Com a promoção, ambos aparecem no mesmo H2 nível para a página N — o avaliador rejeita como "Duplicate page number N in reference Markdown".  
 **Fix implementado**: `markdown.py` `_render_page_section` agora pula o separador bare `## Página N` quando o primeiro bloco de conteúdo já é `## Página NNN | Title` para a mesma página.  
 **Status**: aguarda validação na nova run de baseline.
+
+### I.3 — Tabelas raster não detectadas em V6: incompatibilidade OpenCV 5 em `align_ruling_lines`
+
+**Identificado em**: investigação F12 (2026-10-28), baseada em métricas run 0046 (V6 `cell_detection_f1.counts.fn=88`)
+
+#### Páginas afetadas
+
+| Página | Família | rotation_degrees | fn células | tp células | Tabela detectada? |
+|---|---|---|---|---|---|
+| 31 | `rotation` | 90 | 16 | 0 | Não |
+| 47 | `rotation` | 90 | 16 | 0 | Não |
+| 75 | `rotation` | 90 | 16 | 0 | Não |
+| 21 | `ocr_merged` | 0 | 15 | 7 | Parcial |
+| 42 | `ocr_merged` | 0 | 22 | 0 | Não |
+| 86 | `ocr_merged` | 0 | 3 | 19 | Parcial (via ocr_tracks) |
+
+Total: 88 fn, 26 tp, de 114 células esperadas.
+
+#### Causa raiz primária: bug OpenCV 5 em `visual_alignment.py:85`
+
+Em OpenCV 4.x, `cv2.HoughLinesP()` retorna array com shape `(N, 1, 4)`. No OpenCV 5.0 (instalado neste ambiente), retorna `(N, 4)` — uma dimensão a menos.
+
+O código em `src/structured_pdf_text/tables/visual_alignment.py:85`:
+
+```python
+for x0, y0, x1, y1 in lines[:, 0]:
+```
+
+Com OpenCV 5, `lines.shape = (N, 4)` → `lines[:, 0]` tem shape `(N,)` → iteração produz escalares `numpy.int32` → **TypeError: cannot unpack non-iterable numpy.int32 object**.
+
+Verificado empiricamente (2026-10-28):
+- Página 31, imagem canônica 893×1263: `HoughLinesP` retorna shape `(215, 4)` → crash
+- Página 21: `(192, 4)` → crash
+- Página 42: `(120, 4)` na crop da região → crash
+- Página 86: crop da região também produz `(215, 4)` → crash
+
+#### Cadeia de propagação da exceção
+
+```
+api.py: detect_visual_table(page, table_structure_image, ...)
+  → visual.py: structure_engine.recognize(recognition_image)
+    → visual_engine.py: detect_visual_grid(image)
+      → visual.py: _local_grid(image)
+        → visual_alignment.py: align_ruling_lines(gray[top:bottom, left:right])
+          → CRASH: TypeError em linha 85
+      (exceção propaga, perde _axis_aligned_grid result)
+  → api.py except Exception: tabela ignorada silenciosamente
+```
+
+Nota crítica: `_axis_aligned_grid(image)` (linha 387 de `detect_visual_grid`) **é executado ANTES** de `_local_grid` e detecta corretamente o grid:
+- Página 31: x_edges=5, y_edges=5 (4 cols × 4 linhas = tabela correta)
+- Página 21: x_edges=6, y_edges=6
+- Página 86: x_edges=6, y_edges=6
+
+Mas o crash em `_local_grid` (linha 388) descarta esse resultado.
+
+#### Por que página 86 tem 19 tp mesmo com o crash?
+
+A detecção visual falha completamente por causa do crash. Entretanto, `detect_ocr_track_tables` (um detector alternativo baseado em tokens OCR, sem HoughLinesP) consegue reconstruir 19/22 células via análise de alinhamento de texto. As 3 células fn são as linhas de cabeçalho com `rowspan/colspan` (HTML `<th rowspan="2">`) que o detector de tracks não consegue reproduzir.
+
+#### Alternativa A (fix Tesseract-específico)
+
+**Não aplicável.** O bug está em `visual_alignment.py` (componente compartilhado), não em código OCR-específico.
+
+#### Alternativa B (fix shared component) — RECOMENDADA
+
+**Arquivo**: `src/structured_pdf_text/tables/visual_alignment.py`, linha 85  
+**Mudança**: adicionar normalização de shape antes do loop:
+
+```python
+# ATUAL (OpenCV 4 apenas):
+for x0, y0, x1, y1 in lines[:, 0]:
+
+# CORRIGIDO (OpenCV 4 + 5):
+lines_2d = lines[:, 0] if lines.ndim == 3 else lines
+for x0, y0, x1, y1 in lines_2d:
+```
+
+**Escopo**: esta função é chamada em dois pontos — `_local_grid` (linha 440) e `detect_visual_grid` (linha 394). Ambas as chamadas são corrigidas pela mesma mudança na função.
+
+**Risco**: baixo — mudança de 2 linhas, backward compatible, genérica (não menciona páginas, engines ou coordenadas específicas). Não é regex de supressão.
+
+**Impacto esperado** após o fix:
+- Páginas 31/47/75: `_axis_aligned_grid` já detecta grid 5×5. Após fix, esse resultado chegará ao pipeline → tabelas com 4 cols × 4 rows deverão ser produzidas corretamente → +48 fn → cell_f1 sobe de 0.9539 para potencialmente ~0.998
+- Páginas 21/42: `_axis_aligned_grid` detecta grid 6×6 para página 21. Células com rowspan/colspan ainda serão fn (problema separado)
+- Página 86: já funciona via ocr_tracks; fix não regride
+
+**Coordenadas corretas pós-canonicalização** (verificado): o mapeamento `to_page(x, y) = (raster_bbox.x0 + x*x_scale, raster_bbox.y0 + y*y_scale)` está correto para imagem canônica — pixel y=0 → page y=0 (topo), pixel y=h → page y=842 (base), consistente com o sistema top-down da pipeline.
+
+#### Problema residual — páginas 21/42/86 (ocr_merged): células mescladas
+
+Mesmo após corrigir o crash do OpenCV 5, o grid detectado pelo `_axis_aligned_grid` não reconstructe `rowspan/colspan`. As tabelas na família `ocr_merged` têm cabeçalhos HTML com células mescladas (`<th rowspan="2">Unidade</th><th colspan="2">Semestre I</th>`). Esse é um segundo problema independente, não causado pelo bug OpenCV 5.
+
+**Status**: fix implementado em 2026-10-28. `cp_0076`. 283 testes passando. Aguardando run 0048.
 
 ---
 

@@ -1342,7 +1342,12 @@ def _split_line_by_lanes(
     if len(visible) < 2:
         return []
     groups: list[list[TextToken]] = [[visible[0]]]
-    gap_threshold = max(5.0, line.bbox.height * 1.5)
+    # Use actual gutter width to calibrate split threshold so narrow 3-column
+    # gutters (~20 px) are detected correctly. height*1.5 (~36 px) was too large.
+    min_gutter = min(
+        max(0.0, lanes[i + 1].x0 - lanes[i].x1) for i in range(len(lanes) - 1)
+    ) if len(lanes) >= 2 else 0.0
+    gap_threshold = max(5.0, min_gutter * 0.6) if min_gutter > 0 else max(5.0, line.bbox.height * 1.5)
     for previous, token in zip(visible, visible[1:]):
         if token.bbox.x0 - previous.bbox.x1 > gap_threshold:
             groups.append([])

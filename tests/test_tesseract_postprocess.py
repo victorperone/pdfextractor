@@ -27,6 +27,7 @@ class _Block:
     inline_style: str | None = None
     styled_runs: list = field(default_factory=list)
     heading_level: int | None = None
+    list_items: list = field(default_factory=list)
 
 
 @dataclass
@@ -54,12 +55,15 @@ def _make_doc(page_texts: list[str], kind: str = "text") -> _Doc:
 
 from structured_pdf_text.ocr.tesseract.postprocess import (
     _block_is_bold,
+    _next_block_is_unordered_list,
     _normalize_brl_currency_spacing,
     _omitir_gabarito_split,
     _promote_allcaps_section_headers,
     _promote_bold_pipe_title,
     _promote_bold_pre_table_heading,
     _promote_numbered_bold_headings,
+    _promote_ocr_checkbox_o_prefix,
+    _promote_post_table_checklist_items,
     _promote_seção_subseção_headings,
     _promote_short_bold_column_headers,
     _suppress_dollar_letter_garble,
@@ -2058,3 +2062,310 @@ def test_promote_bold_pre_table_heading_dynamic_level_h2_when_no_leveled_title()
     assert bold.heading_level == 2
 
 
+def test_promote_bold_pre_table_heading_ignores_titles_after_table():
+    """TITLE blocks that appear AFTER the TABLE are excluded from level computation.
+
+    Simulates V6 hybrid_cell_stamp pages p019/041/093: page has H1 (page sep),
+    a bold CAPTION before the TABLE, and H2/H3 TITLEs after the table (in later
+    content sections).  Fix-U v6 should use only scan_range (before TABLE) and
+    promote to H2 — not H4 as Fix-U v5 would do by counting H3 from after TABLE.
+    """
+    h1 = _Block(order_index=0, text="Page separator heading", kind="title", heading_level=1)
+    bold = _Block(order_index=1, text="Quadro de recebimento com chancela no interior da célula",
+                  kind="caption", inline_style="bold")
+    table = _Block(order_index=2, text="| col1 | col2 |", kind="table")
+    h2_after = _Block(order_index=3, text="Identificação do processo", kind="title", heading_level=2)
+    h3_after = _Block(order_index=4, text="Dados básicos do processo", kind="title", heading_level=3)
+    doc = _Doc([_Page([h1, bold, table, h2_after, h3_after])])
+    _promote_bold_pre_table_heading(doc)
+    # scan_range = [h1, bold] (before first TABLE); existing_levels from scan_range = [1]
+    # target = max([1]) + 1 = 2 — NOT 4 as Fix-U v5 would produce using all active blocks
+    assert bold.kind == "title"
+    assert bold.heading_level == 2
+
+
+# ---------------------------------------------------------------------------
+# Fix-F05: _promote_post_table_checklist_items
+# ---------------------------------------------------------------------------
+
+def test_promote_post_table_checklist_basic():
+    """Two short TEXT blocks after a TABLE are promoted to list items — V3 p88 pattern."""
+    table = _Block(order_index=0, text="| Campo | Valor |", kind="table")
+    b1 = _Block(order_index=1, text="Aprovado", kind="text")
+    b2 = _Block(order_index=2, text="Pendente", kind="text")
+    doc = _Doc([_Page([table, b1, b2])])
+    _promote_post_table_checklist_items(doc)
+    assert b1.kind == "list"
+    assert len(b1.list_items) == 1
+    assert b1.list_items[0].text == "Aprovado"
+    assert b1.list_items[0].marker == "☐"
+    assert b2.kind == "list"
+    assert b2.list_items[0].text == "Pendente"
+
+
+def test_promote_post_table_checklist_with_label():
+    """TABLE → colon-label → short blocks: V6 p3/p33 pattern."""
+    table = _Block(order_index=0, text="| Medição | Valor |", kind="table")
+    label = _Block(order_index=1, text="Encaminhamento:", kind="text")
+    b1 = _Block(order_index=2, text="Conferir", kind="text")
+    b2 = _Block(order_index=3, text="Reabrir", kind="text")
+    b3 = _Block(order_index=4, text="Registrar ciência", kind="text")
+    doc = _Doc([_Page([table, label, b1, b2, b3])])
+    _promote_post_table_checklist_items(doc)
+    assert label.kind == "text"  # label itself stays TEXT
+    assert b1.kind == "list" and b1.list_items[0].text == "Conferir"
+    assert b2.kind == "list" and b2.list_items[0].text == "Reabrir"
+    assert b3.kind == "list" and b3.list_items[0].text == "Registrar ciência"
+    assert b1.list_items[0].marker == "☐"
+
+
+def test_promote_post_table_checklist_noop_single_block():
+    """Only 1 short block after TABLE — threshold not met, no promotion."""
+    table = _Block(order_index=0, text="| A | B |", kind="table")
+    b1 = _Block(order_index=1, text="Aprovado", kind="text")
+    doc = _Doc([_Page([table, b1])])
+    _promote_post_table_checklist_items(doc)
+    assert b1.kind == "text"
+
+
+def test_promote_post_table_checklist_noop_sentence_ending():
+    """Block ending with '.' stops candidate collection — no promotion."""
+    table = _Block(order_index=0, text="| A | B |", kind="table")
+    b1 = _Block(order_index=1, text="Item um.", kind="text")
+    b2 = _Block(order_index=2, text="Item dois", kind="text")
+    doc = _Doc([_Page([table, b1, b2])])
+    _promote_post_table_checklist_items(doc)
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+def test_promote_post_table_checklist_noop_allcaps():
+    """ALL-CAPS block stops candidate collection before threshold."""
+    table = _Block(order_index=0, text="| A | B |", kind="table")
+    b1 = _Block(order_index=1, text="CONFERIDO", kind="text")
+    b2 = _Block(order_index=2, text="Pendente", kind="text")
+    doc = _Doc([_Page([table, b1, b2])])
+    _promote_post_table_checklist_items(doc)
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+def test_promote_post_table_checklist_noop_no_table():
+    """Without a TABLE trigger, short blocks are not promoted."""
+    b1 = _Block(order_index=0, text="Aprovado", kind="text")
+    b2 = _Block(order_index=1, text="Pendente", kind="text")
+    doc = _Doc([_Page([b1, b2])])
+    _promote_post_table_checklist_items(doc)
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+def test_promote_post_table_checklist_stops_at_long_block():
+    """Block exceeding 40 chars stops candidate collection."""
+    table = _Block(order_index=0, text="| A | B |", kind="table")
+    b1 = _Block(order_index=1, text="Observação: texto muito longo que não é item de lista.", kind="text")
+    b2 = _Block(order_index=2, text="Pendente", kind="text")
+    doc = _Doc([_Page([table, b1, b2])])
+    _promote_post_table_checklist_items(doc)
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+def test_promote_post_table_checklist_caption_kind_promoted():
+    """CAPTION blocks (not just TEXT) qualify as candidates."""
+    table = _Block(order_index=0, text="| A | B |", kind="table")
+    b1 = _Block(order_index=1, text="Aprovado", kind="caption")
+    b2 = _Block(order_index=2, text="Pendente", kind="caption")
+    doc = _Doc([_Page([table, b1, b2])])
+    _promote_post_table_checklist_items(doc)
+    assert b1.kind == "list"
+    assert len(b1.list_items) == 1
+    assert b1.list_items[0].text == "Aprovado"
+    assert b2.kind == "list"
+
+
+def test_promote_post_table_checklist_noop_url_candidate():
+    """A URL block (containing '://') is not a valid checklist candidate."""
+    table = _Block(order_index=0, text="| A | B |", kind="table")
+    b1 = _Block(order_index=1, text="Consultar autenticidade do re", kind="text")
+    b2 = _Block(order_index=2, text="https://exemplo.invalid/V8-070", kind="text")
+    doc = _Doc([_Page([table, b1, b2])])
+    _promote_post_table_checklist_items(doc)
+    # b1 alone (before URL broke the scan) is < 2 candidates — no promotion
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+
+# ---------------------------------------------------------------------------
+# Fix-F05 v4 — _promote_ocr_checkbox_o_prefix
+# ---------------------------------------------------------------------------
+
+def test_promote_o_prefix_basic_pair():
+    """'O Vistoria...' + 'Conferência...' → ☐ + ☑ pair promoted."""
+    b1 = _Block(order_index=0, text="Conferência documental executada", kind="text")
+    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
+    doc = _Doc([_Page([b1, b2])])
+    _promote_ocr_checkbox_o_prefix(doc)
+    assert b1.kind == "list"
+    assert len(b1.list_items) == 1
+    assert b1.list_items[0].marker == "☑"
+    assert b1.list_items[0].text == "Conferência documental executada"
+    assert b2.kind == "list"
+    assert len(b2.list_items) == 1
+    assert b2.list_items[0].marker == "☐"
+    assert b2.list_items[0].text == "Vistoria complementar pendente"
+
+
+def test_promote_o_prefix_noop_single_block():
+    """Single 'O ' block alone is not promoted (needs ≥2 in the run)."""
+    b1 = _Block(order_index=0, text="Outro item qualquer longa sentença.", kind="text")
+    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
+    b3 = _Block(order_index=2, text="Texto longo que vai além de 40 caracteres e não entra.", kind="text")
+    doc = _Doc([_Page([b1, b2, b3])])
+    _promote_ocr_checkbox_o_prefix(doc)
+    # b1 ends with '.' → not a candidate; b3 > 40 chars → not a candidate
+    # b2 alone (single O-prefix block) → no promotion
+    assert b2.kind == "text"
+
+
+def test_promote_o_prefix_noop_field_value():
+    """'Responsável: Marina Teixeira' is a field-value block, excluded from promotion."""
+    b1 = _Block(order_index=0, text="Responsável: Marina Teixeira", kind="text")
+    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
+    doc = _Doc([_Page([b1, b2])])
+    _promote_ocr_checkbox_o_prefix(doc)
+    # b1 matches _FIELD_VALUE_RE → excluded; b2 alone is single block → no promotion
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+def test_promote_o_prefix_noop_ending_punct():
+    """Block ending with '.' is excluded; isolated 'O ' block not promoted."""
+    b1 = _Block(order_index=0, text="O código 0011/2026 foi verificado.", kind="text")
+    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
+    doc = _Doc([_Page([b1, b2])])
+    _promote_ocr_checkbox_o_prefix(doc)
+    # b1 ends with '.' → excluded. b2 alone → no promotion.
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+def test_promote_o_prefix_noop_url():
+    """URL block excluded (contains '://')."""
+    b1 = _Block(order_index=0, text="O Vistoria complementar pendente", kind="text")
+    b2 = _Block(order_index=1, text="https://exemplo.invalid/form", kind="text")
+    doc = _Doc([_Page([b1, b2])])
+    _promote_ocr_checkbox_o_prefix(doc)
+    # b2 has '://' → excluded. b1 alone → no promotion.
+    assert b1.kind == "text"
+    assert b2.kind == "text"
+
+
+def test_promote_o_prefix_figure_kind():
+    """FIGURE kind blocks qualify (Fix-F05 v5: scanned forms use FIGURE).
+
+    Root cause for V6 pages 22/43/87: Tesseract layout engine classifies
+    form field content as ContentKind.FIGURE on scanned_form pages.
+    Fix-F05 v4 missed these because it only accepted TEXT/CAPTION.
+    """
+    b1 = _Block(order_index=0, text="Conferência documental executada", kind="figure")
+    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="figure")
+    doc = _Doc([_Page([b1, b2])])
+    _promote_ocr_checkbox_o_prefix(doc)
+    assert b1.kind == "list"
+    assert b2.kind == "list"
+    assert len(b1.list_items) == 1
+    assert b1.list_items[0].marker == "☑"
+    assert b1.list_items[0].text == "Conferência documental executada"
+    assert len(b2.list_items) == 1
+    assert b2.list_items[0].marker == "☐"
+    assert b2.list_items[0].text == "Vistoria complementar pendente"
+
+
+# ---------------------------------------------------------------------------
+# Fix-F11: _promote_numbered_bold_headings — structural path (non-bold)
+# ---------------------------------------------------------------------------
+
+def _make_list_block(order_index, marker="- ", text="Item"):
+    """Create a LIST block with a single list item for Fix-F11 tests."""
+    item = SimpleNamespace(marker=marker, text=text)
+    b = _Block(order_index=order_index, kind="list", text=f"{marker}{text}")
+    b.list_items = [item]
+    return b
+
+
+def test_promote_numbered_structural_before_unordered_list():
+    """Non-bold '1. Title' block before unordered LIST is promoted (Fix-F11 structural path)."""
+    heading = _Block(order_index=0, text="1. Síntese executiva", kind="text")
+    lst = _make_list_block(order_index=1, marker="- ", text="Confirmar objeto")
+    doc = _Doc([_Page([heading, lst])])
+    _promote_numbered_bold_headings(doc)
+    assert heading.kind == "title"
+    assert heading.heading_level == 1
+
+
+def test_promote_numbered_structural_not_promoted_before_ordered_list():
+    """Non-bold '1. Title' before ordered list is NOT promoted — part of numbered sequence."""
+    heading = _Block(order_index=0, text="1. Prazo para entrega", kind="text")
+    lst = _make_list_block(order_index=1, marker="1. ", text="Primeiro item")
+    doc = _Doc([_Page([heading, lst])])
+    _promote_numbered_bold_headings(doc)
+    assert heading.kind == "text"
+
+
+def test_promote_numbered_structural_not_promoted_if_too_long():
+    """Non-bold numbered block > 45 chars is NOT promoted via structural path."""
+    heading = _Block(
+        order_index=0,
+        text="1. Este é um título muito longo que ultrapassa o limite",
+        kind="text",
+    )
+    lst = _make_list_block(order_index=1, marker="- ", text="Item")
+    doc = _Doc([_Page([heading, lst])])
+    _promote_numbered_bold_headings(doc)
+    assert heading.kind == "text"
+
+
+def test_promote_numbered_structural_not_promoted_if_multilevel():
+    """Non-bold '1.1 Sub' prefix (multilevel) is NOT promoted via structural path."""
+    heading = _Block(order_index=0, text="1.1 Análise", kind="text")
+    lst = _make_list_block(order_index=1, marker="- ", text="Item")
+    doc = _Doc([_Page([heading, lst])])
+    _promote_numbered_bold_headings(doc)
+    assert heading.kind == "text"
+
+
+def test_promote_numbered_bold_path_still_works():
+    """Bold '1.1.1 Title' is still promoted via the original bold path (no regression)."""
+    heading = _Block(
+        order_index=0, text="1.1.1 Consolidação dos registros", kind="text",
+        inline_style="bold",
+    )
+    doc = _Doc([_Page([heading])])
+    _promote_numbered_bold_headings(doc)
+    assert heading.kind == "title"
+    assert heading.heading_level == 3
+
+
+def test_next_block_is_unordered_list_with_bullet():
+    """_next_block_is_unordered_list returns True for LIST block with bullet marker."""
+    anchor = _Block(order_index=0, text="1. Título", kind="text")
+    lst = _make_list_block(order_index=1, marker="- ", text="Item")
+    page = _Page([anchor, lst])
+    assert _next_block_is_unordered_list(page, anchor) is True
+
+
+def test_next_block_is_unordered_list_with_ordinal():
+    """_next_block_is_unordered_list returns False for LIST block with ordinal marker."""
+    anchor = _Block(order_index=0, text="1. Título", kind="text")
+    lst = _make_list_block(order_index=1, marker="1. ", text="Item")
+    page = _Page([anchor, lst])
+    assert _next_block_is_unordered_list(page, anchor) is False
+
+
+def test_next_block_is_unordered_list_no_next():
+    """_next_block_is_unordered_list returns False when no block follows."""
+    anchor = _Block(order_index=0, text="1. Título", kind="text")
+    page = _Page([anchor])
+    assert _next_block_is_unordered_list(page, anchor) is False

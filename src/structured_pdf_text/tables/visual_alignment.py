@@ -82,7 +82,8 @@ def align_ruling_lines(image):
     if lines is None:
         return None
     horizontal, vertical = [], []
-    for x0, y0, x1, y1 in lines[:, 0]:
+    lines_2d = lines[:, 0] if lines.ndim == 3 else lines
+    for x0, y0, x1, y1 in lines_2d:
         dx, dy = float(x1-x0), float(y1-y0)
         if abs(dx) >= w*.20 and abs(dy/dx) <= .14:
             horizontal.append((dy/dx, y0-(dy/dx)*x0, abs(dx)))

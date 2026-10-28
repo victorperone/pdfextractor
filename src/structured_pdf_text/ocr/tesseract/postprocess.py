@@ -136,6 +136,8 @@ def apply_tesseract_postprocessors(document: "StructuredDocument") -> None:
     _promote_bold_pre_table_heading(document)   # Fix-U — NEW
     _promote_bold_pipe_title(document)
     _promote_seção_subseção_headings(document)
+    _promote_post_table_checklist_items(document)   # Fix-F05 v1-v3
+    _promote_ocr_checkbox_o_prefix(document)         # Fix-F05 v4 — NEW
 
 
 def suppress_tesseract_running_headers(
@@ -410,14 +412,45 @@ def _normalize_brl_currency_spacing(document: "StructuredDocument") -> None:
         )
 
 
-def _promote_numbered_bold_headings(document: "StructuredDocument") -> None:
-    """Promote bold TEXT blocks with numbered section prefixes to TITLE.
+def _next_block_is_unordered_list(page, block) -> bool:
+    """Return True if the next non-suppressed block on the page is an unordered LIST."""
+    try:
+        from structured_pdf_text.document import ContentKind
+    except Exception:
+        return False
+    blocks_sorted = sorted(page.content_blocks, key=lambda x: getattr(x, "order_index", 0))
+    found = False
+    for b in blocks_sorted:
+        if getattr(b, "suppressed", False):
+            continue
+        if b is block:
+            found = True
+            continue
+        if not found:
+            continue
+        if b.kind != ContentKind.LIST:
+            return False
+        items = getattr(b, "list_items", None) or []
+        if items:
+            first_marker = (items[0].marker or "").strip()
+            if re.match(r"^\d+[.)]", first_marker):
+                return False  # Ordered list
+        return True
+    return False
 
-    In Tesseract output the layout engine occasionally classifies section
-    headings such as "1.1.1 Title text" as TEXT even when they are bold and
-    short.  This function detects those blocks and promotes them, inferring
-    the heading level from the prefix depth calibrated against existing TITLE
-    blocks in the same document.
+
+def _promote_numbered_bold_headings(document: "StructuredDocument") -> None:
+    """Promote TEXT blocks with numbered section prefixes to TITLE.
+
+    Primary path (bold): TEXT blocks with dominant bold styling and a numbered
+    prefix such as "1.1.1 Title text" are promoted.  The heading level is
+    inferred from the prefix depth calibrated against existing TITLE blocks.
+
+    Structural path (non-bold): Very short TEXT blocks (≤ 45 chars) whose
+    numbered prefix has exactly one level ("1. Title") and whose immediately
+    following non-suppressed block is an unordered LIST are also promoted.
+    This covers section headers that are not visually bold in native PDFs
+    but serve syntactically as numbered section headings (Fix-F11).
 
     Calibration example for a document whose numbered sections start at H2:
         existing TITLEs: "1. Section" → H2, "1.1 Sub" → H3
@@ -426,8 +459,10 @@ def _promote_numbered_bold_headings(document: "StructuredDocument") -> None:
 
     Invariants:
     - Only TEXT blocks are considered (TITLE blocks already processed).
-    - Block must have dominant bold styling (``inline_style`` or ``styled_runs``).
-    - Block text must be ≤ 90 characters and must not span multiple lines.
+    - Bold path: block must have dominant bold styling.
+    - Structural path: single-level prefix only, ≤ 45 chars, next block is
+      unordered LIST.
+    - Block text must not span multiple lines.
     - Numbered prefix must contain at least one embedded dot OR a trailing dot
       to distinguish from lone integers (catalog numbers, list counters).
     - Idempotent: already-promoted blocks have kind=TITLE and are skipped.
@@ -455,14 +490,27 @@ def _promote_numbered_bold_headings(document: "StructuredDocument") -> None:
         for block in page.content_blocks:
             if block.suppressed or block.kind != ContentKind.TEXT:
                 continue
-            if not _block_is_bold(block):
-                continue
+            is_bold = _block_is_bold(block)
             text = (block.text or "").strip()
             m = _NUMBERED_PREFIX_RE.match(text)
             if not m:
                 continue
-            if len(text) > 90 or "\n" in text:
+            if "\n" in text:
                 continue
+
+            if is_bold:
+                if len(text) > 90:
+                    continue
+            else:
+                # Structural path: short single-level numbered block before unordered list
+                if len(text) > 45:
+                    continue
+                depth_check = _prefix_depth(m.group(1))
+                if depth_check != 1:
+                    continue  # Only single-level (1.) for structural path
+                if not _next_block_is_unordered_list(page, block):
+                    continue
+
             depth = _prefix_depth(m.group(1))
             if depth > 6:
                 continue
@@ -526,6 +574,10 @@ def _suppress_tesseract_coordinate_dump(document: "StructuredDocument") -> None:
 _ALLCAPS_SECTION_RE = re.compile(
     r"^[A-ZÁÀÂÃÇÉÊÍÓÔÕÚÛÜQW\s\d\-/°Nº]+$"
 )
+
+# Matches "Label: Value" field patterns (e.g., "Responsável: Marina Teixeira")
+# Used to exclude form field labels from checklist candidate detection.
+_FIELD_VALUE_RE = re.compile(r"^\w[\w\s]+:\s+\S")
 
 
 def _block_is_bold(block) -> bool:
@@ -736,15 +788,16 @@ def _promote_bold_pre_table_heading(document: "StructuredDocument") -> None:
       styled_runs) OR via ``**...**`` wrapping in the raw text.
     - The content length (stripped of ``**`` markers if present) is 40–90 chars.
     - Exactly one such qualifying bold block exists on the page.
-    - Promote to ``max(existing_heading_levels) + 1`` so the promoted heading
-      sits one level below the deepest existing heading on the page.  If no
-      existing TITLE has a known level, default to H2.
+    - Promote to ``max(scan_range heading levels) + 1`` so the promoted heading
+      sits one level below the deepest heading in the *same scan region*.
+      Using scan_range (before the first TABLE, or all blocks when no TABLE
+      exists) prevents H2/H3 titles that follow the table on hybrid_cell_stamp
+      pages from inflating the max and incorrectly pushing the candidate to H4.
+      If no TITLE in scan_range has a known level, default to H2.
 
     The 40-char minimum prevents short floating column-header labels (handled by
     Fix-K) from being promoted.  The "exactly one" constraint avoids confusion
-    with multi-column pages (also handled by Fix-K).  The dynamic level keeps
-    Fix-U from promoting a block to H2 on pages that already have an H2
-    heading from the layout engine (those pages need an H3 subordinate).
+    with multi-column pages (also handled by Fix-K).
     """
     try:
         from structured_pdf_text.document import ContentKind
@@ -799,12 +852,16 @@ def _promote_bold_pre_table_heading(document: "StructuredDocument") -> None:
 
         if len(candidates) == 1:
             block, content, strip_markers = candidates[0]
-            # Determine target level: one below the deepest existing heading on
-            # the page.  This prevents promoting to H2 when the page already has
-            # a layout-detected H2 heading (those pages need an H3 subordinate).
+            # Determine target level: one below the deepest heading in the *same
+            # scan region* as the candidate.  Using scan_range (not all active
+            # blocks) avoids counting H2/H3 titles that appear after the table on
+            # hybrid_cell_stamp pages, which would incorrectly push the promoted
+            # block to H4 instead of H2.  On redacted pages (no TABLE → scan_range
+            # == all active), the layout-detected H2 "Extrato de dados" is visible
+            # and the candidate correctly becomes H3.
             existing_levels = [
                 b.heading_level
-                for b in active
+                for b in scan_range
                 if b.kind == ContentKind.TITLE and b.heading_level is not None
             ]
             target_level = (max(existing_levels) + 1) if existing_levels else 2
@@ -1044,5 +1101,235 @@ def _promote_seção_subseção_headings(document: "StructuredDocument") -> None
     if promoted:
         print(
             f"[tesseract_post] promoted {promoted} Seção/Subseção block(s) to heading",
+            flush=True,
+        )
+
+
+def _promote_post_table_checklist_items(document: "StructuredDocument") -> None:
+    """Promote consecutive short TEXT blocks after a TABLE to list items (Fix-F05).
+
+    When Tesseract scans a form with checkbox options (e.g., '☑ Aprovado', '☐ Pendente'),
+    the checkbox symbols are lost and each option becomes a standalone short TEXT block.
+    Pattern detected: TABLE → (optional colon-label) → ≥2 consecutive short single-line
+    TEXT/CAPTION blocks without sentence punctuation → converted to LIST with marker '☐'.
+
+    Populates block.list_items with a StructuredListItem so the markdown renderer emits
+    '- ☐ <text>' correctly (renderer requires non-empty list_items; bare kind=LIST with
+    empty list_items falls through to paragraph path and escapes the leading dash).
+
+    Detection is structural (position + character-length + single-line), never corpus-specific.
+    """
+    try:
+        from structured_pdf_text.document import ContentKind, StructuredListItem
+    except Exception:
+        return
+
+    try:
+        from structured_pdf_text.geometry import BBox
+        _DUMMY_BBOX = BBox(0.0, 0.0, 1.0, 1.0)
+    except Exception:
+        BBox = None
+        _DUMMY_BBOX = None
+
+    promoted_count = 0
+    for page in document.pages:
+        blocks = sorted(page.content_blocks, key=lambda b: b.order_index)
+        active = [b for b in blocks if not b.suppressed]
+
+        i = 0
+        while i < len(active):
+            block = active[i]
+            if block.kind != ContentKind.TABLE:
+                i += 1
+                continue
+
+            j = i + 1
+
+            # Optionally skip one colon-ending label block (e.g., "Encaminhamento:")
+            if j < len(active):
+                nxt = active[j]
+                nxt_text = (nxt.text or "").strip()
+                if (
+                    nxt.kind in (ContentKind.TEXT, ContentKind.CAPTION)
+                    and nxt_text.endswith(":")
+                    and len(nxt_text) <= 40
+                    and "\n" not in nxt_text
+                ):
+                    j += 1
+
+            # Collect qualifying short single-line blocks
+            candidates = []
+            k = j
+            while k < len(active):
+                b = active[k]
+                if b.kind not in (ContentKind.TEXT, ContentKind.CAPTION):
+                    break
+                text = (b.text or "").strip()
+                if "\n" in text:
+                    break
+                if not (5 <= len(text) <= 40):
+                    break
+                if text.endswith(":"):
+                    break  # another label — stop
+                if text[-1] in ".!?":
+                    break  # sentence ending — footnote or observation
+                if b.heading_level is not None:
+                    break
+                if _ALLCAPS_SECTION_RE.match(text):
+                    break  # all-caps → watermark / stamp / heading
+                if "://" in text:
+                    break  # URL — not a checkbox label
+                candidates.append(b)
+                k += 1
+
+            if len(candidates) >= 2:
+                for b in candidates:
+                    original_text = (b.text or "").strip()
+                    b.kind = ContentKind.LIST
+                    # Build a StructuredListItem so the renderer emits "- ☐ <text>".
+                    # Use the block's bbox when available; fall back to a dummy for test stubs.
+                    bbox = getattr(b, "bbox", None) or _DUMMY_BBOX
+                    item = StructuredListItem(
+                        marker="☐",
+                        text=original_text,
+                        level=0,
+                        bbox=bbox,
+                        order_index=b.order_index,
+                        marker_source="inferred",
+                    )
+                    existing = getattr(b, "list_items", None)
+                    if existing is None:
+                        b.list_items = [item]
+                    else:
+                        existing.append(item)
+                promoted_count += len(candidates)
+
+            i = k  # advance past the processed range
+
+    if promoted_count:
+        print(
+            f"[tesseract_post] promoted {promoted_count} post-TABLE short blocks to checklist items",
+            flush=True,
+        )
+
+
+def _promote_ocr_checkbox_o_prefix(document: "StructuredDocument") -> None:
+    """Promote OCR checkbox pairs where ☐ was OCRed as letter 'O ' (Fix-F05 v4).
+
+    Tesseract OCR typically converts the open-checkbox symbol '☐' to the letter
+    'O'. When a scanned form has checkboxes, the OCR output looks like:
+
+        Conferência documental executada      ← ☑ item (☑ was missed entirely)
+        O Vistoria complementar pendente      ← ☐ item (☐ OCRed as 'O')
+
+    Detection: collect contiguous runs of short, single-line, non-punctuated
+    TEXT blocks where at least one starts with 'O ' (letter O + space). A run
+    of ≥2 blocks with ≥1 'O '-prefix block is promoted to a checklist.
+
+    Marker assignment:
+        - Block starting with 'O ': strip 'O ', assign marker '☐'
+        - Other blocks in the run: assign marker '☑'
+
+    Guards applied to every candidate:
+        - Kind must be TEXT, CAPTION, or FIGURE (scanned forms use FIGURE)
+        - No sentence-ending punctuation (.!?:;)
+        - No embedded newlines
+        - Length 5–40 characters
+        - Not all-caps (watermarks / stamps)
+        - No URL ('://')
+        - Not a field-value line (e.g., 'Responsável: Marina Teixeira')
+        - Not a heading block
+    """
+    try:
+        from structured_pdf_text.document import ContentKind, StructuredListItem
+    except Exception:
+        return
+
+    try:
+        from structured_pdf_text.geometry import BBox
+        _DUMMY_BBOX = BBox(0.0, 0.0, 1.0, 1.0)
+    except Exception:
+        BBox = None
+        _DUMMY_BBOX = None
+
+    _ENDING_PUNCT = frozenset(".!?:;")
+
+    def _qualifies(b) -> bool:
+        if b.kind not in (ContentKind.TEXT, ContentKind.CAPTION, ContentKind.FIGURE):
+            return False
+        if getattr(b, "suppressed", False):
+            return False
+        text = (b.text or "").strip()
+        if "\n" in text:
+            return False
+        if not (5 <= len(text) <= 40):
+            return False
+        if not text or text[-1] in _ENDING_PUNCT:
+            return False
+        if b.heading_level is not None:
+            return False
+        if _ALLCAPS_SECTION_RE.match(text):
+            return False
+        if "://" in text:
+            return False
+        if _FIELD_VALUE_RE.match(text):
+            return False
+        return True
+
+    def _is_o_prefix(b) -> bool:
+        text = (b.text or "").strip()
+        return len(text) > 2 and text[0] == "O" and text[1] == " "
+
+    promoted_count = 0
+    for page in document.pages:
+        blocks = sorted(page.content_blocks, key=lambda b: b.order_index)
+        active = [b for b in blocks if not getattr(b, "suppressed", False)]
+
+        i = 0
+        while i < len(active):
+            if not _qualifies(active[i]):
+                i += 1
+                continue
+
+            # Collect contiguous qualifying blocks starting at i
+            run_start = i
+            run_end = i + 1
+            while run_end < len(active) and _qualifies(active[run_end]):
+                run_end += 1
+
+            run = active[run_start:run_end]
+
+            # Promote only if ≥2 members and ≥1 has the 'O ' prefix
+            if len(run) >= 2 and any(_is_o_prefix(b) for b in run):
+                for b in run:
+                    text = (b.text or "").strip()
+                    if _is_o_prefix(b):
+                        item_text = text[2:].strip()
+                        marker = "☐"
+                    else:
+                        item_text = text
+                        marker = "☑"
+                    b.kind = ContentKind.LIST
+                    bbox = getattr(b, "bbox", None) or _DUMMY_BBOX
+                    item = StructuredListItem(
+                        marker=marker,
+                        text=item_text,
+                        level=0,
+                        bbox=bbox,
+                        order_index=b.order_index,
+                        marker_source="inferred",
+                    )
+                    existing = getattr(b, "list_items", None)
+                    if existing is None:
+                        b.list_items = [item]
+                    else:
+                        existing.append(item)
+                promoted_count += len(run)
+
+            i = run_end
+
+    if promoted_count:
+        print(
+            f"[tesseract_post] promoted {promoted_count} O-prefix blocks to checklist items",
             flush=True,
         )

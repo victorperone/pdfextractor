@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 from structured_pdf_text.document import TextToken
 from structured_pdf_text.geometry import BBox
 from structured_pdf_text.tables.visual import detect_visual_table, detect_visual_grid, _build_visual_cells
-from structured_pdf_text.tables.visual_alignment import point, quarter_turn_to_source
+from structured_pdf_text.tables.visual_alignment import point, quarter_turn_to_source, align_ruling_lines
 from structured_pdf_text.tables.text_join import join_table_tokens
 
 
@@ -275,3 +275,67 @@ def test_rectified_separator_tolerance_uses_page_units_at_high_resolution():
     assert (table.row_count, table.column_count) == (3, 3)
     assert all(c.rowspan == c.colspan == 1 for c in table.cells)
     assert [c.text for c in table.cells] == [f'{r}:{c}' for r in range(3) for c in range(3)]
+
+
+def test_spanned_table_html_uses_compact_format():
+    """Regression: _render_spanned_table_html must produce compact inline rows.
+
+    Pretty-printed format (  <tr>\\n    <cells>\\n  </tr>) adds ~130 extra
+    whitespace characters vs the reference format (<tr><cells></tr>), which
+    the CER metric counts as 137 insertions per page for V6 pages 28/50/81.
+    Fix-F14: each row must be on a single line with no indentation.
+    """
+    from structured_pdf_text.document import StructuredTable, TableCell, TableMethod
+    from structured_pdf_text.renderers.markdown import _render_spanned_table_html
+
+    cells = [
+        TableCell(0, 0, 2, 1, BBox(0, 0, 50, 40), 'Natureza', [], 0.9),
+        TableCell(0, 1, 1, 2, BBox(50, 0, 150, 20), 'Previsto', [], 0.9),
+        TableCell(1, 1, 1, 1, BBox(50, 20, 100, 40), 'Quantidade', [], 0.9),
+        TableCell(1, 2, 1, 1, BBox(100, 20, 150, 40), 'Valor', [], 0.9),
+        TableCell(2, 0, 1, 1, BBox(0, 40, 50, 60), 'Drenagem', [], 0.9),
+        TableCell(2, 1, 1, 1, BBox(50, 40, 100, 60), '8', [], 0.9),
+        TableCell(2, 2, 1, 1, BBox(100, 40, 150, 60), 'R$ 34.000,00', [], 0.9),
+    ]
+    table = StructuredTable('test', [], cells, 3, 3, 0.9, TableMethod.VISUAL_MODEL)
+    html = _render_spanned_table_html(table)
+
+    # Every content line must be a <tr>...</tr> on a single line (compact format)
+    for line in html.splitlines():
+        stripped = line.strip()
+        if stripped in ('<table>', '</table>', ''):
+            continue
+        assert stripped.startswith('<tr>') and stripped.endswith('</tr>'), (
+            f"Expected compact <tr>...</tr> on one line, got: {stripped!r}"
+        )
+    # No indentation or standalone cell tags allowed
+    assert '  <tr>' not in html, "Pretty-printed indented <tr> found — compact format required"
+    assert '\n    <' not in html, "Per-cell indentation found — compact format required"
+
+
+def test_align_ruling_lines_works_with_opencv5_houghlinesP_shape():
+    """Regression: OpenCV 5 changed HoughLinesP return shape from (N,1,4) to (N,4).
+
+    The old code `for x0,y0,x1,y1 in lines[:,0]` raised TypeError in OpenCV 5
+    because lines[:,0] returns scalars, not 4-tuples. The exception was silently
+    caught by api.py causing all rotated-table grid detection to be discarded.
+    The fix selects indexing based on lines.ndim, compatible with both versions.
+
+    A slight shear is required so align_ruling_lines has reason to return a
+    non-None transform (perfectly axis-aligned grids return None by design).
+    """
+    cv2 = pytest.importorskip('cv2')
+    import numpy as np
+
+    upright, _ = _financial_grid()
+    shear_matrix = np.array([[1., .018, 5.], [-.028, 1., 35.]], dtype=np.float32)
+    skewed = cv2.warpAffine(np.asarray(upright), shear_matrix, (850, 310),
+                            borderValue=(255, 255, 255))
+
+    result = align_ruling_lines(Image.fromarray(skewed))
+    assert result is not None, (
+        "align_ruling_lines returned None for skewed grid — "
+        "OpenCV HoughLinesP shape compat bug may have recurred"
+    )
+    rectified, transform = result
+    assert transform is not None
