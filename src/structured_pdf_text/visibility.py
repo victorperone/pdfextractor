@@ -199,16 +199,36 @@ def characters_inside_page(
     characters: Iterable[NativeCharacter],
     page_bbox: BBox,
 ) -> tuple[list[NativeCharacter], int]:
-    """Keep characters with at least some glyph area inside the visible page box."""
+    """Keep characters with at least some glyph area inside the visible page box.
+
+    A small y-axis tolerance (15 % of page height) accommodates form XObjects
+    whose local coordinate space is not fully transformed to page space before
+    pypdfium2 reports character positions.  Without this margin, list items
+    physically placed via a form XObject can have cy slightly above y0 (screen
+    top) and are incorrectly discarded even though they appear in the page's
+    text stream.  BBox coordinates use screen space (y0=0 at top, y increases
+    downward to y1=page_height at bottom).  Characters above the page top have
+    negative cy values, so the tolerance extends y0 upward (negative direction).
+    The tolerance is asymmetric: we allow modest overflow above y0 only, not
+    below y1 or beyond x0/x1, because the only observed failure mode is
+    y-axis overflow from vertical coordinate misalignment in form XObjects.
+    Characters in this above-y0 tolerance zone are exempted from the inkless
+    check in api.py (their pixel boxes map to negative image coordinates and
+    would be incorrectly classified as hidden even though they are visible).
+    """
+    y_tolerance = (page_bbox.y1 - page_bbox.y0) * 0.15
     visible: list[NativeCharacter] = []
     outside = 0
     for character in characters:
         # Character boxes may extend a few points beyond the crop because of
         # font metrics. Treat a glyph as off-page only when its center lies
         # beyond the visible page; partial edge overlap is still visible.
+        # BBox uses screen coords (y0=top, y increases downward, y1=bottom).
+        # Tolerance extends y0 upward (negative) to capture form XObject
+        # characters whose screen cy is slightly negative (above page top).
         if not (
             page_bbox.x0 <= character.bbox.cx <= page_bbox.x1
-            and page_bbox.y0 <= character.bbox.cy <= page_bbox.y1
+            and page_bbox.y0 - y_tolerance <= character.bbox.cy <= page_bbox.y1
         ):
             outside += 1
         else:

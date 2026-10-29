@@ -199,7 +199,7 @@ def _looks_like_semantic_status(
     sizes = [_font_size(line) for line in group if _font_size(line) > 0]
     median_size = median(sizes) if sizes else typical_height
     font_above_body = median_size >= max(12.0, (body_font_median or typical_height) * 1.25)
-    fragmented = len(group) > 1
+    fragmented = len(group) >= 3
     style_coherent = _style_is_coherent(group)
     dark_contrast = luminance is not None and luminance <= 0.55
     opaque_contrast = opacity is not None and opacity >= 0.82 and not light

@@ -455,6 +455,8 @@ def _build_region_blocks(
     if ordered_lines is None:
         ordered_lines, _ = order_lines_in_region(region)
     kind = _content_kind_from_region(region.kind)
+    if kind == ContentKind.UNKNOWN:
+        kind = ContentKind.TEXT
 
     # Find every table that intersects this region, even when its block was
     # emitted in an earlier region. Previously emitted tables still own their

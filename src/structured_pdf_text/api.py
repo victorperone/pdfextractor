@@ -365,17 +365,33 @@ class PdfTextExtractor:
                     # Paint-order check per glyph, in the modes that render:
                     # covered, same-color, clipped or invisible glyphs leave no
                     # ink, while text drawn over a solid fill remains visible.
+                    #
+                    # Form XObject characters above the page top have negative
+                    # screen cy (screen coords: y0=0 at top, y1=height at bottom).
+                    # Their pixel boxes map to negative image y-coordinates and
+                    # are always classified as inkless even though they are
+                    # visually present.  Run the ink check only on in-page
+                    # characters (cy >= page y0), then restore the exempted ones
+                    # so they remain in the text stream for reconciliation.
+                    page_y0 = native_page.bbox.y0
+                    xobj_tolerance_chars = [
+                        c for c in visible_characters if c.bbox.cy < page_y0
+                    ]
+                    in_page_chars = [
+                        c for c in visible_characters if c.bbox.cy >= page_y0
+                    ]
                     hidden_glyphs = source.hidden_glyphs(
                         page_index,
-                        visible_characters,
+                        in_page_chars,
                         native_page.bbox,
                         native_page.objects.rotation,
-                    ) if visible_characters else frozenset()
+                    ) if in_page_chars else frozenset()
                     if hidden_glyphs is not None:
-                        visible_characters, inkless_character_count = characters_without_ink(
-                            visible_characters,
+                        in_page_chars, inkless_character_count = characters_without_ink(
+                            in_page_chars,
                             hidden_glyphs,
                         )
+                        visible_characters = xobj_tolerance_chars + in_page_chars
                         redacted_character_count = inkless_character_count
                     else:
                         # Pixel heuristic for PDFium builds that cannot attribute

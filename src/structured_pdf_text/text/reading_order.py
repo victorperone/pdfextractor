@@ -557,6 +557,15 @@ def _region_pair_score(
     if second.kind == RegionKind.HEADER or first.kind == RegionKind.FOOTER:
         return -100.0
 
+    # Fix-F38: TITLE region precedes overflow content clamped to page top (y0≤1).
+    # Overflow lines from the previous page land at y≤0, whose bbox is clamped to
+    # y0=0; any region carrying only such lines sits at the top of the page but
+    # logically belongs *after* the current page's section heading.
+    if first.kind == RegionKind.TITLE and second.bbox.y0 <= 1.0:
+        return 10.0
+    if second.kind == RegionKind.TITLE and first.bbox.y0 <= 1.0:
+        return -10.0
+
     score = 0.0
     horizontal_overlap = _axis_overlap(
         first.bbox.x0,
@@ -611,6 +620,13 @@ def _region_pair_score(
         score += 4.0
     elif second.bbox.y1 <= first.bbox.y0 + tolerance and second.bbox.x1 <= first.bbox.x0 + tolerance:
         score -= 4.0
+    elif first.bbox.y1 <= second.bbox.y0 + tolerance:
+        # Fix-F37: clear vertical gap but insufficient horizontal overlap for the
+        # main +8 score (e.g. a stamp region on the right half above a wider text
+        # block). Use a weak score to overcome the semantic-priority tie-breaker.
+        score += 2.0
+    elif second.bbox.y1 <= first.bbox.y0 + tolerance:
+        score -= 2.0
 
     first_order = _region_native_order(first)
     second_order = _region_native_order(second)

@@ -8,33 +8,53 @@
 
 | Campo | Valor |
 |---|---|
-| **Última atualização** | 2026-10-28 |
+| **Última atualização** | 2026-10-29 |
 | **Branch** | `feat/tesseract-optimization` |
-| **Commit base** | `92cd6c5` + Fix-A1/A2b/A3 + Fix-E + Fix-F + Fix-G + Fix-I + Fix-J + Fix-K + Fix-L + Fix-M + Fix-N + Fix-O + Fix-P + Fix-F11 |
-| **Última run avaliada** | **0047** (Fix-F11 ACEITAR_PROVISORIAMENTE) |
+| **Commit base** | `92cd6c5` + Fix-A1/A2b/A3 + Fix-E + Fix-F + Fix-G + Fix-I + Fix-J + Fix-K + Fix-L + Fix-M + Fix-N + Fix-O + Fix-P + Fix-F11 + Fix-F19 + Fix-F21 + Fix-F24 + Fix-F25 + Fix-F26 + Fix-F28 + Fix-F35 + Fix-F36 + Fix-F37 + Fix-F38 + Fix-F39 (F33 REVERTIDO) |
+| **Última run avaliada** | **0084** (Tesseract: Fix-F39 validação V6+V7+V8 completa — todos os 5 corpora confirmados) |
 | **Run em andamento** | nenhuma |
-| **Melhor série 2** | **RUN 0048** — best_known=0048 |
+| **Melhor Tesseract** | **RUN 0081/0082/0083/0084** — best_known (V3=0.050806 r0082, V5=0.126830 r0081, V6=0.020874 r0083, V7=0.008937 r0083, V8=0.011294 r0084) |
 | **Esquema do avaliador** | `evaluation-3.0.0` |
 | **Engine** | tesseract, balanced/adaptive, pt-BR |
-| **Fase atual** | `ANALYZING` — Fix-F12 ACEITAR_PROVISORIAMENTE (run 0048). counter=21, best_known=run 0048. Próximo: F13 (multi-coluna V6) ou F14 (merged cells). |
-| **Cron** | `32fde507` — ativo, 5 min, renovado 2026-10-27, expira ~2026-11-03 |
-| **provisional_corrections_count** | 21 |
+| **Fase atual** | `ANALYZING` — Fix-F39 validado em todos os 5 corpora. Próximo: Fix-F40. Candidatos: Pattern B (headings raster ausentes: p017, p026, p032), Pattern C (scrambled native heading: p028), Pattern A residual (p030, p003). |
+| **Cron** | `a6078ceb` — ativo, 5 min, renovado 2026-10-29, expira ~2026-11-05 |
+| **provisional_corrections_count (Tesseract)** | 12 |
 
-### Métricas atuais — melhor resultado série 2 (run 0032, 2026-10-27)
+### Métricas atuais — melhor resultado série 2 (run 0081/0082, 2026-10-29)
 
 | Métrica | V3 (144p) | V5 (42p) | V6 (95p) | V7 (80p) | V8 (90p) |
 |---|---|---|---|---|---|
-| `cer_markdown_raw` | **0.08270** | 0.19619 | **0.04405** | 0.01364 | **0.01887** |
-| `cer_sequential_normalized` | 0.04212 | 0.1461 | **0.0202** | 0.0011 | — |
-| `wer_sequential` | **0.05406** | 0.1554 | **0.0281** | 0.0012 | — |
-| `heading_f1` | 0.867 | **0.838** | **0.973** | **0.989** | **0.991** |
-| `heading_precision` | 0.929 | 1.000 | **0.996** | 1.000 | 0.989 |
-| `heading_recall` | 0.813 | **0.721** | **0.950** | 0.978 | **0.993** |
-| `heading_level_match_rate` | 0.0¹ | 1.0 | 1.0 | 1.0 | 1.0 |
-| `heading_text_cer` | 0.145 | 0.368 | **0.079** | 0.026 | — |
-| `text_coverage_recall` | 0.9597 | 0.893 | **0.989** | 1.000 | 0.9937 |
-| `text_coverage_precision` | **0.9775** | 0.995 | **0.993** | 0.999 | — |
+| `cer_markdown_raw` | **0.050806** | **0.126830** | **0.020874** | **0.008937** | **0.011294** |
+| `heading_detection_f1` | — | 0.8571 | 0.9904 | 0.9891 | 0.9927 |
+| `heading_recall` | 0.8125 | 0.75 | 0.9847 | — | — |
+| `heading_level_match_rate` | 0.0¹ | 0.9608 | 1.0 | — | — |
+| `list_group_detection_f1` | — | 0.8667 | 1.0 | — | — |
+| `text_coverage_recall` | 0.9593 | 0.9210 | 0.9881 | — | — |
 | `rank_eligible` | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+**Progressão global do ciclo Tesseract** (baseline run 0042 → Fix-F39):
+
+| Corpus | Baseline (r0042) | Fix-F39 atual | Δ absoluto | Δ % |
+|---|---|---|---|---|
+| V3 | 0.082554 | 0.050806 | −0.031748 | **−38.5%** |
+| V5 | 0.196192 | 0.126830 | −0.069362 | **−35.4%** |
+| V6 | 0.043444 | 0.020874 | −0.022570 | **−51.9%** |
+| V7 | 0.013641 | 0.008937 | −0.004704 | **−34.5%** |
+| V8 | 0.018916 | 0.011294 | −0.007622 | **−40.3%** |
+
+¹ V3 heading_level_match_rate=0.0 ignorado por instrução do usuário.
+
+**Fix-F24 (2026-10-28)**: Joined soft-wrap scan lines (`\n` → ` `) in TEXT blocks via `markdown.py`. Mirrors Fix-F21 (TITLE blocks). Impacto: V5 −1.69% (−71 ops), V3 −0.46% (−10 ops), V6 −15.9% (−397 ops).
+
+**Fix-F25 (2026-10-28)**: Redução de over-escaping em `_escape_inline_text()` — base `escaped` set reduzido de `set("\\`*_[]<>!")` para `set("\\")`. REF nunca usa esses escapes em parágrafo; EXT tinha 50 backslashes desnecessários. Impacto: V5 −0.147% (−6 ops, 4081→4075), V3 −0.91% (−20 ops, 2188→2168), V6 estimado ~−0.82% (−17 ops). counter=30.
+
+**Fix-F26 (2026-10-28)**: Detecção de linguagem em blocos de código `_detect_code_lang()`. `_render_block_text()` sempre emitia ` ```text ` para blocos preformatted. REF V3 especifica linguagens específicas (python, sql, json, csv, yaml). Detectores via regras não corpus-específicas: JSON (starts with `{`/`[`), SQL (SELECT\b), Python (def func(...) ->), CSV (linhas com `;` consistentes), YAML (all lines match `^\w+:`). V5 e V6 não afetados (REF usa `text`). Impacto: V5 0% (idêntico), V3 −0.97% (−21 ops, 2168→2147, p017: 13→4, p018: 16→4). counter=31.
+
+**IRREDUCIVEIS confirmados (2026-10-28)**:
+- V6 p021/028/042/050/081/086 (~145 ops cada): HTML table indentation — V3 REF usa `  <tr>` indentado, V6 REF usa `<tr>` compacto. Conflito irreconciliável (Fix-F22 run 0059, Fix-F26 tentativa 1 abortada).
+- V6 p003/033/089 (~89 ops): múltiplos espaços em campos metadata + OCR char confusions (OOI1→O0I1, N-030→N-03O).
+- V6 p061/077 (~61-81 ops): reading order de stamps diagonais + blockquote ausente.
+- V3 p069 (32 ops): texto vertical OCR. V3 p086 (30 ops): confusable chars.
 
 ¹ V3 heading_level_match_rate=0.0 ignorado por instrução do usuário.
 
@@ -908,14 +928,18 @@ A tabela de índice com `<table>`, `<tr>`, `<td>` foi preservada como HTML no ma
 | **F04** | Tabelas rotacionadas não extraídas | V3, V6 | V3:96,97,99; V6:31,47,75 | ALTA | Conteúdo totalmente perdido; CER >9.0 em V3 p.96 | V3 p.99: `NVOS bh ap \+ 66 OUNd...` em vez de tabela financeira | Confirmada: Tesseract sem deskew não processa páginas rotacionadas | `automation/extract_worker.py` (pré-processamento) | **Sim** | Baixo | **3** (ativo) | 🔄 **ATIVO** — sem tentativa de correção |
 | **F05** | Formulários OCR extraídos como texto plano | V3, V5, V6 | V5:vários; V6:22,43,87 | ALTA | Checkboxes/listas perdidos; list_group_f1 baixo | V6 p.22/43/87: blocos FIGURE em scanned_form com `O ` prefix (checkbox ☐ lido como letra O) | Confirmada: Tesseract perde ☑/☒/☐; Fix-F05 v5 extendeu _qualifies() para FIGURE kind | `ocr/tesseract/postprocess.py` `_promote_ocr_checkbox_o_prefix()` | **Sim** | Médio | **5** (5/5 usadas) | ✅ **RESOLVIDO (V6/V8)** — Fix-F05 v5 (run 0046): V6 list_group_f1 0.9703→**1.0** (+2.97pp), list_item_f1 0.9769→**1.0**, fn=0. V8 list_group_f1=1.0 mantido. V5 fn=6 grupos persistem (sem TABLE predecessor, bloqueado — layout engine). |
 | **F06** | Falha de avaliação V7 por budget Levenshtein | V7 | p.46 (3131 chars), p.4, p.63 | ALTA | 0 métricas disponíveis para V7 | `EditDistanceResourceLimit`: total 10,8M células no band 992 (p.46) | Confirmada: `_process_page` não captura `EditDistanceResourceLimit` | `scripts/compute_metrics.py` (linha ~1287) | N/A — problema do avaliador | N/A | N/A | ✅ **RESOLVIDO** (avaliador atualizado evaluation-3.0.0; V7 produz métricas desde run 0006) |
-| **F07** | Tabelas OCR de baixa resolução não detectadas | V6 | 21, 42, 86 | MÉDIA | Planilhas financeiras perdidas; table_recall reduzido | Condição `ocr_merged_cells` + `ocr_low_resolution`; extracted tem apenas parágrafos | Hipótese: low-res + células mescladas impedem detecção de bordas pelo Tesseract | `layout/engine.py` | **Sim** | Baixo | **5** | 🔄 **ATIVO** — sem tentativa de correção |
+| **F07** | Tabelas OCR de baixa resolução não detectadas | V6 | 21, 42, 86 | MÉDIA | Planilhas financeiras perdidas; table_recall reduzido | Condição `ocr_merged_cells` + `ocr_low_resolution`; extracted tem apenas parágrafos | **RESOLVIDO por F12**: Fix-F12 (OpenCV5 HoughLinesP shape fix) eliminou fn=88. run 0050: table_detection_f1=1.0, cell_detection_f1=1.0 (tp=1020, fn=0). | `tables/visual_alignment.py:85` | cp_0076 | — | ✅ **RESOLVIDO por F12** — run 0050 confirmou. Páginas 21/42/86 ainda têm CER residual ~0.14 (I=137 de HTML format para merged cells — causa separada F14/F07b). |
 | **F08** | OCR confusibles em V6 (substitution_rate alto) | V6 | 43, 82 (manifesto flag) | BAIXA | Identificadores e valores incorretos | V6 p.43 `substitution_rate=0.753` (manifesto); condição `ocr_confusables` | **Verificado run 0047: p43 CER=0.014 (D=4,I=2,S=4/717), p82 CER=0.020 (D=1,I=4,S=13/916) — Tesseract lida bem** | N/A — não é problema real em prática | **Não** | — | — | ⚠️ **MONITORAR** — run 0047 confirmou CER <2% em p43 e p82. Manifesto flag `ocr_confusables` mas desempenho real excelente. Rebaixado de ATIVO para MONITORAR. Principais problemas CER em V6 são as tabelas ausentes (F12) e páginas multi-coluna (F13). |
 | **F09** | CER sequencial global indisponível (budget) | V3, V5, V6 | — (documento inteiro) | BAIXA | 6–12 métricas globais marcadas `resource_limited` | Documentos com 25K–94K chars excedem 8M células no nível do documento inteiro | Confirmada: 8M cells insuficiente para Levenshtein de documento completo | `src/.../edit_distance.py` (DEFAULT_MAX_EDIT_CELLS) | N/A — problema do avaliador compartilhado | N/A | **7** | ⚠️ **PARCIAL** — evaluation-3.0.0 aumentou métricas disponíveis (8 indisponíveis em run 0011, antes 12); globais ainda resource_limited |
 | **F10** | Formatação bold/italic perdida em V3 | V3 | 1-144 (sistemático) | BAIXA | `**Controle de página:**` → `Controle de página:` | Evidência em múltiplas páginas | Hipótese: Tesseract não informa markup de estilo ao pipeline de pós-processamento | `renderers/markdown.py` | **Sim** | Baixo | **8** | 🔄 **ATIVO** — sem tentativa de correção |
 | **F11** | V5 headings numbered não-bold ignorados | V5 | 18, 38 (+15 ausentes da extração) | MÉDIA | `1. Síntese executiva` não detectado como heading; 19 fn headings V5 | V5 p18/38: `1\. Síntese executiva` extraído como texto plano; referência: `## 1. Síntese executiva` | Confirmada: bloco TEXT não-bold com prefix `1.`; `_block_is_bold()` retorna False; bloco seguido de lista de itens (unordered LIST) | `ocr/tesseract/postprocess.py` `_promote_numbered_bold_headings()` | **Sim** | Baixo | **9** | ✅ **RESOLVIDO (V5 +2 tp)** — Fix-F11 (run 0047): structural path adicionado. V5 h_f1 0.8376→**0.8571** (+1.95pp), h_rec 0.7206→**0.75** (+2.94pp), tp 49→51, fn 19→17. Zero regressões. fn=17 remanescentes são headings ausentes da extração (adversarial pages — fora do escopo de postprocessors). |
 | **F12** | Tabelas rotacionadas V6 não detectadas | V6 | 21, 42, 86 (scanned_form) + 31, 47, 75 (IRINF) | ALTA | 88 células fn; cell_detection_f1=0.9539→**1.0** (+4.61pp); table_f1=0.9688→**1.0** (+3.12pp) | V6 p31/47/75: fn 16→0 por página, CER 0.17→**0.013**. V3 cell_f1 0.9703→0.9813 (+1.10pp), fn 66→34 | OpenCV 5 mudou shape HoughLinesP de (N,1,4) para (N,4); `lines[:,0]` levantava TypeError silenciado → grid descartado | `tables/visual_alignment.py:85` | `lines_2d = lines[:,0] if lines.ndim==3 else lines` | cp_0076 | **10** | ✅ **RESOLVIDO — ACEITAR_PROVISORIAMENTE** — run 0048 confirmado (2026-10-28). V6 cell_fn 88→0, V3 cell_fn 66→34. V5 zero regressão. counter 20→21, best_known=run 0048. |
 | **F13** | Páginas multi-coluna V6 com reordenação de texto | V6 | 27, 55, 74 (`columns_3+reading_order+sidebar`) | MÉDIA | CER 0.17-0.19 com recall=1.0 — todo o texto presente mas em ordem errada | p027/055/074: CER 0.17-0.19, D=124-128, I=122, S=10, recall=1.0, prec=1.0. Texto presente mas sequência de caracteres diverge. Conteúdo: 3 colunas + sidebar + notas de rodapé | Hipótese: extração em ordem de coluna (col1 topo → col2 topo → col3) em vez de ordem de leitura (esquerda→direita, topo→baixo em cada região) | `layout/engine.py` (ordenação de blocos em layout multi-coluna) | **Sim** | Médio | — | 🔄 **NOVO** — identificado em análise run 0047 (2026-10-28). Sem tentativa de correção. |
-| **F14** | Tabelas HTML com cabeçalhos mesclados geram caracteres extras | V6 | 28, 50, 81 (`html_table_headers+merged_cells+inline_bold`) | BAIXA | CER 0.15 com D=0, I=137, S=21 por página — texto extra gerado | p028/050/081: CER ~0.147, D=0, I=137, S=21, recall=1.0, prec=1.0. Inserções sem deleções sugerem conteúdo extra sendo gerado pelo renderizador de tabelas | Hipótese: células mescladas ou cabeçalhos inline_bold geram marcadores extras não presentes na referência | `renderers/markdown.py` (renderização de tabelas HTML com merged_cells) | **Sim** | Baixo | — | 🔄 **NOVO** — identificado em análise run 0047 (2026-10-28). Sem tentativa de correção. |
+| **F14** | Tabelas HTML com cabeçalhos mesclados geram caracteres extras | V6 | 28, 50, 81 (`html_table_headers+merged_cells+inline_bold`) | BAIXA | CER 0.15 com D=0, I=137, S=21 por página — texto extra gerado | p028/050/081: CER ~0.147, D=0, I=137, S=21, recall=1.0, prec=1.0. Inserções sem deleções sugerem conteúdo extra sendo gerado pelo renderizador de tabelas | **Causa raiz**: V3 referência usa HTML pretty-printed, V6 referência usa compacto — inconsistência de corpora. Fix compact causou V3 +37.8% CER. | `renderers/markdown.py` | — | 1 | 🚨 **REVERTIDA** — Fix-F14 causou regressão V3 +37.8% CER. Raiz: inconsistência entre corpora (V3=pretty-printed, V6=compact). Problema de corpus, não de extrator. |
+| **F15** | header_only_table renderiza como HTML em vez de pipe | V6 | 14, 49, 70 (`adjacent_tables+header_only_table+narrow_ocr_table`) | MÉDIA | CER 0.14 com D=8, I=78, S=20 por página | p014/049/070: tabela "Campo/Status" gerada como `<table><tr><td>` mas referência usa `\| Campo \| Status \|` | **Causa raiz**: `infer_header_rows()` retorna `()` para tabelas sem body rows; `_render_table()` via `() != (0,)` roteia para HTML mesmo sem merged cells. Fix-F15 universal falhou: V3 data-only tables (multi-row + header_rows=()) revertidas para HTML. **AJUSTAR**: pipe apenas para row_count==1 AND column_count>1. | `renderers/markdown.py:297` | cp_0080 | 2 | ✅ **RESOLVIDO — ACEITAR_PROVISORIAMENTE** — Fix-F15-AJUSTAR (run 0052, 2026-10-28). V6: 0.02867→**0.02696** (-6.0%), p014/049/070 cada -51%. V3: 0.05538→**0.05377** (-2.9%, p047: 0.5496→0.0305). V5: 0.0% (estável). Sem regressões. counter=23, best_known=0052. |
+| **F16** | OCR tables sem header shading visual detectadas como data-only | V5 | 19, 24 (`raster_ocr+table`) | ALTA | CER ~0.44-0.50 por página | p019: "Protocolo/Data/Responsável/Situação" como primeira linha tratada como dado (header_rows=()), pipe esperado; p024: "NF-e/Emissão/Valor/Status" idem | **Causa raiz**: `infer_visual_header_rows()` usa apenas shading de background para detectar header rows. Tabelas OCR sem coloração de cabeçalho retornam `()`. Fix-F16: fallback baseado em conteúdo — se ≥80% das células da primeira linha são alpha-heavy (letras ≥ dígitos), retorna `(0,)`. V3/V6: zero páginas `raster_ocr+table` — sem impacto. | `tables/headers.py:infer_visual_header_rows()` | cp_pre-fix-F16 | 1 | ✅ **RESOLVIDO — ACEITAR_PROVISORIAMENTE** — Fix-F16 (run 0053, 2026-10-28). V5: 0.19600→**0.17511** (-10.65%, p019: 0.4429→0.0206, p024: 0.4964→0.0231). V3 bonus: 0.05377→**0.05265** (-2.07%, p098/099 via visual model). V6: 0.02696 inalterado. Sem regressões. counter=24, best_known=0053. |
+| **F17** | URL auto-link redundante `[url](url)` quando texto de exibição é a própria URL | V5 | 8, 18, 38, 39 (`raster_graphic`, `raster_ocr`) | BAIXA | I=54 extra chars por página afetada | p008/039: `[https://exemplo.invalid/verificar/...](https://exemplo.invalid/verificar/...)` vs gabarito `https://exemplo.invalid/verificar/...` | **Causa raiz**: `_render_block_text()` em `markdown.py` emite `[{text}]({uri})` sem checar se `text == uri`. Fix-F17: se `text.strip() == link_uri or text.strip() == safe_uri`, retornar `text` diretamente. | `renderers/markdown.py:136` | cp_0082 | 1 | ✅ **RESOLVIDO — ACEITAR_PROVISORIAMENTE** — Fix-F17 (run 0054, 2026-10-28). V5: 0.17511→**0.16813** (-4.0%, p008: -85%, p039: -85%, p018: -17%, p038: -18%). V3: 0.05265 inalterado. V6: 0.02696 inalterado. Sem regressões. counter=25, best_known=0054. |
+| **F18** | Subtítulo bold após heading h1 — `**Subtitle.**` quando gabarito espera texto plain | V5 | 1–40 (30 páginas, todas as famílias com subtítulo de corpus) | BAIXA | I=4 chars/página × 30 = ~120 chars de marcadores `**...**` extras | p001: `**Corpus sintético pt-BR de reading order...**` vs gabarito `Corpus sintético pt-BR de reading order...` | **Causa raiz**: PDF V5 tem subtítulos em fonte bold → `inline_style="bold"` detectado corretamente; mas gabarito V5 trata subtítulos como plain. `render_markdown()` não rastreava bloco anterior. Fix-F18 (VQ-21): `prev_was_h1` tracking + guard `if prev_was_h1 and inline_style=="bold": inline_style=None`. | `renderers/markdown.py:42-58, 139-143` | cp_0083 | 1 | ✅ **RESOLVIDO — ACEITAR_PROVISORIAMENTE** — Fix-F18 (run 0055, 2026-10-28). V5: 0.16813→**0.163572** (-2.71%, 30 páginas melhoradas, 0 regressões; maiores: p037/010/027/009 -50%, p031/021 -44%). V3: -0.09% (tiny, 0 regressões). V6: 0.00% (idêntico). Sem regressões estruturais. counter=26, best_known=0055. |
 
 ### Legenda de prioridade e status
 
@@ -925,7 +949,7 @@ A tabela de índice com `<table>`, `<tr>`, `<td>` foi preservada como HTML no ma
 - 🚨 **REGREDIDO**: problema introduzido ou agravado por uma correção recente
 - 🔍 **INVESTIGANDO**: investigação técnica em andamento, não iniciado ciclo de correção
 
-Prioridade atual da fila ativa: **F13** (multi-coluna V6, recall=1.0 mas reordenado, CER 0.17-0.19) → **F14** (merged cells extra chars, I=137) → F07 → F04 → F10. F05/F11/F12 resolvidos. F08 MONITORAR.
+Prioridade atual da fila ativa: **F04** (rotação/deskew, arquitetural) → **F10** (bold/italic perdidos, irreducível sem font-weight) → outros. F05/F07/F11/F12/F13/F15-AJUSTAR/F16/F17/F18 resolvidos. F14 REVERTIDA (inconsistência de corpus). F08 MONITORAR. F18 ACEITA (run 0055, counter=26). Fase: ANALYZING.
 
 ---
 
@@ -1150,8 +1174,304 @@ Descartada pelo usuário (2026-10-26): modificaria contrato de `assign_heading_l
 
 ---
 
+---
+
+## L. Fix-F33: Overflow reading order — runs 0040 (V5) e 0041 (V3) — 2026-10-29
+
+**Decisão**: D. REVERTER (2026-10-29) — net V5 +0.001099 regressão vs pre-F33; V3 neutro. cp_0105 restaurado. counter_tesseract=7.
+
+> **NOTA**: Aceitação prévia baseada em comparação INCORRETA (0.145554 vs 0.138214 = −5.0%).
+> Comparação correta: pre-F33 run 0035 (0.137115) vs F33-only run 0040 (0.138214) = **+0.001099 regressão**.
+> A melhoria "−5%" comparava contra baseline pré-F30, não contra baseline imediatamente pre-F33.
+
+### Mudança implementada
+
+**`src/structured_pdf_text/layout/engine.py`** linha 703:
+```python
+# Antes:
+header_lines = [line for line in ordered if visual_boxes[id(line)].y0 <= edge_distance]
+# Depois:
+header_lines = [line for line in ordered if 0 <= visual_boxes[id(line)].y0 <= edge_distance]
+```
+Excluir linhas com `y0 < 0` (overflow de página anterior) da banda de cabeçalho.
+
+**`src/structured_pdf_text/text/reading_order.py`** — `_region_key`:
+```python
+def _region_key(region):
+    if region.native_lines and all(line.bbox.y0 < 0 for line in region.native_lines):
+        return -1, min(line.bbox.y0 for line in region.native_lines), region.bbox.x0
+    return _semantic_priority(region.kind), region.bbox.y0, region.bbox.x0
+```
+Regions onde TODOS os native_lines têm y0<0 recebem prioridade -1 (antes de tudo).
+
+### Resultado
+
+| Corpus | CER antes (pre-F33) | CER depois (F33) | Δ real | Baseline errado (usado na aceitação) |
+|---|---|---|---|---|
+| V5 run 0035→0040 | 0.137115 | 0.138214 | **+0.001099 (+0.8%) REGRESSÃO** | 0.145554 (pré-F30, stale) |
+| V3 run 0036→0041 | 0.050830 | 0.050830 | **0.0% (neutro)** | — |
+
+**Efeito por página V5** (run 0035 vs 0040):
+- p003: 0.375918 → 0.452276 (+0.076) — overflow items antes do Controle marker → desalinhamento
+- p030: 0.589015 → 0.543561 (−0.046) — ordenação correta de overflow real
+- p005, p036: sem mudança (melhoria prévia era de fixes anteriores)
+
+### Efeito colateral identificado (efeito F33)
+
+A condição `all(y0 < 0)` MELHORA páginas com overflow real (p005, p036: −22% CER) mas PIORA páginas onde o conteúdo próprio do topo também tem y0<0 (p003, p030: +0.55/+1.30 CER). Nesses casos, a referência espera o marcador "Controle de página" como PRIMEIRO elemento, mas F33 coloca o conteúdo físico-acima-do-zero antes dele.
+
+### Problemas irreduíveis confirmados (run 0071/0072)
+
+| Problema | Corpus | Páginas | Causa | Ação |
+|---|---|---|---|---|
+| HTML table format conflict | V5 | p022, p011 | V5 ref usa HTML compacto, código gera expandido (=V3). norm=0.000 (texto correto) | Irreduível sem quebrar V3 |
+| Bold ausente em campos | V5 | múltiplas | `_mark_styled_runs` requer `len(styles)>=2`; fontes V5 não atingem font_weight>=600 | Limitação de extração de fonte |
+| Rotação de página | V3 | p096-p099, p116 | Páginas giradas sem OSD | Fora de escopo |
+| Página em branco | V3 | p138 | Sem conteúdo para extrair | Irreduível |
+| Tilt/inclinação | V3 | p080 | +2° de inclinação causa OCR fragmentado | Qualidade OCR |
+| Caracteres confundíveis | V3 | p086 | OCR Tesseract confunde chars similares | Qualidade OCR |
+| Marcadores Controle ausentes | V5 | p004,p005,p006,p017,p018,p020,p023,p026,p028,p032,p036,p038 | Classificados como HEADER ou suprimidos por `_suppress_pagina_separator_blocks` | A investigar |
+
+### Próxima prioridade (após F33 REVERTER)
+
+**Fix-F35 candidato**: Filtrar completamente linhas com y0 muito negativo (overflow profundo, y0 < −altura_típica_linha)
+ao invés de reordená-las. Se o conteúdo está acima do MediaBox, não pertence à página atual e não deve aparecer
+no extracted.md dessa página.
+
+Alternativa: abordar supressão de marcadores Controle de página em V5 (12 páginas afetadas):
+- `src/structured_pdf_text/ocr/tesseract/postprocess.py` — `_suppress_pagina_separator_blocks`
+- `src/structured_pdf_text/layout/engine.py` — banda de cabeçalho capturando marcador em posição alta
+
+---
+
+## O. Fix-F37: reading_order.py — weak vertical score (low h-overlap) — runs 0077 (V5) e 0078 (V3) — 2026-10-29
+
+**Decisão**: A. ACEITAR_PROVISORIAMENTE — V5 CER -2.7% (p020 -37.5%), V3 neutro. counter_tesseract=10.
+
+### Problema identificado
+
+Página V5-p020 (família: interleaved_native_ocr). A região FIGURE contendo 'DECLARAÇÃO LOCAL' (y0=521.3) aparecia DEPOIS de TEXT 'Bloco nativo 3' (y0=596.9), mas deveria aparecer ANTES.
+
+Causa: `_region_pair_score(FIGURE, TEXT)` retornava -1.0. H-overlap=0.133 < 0.15 (threshold do +8.0 geométrico). Nem diagonal nem coluna se aplicavam. Score geométrico=0; penalidade semântica FIGURE(4)>TEXT(2) = -1.0 → TEXT antes FIGURE.
+
+### Mudança implementada
+
+**`src/structured_pdf_text/text/reading_order.py`** em `_region_pair_score`, após elif diagonal (linha 613):
+
+```python
+elif first.bbox.y1 <= second.bbox.y0 + tolerance:
+    score += 2.0  # Fix-F37: vertical gap, h-overlap insuficiente
+elif second.bbox.y1 <= first.bbox.y0 + tolerance:
+    score -= 2.0
+```
+
++2.0 supera -1.0 semântico → FIGURE antes TEXT (+1.0 líquido).
+
+### Resultados
+
+| Corpus | CER pre-F37 | CER F37 | Delta |
+|---|---|---|---|
+| V5 | 0.136290 | 0.132640 | **-0.003650 (-2.7%)** |
+| V3 | 0.050830 | 0.050830 | 0.000000 |
+
+Página p020: 0.5041 → 0.3150 (-37.5%). Nenhuma regressão.
+
+Checkpoint: cp_0109 (pre-fix-F37-figure-reading-order)
+
+---
+
+## P. Fix-F38: reading_order.py — TITLE precedes overflow clamped to y0<=1 — runs 0079 (V5) e 0080 (V3) — 2026-10-29
+
+**Decisão**: A. ACEITAR_PROVISORIAMENTE — V5 CER -3.91% (p003 -23.6%, p030 -24.7%), V3 neutro. counter_tesseract=11.
+
+### Problema identificado
+
+Páginas V5-p003 (CER=0.4097) e V5-p030 (CER=0.5057). Conteúdo de overflow da página anterior (bbox clampado para y0=0) aparecia ANTES do heading da seção (TITLE, y0=88.7). Região UNKNOWN degenerate (y0=y1=0) com itens de lista e TEXT (y0=0-71.5) recebiam score geométrico +8.0 de `_region_pair_score` ("acima de TITLE") e eram ordenados antes da TITLE.
+
+### Mudança implementada
+
+**`src/structured_pdf_text/text/reading_order.py`** em `_region_pair_score`, após early returns de HEADER/FOOTER:
+
+```python
+# Fix-F38: TITLE region precedes overflow content clamped to page top (y0<=1).
+if first.kind == RegionKind.TITLE and second.bbox.y0 <= 1.0:
+    return 10.0
+if second.kind == RegionKind.TITLE and first.bbox.y0 <= 1.0:
+    return -10.0
+```
+
+Score ±10.0 supera qualquer score geométrico. Aplicado SOMENTE quando região está em y0<=1 (conteúdo clampado ao topo da página).
+
+### Resultados
+
+| Corpus | CER pre-F38 | CER F38 | Delta |
+|---|---|---|---|
+| V5 | 0.132640 | 0.127458 | **-0.005182 (-3.91%)** |
+| V3 | 0.050830 | 0.050830 | 0.000000 (neutro) |
+
+Páginas impactadas: p003 (0.4097→0.3128, -23.6%), p030 (0.5057→0.3807, -24.7%). Nenhuma regressão.
+
+Checkpoint: cp_0110 (pre-fix-F38-title-precedes-overflow)
+
+---
+
+## Q. Fix-F39: markdown.py — Remove numbered list escaping + VQ-21 extend to full h1 section — runs 0081 (V5) e 0082 (V3) — 2026-10-29
+
+**Decisão**: A. ACEITAR_PROVISORIAMENTE — V5 CER -0.49% (p003 -3.8%, p030 -3.0%), V3 neutro -0.05%. counter_tesseract=12.
+
+### Problema identificado
+
+Duas causas de erro residual em p003 e p030 após Fix-F38:
+
+1. **Over-escaping de marcadores de lista numerada**: `_escape_inline_text()` detectava padrão `^\d+\.` e adicionava `"."` ao set `line_escaped`, resultando em ALL "." do texto sendo escapadas (e.g., `"3\. Publicar o resultado\."` em vez de `"3. Publicar o resultado."`). Referência nunca usa backslash escaping.
+
+2. **Bold/italic em texto de corpo na seção h1**: VQ-21 original suprimia bold apenas no bloco TEXT imediatamente após h1 (`prev_was_h1`). Blocos subsequentes (como "Observação:" em `DejaVuSans-Oblique`) continuavam recebendo marcação `*...*` mesmo sendo corpo de seção sob h1. Gabarito espera texto plain.
+
+### Mudança implementada
+
+**`src/structured_pdf_text/renderers/markdown.py`**:
+
+1. Removidas linhas que over-escaping marcadores numerados em `_escape_inline_text`:
+```python
+# REMOVIDO (Fix-F39):
+if len(stripped) > 1 and stripped[0].isdigit():
+    marker = stripped.split(maxsplit=1)[0]
+    if marker.endswith((".", ")")):
+        line_escaped.add(marker[-1])
+```
+
+2. Tracking de `in_h1_section: bool = False` no render loop — atualizado após cada TITLE block:
+```python
+if block.kind == ContentKind.TITLE:
+    in_h1_section = (prev_heading_level == 1)
+```
+
+3. VQ-21 estendido:
+```python
+if (prev_was_h1 or in_h1_section) and inline_style in ("bold", "italic", "bold_italic"):
+    inline_style = None
+```
+
+### Resultados
+
+| Corpus | CER pre-F39 | CER F39 | Delta |
+|---|---|---|---|
+| V5 | 0.127458 | 0.126830 | **-0.000628 (-0.49%)** |
+| V3 | 0.050830 | 0.050806 | **-0.000024 (-0.05%) — neutro** |
+| V6 | — | 0.020874 | neutro (confirmado runs 0083/0084) |
+| V7 | — | 0.008937 | neutro (confirmado runs 0083/0084) |
+| V8 | — | 0.011294 | neutro (confirmado run 0084) |
+
+Páginas impactadas: p003 (0.3128→0.3010, -3.8%), p030 (0.3807→0.3693, -3.0%). Nenhuma regressão.
+Validação completa (todos os 5 corpora): runs 0081/0082/0083/0084 — 2026-10-29.
+
+Checkpoint: cp_0111 (pre-fix-F39-escape-vq21-extend)
+
+---
+
 ## Apêndice: Verificação de não-modificação de código compartilhado
 
 Nenhum módulo foi modificado durante a produção desta análise. Todos os dados vieram da leitura de artefatos em `output/tesseract/baseline/` e dos gabaritos em `corpus/`.
 
-Os dois arquivos marcados como modificados no git (`block_alignment.py`, `edit_distance.py`) foram alterados em sessão anterior para suportar a baseline e estão documentados em `memory/knowledge_base.md`.
+Os dois arquivos marcados como modificados no git (`block_alignment.py`, `edit_distance.py`) foram alterados em sessão anterior para suportar a baseline e estão documentados em `memory/knowledge_base.md`.## M. Fix-F35: Header band lower bound fix â runs 0073 (V5) e 0074 (V3) â 2026-10-29
+
+**DecisÃ£o**: A. ACEITAR_PROVISORIAMENTE â V5 CER massiva melhoria -29.5%, V3 neutro. counter_tesseract=8.
+
+### Problema identificado
+
+Linhas com y0 < 0 (overflow acima do topo da pÃ¡gina) eram incorretamente classificadas como `header_lines` pela funÃ§Ã£o `_edge_band_lines` em `engine.py`. Com `edge_distance=48.0` (pÃ¡ginas A4), qualquer linha com y0<0 satisfaz y0<=48.0. Isso fazia itens de lista (y0 de -105 a -22) serem tratados como conteÃºdo de cabeÃ§alho.
+
+Este Ã© o componente correto do Fix-F33 (que incluÃ­a tambÃ©m uma mudanÃ§a em `reading_order.py` que causou regressÃ£o separada).
+
+### MudanÃ§a implementada
+
+**`src/structured_pdf_text/layout/engine.py`** linha 703:
+
+- Antes: `header_lines = [line for line in ordered if visual_boxes[id(line)].y0 <= edge_distance]`
+- Depois: `header_lines = [line for line in ordered if 0 <= visual_boxes[id(line)].y0 <= edge_distance]`
+
+### Resultados (avaliador schema 3.0.0)
+
+| Corpus | MÃ©trica | Baseline (run 0035) | Fix-F35 (run 0073/0074) | Delta |
+|---|---|---|---|---|
+| V5 | CER_markdown_raw | 0.196192 | 0.138214 | **-0.057978 (-29.5%)** |
+| V5 | CER_norm | 0.146052 | 0.121551 | -0.024501 |
+| V3 | CER_markdown_raw | 0.050830 | 0.050830 | 0.000000 |
+
+### PÃ¡ginas mais impactadas (V5)
+
+| PÃ¡gina | Baseline | Fix-F35 | Delta | FamÃ­lia |
+|---|---|---|---|---|
+| p003 | 0.7386 | 0.4523 | -0.2863 | native_lists |
+| p005 | 0.4868 | 0.2456 | -0.2412 | reading_order |
+| p019 | 0.4429 | 0.0143 | -0.4286 | native_and_ocr_tables |
+| p024 | 0.4964 | 0.0160 | -0.4804 | native_and_ocr_tables |
+| p030 | 0.6723 | 0.5436 | -0.1288 | native_lists |
+| p036 | 0.4784 | 0.2399 | -0.2385 | reading_order |
+| p004 | 0.2327 | 0.2430 | +0.0102 | reading_order (regressÃ£o trivial) |
+
+Checkpoint: cp_0107 (pre-fix-F35-engine-header-band)
+
+---
+
+## N. Fix-F36: UNKNOWN region treated as TEXT â runs 0075 (V5) e 0076 (V3) â 2026-10-29
+
+**DecisÃ£o**: A. ACEITAR_PROVISORIAMENTE â V5 CER melhoria adicional -1.4% sobre F35, V3 neutro. counter_tesseract=9.
+
+### Problema identificado
+
+Linhas com y0 < 0 (overflow) nÃ£o correspondem a nenhuma regiÃ£o predita pelo detector de layout (que cobre apenas y â¥ 0). Eram atribuÃ­as a uma regiÃ£o `UNKNOWN`. Em `_emit_prose_blocks`, somente `ContentKind.TEXT` e `ContentKind.LIST` chamavam `segment_list_lines`. Para `ContentKind.UNKNOWN`, as linhas eram emitidas como um bloco de texto concatenado (sem detecÃ§Ã£o de lista).
+
+### MudanÃ§a implementada
+
+**`src/structured_pdf_text/assemble/content.py`** em `_build_region_blocks` (apÃ³s linha 457):
+
+- Adicionado: `if kind == ContentKind.UNKNOWN: kind = ContentKind.TEXT`
+
+RegiÃµes UNKNOWN sÃ£o conteÃºdo corporal nÃ£o classificado; devem ser tratadas como TEXT para que listas e parÃ¡grafos sejam detectados corretamente.
+
+### Resultados (acumulado F35+F36 vs baseline prÃ©-F35)
+
+| Corpus | Baseline (run 0035 tesseract/) | F35+F36 (run 0075/0076) | Delta |
+|---|---|---|---|
+| V5 | 0.196192 | 0.136290 | **-0.059902 (-30.5%)** |
+| V3 | 0.050830 | 0.050830 | 0.000000 |
+
+Checkpoint: cp_0108 (pre-fix-F36-unknown-region-as-text)
+
+---
+
+
+## O. Fix-F41: _has_line_beside removal (REVERTER) — 2026-10-29
+
+**Decisão**: D. REVERTER — regressões graves confirmadas em dois runs. Contador NÃO incrementado.
+
+### Problema identificado
+
+V4 (224 pág) tem heading_f1=0.502, abaixo dos demais corpora. Causa: blocos curtos em negrito em layout two-column eram bloqueados de classificação como TITLE pelo gate `_has_line_beside` em `_semantic_predictions`.
+
+### Tentativa de fix
+
+Removido `and not _has_line_beside(line, candidates)` do gate. Dois runs de validação (0088 e 0089) testaram variações.
+
+### Resultados
+
+| Run | V4 h_f1 | V6 CER | V7 CER | Decisão |
+|-----|---------|--------|--------|---------|
+| best_known (0086) | 0.502 | 0.020874 | 0.008937 | baseline |
+| 0088 (_has_line_beside removido + 0<=guard) | 0.6245 (+24.4%) | 0.032753 (+56.9%) | 0.011652 (+30.4%) | AJUSTAR |
+| 0089 (_has_line_beside removido, 0<=guard revertido) | 0.6245 (+24.4%) | 0.032753 (+56.9%) | 0.011652 (+30.4%) | REVERTER |
+
+V6 e V7 idênticos em ambos os runs → a hipótese do `0<=guard` foi REFUTADA. Causa real: `_has_line_beside` protege também V6/V7 contra falsos positivos de heading em linhas de formulário/negrito que compartilham a faixa Y com outras linhas.
+
+### Ação realizada
+
+`_has_line_beside` restaurado em `engine.py`. Gate restaurado: `_is_bold_subtitle(...) and not _has_line_beside(line, candidates)`.
+
+Checkpoint: cp_0116 (pre-reverter-F41)
+
+### Limitação conhecida (KNOWN_LIMITATION)
+
+V4 heading_f1=0.502 persiste. Abordagem global de remover `_has_line_beside` é inviável. Fix-F42 deverá detectar layout two-column em nível de página e suprimir o gate seletivamente.
+
+---

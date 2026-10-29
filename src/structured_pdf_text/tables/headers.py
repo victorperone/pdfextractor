@@ -7,8 +7,18 @@ from structured_pdf_text.document import TableCell
 from structured_pdf_text.geometry import BBox
 
 
+def _header_rows_from_rowspan(first_row_cells: list[TableCell]) -> tuple[int, ...]:
+    """Return header rows (0, …, N-1) when a row-0 cell spans N rows (sub-header pattern)."""
+    max_span = max((c.rowspan or 1) for c in first_row_cells)
+    return tuple(range(min(max_span, 3)))  # cap at 3 to match infer_visual_header_rows
+
+
 def infer_header_rows(cells: list[TableCell]) -> tuple[int, ...]:
-    """Return row zero only when native weight/size clearly marks a header."""
+    """Return header rows when native weight/size clearly marks a header.
+
+    For tables whose row-0 header cells span multiple rows (rowspan ≥ 2), also
+    include the spanned rows as sub-header rows so they render as <th> elements.
+    """
     rows = {cell.row for cell in cells}
     first = [cell for cell in cells if cell.row == 0 and cell.text.strip()]
     body = [cell for cell in cells if cell.row > 0 and cell.text.strip()]
@@ -21,12 +31,12 @@ def infer_header_rows(cells: list[TableCell]) -> tuple[int, ...]:
         for tokens in token_groups
     )
     if emphasized / len(first) >= 0.6:
-        return (0,)
+        return _header_rows_from_rowspan(first)
 
     first_sizes = [token.font_size for cell in first for token in cell.tokens if token.font_size]
     body_sizes = [token.font_size for cell in body for token in cell.tokens if token.font_size]
     if first_sizes and body_sizes and median(first_sizes) >= median(body_sizes) * 1.15:
-        return (0,)
+        return _header_rows_from_rowspan(first)
     return ()
 
 
@@ -67,6 +77,17 @@ def infer_visual_header_rows(cells: list[TableCell], image, raster_bbox: BBox) -
     band = {row: np.median(values, axis=0) for row, values in colors.items()}
     background = np.percentile([color for row, color in band.items() if row > 0], 75, axis=0)
     if np.mean(np.abs(band[0]-background)) < 8:
+        # No visual shading: fall back to content — if the first row is all-text labels,
+        # treat it as a header row (handles OCR tables without background colour coding).
+        first_populated = [c for c in cells if c.row == 0 and c.text.strip()]
+        if first_populated:
+            labels = sum(
+                any(ch.isalpha() for ch in c.text)
+                and sum(ch.isalpha() for ch in c.text) >= sum(ch.isdigit() for ch in c.text)
+                for c in first_populated
+            )
+            if labels / len(first_populated) >= 0.8:
+                return (0,)
         return ()
     headers = []
     for row in range(min(3, max(rows))):

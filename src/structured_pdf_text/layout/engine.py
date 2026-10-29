@@ -234,6 +234,7 @@ class NativeHeuristicLayoutEngine:
                     label="heuristic_full_page",
                 )
             )
+
         return _normalize_predictions(predictions, page_bbox)
 
 
@@ -545,6 +546,17 @@ def _is_title(line: Any, text: str, page_bbox: BBox, typical_height: float) -> b
     return True
 
 
+def _has_line_beside(line: Any, candidates: list[Any]) -> bool:
+    """Another line shares this line's row: a column or form layout, where a
+    bold label belongs to the flow of its own column."""
+    return any(
+        other is not line
+        and min(other.bbox.y1, line.bbox.y1) - max(other.bbox.y0, line.bbox.y0) >= 0.5 * min(other.bbox.height, line.bbox.height)
+        and (other.bbox.x1 < line.bbox.x0 or other.bbox.x0 > line.bbox.x1)
+        for other in candidates
+    )
+
+
 def _is_bold_subtitle(line: Any, text: str, typical_font_size: float | None) -> bool:
     """A short line set entirely in bold at a size above the body text.
 
@@ -576,17 +588,6 @@ def _all_bold(line: Any) -> bool:
         (token.font_weight is not None and token.font_weight >= 600)
         or (token.font_name and "bold" in token.font_name.casefold())
         for token in tokens
-    )
-
-
-def _has_line_beside(line: Any, candidates: list[Any]) -> bool:
-    """Another line shares this line's row: a column or form layout, where a
-    bold label belongs to the flow of its own column."""
-    return any(
-        other is not line
-        and min(other.bbox.y1, line.bbox.y1) - max(other.bbox.y0, line.bbox.y0) >= 0.5 * min(other.bbox.height, line.bbox.height)
-        and (other.bbox.x1 < line.bbox.x0 or other.bbox.x0 > line.bbox.x1)
-        for other in candidates
     )
 
 

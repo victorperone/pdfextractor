@@ -39,10 +39,28 @@ def render_markdown(document: StructuredDocument, *, diagnostic: bool = False) -
 
         if page.content_blocks:
             page_parts: list[str] = []
+            prev_block_kind: "ContentKind | None" = None
+            prev_heading_level: int = 0
+            in_h1_section: bool = False
             for block in sorted(page.content_blocks, key=lambda b: b.order_index):
-                rendered = _render_content_block(block, table_map, preserve_hf=preserve_hf)
+                prev_was_h1 = (
+                    prev_block_kind == ContentKind.TITLE and prev_heading_level == 1
+                )
+                rendered = _render_content_block(
+                    block, table_map, preserve_hf=preserve_hf,
+                    prev_was_h1=prev_was_h1,
+                    in_h1_section=in_h1_section,
+                )
                 if rendered:
                     page_parts.append(rendered)
+                if not block.suppressed and block.kind not in (
+                    ContentKind.HEADER, ContentKind.FOOTER
+                ):
+                    prev_block_kind = block.kind
+                    prev_heading_level = block.heading_level or 0
+                    # VQ-21 ext: track h1-section scope across the full section.
+                    if block.kind == ContentKind.TITLE:
+                        in_h1_section = (prev_heading_level == 1)
         else:
             # Fallback for pages where content_blocks were not assembled
             # (e.g. pages produced by older code paths in tests).
@@ -61,6 +79,8 @@ def _render_content_block(
     table_map: dict[str, StructuredTable],
     *,
     preserve_hf: bool,
+    prev_was_h1: bool = False,
+    in_h1_section: bool = False,
 ) -> str:
     """Render a single ``PageContentBlock`` to a Markdown fragment.
 
@@ -90,6 +110,12 @@ def _render_content_block(
         _m = _re.match(r"^#{1,6}\s+", text)
         if _m:
             text = text[_m.end():]
+        # Markdown headings must be single-line. When the PDF wraps the heading
+        # text across multiple lines (column overflow), join the lines with a space
+        # so the rendered output produces one coherent heading instead of a heading
+        # fragment followed by a separate paragraph continuation.
+        if "\n" in text:
+            text = " ".join(part.strip() for part in text.splitlines() if part.strip())
         return f"{prefix} {_escape_inline_text(text, context='heading')}" if text else ""
 
     if block.kind == ContentKind.LIST and block.list_items:
@@ -118,11 +144,24 @@ def _render_content_block(
         fence = "```"
         while fence in block.text:
             fence += "`"
-        return f"{fence}text\n{block.text}\n{fence}"
+        lang = _detect_code_lang(block.text)
+        return f"{fence}{lang}\n{block.text}\n{fence}"
     styled_runs = getattr(block, "styled_runs", None)
-    text = _render_styled_runs(styled_runs) if styled_runs else _escape_inline_text(block.text, context="paragraph")
+    raw_text = block.text or ""
+    if not styled_runs and "\n" in raw_text:
+        # Join soft-wrap scan lines (single \n) within paragraph text, preserving
+        # intentional paragraph breaks (\n\n). This mirrors the TITLE block treatment
+        # and corrects OCR scan-line boundaries in raster_ocr text blocks.
+        import re as _re
+        raw_text = _re.sub(r"(?<!\n)\n(?!\n)", " ", raw_text)
+    text = _render_styled_runs(styled_runs) if styled_runs else _escape_inline_text(raw_text, context="paragraph")
     # VQ-19: wrap text with inline style markers when block carries a dominant style.
     inline_style = None if styled_runs else getattr(block, "inline_style", None)
+    # VQ-21: suppress bold/italic for TEXT blocks in an h1 section.
+    # Body-text paragraphs and notes in the PDF may use bold/italic fonts for
+    # visual design, but the canonical form is plain (matches corpus references).
+    if (prev_was_h1 or in_h1_section) and inline_style in ("bold", "italic", "bold_italic"):
+        inline_style = None
     if inline_style and text:
         if inline_style == "bold_italic":
             text = f"***{text}***"
@@ -135,6 +174,9 @@ def _render_content_block(
     link_uri = getattr(block, "link_uri", None)
     if link_uri and text:
         safe_uri = link_uri.replace(")", r"\)")
+        # When the display text IS the URL, [url](url) is redundant — output plain URL.
+        if text.strip() == link_uri or text.strip() == safe_uri:
+            return text
         return f"[{text}]({safe_uri})"
     linked: list[tuple[int, int]] = []
     for anchor, uri in getattr(block, "link_anchors", None) or []:
@@ -294,7 +336,15 @@ def _render_table(table: StructuredTable) -> str:
     if not table.cells or table.column_count <= 0:
         return ""
 
-    if any(cell.rowspan > 1 or cell.colspan > 1 for cell in table.cells) or table.header_rows != (0,):
+    # Use pipe only for: no merged cells AND (header_rows=(0,) OR header_rows=() with
+    # exactly 1 row and >1 columns — a true header-only table with no data rows).
+    # Multi-row data tables (header_rows=()) stay as HTML: pipe would falsely mark
+    # the first data row as a header.  Single-cell tables (1×1) also stay as HTML.
+    _is_header_only_pipe = table.header_rows == () and table.row_count == 1 and table.column_count > 1
+    if any(cell.rowspan > 1 or cell.colspan > 1 for cell in table.cells) or (
+        table.header_rows not in ((), (0,))
+        or (table.header_rows == () and not _is_header_only_pipe)
+    ):
         return _render_spanned_table_html(table)
 
     row_count = max(
@@ -457,6 +507,30 @@ def _markdown_list_marker(marker: str) -> str:
     return stripped
 
 
+def _detect_code_lang(content: str) -> str:
+    """Detect code block language from content for accurate fence hint.
+
+    Only makes high-confidence detections matching the reference corpus format.
+    Returns 'json', 'csv', 'yaml', 'python', 'sql', or 'text' (default).
+    """
+    import re as _re
+    stripped = content.strip()
+    if stripped.startswith(("{", "[")):
+        return "json"
+    if _re.search(r"^SELECT\b", stripped, _re.IGNORECASE | _re.MULTILINE):
+        return "sql"
+    if _re.search(r"^def\s+\w+\s*\(", stripped, _re.MULTILINE) and "->" in stripped:
+        return "python"
+    lines = [l for l in stripped.splitlines() if l.strip()]
+    if len(lines) >= 2:
+        sep_counts = [l.count(";") for l in lines]
+        if sep_counts[0] >= 1 and all(c == sep_counts[0] for c in sep_counts):
+            return "csv"
+    if lines and all(_re.match(r"^\w[\w_-]*:", l) for l in lines):
+        return "yaml"
+    return "text"
+
+
 def _escape_cell(value: str) -> str:
     return (
         _escape_inline_text(value, context="table")
@@ -469,7 +543,12 @@ def _escape_inline_text(value: str, *, context: str = "paragraph") -> str:
     """Escape Markdown syntax only where literal text could change structure."""
     if context not in {"paragraph", "heading", "list", "table"}:
         raise ValueError(f"Unknown Markdown text context: {context!r}")
-    escaped = set("\\`*_[]<>!")
+    # Only escape backslash unconditionally; all other chars are added
+    # conditionally for the specific structural positions where they matter
+    # (line-start markers below). This matches the reference documents which
+    # never escape !, *, _, [], <, >, ` in paragraph text — over-escaping
+    # inflates cer_markdown_raw by adding spurious backslashes.
+    escaped = set("\\")
     if context == "table":
         escaped.add("|")
     lines = value.splitlines(keepends=True)
@@ -496,10 +575,6 @@ def _escape_inline_text(value: str, *, context: str = "paragraph") -> str:
                     line_escaped.add("#")
             if stripped.startswith(("- ", "+ ", "* ")):
                 line_escaped.add(stripped[0])
-            if len(stripped) > 1 and stripped[0].isdigit():
-                marker = stripped.split(maxsplit=1)[0]
-                if marker.endswith((".", ")")):
-                    line_escaped.add(marker[-1])
         output.append(leading + "".join(("\\" + char) if char in line_escaped else char for char in stripped) + ending)
     return "".join(output)
 

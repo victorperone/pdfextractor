@@ -108,7 +108,7 @@ def reconstruct_native_lines(
     lines.extend(_line_from_chars(group, WritingDirection.UNKNOWN) for group in other_groups if group)
     lines.sort(key=lambda line: (line.bbox.y0, line.bbox.x0))
     if extracted_text:
-        lines = _reconcile_with_textpage(lines, extracted_text)
+        lines, _candidates, _available, _matched_at = _reconcile_with_textpage(lines, extracted_text)
         lines = _remove_reconciled_punctuation_fragments(lines)
         lines = _remove_joined_prefix_duplicates(lines)
     lines = _mark_identifier_continuations(lines)
@@ -148,7 +148,9 @@ def lines_to_text(lines: list[TextLine]) -> str:
 _RECONCILE_WINDOW = 8  # max candidates ahead of cursor to consider per line
 
 
-def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list[TextLine]:
+def _reconcile_with_textpage(
+    lines: list[TextLine], extracted_text: str
+) -> tuple[list[TextLine], list[str], set[int], dict[int, TextLine]]:
     """Recover spacing/ligature mappings when PDFium exposes better line text.
 
     PDFium's character stream may contain tracked glyphs or a lossy font
@@ -160,11 +162,19 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
     window of _RECONCILE_WINDOW candidates is searched from the cursor forward.
     This prevents similar lines in different regions (e.g. repeated IDs, near-
     identical labels) from swapping with each other due to a better global score.
+
+    Returns ``(reconciled, candidates, available, matched_at)`` where
+    ``candidates`` is the parsed text-page lines, ``available`` is the set of
+    unmatched candidate indices, and ``matched_at`` maps stream index to the
+    TextLine that was matched.  The caller may use these to inject synthetic
+    lines for candidates that have no visible counterpart (e.g. form XObject
+    characters removed by occlusion filtering).
     """
     candidates = [line.strip() for line in extracted_text.replace("\r", "").split("\n") if line.strip()]
     available = set(range(len(candidates)))
     cursor = 0  # monotonic lower bound — never decreases
     output: list[TextLine | None] = [None] * len(lines)
+    matched_at: dict[int, TextLine] = {}
     processing_order = sorted(
         enumerate(lines),
         key=lambda item: (
@@ -204,7 +214,7 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
                 and not _replacement_changes_critical_punctuation(line.text, candidate)
             )
             if should_replace:
-                output[line_index] = TextLine(
+                matched_line = TextLine(
                     tokens=line.tokens,
                     bbox=line.bbox,
                     baseline=line.baseline,
@@ -218,12 +228,97 @@ def _reconcile_with_textpage(lines: list[TextLine], extracted_text: str) -> list
                     join_next_without_space=line.join_next_without_space,
                 )
             else:
-                output[line_index] = line
+                matched_line = line
+            output[line_index] = matched_line
+            matched_at[best_index] = matched_line
             available.remove(best_index)
             cursor = best_index + 1
         else:
             output[line_index] = line
-    return [line for line in output if line is not None]
+    reconciled = [line for line in output if line is not None]
+    return reconciled, candidates, available, matched_at
+
+
+def _inject_stream_only_lines(
+    lines: list[TextLine],
+    candidates: list[str],
+    unmatched: set[int],
+    matched_at: dict[int, TextLine],
+) -> list[TextLine]:
+    """Append synthetic TextLine objects for stream candidates with no visible match.
+
+    Covers form XObjects whose characters have off-page coordinates and are
+    therefore removed by occlusion filtering before reconstruct_native_lines
+    sees them.  The text-page extraction still returns their text; we reattach
+    it here at estimated positions derived from the nearest matched lines in
+    stream order so the layout engine can incorporate it.
+    """
+    if not unmatched or not matched_at:
+        return lines
+
+    sorted_unmatched = sorted(unmatched)
+    matched_indices = sorted(matched_at.keys())
+
+    def _find_neighbors(u: int) -> tuple[int | None, int | None]:
+        pred = next((mi for mi in reversed(matched_indices) if mi < u), None)
+        succ = next((mi for mi in matched_indices if mi > u), None)
+        return pred, succ
+
+    # Group consecutive unmatched indices that share the same (pred, succ) anchor pair
+    groups: list[list] = []
+    for u in sorted_unmatched:
+        pred, succ = _find_neighbors(u)
+        if groups and groups[-1][0] == pred and groups[-1][1] == succ:
+            groups[-1][2].append(u)
+        else:
+            groups.append([pred, succ, [u]])
+
+    injected: list[TextLine] = []
+    for pred_idx, succ_idx, group_items in groups:
+        n = len(group_items)
+
+        if pred_idx is not None:
+            anchor = matched_at[pred_idx]
+            x0, x1 = anchor.bbox.x0, anchor.bbox.x1
+            line_h = max(anchor.bbox.height, 10.0)
+            y_start = anchor.bbox.y1
+        elif succ_idx is not None:
+            anchor = matched_at[succ_idx]
+            x0, x1 = anchor.bbox.x0, anchor.bbox.x1
+            line_h = max(anchor.bbox.height, 10.0)
+            y_start = anchor.bbox.y0 - n * (line_h + 2)
+        else:
+            continue  # no geometric anchor — skip
+
+        if pred_idx is not None and succ_idx is not None:
+            y_end = matched_at[succ_idx].bbox.y0
+            step = (y_end - y_start) / (n + 1)
+        else:
+            step = line_h + 2
+
+        for i, u in enumerate(group_items):
+            y0 = y_start + (i + 1) * step
+            y1 = y0 + line_h
+            bbox = BBox(x0=x0, y0=y0, x1=x1, y1=y1)
+            text = candidates[u]
+            token = TextToken(
+                text=text,
+                bbox=bbox,
+                sources=[],
+                confidence=1.0,
+                normalized_text=text,
+            )
+            injected.append(TextLine(
+                tokens=[token],
+                bbox=bbox,
+                baseline=Baseline(y=y0),
+                direction=WritingDirection.LEFT_TO_RIGHT,
+                native_order_min=None,
+                native_order_max=None,
+                text_override=text,
+            ))
+
+    return lines + injected
 
 
 def _remove_reconciled_punctuation_fragments(lines: list[TextLine]) -> list[TextLine]:

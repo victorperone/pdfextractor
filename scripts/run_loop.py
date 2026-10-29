@@ -1,10 +1,10 @@
 """Tesseract optimization loop runner.
 
-Runs extract_worker.py + compute_metrics.py for V3, V5, V6, V7, V8 sequentially,
+Runs extract_worker.py + compute_metrics.py for V3, V4, V5, V6, V7, V8 sequentially,
 saving output to output/loop/tesseract/<run_id>/<corpus>/.
 
 Usage:
-    python scripts/run_loop.py <run_id> [--corpora V3 V5 V6 V7 V8]
+    python scripts/run_loop.py <run_id> [--corpora V3 V4 V5 V6 V7 V8]
     python scripts/run_loop.py 0001
     python scripts/run_loop.py 0001 --corpora V5 V6
 """
@@ -27,7 +27,7 @@ from automation.config import CORPUS, CORPUS_MIN_COMMIT_GB, CORPUS_MIN_RAM_GB, C
 from automation.resource_guard import can_start_extraction, system_memory_status
 
 LOOP_ROOT = REPO_ROOT / "output" / "loop" / "tesseract"
-LOOP_CORPORA = ["V3", "V5", "V6", "V7", "V8"]
+LOOP_CORPORA = ["V3", "V4", "V5", "V6", "V7", "V8"]
 METRICS_TIMEOUT = 7200  # 2 h (V7 eval can take ~26 min)
 LOCK_FILE = LOOP_ROOT / ".run_lock"
 
