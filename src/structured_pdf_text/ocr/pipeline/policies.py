@@ -77,11 +77,20 @@ LEGACY_EVIDENCE_ADMISSION_POLICY = EvidenceAdmissionPolicy()
 class CellRecoveryPolicy:
     """Candidate selection values owned independently by each engine pipeline."""
 
+    automatic_recovery: bool = False
+    maximum_automatic_cells: int = 0
     minimum_existing_confidence: float = .70
     render_scale_factor: float = 1.75
     enlarged_scale_factor: float = 2.0
     empty_minimum_confidence: float = .75
     empty_minimum_characters: int = 2
+
+    def header_context(self, table, cell, header_rows):
+        return next((item.text for item in table.cells
+                     if item.col == cell.col and item.row in header_rows and item.text.strip()), "")
+
+    def automatic_priority(self, cell, header_text, *, is_header=False):
+        return None
 
     def select(self, candidates, *, current_text, cell_bbox, header_text):
         from dataclasses import replace

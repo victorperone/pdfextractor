@@ -888,6 +888,7 @@ def _split_groups_by_column_gap(
     A large horizontal gap between consecutive characters (sorted by x0)
     indicates a column boundary and must produce separate line segments.
     """
+    narrow_gutters = _recurring_column_gutters(groups)
     result: list[list[NativeCharacter]] = []
     for group in groups:
         if len(group) < 2:
@@ -917,13 +918,50 @@ def _split_groups_by_column_gap(
         current: list[NativeCharacter] = [sorted_by_x[0]]
         for prev, curr in zip(sorted_by_x, sorted_by_x[1:]):
             horizontal_gap = curr.bbox.x0 - prev.bbox.x1
-            if horizontal_gap > gap_threshold:
+            midpoint = (prev.bbox.x1 + curr.bbox.x0) / 2
+            height = max(prev.bbox.height, curr.bbox.height)
+            # A narrow gutter needs independent neighboring baselines. Keep
+            # the ordinary threshold for isolated gaps and tracked headings.
+            supported = horizontal_gap > max(8., median_width * 2.5, typical_gap * 3.) and sum(
+                left < midpoint < right and abs(y - curr.bbox.y1) <= 8 * height
+                for left, right, y in narrow_gutters) >= 3
+            if horizontal_gap > gap_threshold or supported:
                 result.append(current)
                 current = [curr]
             else:
                 current.append(curr)
         result.append(current)
     return result
+
+
+def _recurring_column_gutters(groups):
+    """Collect whitespace on independent baselines, including split groups.
+
+    A 12 pt prose gutter can be smaller than 3.5 glyph widths. Several lines
+    sharing that empty lane distinguish it from a word space. Only substantial
+    text on both sides votes; explicit whitespace never fills the lane.
+    """
+    rows = []
+    for group in sorted(groups, key=lambda items: median(c.bbox.y1 for c in items)):
+        visible = [c for c in group if c.text.strip() and c.bbox.area > 0]
+        if not visible:
+            continue
+        baseline = median(c.bbox.y1 for c in visible)
+        if rows and abs(rows[-1][0] - baseline) <= 1.5:
+            rows[-1][1].extend(visible)
+        else:
+            rows.append((baseline, visible))
+    gutters = []
+    for baseline, characters in rows:
+        characters.sort(key=lambda c: (c.bbox.x0, c.char_index))
+        width = median(c.bbox.width for c in characters)
+        gaps = [b.bbox.x0 - a.bbox.x1 for a, b in zip(characters, characters[1:])]
+        positive = [gap for gap in gaps if gap > 0]
+        threshold = max(8., width * 2.5, (median(positive) if positive else 0.) * 3.)
+        for i, (a, b, gap) in enumerate(zip(characters, characters[1:], gaps)):
+            if gap > threshold and i >= 5 and len(characters) - i - 1 >= 6:
+                gutters.append((a.bbox.x1, b.bbox.x0, baseline))
+    return gutters
 
 
 def _line_center(char: NativeCharacter, median_height: float) -> float:

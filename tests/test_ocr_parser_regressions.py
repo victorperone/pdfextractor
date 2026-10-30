@@ -958,15 +958,14 @@ class TestPageOrientationCandidates:
         assert rotated.shape == (200, 100, 3)
 
     def test_remap_180_inverts_coordinates(self):
-        """180° remap: point (x, y) maps to (W-1-x, H-1-y)."""
+        """Polygon edges map to (W-x, H-y); they are not pixel centres."""
         from structured_pdf_text.ocr.backends.easyocr import _remap_raw_for_rotation
 
         raw = [([[10, 20], [30, 20], [30, 40], [10, 40]], "text", 0.9)]
         # rotated image is 100×200 (H×W same as original for 180°)
         remapped = _remap_raw_for_rotation(raw, 180, rotated_h=100, rotated_w=200)
         pts = remapped[0][0]
-        # (10,20) → (200-1-10, 100-1-20) = (189, 79)
-        assert pts[0] == [189.0, 79.0]
+        assert pts[0] == [190.0, 80.0]
 
     def test_remap_empty_raw_unchanged(self):
         """Empty raw list → empty result."""

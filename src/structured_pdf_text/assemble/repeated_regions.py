@@ -11,7 +11,9 @@ import re
 import unicodedata
 from collections import defaultdict
 
-from structured_pdf_text.document import RegionKind, StructuredPage, TextLine
+from structured_pdf_text.document import RegionKind, SourceKind, StructuredPage, TextLine
+
+_OCR_SOURCES = frozenset({SourceKind.OCR_PAGE, SourceKind.OCR_REGION})
 
 
 def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, list[int]]:
@@ -47,6 +49,9 @@ def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, li
         ]
         check_selected = native_selected if len(native_selected) >= 2 else selected
         if not _stable_edge_position(check_selected) or not _stable_style(check_selected):
+            stable = [] if native_selected else _stable_ocr_members(selected)
+            if stable:
+                confirmed[key] = sorted(page.page_index for _, _, page in stable)
             continue
         confirmed[key] = sorted(by_page)
     _confirm_ocr_variants(observations, confirmed)
@@ -59,6 +64,11 @@ def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, li
 _OCR_VARIANT_SIMILARITY = 0.85
 _OCR_VARIANT_MINIMUM_LETTERS = 12
 _PAGE_COUNTER_REMNANT_RE = re.compile(r"<page-number>(?:\s+\S{1,3}\s+\d{1,4})?")
+# A trailing counter whose label OCR misread ("Paglna B5 de 224", "Pagina 91 Ge
+# 224", "Paoina Ione 22"): label, page, optional "de", total. Only an edge line
+# ending this way, with a label close to "página", loses it in the variant form.
+_MISREAD_COUNTER_RE = re.compile(r"(?:^|\s)(\S{4,7})\s+\S{1,5}(?:\s+\S{1,3})?\s+\S{0,3}\d{2,4}\W{0,2}$")
+_COUNTER_LABEL_SIMILARITY = 0.6
 
 
 def _ocr_variant_form(key: str) -> tuple[str, str, tuple[str, ...]]:
@@ -67,8 +77,14 @@ def _ocr_variant_form(key: str) -> tuple[str, str, tuple[str, ...]]:
     Letters are compared with tolerance; any other number is semantic and
     must match exactly, so "repetição 1" never joins "repetição 2".
     """
+    from difflib import SequenceMatcher
+
     role, _, text = key.partition(":")
     text = _PAGE_COUNTER_REMNANT_RE.sub(" ", text)
+    counter = _MISREAD_COUNTER_RE.search(text)
+    if counter is not None and SequenceMatcher(
+            None, "".join(c for c in counter[1] if c.isalpha()), "pagina").ratio() >= _COUNTER_LABEL_SIMILARITY:
+        text = text[:counter.start()]
     letters = "".join(c for c in unicodedata.normalize("NFKD", text).casefold() if c.isalpha())
     return role, letters, tuple(re.findall(r"\d+", text))
 
@@ -119,9 +135,12 @@ def _confirm_ocr_variants(
                 by_page.setdefault(page_index, (kind, line, page))
         selected = list(by_page.values())
         if not _stable_edge_position(selected) or not _stable_style(selected):
-            continue
+            selected = _stable_ocr_members(selected)
+            if not selected:
+                continue
+        pages = {page.page_index for _, _, page in selected}
         for key in members:
-            confirmed[key] = sorted(set(confirmed.get(key, ())) | set(by_page))
+            confirmed[key] = sorted(set(confirmed.get(key, ())) | pages)
     for key in counters:
         role = key.partition(":")[0]
         companion = {page for other, pages in confirmed.items()
@@ -179,6 +198,12 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
             # visual frame (/Rotate) used to confirm its repetition.
             if _at_edge(line, page, role):
                 candidates.append((role, line))
+            elif _ocr_line(line):
+                # OCR layout can label a bottom band "header" (V4 p213); the
+                # line's own edge decides, and repetition must still confirm it.
+                other = "footer" if role == "header" else "header"
+                if _at_edge(line, page, other):
+                    candidates.append((other, line))
 
     # Edge bands of the other regions use the same visual (/Rotate) test, so
     # an occurrence that is not at the visual edge is never a candidate: it
@@ -265,12 +290,52 @@ _EDGE_FRACTION = 0.08
 _EDGE_EXTENT_FRACTION = 0.12
 
 
+def _ocr_line(line: TextLine) -> bool:
+    if (line.line_id or "").startswith("native:"):
+        return False
+    sources = [ref.source for token in line.tokens for ref in (getattr(token, "sources", None) or ())]
+    return bool(sources) and all(source in _OCR_SOURCES for source in sources)
+
+
+def _text_rotation(line: TextLine) -> int:
+    """Quarter turn shared by the OCR text of a line drawn rotated in an upright scan."""
+    if not _ocr_line(line):
+        return 0
+    angles = {int(token.rotation) % 360 for token in line.tokens if token.text.strip()}
+    return angles.pop() if len(angles) == 1 and next(iter(angles)) in (90, 180, 270) else 0
+
+
 def _visual_box(line: TextLine, page: StructuredPage):
-    """Line box and page height in the upright (visual) frame of the page."""
+    """Line box and page height in the upright (visual) frame of the page.
+
+    /Rotate defines that frame for native and OCR text alike. On an upright
+    page, a scanned image rotated by a quarter turn puts its furniture on
+    another physical edge (V3 p96-p99); OCR text read rotated is then judged
+    in its own reading frame, as the repeated upright pages are.
+    """
+    box, page_height, _ = _reading_frame(line, page)
+    return box, page_height
+
+
+def _reading_frame(line: TextLine, page: StructuredPage):
+    """(box, page height, reframed): ``reframed`` when not the page's own frame."""
+    rotation = page.page_rotation % 360 or (-_text_rotation(line)) % 360
+    box, page_height = _frame_box(line, page, rotation)
+    if rotation and box.height > box.width:
+        # Furniture drawn in the unrotated user space of a /Rotate page runs
+        # vertically along a side of the visual page (V3 p29, V6 p31/p47/p75)
+        # and is read horizontally only in that space.
+        upright, upright_height = _frame_box(line, page, 0)
+        if upright.width >= upright.height:
+            return upright, upright_height, page.page_rotation % 360 != 0
+    return box, page_height, rotation != page.page_rotation % 360
+
+
+def _frame_box(line: TextLine, page: StructuredPage, rotation: int):
     box = line.bbox
-    if page.page_rotation % 360:
-        box = box.rotate_to_visual(page.page_rotation, page.bbox.width, page.bbox.height)
-        page_height = page.bbox.width if page.page_rotation % 180 else page.bbox.height
+    if rotation:
+        box = box.rotate_to_visual(rotation, page.bbox.width, page.bbox.height)
+        page_height = page.bbox.width if rotation % 180 else page.bbox.height
     else:
         page_height = page.bbox.height
     return box, max(page_height, 1.0)
@@ -294,15 +359,57 @@ def _at_edge(line: TextLine, page: StructuredPage, role: str) -> bool:
 def _stable_edge_position(
     values: list[tuple[str, TextLine, StructuredPage]],
 ) -> bool:
-    normalized = []
+    framed, reframed = [], []
     for kind, line, page in values:
         if not _at_edge(line, page, kind):
             return False
-        box, page_height = _visual_box(line, page)
-        normalized.append(box.cy / page_height)
+        box, page_height, turned = _reading_frame(line, page)
+        (reframed if turned else framed).append(box.cy / page_height)
+    # A rotated image inside a scan is scaled to fit the page, so its
+    # furniture sits at the edge in another proportion (V3 p116). It must be
+    # at the edge, but the spread is measured in page frames when there are
+    # any; occurrences that all share one alternative frame compare there.
+    normalized = framed or reframed
     if not normalized:
         return False
     return max(normalized) - min(normalized) <= 0.035
+
+
+_OUTLIER_POSITION_TOLERANCE = 0.07
+
+
+def _stable_ocr_members(
+    values: list[tuple[str, TextLine, StructuredPage]],
+) -> list[tuple[str, TextLine, StructuredPage]]:
+    """Largest position-stable subset of OCR-only occurrences, or [].
+
+    One skewed or blurred scan can shift its footer (V4 p107/p108: 0.941
+    against 0.98) and used to veto the signature on every page. The stable
+    band (same 0.035 spread) needs three pages; other edge occurrences of the
+    same signature group within 0.07 of it then join. Native evidence never
+    takes this path.
+    """
+    if any(not _ocr_line(line) for _, line, _ in values):
+        return []
+    placed, reframed = [], []
+    for kind, line, page in values:
+        if _at_edge(line, page, kind):
+            box, page_height, turned = _reading_frame(line, page)
+            if turned:
+                reframed.append((kind, line, page))
+            else:
+                placed.append((box.cy / page_height, (kind, line, page)))
+    placed.sort(key=lambda item: item[0])
+    best: list = []
+    for start in range(len(placed)):
+        window = [item for item in placed[start:] if item[0] - placed[start][0] <= 0.035]
+        if len(window) > len(best):
+            best = window
+    if len(best) < 3 or not _stable_style([item[1] for item in best]):
+        return []
+    centre = sorted(position for position, _ in best)[len(best) // 2]
+    members = [item[1] for item in placed if abs(item[0] - centre) <= _OUTLIER_POSITION_TOLERANCE] + reframed
+    return members if _stable_style(members) else [item[1] for item in best]
 
 
 def _stable_style(

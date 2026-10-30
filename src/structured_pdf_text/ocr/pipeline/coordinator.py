@@ -556,7 +556,7 @@ class OCRPageFacade:
         with self.coordinator._lock:
             self.coordinator._discard_deferred_target(target.target)
 
-    def make_cell_target(self, table_id, page_index, cell):
+    def make_cell_target(self, table_id, page_index, cell, *, allow_single_digit=False):
         if page_index != self.coordinator.page_index:
             raise ValueError("Cell target belongs to a different page")
         from structured_pdf_text.fusion.integrator import prepare_cell_evidence
@@ -566,6 +566,7 @@ class OCRPageFacade:
         return CellTarget(
             TargetRef("cell", f"{table_id}:cell:{cell.row}:{cell.col}", 0),
             table_id, page_index, cell, evidence_ids, visible_target=True,
+            allow_single_digit=allow_single_digit,
         )
 
     def make_token_target(self, tokens, bbox, *, target_id, indices, goal=WorkGoal.REGION):
@@ -613,6 +614,18 @@ class OCRPageFacade:
         return getattr(self.coordinator.pipeline, "fusion_policy", LEGACY_FUSION_POLICY)
 
     @property
+    def line_order_policy(self):
+        return getattr(self.coordinator.pipeline, "line_order_policy", None)
+
+    @property
+    def table_structure_engine(self):
+        return getattr(self.coordinator.pipeline, "table_structure_engine", None)
+
+    @property
+    def currency_marker_repair(self):
+        return bool(getattr(self.coordinator.pipeline, "currency_marker_repair", False))
+
+    @property
     def figure_segmentation_policy(self):
         from .policies import LEGACY_FIGURE_SEGMENTATION_POLICY
 
@@ -639,7 +652,11 @@ class OCRPageFacade:
     def refine_cell(self, *, table_id, page_index, cell, quality_policy, base_scale, header_text):
         from .cell_recovery import refine_cell
 
-        target = self.make_cell_target(table_id, page_index, cell)
+        approves = getattr(self.cell_recovery_policy, "allows_single_digit", None)
+        target = self.make_cell_target(
+            table_id, page_index, cell,
+            allow_single_digit=bool(approves(header_text)) if callable(approves) else False,
+        )
         return refine_cell(
             self, target, quality_policy=quality_policy, base_scale=base_scale,
             header_text=header_text, policy=self.cell_recovery_policy,

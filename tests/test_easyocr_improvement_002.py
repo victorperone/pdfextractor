@@ -136,6 +136,7 @@ def test_reread_without_better_evidence_keeps_the_cell(old, new):
     (_cell("πI", [.71]), _cell("TI", [.98])),
     (_cell("", []), _cell("39,25", [.5])),
     (_cell("Semestre", [.90]), _cell("Semestre II", [.88, .86])),  # V6 p42
+    (_cell("Rs +500,00", [.96]), _cell("R$ +500,00", [.81])),
 ])
 def test_reread_with_better_or_added_evidence_replaces_the_cell(old, new):
     assert not _keeps(old, new)

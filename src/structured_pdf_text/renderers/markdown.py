@@ -56,6 +56,18 @@ def render_markdown(document: StructuredDocument, *, diagnostic: bool = False) -
     return "\n\n".join(sections).strip()
 
 
+def _render_heading(prefix: str, text: str) -> str:
+    escaped = _escape_inline_text(text, context="heading")
+    if prefix == "##":
+        match = re.match(r"^[ \t]*(P(?:á|a\u0301|a)gina[ \t]+\d+(?=[ \t]|$))", escaped, re.I)
+        if match:
+            # The visible text and heading level stay identical. Entity-encode
+            # its initial P so a body title cannot impersonate the page envelope.
+            index = match.start(1)
+            escaped = escaped[:index] + f"&#{ord(escaped[index])};" + escaped[index+1:]
+    return f"{prefix} {escaped}"
+
+
 def _render_content_block(
     block: PageContentBlock,
     table_map: dict[str, StructuredTable],
@@ -90,7 +102,7 @@ def _render_content_block(
         _m = _re.match(r"^#{1,6}\s+", text)
         if _m:
             text = text[_m.end():]
-        return f"{prefix} {_escape_inline_text(text, context='heading')}" if text else ""
+        return _render_heading(prefix, text) if text else ""
 
     if block.kind == ContentKind.LIST and block.list_items:
         return _render_list_items(block.list_items)
@@ -204,7 +216,7 @@ def _render_page_legacy(
                 if line.text.strip()
             )
             if title_text:
-                page_parts.append(f"{prefix} {_escape_inline_text(title_text, context='heading')}")
+                page_parts.append(_render_heading(prefix, title_text))
             continue
 
         body = "\n".join(

@@ -30,7 +30,8 @@ def infer_header_rows(cells: list[TableCell]) -> tuple[int, ...]:
     return ()
 
 
-def infer_visual_header_rows(cells: list[TableCell], image, raster_bbox: BBox) -> tuple[int, ...]:
+def infer_visual_header_rows(cells: list[TableCell], image, raster_bbox: BBox, *,
+                             alphanumeric_labels: bool = False) -> tuple[int, ...]:
     """Use a distinct leading background band, not a mandatory first header.
 
     Raster OCR has no font-weight evidence. Consistent shading across leading
@@ -73,8 +74,10 @@ def infer_visual_header_rows(cells: list[TableCell], image, raster_bbox: BBox) -
         populated = [c for c in cells if c.row == row and c.text.strip()]
         if row not in band or not populated or np.mean(np.abs(band[row]-band[0])) > 5:
             break
-        labels = sum(any(ch.isalpha() for ch in c.text)
-                     and sum(ch.isalpha() for ch in c.text) >= sum(ch.isdigit() for ch in c.text)
+        import re
+        labels = sum((any(ch.isalpha() for ch in c.text)
+                      and sum(ch.isalpha() for ch in c.text) >= sum(ch.isdigit() for ch in c.text))
+                     or (alphanumeric_labels and re.fullmatch(r'[A-Za-z]{1,4}\d{1,3}', c.text.strip()) is not None)
                      for c in populated)
         if labels / len(populated) < .6:
             break

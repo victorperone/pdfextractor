@@ -20,11 +20,12 @@ _STRUCTURAL_CRITICAL_PATTERNS = (
 )
 
 _SIGNED_MONEY_PATTERN = re.compile(
-    r"(?<![\w\d])r\$\s*([+-]?)\s*((?:\d{1,3}(?:\.\d{3})*)|\d+),(\d{2})(?!\d)",
+    r"(?<![\w\d])(?P<before>[+−-]?)\s*r\$\s*(?P<after>[+−-]?)\s*"
+    r"(?P<integer>(?:\d{1,3}(?:\.\d{3})*)|\d+),(?P<fraction>\d{2})(?!\d)",
     re.IGNORECASE,
 )
 _SIGNED_PERCENTAGE_PATTERN = re.compile(
-    r"(?<![\w\d.,])([+-]?)\s*(\d{1,3})(?:([,.])(\d{1,3}))?\s*%(?!\w)"
+    r"(?<![\w\d.,])([+−-]?)\s*(\d{1,3})(?:([,.])(\d{1,3}))?\s*%(?!\w)"
 )
 _PROTECTED_NEGATION_WORDS: frozenset[str] = frozenset({
     "não", "nao", "nem", "sem", "exceto", "salvo", "jamais", "nunca",
@@ -32,7 +33,8 @@ _PROTECTED_NEGATION_WORDS: frozenset[str] = frozenset({
     "aprovado", "reprovado", "ativo", "inativo", "válido", "invalido",
 })
 _PROTECTED_OPERATORS_RE = re.compile(
-    r"(?:<=|>=|<>|!=|[<>]=?)|(?:(?<!\w)-(?=\s*\d))"
+    r"(?:<=|>=|<>|!=|[<>]=?)|(?:(?<!\w)[−-](?=\s*(?:r\$\s*)?\d))",
+    re.IGNORECASE,
 )
 
 
@@ -62,12 +64,15 @@ def _extract_signed_numeric_critical_values(text: str) -> Counter[str]:
     """Extract canonical sign-sensitive monetary and percentage values."""
     values: Counter[str] = Counter()
     for match in _SIGNED_MONEY_PATTERN.finditer(text):
-        sign = "-" if match.group(1) == "-" else "+"
-        integer = match.group(2).replace(".", "")
-        amount = Decimal(f"{integer}.{match.group(3)}")
+        before, after = (match.group(name).replace("−", "-") for name in ("before", "after"))
+        # Conflicting printed signs are retained as a distinct fingerprint;
+        # the conservation check must not guess their intended arithmetic.
+        sign = before + after if before and after and before != after else before or after or "+"
+        integer = match.group("integer").replace(".", "")
+        amount = Decimal(f"{integer}.{match.group('fraction')}")
         values[f"money:{sign}:{format(amount, '.2f')}"] += 1
     for match in _SIGNED_PERCENTAGE_PATTERN.finditer(text):
-        sign = "-" if match.group(1) == "-" else "+"
+        sign = "-" if match.group(1) in {"-", "−"} else "+"
         integer = match.group(2)
         fraction = match.group(4)
         number = Decimal(f"{integer}.{fraction}" if fraction else integer)
@@ -83,7 +88,7 @@ def _extract_protected_semantic_tokens(text: str) -> frozenset[str]:
         if clean in _PROTECTED_NEGATION_WORDS:
             tokens.add(clean)
     for match in _PROTECTED_OPERATORS_RE.finditer(text):
-        tokens.add(match.group())
+        tokens.add(match.group().replace("−", "-"))
     return frozenset(tokens)
 
 
@@ -140,8 +145,8 @@ def _critical_surface_preserved(original: str, proposed: str) -> bool:
     """Preserve explicit signs and leading zeroes when replacing a value."""
     if not original.strip():
         return True
-    orig = re.sub(r"\s", "", original)
-    prop = re.sub(r"\s", "", proposed)
+    orig = re.sub(r"\s", "", original).replace("−", "-")
+    prop = re.sub(r"\s", "", proposed).replace("−", "-")
     if not prop:
         return False
     orig_sign = orig[0] if orig and orig[0] in "+-" else ""

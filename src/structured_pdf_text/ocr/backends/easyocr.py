@@ -1069,10 +1069,26 @@ def _best_candidate(
     ]
     from structured_pdf_text.ocr.pipelines.easyocr.policy import FUSION_POLICY
 
-    fused = OcrCandidateFusionEngine(FUSION_POLICY).fuse(candidate_results)
+    fusion_policy, sign_adjustments = FUSION_POLICY.with_observed_signs(candidate_results)
+    fused = OcrCandidateFusionEngine(fusion_policy).fuse(candidate_results)
+    from structured_pdf_text.ocr.pipelines.easyocr.segmentation import (
+        prefer_stroke_majority, prefer_case_majority, reconcile_boundary_words, trim_overlapping_readings,
+    )
+    fused, boundary_repairs = reconcile_boundary_words(fused, candidate_results, fusion_policy)
+    fused, overlap_trims = trim_overlapping_readings(fused)
+    fused, stroke_votes = prefer_stroke_majority(fused, candidate_results)
+    fused, case_votes = prefer_case_majority(fused, candidate_results)
+    from structured_pdf_text.ocr.pipelines.easyocr.recognition import prefer_verified_numeric
+    fused, numeric_votes = prefer_verified_numeric(fused, candidate_results)
     diagnostics = [
         {
             "candidate_id": label,
+            "sign_protected_alternatives": sign_adjustments.get(label, 0),
+            "boundary_segmentation_repairs": boundary_repairs.get(label, 0),
+            "overlapping_reading_trims": overlap_trims.get(label, 0),
+            "stroke_majority_adoptions": stroke_votes.get(label, 0),
+            "case_majority_adoptions": case_votes.get(label, 0),
+            "numeric_verification_adoptions": numeric_votes.get(label, 0),
             "token_count": metrics["token_count"],
             "char_count": metrics["char_count"],
             "mean_confidence": round(metrics["mean_confidence"], 4),
@@ -1736,14 +1752,12 @@ def _remap_raw_for_rotation(
             for pt in bbox_pts:
                 x, y = float(pt[0]), float(pt[1])
                 if angle == 90:
-                    # Clockwise 90°: (x, y) in rotated → (y, W_rot - 1 - x) in original
-                    nx, ny = y, rotated_w - 1 - x
+                    # Polygons use pixel edges, not integer pixel centres.
+                    nx, ny = y, rotated_w - x
                 elif angle == 180:
-                    # 180°: (x, y) → (W_rot-1-x, H_rot-1-y)
-                    nx, ny = rotated_w - 1 - x, rotated_h - 1 - y
+                    nx, ny = rotated_w - x, rotated_h - y
                 else:  # 270
-                    # Clockwise 270° = CCW 90°: (x, y) → (H_rot-1-y, x)
-                    nx, ny = rotated_h - 1 - y, x
+                    nx, ny = rotated_h - y, x
                 new_pts.append([nx, ny])
             if conf is not None:
                 remapped.append((new_pts, text, conf))
@@ -2610,6 +2624,9 @@ class EasyOCRBackend:
         self.last_easyocr_fallback_used = False
         self.last_easyocr_fallback_reason: str | None = None
         self._last_candidate_diagnostics: list[dict[str, Any]] = []
+        self.last_candidate_metrics: dict[str, dict[str, Any]] = {}
+        self.last_candidate_count = 0
+        self._candidate_decisions: list[dict[str, Any]] = []
         self._last_orientation_decision: dict[str, Any] = {}
         self._orientation_decisions: list[dict[str, Any]] = []
         self._last_dbnet_diag: list[dict[str, Any]] = []
@@ -2644,6 +2661,7 @@ class EasyOCRBackend:
             ),
             "easyocr_fallback_reasons": list(self._easyocr_fallback_reasons),
             "candidate_diagnostics": list(self._last_candidate_diagnostics),
+            "candidate_decisions": deepcopy(getattr(self, "_candidate_decisions", [])),
             "env_probe": dict(getattr(self, "_env_probe", {})),
             "effective_workers": getattr(self, "_workers", None),
             "effective_torch_intra_threads": getattr(self, "_torch_num_threads", None),
@@ -2658,6 +2676,21 @@ class EasyOCRBackend:
         }
         self.reset_page_diagnostics()
         return result
+
+    def _record_candidates(self, diagnostics):
+        """Keep each completed fusion and expose the current request snapshot."""
+        self._last_candidate_diagnostics = deepcopy(diagnostics)
+        self.last_candidate_metrics = {item["candidate_id"]: deepcopy(item) for item in diagnostics}
+        self.last_candidate_count = len(diagnostics)
+        if not hasattr(self, "_candidate_decisions"):
+            self._candidate_decisions = []
+        self._candidate_decisions.append({
+            "call_index": len(self._candidate_decisions) + 1,
+            "stage": "candidate_fusion",
+            "device": getattr(self, "_device", "unknown"),
+            "selected_angle": getattr(self, "_last_orientation_decision", {}).get("selected_angle"),
+            "candidates": deepcopy(diagnostics),
+        })
 
     def _record_call(self, fallback: dict[str, Any] | None) -> None:
         self._easyocr_calls += 1
@@ -2811,6 +2844,8 @@ class EasyOCRBackend:
         """
         t0 = time.perf_counter()
         self.last_pass_count = self.last_batch_count = 0
+        self.last_candidate_metrics = {}
+        self.last_candidate_count = 0
         if self._closed:
             return OCRResult(
                 status="runtime_error", tokens=(), text="", engine_identity=self.identity,
@@ -2832,6 +2867,7 @@ class EasyOCRBackend:
                 status = "ok" if tokens else "no_text"
                 extra_warnings = ()
         except Exception as exc:
+            _propagate_fatal_error(exc)
             if self._fallback_to_cpu(exc):
                 return self.recognize(request)
             return OCRResult(
@@ -2882,6 +2918,9 @@ class EasyOCRBackend:
         if self._closed:
             raise RuntimeError("EasyOCR backend is closed")
         self.last_pass_count = self.last_batch_count = 0
+        self.last_candidate_metrics = {}
+        self.last_candidate_count = 0
+        self._last_orientation_decision = {}
         img = _to_numpy(page_image)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
 
@@ -2925,8 +2964,20 @@ class EasyOCRBackend:
                 ):
                     self._dbnet_runtime_state = False
                     self._dbnet_failure_reason = self._last_dbnet_diag[-1].get("failure_reason")
+                from structured_pdf_text.ocr.pipelines.easyocr.recognition import recover_signed_currency, recover_numeric_readings
+                pipeline_candidates = recover_numeric_readings(
+                    self._reader, img, pipeline_candidates, page_index=page_index,
+                    language=self._language, workers=getattr(self, "_workers", 0), record_call=self._record_call,
+                    propagate_error=_propagate_optional_inference_error,
+                    allowlist=base_kwargs.get("allowlist"), blocklist=base_kwargs.get("blocklist"),
+                )
+                pipeline_candidates = recover_signed_currency(
+                    self._reader, img, pipeline_candidates, page_index=page_index,
+                    language=self._language, workers=getattr(self, "_workers", 0), record_call=self._record_call,
+                    propagate_error=_propagate_optional_inference_error,
+                )
                 tokens, cand_diag = _best_candidate(pipeline_candidates)
-                self._last_candidate_diagnostics = cand_diag
+                self._record_candidates(cand_diag)
                 # VQ-14: supplement global tokens with regional passes for any
                 # image areas not covered by the selected orientation. This handles
                 # pages with mixed orientations (horizontal body + vertical stamp).
@@ -2952,8 +3003,20 @@ class EasyOCRBackend:
                     "selected_angle": _orient_diag.get("selected_angle"),
                     "attempts": list(_orient_diag.get("attempts", [])),
                 })
+                from structured_pdf_text.ocr.pipelines.easyocr.recognition import recover_signed_currency, recover_numeric_readings
+                pipeline_candidates = recover_numeric_readings(
+                    self._reader, img, pipeline_candidates, page_index=page_index,
+                    language=self._language, workers=getattr(self, "_workers", 0), record_call=self._record_call,
+                    propagate_error=_propagate_optional_inference_error,
+                    allowlist=base_kwargs.get("allowlist"), blocklist=base_kwargs.get("blocklist"),
+                )
+                pipeline_candidates = recover_signed_currency(
+                    self._reader, img, pipeline_candidates, page_index=page_index,
+                    language=self._language, workers=getattr(self, "_workers", 0), record_call=self._record_call,
+                    propagate_error=_propagate_optional_inference_error,
+                )
                 tokens, cand_diag = _best_candidate(pipeline_candidates)
-                self._last_candidate_diagnostics = cand_diag
+                self._record_candidates(cand_diag)
                 # VQ-14: regional orientation supplement for adaptive path as well.
                 tokens = _supplement_with_regional_orientation(
                     self._reader, img, base_kwargs, tokens, page_index, self._language,
@@ -2964,8 +3027,14 @@ class EasyOCRBackend:
             raw, fallback = _run_easyocr(self._reader, img, **self._run_kwargs())
             self._record_call(fallback)
             tokens = _result_to_pipeline_tokens(raw, page_index, self._language)
-            self._last_candidate_diagnostics = []
+            self._record_candidates([])
 
+        if use_variants:
+            from structured_pdf_text.ocr.pipelines.easyocr.decorations import WATERMARK_POLICY
+            from structured_pdf_text.ocr.pipelines.easyocr.marks import recover_selection_marks
+            tokens = WATERMARK_POLICY.annotate(img, tokens)
+            tokens = recover_selection_marks(img, tokens, language=self._language,
+                                             allowlist=base_kwargs.get("allowlist"), blocklist=base_kwargs.get("blocklist"))
         return map_tokens_to_page(tokens, page_bbox, img.shape[1], img.shape[0], page_rotation)
 
     @retry_gpu_configuration_on_cpu
@@ -2985,6 +3054,8 @@ class EasyOCRBackend:
         if self._closed:
             raise RuntimeError("EasyOCR backend is closed")
         self.last_pass_count = self.last_batch_count = 0
+        self.last_candidate_metrics = {}
+        self.last_candidate_count = 0
         img = _to_numpy(page_image)
         from structured_pdf_text.ocr.backends._parser_utils import crop_region_in_raster
         crop, (cx0, cy0, _cx1, _cy1), (width, height) = crop_region_in_raster(img, region_bbox, page_bbox)
@@ -3007,11 +3078,14 @@ class EasyOCRBackend:
     ) -> list[OcrToken]:
         """Recognize a known crop without text detection.
 
-        quality_policy is accepted for compatibility with the common regional
-        recognition interface. Direct recognition is a single recognizer pass,
-        so candidate quality policies do not alter this path.
+        Adaptive/exhaustive verification uses a beam decoder for a second
+        observation of a known crop. Default/baseline calls and an explicitly
+        configured non-greedy decoder retain their settings. This remains a
+        single recognizer pass, without text detection.
         """
         self.last_pass_count = self.last_batch_count = 0
+        self.last_candidate_metrics = {}
+        self.last_candidate_count = 0
         if self._closed:
             return []
         import numpy as np
@@ -3021,17 +3095,33 @@ class EasyOCRBackend:
         height, width = gray.shape[:2]
         if not width or not height:
             return []
+        content_box = None
+        if quality_policy in {"adaptive", "exhaustive"}:
+            from structured_pdf_text.ocr.pipelines.easyocr.recognition import direct_content_box
+            x0, y0, x1, y1 = direct_content_box(gray)
+            content_box = (x0, y0, x1, y1)
+            gray = gray[y0:y1, x0:x1]
+            padding = max(4, round(.4 * gray.shape[0]))
+            gray = cv2.copyMakeBorder(gray, padding, padding, padding, padding, cv2.BORDER_CONSTANT, value=255)
+        decoder = ("beamsearch" if quality_policy in {"adaptive", "exhaustive"}
+                   and self._decoder == "greedy" else self._decoder)
         result = self._reader.recognize(
             gray,
-            [[0, width, 0, height]],
+            [[0, gray.shape[1], 0, gray.shape[0]]],
             [],
-            decoder=self._decoder,
-            beamWidth=self._beamwidth,
+            decoder=decoder,
+            beamWidth=max(10, self._beamwidth) if decoder == "beamsearch" else self._beamwidth,
             allowlist=self._allowlist,
             blocklist=self._blocklist,
             workers=self._workers,
         )
         self._record_call(None)
+        if content_box is not None:
+            x0, y0, x1, y1 = content_box
+            # The known recognition box includes synthetic white padding.
+            # Attribute its text only to the ink's original raster bounds.
+            result = [([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], text, confidence)
+                      for _, text, confidence in result or []]
         tokens = _result_to_pipeline_tokens(result or [], page_index, self._language)
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)

@@ -102,7 +102,7 @@ from .tables.validation import (
 from .tables.text_tracks import assess_borderless_region
 from .tables.text_join import join_table_tokens
 from .tables.grid_repair import repair_missing_dividers
-from .tables.value_surfaces import harmonize_value_surfaces
+from .tables.value_surfaces import harmonize_currency_markers, harmonize_value_surfaces
 from .tables.ocr_lines import _rebuild_table_ocr_lines, _merge_short_table_fragments
 from .native.reading_frame import to_upright_frame, upside_down
 from .text.line_detector import lines_to_text, reconstruct_native_lines, spacing_diagnostics
@@ -1013,6 +1013,10 @@ class PdfTextExtractor:
                 # (covers single-table pages and pages with one raster table);
                 # subsequent attempts crop the page image to each image bbox that is
                 # not already covered by a native or previously detected visual table.
+                _table_structure_engine = (
+                    self.ocr_engine.table_structure_engine
+                    if isinstance(self.ocr_engine, OCRPageFacade) else None
+                )
                 _visual_candidates: list = []  # StructuredTable results
                 if _should_run_visual:
                     structure_tokens = _table_structure_tokens(
@@ -1024,6 +1028,7 @@ class PdfTextExtractor:
                             native_page,
                             table_structure_image,
                             tokens=structure_tokens,
+                            structure_engine=_table_structure_engine,
                             page_rotation=native_page.objects.rotation,
                         )
                         if visual_table is not None:
@@ -1069,6 +1074,7 @@ class PdfTextExtractor:
                                 img_box,
                                 table_id=extra_id,
                                 tokens=structure_tokens,
+                                structure_engine=_table_structure_engine,
                             )
                             if extra is not None:
                                 _visual_candidates.append(extra)
@@ -1095,6 +1101,7 @@ class PdfTextExtractor:
                         _visual_candidates.extend(detect_ocr_track_tables(
                             native_page, regions, table_structure_image,
                             tables + _visual_candidates,
+                            structure_engine=_table_structure_engine,
                         ))
                     except FatalExtractionError:
                         raise
@@ -1198,7 +1205,12 @@ class PdfTextExtractor:
                     )
                     ocr_table_tokens += len(consumed_table_ocr)
                 table_cell_refinements = 0
-                if self.config.enable_table_cell_ocr and _ocr_enabled(self.config) and tables:
+                _automatic_cells = (
+                    isinstance(self.ocr_engine, OCRPageFacade)
+                    and getattr(self.ocr_engine.cell_recovery_policy, "automatic_recovery", False)
+                    and effective_ocr_quality_policy(self.config).value != "baseline"
+                )
+                if (self.config.enable_table_cell_ocr or _automatic_cells) and _ocr_enabled(self.config) and tables:
                     try:
                         self._ensure_page_ocr(source, native_page, page_index)
                         cell_image = ocr_image if ocr_image is not None else rendered_page
@@ -1222,6 +1234,7 @@ class PdfTextExtractor:
                                 ),
                                 base_scale=ocr_render_scale,
                                 page_rotation=native_page.objects.rotation,
+                                automatic=not self.config.enable_table_cell_ocr,
                             )
                     except FatalExtractionError:
                         raise
@@ -1256,6 +1269,7 @@ class PdfTextExtractor:
                             complexity=complexity,
                             table_ocr_overrides=table_ocr_overrides,
                             figure_ocr_bindings=figure_ocr_bindings,
+                            preserve_cell_refinements=_automatic_cells,
                         )
                     elif not use_ocr_as_primary and (unmatched_ocr_lines or figure_ocr_bindings):
                         _append_hybrid_ocr_regions(
@@ -1268,9 +1282,16 @@ class PdfTextExtractor:
                             complexity=complexity,
                             table_ocr_overrides=table_ocr_overrides,
                             figure_ocr_bindings=figure_ocr_bindings,
+                            preserve_cell_refinements=_automatic_cells,
                         )
                     if ocr_tokens:
-                        regions = reconstruct_ocr_layout(regions, native_page.bbox)
+                        _line_order_policy = (
+                            self.ocr_engine.line_order_policy
+                            if isinstance(self.ocr_engine, OCRPageFacade) else None
+                        )
+                        regions = reconstruct_ocr_layout(
+                            regions, native_page.bbox, line_order_policy=_line_order_policy,
+                        )
                 except FatalExtractionError:
                     raise
                 except Exception as exc:
@@ -1550,8 +1571,14 @@ class PdfTextExtractor:
                     },
                 )
                 # Last: earlier stages rebuild cell text from OCR lines.
+                _currency_markers = (
+                    isinstance(self.ocr_engine, OCRPageFacade)
+                    and self.ocr_engine.currency_marker_repair
+                )
                 for table in tables:
-                    harmonize_value_surfaces(table)
+                    harmonize_value_surfaces(table, currency_markers=_currency_markers)
+                if _currency_markers:
+                    harmonize_currency_markers(regions, tables)
                 pages.append(
                     assemble_page(
                         page_index=page_index,
@@ -2237,28 +2264,58 @@ def _refine_critical_data_tokens(
 def _refine_table_cells_ocr(
     *, engine: Any, page_image: Any, page_index: int, page_bbox: BBox,
     tables: list[Any], quality_policy: str, region_renderer: Any = None,
-    base_scale: float = 3.0, page_rotation: int = 0,
+    base_scale: float = 3.0, page_rotation: int = 0, automatic: bool = False,
 ) -> int:
     """Target weak cells using both detector and direct-recognition paths."""
     if isinstance(engine, OCRPageFacade):
         refinements = 0
-        threshold = engine.cell_recovery_policy.minimum_existing_confidence
+        if not automatic:
+            # Preserve the explicit legacy path, including reading the current
+            # header after earlier cells have been refined.
+            threshold = engine.cell_recovery_policy.minimum_existing_confidence
+            for table in tables:
+                header_rows = table.header_rows if table.header_rows is not None else (
+                    (min((cell.row for cell in table.cells), default=0),) if table.cells else ()
+                )
+                for cell in table.cells:
+                    if cell.bbox is None or (cell.text.strip() and cell.confidence >= threshold):
+                        continue
+                    header_text = next((item.text for item in table.cells
+                                        if item.col == cell.col and item.row in header_rows and item.text.strip()), "")
+                    refinements += int(engine.refine_cell(
+                        table_id=table.table_id, page_index=page_index, cell=cell,
+                        quality_policy=quality_policy, base_scale=base_scale, header_text=header_text,
+                    ))
+            return refinements
+        policy = engine.cell_recovery_policy
+        selected = []
         for table in tables:
             header_rows = table.header_rows if table.header_rows is not None else (
                 (min((cell.row for cell in table.cells), default=0),) if table.cells else ()
             )
             for cell in table.cells:
-                if cell.bbox is None or (cell.text.strip() and cell.confidence >= threshold):
+                if cell.bbox is None:
                     continue
-                header_text = next((
-                    item.text for item in table.cells
-                    if item.col == cell.col and item.row in header_rows and item.text.strip()
-                ), "")
-                refinements += int(engine.refine_cell(
-                    table_id=table.table_id, page_index=page_index, cell=cell,
-                    quality_policy=quality_policy, base_scale=base_scale,
-                    header_text=header_text,
-                ))
+                header_text = policy.header_context(table, cell, header_rows)
+                if automatic:
+                    # Engine policy may schedule only already-observed raster
+                    # tables; native extraction remains outside this opt-in.
+                    priority = policy.automatic_priority(cell, header_text, is_header=cell.row in header_rows)
+                    if priority is None or table.method.value != "visual_model":
+                        continue
+                else:
+                    if cell.text.strip() and cell.confidence >= policy.minimum_existing_confidence:
+                        continue
+                    priority = 0
+                selected.append((priority, table, cell, header_text))
+        selected.sort(key=lambda value: value[0])
+        if automatic:
+            selected = selected[:policy.maximum_automatic_cells]
+        for _, table, cell, header_text in selected:
+            refinements += int(engine.refine_cell(
+                table_id=table.table_id, page_index=page_index, cell=cell,
+                quality_policy=quality_policy, base_scale=base_scale, header_text=header_text,
+            ))
         return refinements
 
     import numpy as np
@@ -2762,6 +2819,7 @@ def _append_hybrid_ocr_regions(
     complexity: Any,
     table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] | None = None,
     figure_ocr_bindings: list[tuple[BBox, list[TextLine], list[OcrToken]]] | None = None,
+    preserve_cell_refinements: bool = False,
 ) -> None:
     """Attach unmatched OCR to tables/remaining body without duplicating regions."""
     remaining = list(unmatched_lines)
@@ -2788,7 +2846,10 @@ def _append_hybrid_ocr_regions(
                             if _point_in_cells(table, token.bbox.cx, token.bbox.cy)]
         if not table_lines:
             continue
-        table_lines = _rebuild_table_ocr_lines(table, table_lines, page_index)
+        table_lines = _rebuild_table_ocr_lines(
+            table, table_lines, page_index,
+            preserve_cell_refinements=preserve_cell_refinements,
+        )
         table_region = full_page_text_region(page_index, table_bbox, table_lines, complexity)
         table_region.region_id = f"{table.table_id}:ocr"
         table_region.kind = RegionKind.TABLE
@@ -3105,6 +3166,7 @@ def _refine_visual_table_ocr(
             refined_table = detect_visual_table_in_region(
                 page=page, image=page_image, region=table_bbox, table_id=table.table_id,
                 tokens=list(result.tokens),
+                structure_engine=engine.table_structure_engine,
             )
             candidate = _preserve_visual_grid(table, refined_table)
             if candidate is table:

@@ -99,7 +99,7 @@ def _binding_metadata(binding) -> tuple:
         return (binding.target, tuple(binding.evidence_ids), binding.visible_target)
     if isinstance(binding, CellTarget):
         return (binding.target, binding.table_id, binding.page_index,
-                frozenset(binding.visible_evidence_ids), binding.visible_target)
+                frozenset(binding.visible_evidence_ids), binding.visible_target, binding.allow_single_digit)
     raise ValueError("Unsupported core integration target binding")
 
 
@@ -281,6 +281,7 @@ class CellTarget:
     visible_target: bool = False
     expected_snapshot: tuple | None = None
     binding_snapshot: tuple | None = field(init=False, default=None, repr=False)
+    allow_single_digit: bool = False
 
     def __post_init__(self):
         if not isinstance(self.target, TargetRef) or not isinstance(self.cell, TableCell):
@@ -289,6 +290,8 @@ class CellTarget:
             raise ValueError("Cell binding requires a table and cell target reference")
         if self.visible_target is not True:
             raise ValueError("Cell correction requires a visible, core-approved target")
+        if type(self.allow_single_digit) is not bool:
+            raise ValueError("Single-digit cell context must be explicitly approved by the core")
         self.visible_evidence_ids = set(self.visible_evidence_ids)
         actual = cell_evidence_snapshot(self.cell)
         if self.expected_snapshot is None:
@@ -795,7 +798,14 @@ class ProposalIntegrator:
                             sum(token.confidence or 0.0 for token in evidence) / len(evidence)
                             if evidence else 0.0
                         )
-                        if len(proposed_cell_text.strip()) < 2 or average_confidence < 0.75:
+                        single_digit = (
+                            binding.allow_single_digit and len(evidence) == 1
+                            and len(proposed_cell_text.strip()) == 1
+                            and proposed_cell_text.strip() in "0123456789"
+                            and average_confidence >= .95
+                            and evidence[0].bbox.overlap_ratio(binding.cell.bbox) >= .80
+                        )
+                        if (len(proposed_cell_text.strip()) < 2 and not single_digit) or average_confidence < 0.75:
                             raise IntegrationRejected("Empty-cell insertion lacks strong OCR evidence")
                     staged_cell = deepcopy(binding.cell)
                     helper = NativeOCRIntegrator(join_table_tokens)

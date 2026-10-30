@@ -96,7 +96,23 @@ def detect_visual_table(
         import numpy as np
 
         recognition_image = np.ascontiguousarray(np.rot90(np.asarray(image), orientation // 90))
+    # Header shading is measured on the observed pixels: illumination recovery
+    # flattens the header band together with the shadow (V4 p184, run 008).
+    observed_image = image
     grid = structure_engine.recognize(recognition_image)
+    recovery = getattr(structure_engine, "prepare_recovery_image", None)
+    if grid is None and callable(recovery):
+        recovered = recovery(recognition_image)
+        if _image_size(recovered) != _image_size(recognition_image):
+            raise ValueError("Table recovery must preserve the authorized raster frame")
+        grid = structure_engine.recognize(recovered)
+        if grid is not None:
+            # Span sampling must see the same rule contrast as detection.
+            if orientation:
+                import numpy as np
+                image = np.ascontiguousarray(np.rot90(np.asarray(recovered), -orientation // 90))
+            else:
+                image = recovered
     if grid is None:
         return None
     grid = _without_sliver_slots(grid)
@@ -178,6 +194,13 @@ def detect_visual_table(
         return None
     from .headers import infer_visual_header_rows
 
+    header_inference = getattr(structure_engine, "infer_header_rows", infer_visual_header_rows)
+    header_rows = header_inference(cells, observed_image, raster_bbox)
+    if not header_rows and image is not observed_image:
+        header_rows = header_inference(cells, image, raster_bbox)
+    recover_headers = getattr(structure_engine, "recover_header_rows", None)
+    if not header_rows and callable(recover_headers):
+        header_rows = recover_headers(cells)
     return StructuredTable(
         table_id=table_id or f"page-{page.page_index + 1}:visual-grid",
         page_fragments=[
@@ -193,7 +216,7 @@ def detect_visual_table(
         row_count=len(grid.y_edges) - 1,
         confidence=grid.confidence,
         method=TableMethod.VISUAL_MODEL,
-        header_rows=infer_visual_header_rows(cells, image, raster_bbox),
+        header_rows=header_rows,
     )
 
 

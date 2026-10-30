@@ -4,10 +4,16 @@ import structured_pdf_text.ocr.factory as factory
 from structured_pdf_text.ocr.pipeline.adapters import AuthorizedBackendPipeline
 from structured_pdf_text.ocr.pipeline.contracts import EngineSelection
 from structured_pdf_text.ocr.registry import get_entry
+from .structure import EasyOCRTableStructureEngine
+from .layout import prepare_layout_lines
+from .marks import SELECTION_MARK_POLICY
+from .decorations import WATERMARK_POLICY
 from .policy import ADMISSION_POLICY, CELL_POLICY, FIGURE_SEGMENTATION_POLICY, FUSION_POLICY, INTEGRATION_POLICY, RASTER_BOUNDARY_POLICY, RECOVERY_POLICY, TOKEN_REFINEMENT_POLICY
 
 
 class EasyOCRPipeline(AuthorizedBackendPipeline):
+    table_structure_engine = EasyOCRTableStructureEngine()
+    line_order_policy = staticmethod(prepare_layout_lines)
     recovery_policy = RECOVERY_POLICY
     integration_policy = INTEGRATION_POLICY
     cell_policy = CELL_POLICY
@@ -16,6 +22,13 @@ class EasyOCRPipeline(AuthorizedBackendPipeline):
     figure_segmentation_policy = FIGURE_SEGMENTATION_POLICY
     raster_boundary_policy = RASTER_BOUNDARY_POLICY
     admission_policy = ADMISSION_POLICY
+
+    @property
+    def currency_marker_repair(self):
+        # ``Rs`` before a pt-BR amount is ``R$`` misread only in Portuguese
+        # documents; elsewhere it may be the rupee abbreviation.
+        language = getattr(self.settings, "language", None) or ""
+        return language.casefold().startswith("pt")
 
     def _identity(self):
         identity = super()._identity()
@@ -29,6 +42,19 @@ class EasyOCRPipeline(AuthorizedBackendPipeline):
                 "ring_minimum_aspect": self.admission_policy.ring_minimum_aspect,
             },
             "candidate_fusion": self.fusion_policy.__class__.__name__,
+            "raster_table_structure": self.table_structure_engine.__class__.__name__,
+            "rotated_prose_columns": True,
+            "currency_marker_repair": self.currency_marker_repair,
+            "numeric_verification": {"maximum_fields_per_raster": 8, "minimum_confidence": .80,
+                                     "matching_direct_reads": 2, "preserve_amount_and_explicit_sign": True},
+            "direct_content_crop": "edge_rules_and_blank_margins",
+            "case_majority": {"minimum_votes": 3, "absolute_majority": True},
+            "selection_marks": {**SELECTION_MARK_POLICY.identity(), "requires_aligned_empty_neighbour": True},
+            "decorative_watermarks": WATERMARK_POLICY.identity(),
+            "automatic_cell_recovery": {
+                "enabled": self.cell_policy.automatic_recovery,
+                "maximum_cells": self.cell_policy.maximum_automatic_cells,
+            },
             "table_refinement": self.token_refinement_policy.identity()})
 
     def __init__(self, resolved, backend):

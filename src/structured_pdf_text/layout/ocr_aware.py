@@ -207,7 +207,7 @@ def reclassify_ocr_regions(
 
 
 def reconstruct_ocr_layout(
-    regions: list[LayoutRegion], page_bbox: BBox
+    regions: list[LayoutRegion], page_bbox: BBox, *, line_order_policy=None
 ) -> list[LayoutRegion]:
     """Split OCR-only text areas into semantic regions before page assembly.
 
@@ -227,7 +227,8 @@ def reconstruct_ocr_layout(
             output.append(_reclassify_one(region, _body_ocr_height_median(regions), page_bbox.height))
             continue
 
-        lines = _order_ocr_lines_by_columns(region.ocr_lines, page_bbox)
+        lines = (line_order_policy(region.ocr_lines, page_bbox) if callable(line_order_policy)
+                 else _order_ocr_lines_by_columns(region.ocr_lines, page_bbox))
         heights = [line.bbox.height for line in lines if line.bbox.height > 0]
         body_height = statistics.median(heights) if heights else 1.0
         assigned: list[tuple[TextLine, RegionKind]] = []

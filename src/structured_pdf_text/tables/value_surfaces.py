@@ -12,6 +12,12 @@ sign, currency or percent). Dates, versions and three-digit groups
 The same consistency holds for the real sign: when other cells of the table
 write ``R$ `` followed by a space, OCR's ``R$-350,00`` (space lost) and
 ``RS-0,01`` (``$`` read as ``S``) are restored to that form.
+
+An engine may also opt in to ``currency_markers``: with the same evidence,
+``Rs 6.900,00`` / ``-RS 350,00`` (``$`` read as ``s``/``S`` before a
+complete pt-BR amount) become ``R$``. ``harmonize_currency_markers`` applies
+that rule to OCR prose when the page itself writes a well-formed ``R$``.
+Without such evidence, ``Rs`` stays: it is also the rupee abbreviation.
 """
 from __future__ import annotations
 
@@ -26,9 +32,14 @@ _DOT_DECIMAL = re.compile(r"(?<![\w.,])\d{1,3}(?:,\d{3})+\.\d+(?![\w.,])")
 _VALUE_LETTERS = 4  # unit/currency letters a value cell may carry: kg, mm, R$, °C, µg
 _SPACED_REAL = re.compile(r"(?<![\w$])R\$ [+\-−]?\d")
 _GLUED_REAL = re.compile(r"(?<![\w$])R[$S](?=[+\-−]?\d)")
+# ``$`` read as ``s``/``S``, only before a complete pt-BR amount (cents
+# required; a thousands group, when present, uses dots).
+_MISREAD_REAL = re.compile(r"(?<![\w$])R[sS] ?(?=[+\-−]?(?:\d{1,3}(?:\.\d{3})+|\d{1,3}),\d{2}(?![\w,]|\.\d))")
+_MISREAD_MARKER = re.compile(r"R[sS]")
+_BRL_AMOUNT = re.compile(r"[+\-−]?(?:\d{1,3}(?:\.\d{3})+|\d{1,3}),\d{2}(?![\w,]|\.\d)")
 
 
-def harmonize_value_surfaces(table: StructuredTable) -> bool:
+def harmonize_value_surfaces(table: StructuredTable, *, currency_markers: bool = False) -> bool:
     """Restore misread value surfaces of ``table`` in place; True if any changed.
 
     Cells and tokens are edited in place: they keep their identity, so the
@@ -48,6 +59,8 @@ def harmonize_value_surfaces(table: StructuredTable) -> bool:
             text = _NUMBER.sub(_comma_decimal, text)
         if spaced_real:
             text = _GLUED_REAL.sub("R$ ", text)
+            if currency_markers:
+                text = _MISREAD_REAL.sub("R$ ", text)
         return text
 
     changed = False
@@ -84,3 +97,43 @@ def _comma_decimal(match: re.Match) -> str:
     if 1 <= len(groups[0]) <= 3 and all(len(group) == 3 for group in groups[1:-1]) and 1 <= len(groups[-1]) <= 2:
         return ".".join(groups[:-1]) + "," + groups[-1]
     return number  # A date, version or code.
+
+
+def harmonize_currency_markers(regions, tables=()) -> int:
+    """Restore ``Rs``/``RS`` to ``R$`` in OCR prose of a page that writes ``R$``.
+
+    Only OCR tokens of region lines are edited, in place, with the same
+    restriction as table cells: a complete pt-BR amount must follow, and
+    native evidence is never touched. Tokens owned by table cells are left to
+    ``harmonize_value_surfaces``, which keeps the cell text consistent.
+    Returns the number of restored markers.
+    """
+    lines = [line for region in regions for line in (*region.ocr_lines, *region.native_lines)]
+    texts = [line.text for line in lines] + [cell.text for table in tables for cell in table.cells]
+    if not any(_SPACED_REAL.search(text) for text in texts):
+        return 0
+    owned = {id(token) for table in tables for cell in table.cells for token in cell.tokens}
+    restored = 0
+    for region in regions:
+        for line in region.ocr_lines:
+            if line.text_override is not None:
+                continue
+            tokens = line.tokens
+            for index, token in enumerate(tokens):
+                if id(token) in owned or any(source.source in _NATIVE_SOURCES
+                                             for source in getattr(token, "sources", ()) or ()):
+                    continue
+                text = _MISREAD_REAL.sub("R$ ", token.text)
+                if text == token.text and _MISREAD_MARKER.fullmatch(token.text.strip()):
+                    # The marker and its amount can be separate tokens.
+                    following = next((item for item in tokens[index + 1:] if item.text.strip()), None)
+                    if following is not None and _BRL_AMOUNT.match(following.text.strip()):
+                        text = token.text.replace(token.text.strip(), "R$")
+                if text != token.text:
+                    restored += len(_MISREAD_MARKER.findall(token.text)) - len(_MISREAD_MARKER.findall(text))
+                    token.text = text
+                    if token.normalized_text is not None:
+                        token.normalized_text = _MISREAD_REAL.sub("R$ ", token.normalized_text)
+                    token.transformation_type = "page_currency_marker"
+                    token.decision_reason = "restored to the page's R$ currency form"
+    return restored

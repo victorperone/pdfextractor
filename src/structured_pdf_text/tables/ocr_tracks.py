@@ -7,7 +7,7 @@ from .headers import infer_visual_header_rows
 from .text_tracks import detect_borderless_tables
 
 
-def detect_ocr_track_tables(page, regions, image, claimed_tables):
+def detect_ocr_track_tables(page, regions, image, claimed_tables, *, structure_engine=None):
     """Reuse recurrent-track classification within a composed raster scope.
 
     The native detector normally sees only native lines. This adapter admits
@@ -44,6 +44,9 @@ def detect_ocr_track_tables(page, regions, image, claimed_tables):
                         sum(ch.isalpha() for ch in text) >= 3 or any(ch.isdigit() for ch in text))
                            for text in texts):
                     # Recurrent circles/ticks alone cannot establish a table.
+                    continue
+                admission = getattr(structure_engine, "accept_ocr_tracks", None)
+                if callable(admission) and not admission(table):
                     continue
                 table.method = TableMethod.VISUAL_MODEL
                 table.header_rows = infer_visual_header_rows(table.cells, raster, page.bbox)

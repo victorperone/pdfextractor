@@ -21,6 +21,11 @@ def refine_cell(facade, target, *, quality_policy, base_scale, header_text, poli
                     mandatory=False,
                 )
                 if direct:
+                    orientation = getattr(policy, "direct_preprocessing_rotation", None)
+                    if quality_policy in {"adaptive", "exhaustive"} and callable(orientation):
+                        correction = orientation(target.cell)
+                        if correction:
+                            kwargs['preprocessing_rotation'] = correction
                     tokens = facade.recognize_direct(None, page_index, target.cell.bbox, **kwargs)
                 else:
                     tokens = facade.recognize_page(

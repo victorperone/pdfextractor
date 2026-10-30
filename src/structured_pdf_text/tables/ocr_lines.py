@@ -7,7 +7,7 @@ from structured_pdf_text.tables.text_join import join_table_tokens
 from .cell_geometry import contains_point
 
 
-def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int, *, bind_cell_evidence: bool = False) -> list[TextLine]:
+def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int, *, bind_cell_evidence: bool = False, preserve_cell_refinements: bool = False) -> list[TextLine]:
     """Serialize OCR text by detected table row/column instead of OCR line order.
 
     OCR line reconstruction is intentionally page-oriented. On dense raster
@@ -50,6 +50,12 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int,
         if cell.bbox is None:
             continue
         selected = assigned.get((cell.row, cell.col), [])
+        if preserve_cell_refinements and any(
+                token.transformation_type == "table_cell_ocr" for token in cell.tokens):
+            # A committed, authorized cell correction supersedes the old OCR
+            # stream. Rebuilding its row must not put the superseded reading
+            # back into the cell while retaining the new evidence tokens.
+            selected = list(cell.tokens)
         while selected and selected[0].text.isspace():
             selected.pop(0)
         while selected and selected[-1].text.isspace():
@@ -100,6 +106,12 @@ def _rebuild_table_ocr_lines(table: Any, lines: list[TextLine], page_index: int,
         row_tokens = _merge_short_table_fragments(row_tokens)
         row_bbox = BBox.union_all([token.bbox for token in row_tokens])
         row_token_ids = {id(token) for token in row_tokens}
+        if preserve_cell_refinements:
+            # Consume the old row's source identities as well. The integrator
+            # already records the replacement's evidence lineage; without
+            # these line identities conservation can re-emit the old reading.
+            row_token_ids.update(id(token) for cell in occupied_cells
+                                 for token in assigned.get((cell.row,cell.col), ()))
         row_line_id = f"ocr-table:p{page_index}:{table.table_id}:row:{row}"
         source_ids = tuple(dict.fromkeys(
             source_id for line in lines
