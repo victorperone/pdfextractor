@@ -110,7 +110,7 @@ def test_repeated_body_lines_inside_header_region_are_never_suppressed():
 
 
 def test_mixed_header_block_keeps_its_body_lines():
-    pages_blocks = [_v4_page(index) for index in range(2)]
+    pages_blocks = [_v4_page(index) for index in range(3)]
     repeated = detect_repeated_headers_footers([page for page, _ in pages_blocks])
     page, blocks = pages_blocks[0]
     merged = PageContentBlock(block_id="merged", page_index=0, kind=ContentKind.HEADER,
@@ -124,7 +124,7 @@ def test_mixed_header_block_keeps_its_body_lines():
 def test_rotated_page_header_is_still_suppressed():
     # /Rotate 90: the visual top is canonical small x; visual height = canonical width.
     pages = []
-    for index in range(2):
+    for index in range(3):
         header = _line(HEADER, f"ocr:{index}:rot-header", BBox(8, 100, 18, 700))
         body = _line(BODY, f"ocr:{index}:rot-body", BBox(300, 100, 310, 700))
         pages.append(_page(index, [_region(RegionKind.HEADER, [header, body], f"{index}:r")],

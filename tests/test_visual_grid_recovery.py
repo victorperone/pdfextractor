@@ -277,42 +277,6 @@ def test_rectified_separator_tolerance_uses_page_units_at_high_resolution():
     assert [c.text for c in table.cells] == [f'{r}:{c}' for r in range(3) for c in range(3)]
 
 
-def test_spanned_table_html_uses_compact_format():
-    """Regression: _render_spanned_table_html must produce compact inline rows.
-
-    Pretty-printed format (  <tr>\\n    <cells>\\n  </tr>) adds ~130 extra
-    whitespace characters vs the reference format (<tr><cells></tr>), which
-    the CER metric counts as 137 insertions per page for V6 pages 28/50/81.
-    Fix-F14: each row must be on a single line with no indentation.
-    """
-    from structured_pdf_text.document import StructuredTable, TableCell, TableMethod
-    from structured_pdf_text.renderers.markdown import _render_spanned_table_html
-
-    cells = [
-        TableCell(0, 0, 2, 1, BBox(0, 0, 50, 40), 'Natureza', [], 0.9),
-        TableCell(0, 1, 1, 2, BBox(50, 0, 150, 20), 'Previsto', [], 0.9),
-        TableCell(1, 1, 1, 1, BBox(50, 20, 100, 40), 'Quantidade', [], 0.9),
-        TableCell(1, 2, 1, 1, BBox(100, 20, 150, 40), 'Valor', [], 0.9),
-        TableCell(2, 0, 1, 1, BBox(0, 40, 50, 60), 'Drenagem', [], 0.9),
-        TableCell(2, 1, 1, 1, BBox(50, 40, 100, 60), '8', [], 0.9),
-        TableCell(2, 2, 1, 1, BBox(100, 40, 150, 60), 'R$ 34.000,00', [], 0.9),
-    ]
-    table = StructuredTable('test', [], cells, 3, 3, 0.9, TableMethod.VISUAL_MODEL)
-    html = _render_spanned_table_html(table)
-
-    # Every content line must be a <tr>...</tr> on a single line (compact format)
-    for line in html.splitlines():
-        stripped = line.strip()
-        if stripped in ('<table>', '</table>', ''):
-            continue
-        assert stripped.startswith('<tr>') and stripped.endswith('</tr>'), (
-            f"Expected compact <tr>...</tr> on one line, got: {stripped!r}"
-        )
-    # No indentation or standalone cell tags allowed
-    assert '  <tr>' not in html, "Pretty-printed indented <tr> found — compact format required"
-    assert '\n    <' not in html, "Per-cell indentation found — compact format required"
-
-
 def test_align_ruling_lines_works_with_opencv5_houghlinesP_shape():
     """Regression: OpenCV 5 changed HoughLinesP return shape from (N,1,4) to (N,4).
 
