@@ -19,7 +19,7 @@ def _page_entries(data: dict, source: str) -> dict[int, dict]:
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError(f"{source} page entries must be objects")
-        number = page_number(entry.get("page", entry.get("page_num")))
+        number = page_number(entry.get("page", entry.get("page_num", entry.get("page_number"))))
         if "page_num" in entry and page_number(entry["page_num"]) != number:
             raise ValueError(f"Conflicting page IDs in {source} page {number}")
         if number in result:

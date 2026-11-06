@@ -177,6 +177,21 @@ class ProseVsTableClassifier:
             reasons.append("code_layout_signal")
         if leader_ratio >= 0.50:
             reasons.append("dot_leader_index")
+        # A two-column block where most first-column cells end with ":" is a
+        # key-value form field, not a data table.  Real tables have data values
+        # in every column; form blocks have short colon-terminated labels on
+        # the left and free-form values on the right.
+        if column_count == 2:
+            first_col_texts = [
+                group.text.rstrip()
+                for row in assignments
+                for col, group in row
+                if col == 0
+            ]
+            if first_col_texts:
+                colon_ratio = sum(text.endswith(":") for text in first_col_texts) / len(first_col_texts)
+                if colon_ratio >= 0.80:
+                    reasons.append("form_label_colon_pattern")
         accepted = not reasons
         confidence = max(
             0.0,
@@ -355,6 +370,11 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
         if both
     ]
     break_gap = max(18.0, typical_height * 2.4, 1.6 * median(row_gaps) if row_gaps else 0.0)
+    # Lines with fewer than 2 column groups that land within this height of the
+    # previous line are treated as wrapped-cell continuations (e.g. a description
+    # that spills onto a second line inside its cell) rather than run-breakers.
+    # This lets multi-row tables be recognised when cells wrap vertically.
+    continuation_height = max(5.0, typical_height * 1.5)
     runs: list[list[tuple[TextLine, tuple[_CellGroup, ...]]]] = []
     current: list[tuple[TextLine, tuple[_CellGroup, ...]]] = []
     previous: TextLine | None = None
@@ -363,7 +383,12 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
         vertical_break = previous is not None and (
             line.bbox.y0 - previous.bbox.y1 > break_gap
         )
-        if len(groups) < 2 or vertical_break:
+        is_continuation = (
+            len(groups) < 2
+            and previous is not None
+            and line.bbox.y0 - previous.bbox.y1 <= continuation_height
+        )
+        if vertical_break or (len(groups) < 2 and not is_continuation):
             if len(current) >= 3:
                 runs.append(current)
             current = []

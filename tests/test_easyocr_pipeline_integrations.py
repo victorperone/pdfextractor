@@ -125,7 +125,7 @@ def test_repeated_ocr_headers_are_detected_across_scanned_pages() -> None:
     from structured_pdf_text.assemble.repeated_regions import detect_repeated_headers_footers
 
     pages = []
-    for page_index in range(2):
+    for page_index in range(3):
         line = _line("Relatório confidencial", 20, 12, 145, 10)
         region = LayoutRegion(
             region_id=f"header-{page_index}", kind=RegionKind.HEADER,
@@ -142,7 +142,7 @@ def test_repeated_ocr_headers_are_detected_across_scanned_pages() -> None:
         ))
 
     repeated = detect_repeated_headers_footers(pages)
-    assert repeated == {"header:relatório confidencial": [0, 1]}
+    assert repeated == {"header:relatório confidencial": [0, 1, 2]}
 
 
 def test_candidate_fusion_keeps_unique_note_and_selects_conflict_locally() -> None:

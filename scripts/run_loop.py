@@ -1,12 +1,12 @@
-"""Tesseract optimization loop runner.
+"""Tesseract optimization loop runner — Nova série (2026-11-05).
 
-Runs extract_worker.py + compute_metrics.py for V3, V4, V5, V6, V7, V8 sequentially,
-saving output to output/loop/tesseract/<run_id>/<corpus>/.
+Runs extract_worker.py + compute_metrics.py for V3..V9 sequentially,
+saving output to output/tesseract/<run_id>/<corpus>/.
 
 Usage:
-    python scripts/run_loop.py <run_id> [--corpora V3 V4 V5 V6 V7 V8]
-    python scripts/run_loop.py 0001
-    python scripts/run_loop.py 0001 --corpora V5 V6
+    python scripts/run_loop.py <run_id> [--corpora V3 V4 V5 V6 V7 V8 V9]
+    python scripts/run_loop.py 001
+    python scripts/run_loop.py 001 --corpora V9
 """
 from __future__ import annotations
 
@@ -26,8 +26,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from automation.config import CORPUS, CORPUS_MIN_COMMIT_GB, CORPUS_MIN_RAM_GB, CORPUS_EXTRACT_TIMEOUT_S
 from automation.resource_guard import can_start_extraction, system_memory_status
 
-LOOP_ROOT = REPO_ROOT / "output" / "loop" / "tesseract"
-LOOP_CORPORA = ["V3", "V4", "V5", "V6", "V7", "V8"]
+LOOP_ROOT = REPO_ROOT / "output" / "tesseract"
+LOOP_CORPORA = ["V3", "V4", "V5", "V6", "V7", "V8", "V9"]
 METRICS_TIMEOUT = 7200  # 2 h (V7 eval can take ~26 min)
 LOCK_FILE = LOOP_ROOT / ".run_lock"
 
@@ -205,7 +205,7 @@ def _run_corpus(corpus: str, out_dir: Path, run_id_str: str) -> str:
     if not success:
         return "extraction_failed"
 
-    run_id = f"loop{run_id_str}_tesseract_{corpus}"
+    run_id = f"series2_{run_id_str}_tesseract_{corpus}"
     metrics_ok = _compute_metrics(corpus, out_dir, run_id)
     return "complete" if metrics_ok else "metrics_failed"
 

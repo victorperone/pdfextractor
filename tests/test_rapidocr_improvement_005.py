@@ -31,7 +31,7 @@ from structured_pdf_text.document import (
     WritingDirection,
 )
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.layout.engine import _body_bands, _is_bold_subtitle, _is_caption
+from structured_pdf_text.layout.engine import _body_bands, _is_bold_subtitle, _is_caption, _semantic_predictions
 from structured_pdf_text.ocr.pipeline.contracts import WorkGoal
 from structured_pdf_text.ocr.pipelines.rapidocr.policy import (
     ADMISSION_POLICY,
@@ -168,6 +168,29 @@ def test_bold_subtitle_by_font_metadata():
     assert not _is_bold_subtitle(amount, amount.text, 9.4)
     sentence = _line("Texto em negrito que termina.", BBox(45, 100, 200, 111), size=11.2, weight=800)
     assert not _is_bold_subtitle(sentence, sentence.text, 9.4)
+
+
+def test_column_headings_beside_each_other_not_promoted_to_title():
+    # _has_line_beside prevents bold column/form labels from being promoted to
+    # TITLE when another line occupies the same y-band (multi-column layout).
+    # Removing this guard caused +56.9% CER regression in V6 and +30.4% in V7
+    # (confirmed runs 0088 and 0089) — Fix-F41 REVERTER decision.
+    page = BBox(0, 0, 595, 842)
+    left_heading = _line("Coluna esquerda", BBox(44, 100, 280, 112), size=11.2, weight=700)
+    right_heading = _line("Coluna direita", BBox(310, 100, 551, 112), size=11.2, weight=700)
+    body_left = _line("Paragrafo esquerdo normal.", BBox(44, 120, 280, 130), size=9.4)
+    body_right = _line("Paragrafo direito normal.", BBox(310, 120, 551, 130), size=9.4)
+
+    predictions = _semantic_predictions(
+        lines=[left_heading, right_heading, body_left, body_right],
+        page_bbox=page,
+        header_lines=[],
+        footer_lines=[],
+        excluded=[],
+    )
+    title_xs = [round(p.bbox.x0) for p in predictions if p.kind.name == "TITLE"]
+    # Both headings share the same y-band → _has_line_beside suppresses TITLE
+    assert not title_xs, f"bold labels beside each other should not be TITLE, got x0={title_xs}"
 
 
 def test_lowercase_wrapped_word_is_not_a_caption_marker():

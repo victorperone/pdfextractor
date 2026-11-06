@@ -39,7 +39,7 @@ only after real-document validation confirms the two levels are fully redundant.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 
 from structured_pdf_text.document import (
@@ -72,6 +72,44 @@ class _Grid:
     bbox: BBox
     coherence: float
     rectangular_cells: tuple[tuple[int, int, int, int], ...] = ()
+
+
+def _group_short_regions(
+    regions: list[LayoutRegion],
+    *,
+    max_lines: int = 2,
+    y_gap_threshold: float = 20.0,
+    x_overlap_min_fraction: float = 0.3,
+) -> list[list[LayoutRegion]]:
+    """Group adjacent short regions into composite candidates for borderless detection.
+
+    Tesseract assigns each table row its own paragraph block, so each row becomes
+    a separate LayoutRegion with 1–2 native_lines. The ``_candidates()`` function
+    in text_tracks requires ≥ 3 lines and returns [] for each individual region.
+    By merging y-adjacent, x-overlapping short regions, we reconstruct the logical
+    table block so that _candidates() can see the full row sequence.
+    """
+    short = [r for r in regions if len(r.native_lines) <= max_lines]
+    if len(short) < 2:
+        return []
+    short = sorted(short, key=lambda r: (r.bbox.y0, r.bbox.x0))
+    groups: list[list[LayoutRegion]] = []
+    current: list[LayoutRegion] = [short[0]]
+    for region in short[1:]:
+        prev = current[-1]
+        y_gap = region.bbox.y0 - prev.bbox.y1
+        overlap_width = min(region.bbox.x1, prev.bbox.x1) - max(region.bbox.x0, prev.bbox.x0)
+        ref_width = max(region.bbox.width, prev.bbox.width, 1.0)
+        x_ok = (overlap_width / ref_width) >= x_overlap_min_fraction
+        if y_gap <= y_gap_threshold and x_ok:
+            current.append(region)
+        else:
+            if len(current) >= 2:
+                groups.append(current)
+            current = [region]
+    if len(current) >= 2:
+        groups.append(current)
+    return groups
 
 
 def detect_tables_native(
@@ -132,6 +170,35 @@ def detect_tables_native(
         )
         if borderless is not None:
             tables.append(borderless)
+
+    # Pass 2 — merge adjacent short regions (1–2 lines each) and retry borderless
+    # detection on the composite.  Tesseract assigns each table row its own
+    # paragraph block; _candidates() requires ≥ 3 lines per region so individual
+    # rows are always rejected.  Grouping them reconstructs the logical block.
+    eligible_regions = [r for r in (regions or []) if r.kind in eligible_kinds]
+    for g_index, group in enumerate(_group_short_regions(eligible_regions), start=1):
+        composite_bbox = BBox(
+            min(r.bbox.x0 for r in group),
+            min(r.bbox.y0 for r in group),
+            max(r.bbox.x1 for r in group),
+            max(r.bbox.y1 for r in group),
+        )
+        composite = replace(
+            group[0],
+            region_id=f"page-{page.page_index + 1}:composite-{g_index}",
+            bbox=composite_bbox,
+            native_lines=[line for r in group for line in r.native_lines],
+        )
+        if any(_region_overlaps_table(composite, table) for table in tables):
+            continue
+        borderless = detect_borderless_table(
+            page,
+            composite,
+            table_id=f"page-{page.page_index + 1}:composite-borderless-{g_index}",
+        )
+        if borderless is not None:
+            tables.append(borderless)
+
     complete_borderless_cells(tables, regions or [])
     if allow_textpage_recovery:
         for table in tables:
@@ -315,6 +382,13 @@ def _detect_rectangular_grid(paths: list[BBox], limit: BBox) -> _Grid | None:
     if not (x0 < x1 and y0 < y1):
         return None
     if not BBox(x0, y0, x1, y1).overlap_ratio(limit) > 0.50:
+        return None
+    # A rectangular-cell grid covering nearly the entire page height is almost
+    # always a form frame (page border + decorative rectangles), not a data
+    # table. Real tables occupy a subsection of the page. The threshold rejects
+    # grids taller than 85 % of the limit to suppress full-page false positives
+    # observed in V9 form documents (p042, p047, p057, p068, p077, p090, p094).
+    if y1 - y0 > limit.height * 0.85:
         return None
     return _Grid(
         x_edges=tuple(x_edges),
