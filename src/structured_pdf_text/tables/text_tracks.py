@@ -192,6 +192,31 @@ class ProseVsTableClassifier:
                 colon_ratio = sum(text.endswith(":") for text in first_col_texts) / len(first_col_texts)
                 if colon_ratio >= 0.80:
                     reasons.append("form_label_colon_pattern")
+        # When the label column (col 0) is dominated by long prose phrases the
+        # candidate is paragraph text with spurious column groups injected by OCR
+        # noise from decorative image elements beside the text.  Legitimate table
+        # label columns contain short codes or identifiers, not prose sentences.
+        label_col_texts = [
+            group.text
+            for row in assignments
+            for col, group in row
+            if col == 0
+        ]
+        if label_col_texts:
+            label_long_ratio = sum(
+                len(text.split()) >= 5 or len(text) >= 40
+                for text in label_col_texts
+            ) / len(label_col_texts)
+            if label_long_ratio >= 0.60:
+                reasons.append("prose_dominant_label_column")
+        # Non-label cells containing the pipe character "|" are OCR artifacts
+        # from rotated or mirrored printed text, not genuine table data.
+        # Threshold 0.10: catches 1-pipe-in-9-cells (11.1%) from rotated-table
+        # body-only runs where the garbled header is rejected as a prefix.
+        if non_label_cells:
+            pipe_cell_count = sum("|" in group.text for group in non_label_cells)
+            if pipe_cell_count / len(non_label_cells) >= 0.10:
+                reasons.append("pipe_chars_in_nolabel_cells")
         accepted = not reasons
         confidence = max(
             0.0,
@@ -370,14 +395,16 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
         if both
     ]
     break_gap = max(18.0, typical_height * 2.4, 1.6 * median(row_gaps) if row_gaps else 0.0)
-    # Lines with fewer than 2 column groups that land within this height of the
-    # previous line are treated as wrapped-cell continuations (e.g. a description
-    # that spills onto a second line inside its cell) rather than run-breakers.
-    # This lets multi-row tables be recognised when cells wrap vertically.
+    # A 1-group line immediately following a multi-group line and within
+    # continuation_height is treated as a wrapped-cell continuation (e.g. a
+    # description word that spills to a second line) rather than a run-breaker.
+    # Only the FIRST consecutive 1-group line qualifies; a second consecutive
+    # 1-group line indicates paragraph text, not a wrapped cell, and breaks the run.
     continuation_height = max(5.0, typical_height * 1.5)
     runs: list[list[tuple[TextLine, tuple[_CellGroup, ...]]]] = []
     current: list[tuple[TextLine, tuple[_CellGroup, ...]]] = []
     previous: TextLine | None = None
+    consecutive_continuations: int = 0
     for line in lines:
         groups = _cell_groups(line, gap_threshold)
         vertical_break = previous is not None and (
@@ -387,7 +414,14 @@ def _candidates(region: LayoutRegion) -> list[_Candidate]:
             len(groups) < 2
             and previous is not None
             and line.bbox.y0 - previous.bbox.y1 <= continuation_height
+            and consecutive_continuations < 1
         )
+        if len(groups) >= 2:
+            consecutive_continuations = 0
+        elif is_continuation:
+            consecutive_continuations += 1
+        else:
+            consecutive_continuations = 0
         if vertical_break or (len(groups) < 2 and not is_continuation):
             if len(current) >= 3:
                 runs.append(current)

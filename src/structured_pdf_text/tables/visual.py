@@ -340,6 +340,18 @@ def _has_visual_table_text_support(
     populated_columns = len({cell.col for cell in populated}) / column_count
     if occupancy < 0.10 or populated_rows < 0.30 or populated_columns < 0.30:
         return False
+    # Rotated/mirrored grid tables produce garbled OCR where vertical grid
+    # lines are read as "|".  These embedded pipes appear mid-word (e.g.
+    # "Je|nbay", "09'9€T'Z| SU") — distinct from legitimate border-pipe
+    # tables where "|" appears only as a leading/trailing border artifact
+    # (e.g. "| Caneta TOIA |", "| Pago").  Reject when ≥8 % of populated
+    # cells contain "|" that is NOT explained by leading/trailing borders.
+    embedded_pipe_count = sum(
+        "|" in cell.text.strip().lstrip("|").rstrip("|").strip()
+        for cell in populated
+    )
+    if embedded_pipe_count / len(populated) >= 0.08:
+        return False
     if row_count * column_count <= 4 and grid.confidence < 0.70:
         return any(
             _contains_alphabetic_word(token.text)

@@ -22,6 +22,27 @@ V9-FT-06: A borderless 2-column block with exactly 80% colon labels (threshold
 
 V9-FT-07: A borderless 2-column block with only 60% colon labels (below
     threshold) must still be accepted.
+
+V9-FT-08 (Fix-F-V9-06): A 6-column block where col0 contains long prose
+    phrases (paragraph text that OCR split into spurious columns) must be
+    rejected via prose_dominant_label_column.
+
+V9-FT-09 (Fix-F-V9-06): A table where non-label cells contain pipe characters
+    at ≥10% rate (OCR artifact from rotated/mirrored text) must be rejected
+    via pipe_chars_in_nolabel_cells.
+
+V9-FT-10 (Fix-F-V9-06): A legitimate supply table (Rubrica|Descrição|Qtde|
+    Valor|Total|Situação) with short label codes and no pipe artefacts must
+    still be accepted — no regression for real V9 tables.
+
+V9-FT-11 (Fix-F-V9-06): A 2-column table with long col0 prose but ≥60%
+    threshold exactly met must be rejected.
+
+V9-FT-12 (Fix-F-V9-06): A table with ~7% pipe cells (below 10% threshold)
+    must NOT be rejected by pipe_chars_in_nolabel_cells.
+
+V9-FT-13 (Fix-F-V9-07): A table with 11.1% pipe cells (1 of 9 non-label cells,
+    matching the p003 body-only scenario) must be rejected at the 10% threshold.
 """
 from __future__ import annotations
 
@@ -224,3 +245,179 @@ def test_v9_ft07_60pct_colon_not_rejected() -> None:
     assessment = ProseVsTableClassifier().assess(rows, _ANCHORS_2COL)
     assert assessment.accepted, "60% colon labels is below threshold and must still be accepted"
     assert "form_label_colon_pattern" not in assessment.reasons
+
+
+# ---------------------------------------------------------------------------
+# V9-FT-08 to V9-FT-12: Fix-F-V9-06 — prose label column + pipe artefacts
+# ---------------------------------------------------------------------------
+
+_ANCHORS_6COL = (50.0, 150.0, 250.0, 320.0, 400.0, 480.0)
+_ANCHORS_3COL = (50.0, 220.0, 380.0)
+
+
+def test_v9_ft08_prose_dominant_label_column_rejected() -> None:
+    """6-column block: col0 has long prose sentences → prose_dominant_label_column."""
+    # Simulates V9 p003/p036: paragraph text in col0 paired with OCR garbage
+    # cols (diluting long_cell_ratio so the old prose_score test passes)
+    rows = tuple(
+        (
+            _make_cell(col0, 50, 148, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col1, 150, 248, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col2, 250, 318, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col3, 320, 398, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col4, 400, 478, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col5, 480, 540, float(y * 15), float(y * 15 + 12)),
+        )
+        for y, (col0, col1, col2, col3, col4, col5) in enumerate(
+            [
+                ("A proposta foi elaborada considerando os critérios", "Je", "9'9", "ã", "T", "Z"),
+                ("técnicos e orçamentários vigentes para o exercício", "nb", "0'0", "é", "S", "U"),
+                ("fiscal em curso, respeitando o disposto na Lei", "ay", "1'1", "ô", "X", "W"),
+                ("Orçamentária Anual aprovada pelo Poder Legislativo", "zz", "2'2", "ã", "V", "Q"),
+                ("municipal e demais normas aplicáveis ao processo", "ww", "3'3", "î", "Y", "P"),
+            ],
+            start=0,
+        )
+    )
+    assessment = ProseVsTableClassifier().assess(rows, _ANCHORS_6COL)
+    assert not assessment.accepted, (
+        "6-col block with prose sentences in col0 must be rejected (prose_dominant_label_column)"
+    )
+    assert "prose_dominant_label_column" in assessment.reasons
+
+
+def test_v9_ft09_pipe_chars_in_nolabel_cells_rejected() -> None:
+    """Table where ≥10% of non-label cells contain '|' (OCR artifact) must be rejected."""
+    rows = tuple(
+        (
+            _make_cell(col0, 50, 148, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col1, 150, 248, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col2, 250, 318, float(y * 15), float(y * 15 + 12)),
+        )
+        for y, (col0, col1, col2) in enumerate(
+            [
+                ("Rubrica", "Descrição", "Valor"),
+                ("001", "Je|nbay", "150,00"),
+                ("002", "09'9ã'T'Z| SU", "200,00"),
+                ("003", "normal text", "300,00"),
+                ("004", "another|item", "400,00"),
+            ],
+            start=0,
+        )
+    )
+    assessment = ProseVsTableClassifier().assess(rows, _ANCHORS_3COL)
+    assert not assessment.accepted, (
+        "Table with ≥15% pipe chars in non-label cells must be rejected (pipe_chars_in_nolabel_cells)"
+    )
+    assert "pipe_chars_in_nolabel_cells" in assessment.reasons
+
+
+def test_v9_ft10_real_supply_table_accepted() -> None:
+    """V9 supply table (Rubrica|Descrição|Qtde|Valor|Total|Situação) must be accepted."""
+    _ANCHORS_SUPPLY = (50.0, 130.0, 240.0, 320.0, 390.0, 460.0)
+    rows = tuple(
+        (
+            _make_cell(rub, 50, 128, float(y * 15), float(y * 15 + 12)),
+            _make_cell(desc, 130, 238, float(y * 15), float(y * 15 + 12)),
+            _make_cell(qtde, 240, 318, float(y * 15), float(y * 15 + 12)),
+            _make_cell(valor, 320, 388, float(y * 15), float(y * 15 + 12)),
+            _make_cell(total, 390, 458, float(y * 15), float(y * 15 + 12)),
+            _make_cell(sit, 460, 530, float(y * 15), float(y * 15 + 12)),
+        )
+        for y, (rub, desc, qtde, valor, total, sit) in enumerate(
+            [
+                ("Rubrica", "Descrição", "Qtde", "Valor Unit.", "Total", "Situação"),
+                ("3.3.90.30", "Material de expediente", "10", "15,00", "150,00", "Atendido"),
+                ("3.3.90.36", "Outros serviços PF", "2", "500,00", "1.000,00", "Parcial"),
+                ("3.3.90.39", "Outros serviços PJ", "1", "2.000,00", "2.000,00", "Pendente"),
+            ],
+            start=0,
+        )
+    )
+    assessment = ProseVsTableClassifier().assess(rows, _ANCHORS_SUPPLY)
+    assert assessment.accepted, (
+        "Real V9 supply table (Rubrica|Descrição|Qtde|Valor|Total|Situação) must be accepted"
+    )
+    assert "prose_dominant_label_column" not in assessment.reasons
+    assert "pipe_chars_in_nolabel_cells" not in assessment.reasons
+
+
+def test_v9_ft11_exactly_60pct_prose_label_rejected() -> None:
+    """2-col table: exactly 60% of col0 cells are long prose → rejected at threshold."""
+    rows = tuple(
+        (
+            _make_cell(col0, 50, 180, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col1, 220, 400, float(y * 15), float(y * 15 + 12)),
+        )
+        for y, (col0, col1) in enumerate(
+            [
+                ("A proposta foi elaborada considerando os critérios técnicos", "150,00"),
+                ("Respeitando as normas vigentes para o exercício fiscal atual", "200,00"),
+                ("Conforme disposto na regulamentação aplicável ao processo", "300,00"),
+                ("Resumo", "400,00"),          # short — not prose
+                ("Total geral", "1.050,00"),   # short — not prose
+            ],
+            start=0,
+        )
+    )
+    assessment = ProseVsTableClassifier().assess(rows, _ANCHORS_2COL)
+    assert not assessment.accepted, (
+        "Exactly 60% long prose in col0 must trigger prose_dominant_label_column rejection"
+    )
+    assert "prose_dominant_label_column" in assessment.reasons
+
+
+def test_v9_ft12_7pct_pipe_not_rejected() -> None:
+    """Table with ~7% pipe cells (below 10% threshold) must NOT be rejected."""
+    rows = tuple(
+        (
+            _make_cell(col0, 50, 148, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col1, 150, 248, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col2, 250, 348, float(y * 15), float(y * 15 + 12)),
+        )
+        for y, (col0, col1, col2) in enumerate(
+            [
+                ("Rubrica", "Descrição", "Valor"),
+                ("001", "Item A normal", "100,00"),
+                ("002", "Item B normal", "200,00"),
+                ("003", "Item C normal", "300,00"),
+                ("004", "Item D normal", "400,00"),
+                ("005", "Item|E artifact", "500,00"),  # 1 of 14 non-label = 7.1%
+                ("006", "Item F normal", "600,00"),
+                ("007", "Item G normal", "700,00"),
+            ],
+            start=0,
+        )
+    )
+    assessment = ProseVsTableClassifier().assess(rows, _ANCHORS_3COL)
+    # 8 rows × 2 non-label cols = 16 non-label cells, 1 pipe → 6.25% < 10%
+    # so pipe_chars_in_nolabel_cells must NOT trigger
+    assert "pipe_chars_in_nolabel_cells" not in assessment.reasons
+
+
+def test_v9_ft13_11pct_pipe_rejected() -> None:
+    """Table with 11.1% pipe cells (1 of 9 non-label, p003 body-only scenario) must be rejected."""
+    # Simulates V9 p003 body-only run: 3 rows × 4 cols, only body rows
+    # (header with Je|nbay rejected as prefix → not counted).
+    # Only 09'9T'Z| SU in row1 col2 has a pipe → 1/9 = 11.1% ≥ 10%.
+    _ANCHORS_4COL = (50.0, 150.0, 250.0, 380.0)
+    rows = tuple(
+        (
+            _make_cell(col0, 50, 148, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col1, 150, 248, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col2, 250, 378, float(y * 15), float(y * 15 + 12)),
+            _make_cell(col3, 380, 500, float(y * 15), float(y * 15 + 12)),
+        )
+        for y, (col0, col1, col2, col3) in enumerate(
+            [
+                ("1jez0JoL", "TZ'09Z'T. SH", "09'9T'Z| SU", "OS'Z90'Z R$:SU"),
+                ("ep30 5 1 3 1 1 3", "LO", "OT", "05"),
+                ("", "TOO", "too", "003"),
+            ],
+            start=0,
+        )
+    )
+    assessment = ProseVsTableClassifier().assess(rows, _ANCHORS_4COL)
+    # 3 rows × 3 non-label cols = 9 non-label cells, 1 pipe → 11.1% ≥ 10% → rejected
+    assert not assessment.accepted
+    assert "pipe_chars_in_nolabel_cells" in assessment.reasons

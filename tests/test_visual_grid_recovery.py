@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from structured_pdf_text.document import TextToken
+from structured_pdf_text.document import TableCell, TextToken
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.tables.visual import detect_visual_table, detect_visual_grid, _build_visual_cells
+from structured_pdf_text.tables.visual import detect_visual_table, detect_visual_grid, _build_visual_cells, _has_visual_table_text_support
 from structured_pdf_text.tables.visual_alignment import point, quarter_turn_to_source, align_ruling_lines
 from structured_pdf_text.tables.text_join import join_table_tokens
 
@@ -303,3 +303,93 @@ def test_align_ruling_lines_works_with_opencv5_houghlinesP_shape():
     )
     rectified, transform = result
     assert transform is not None
+
+
+def _make_visual_cell(row: int, col: int, text: str) -> TableCell:
+    x0 = col * 100.0
+    y0 = row * 20.0
+    return TableCell(row, col, 1, 1, BBox(x0, y0, x0 + 95, y0 + 18), text, [], 0.9)
+
+
+def _make_grid(rows: int, cols: int) -> "VisualGrid":
+    from structured_pdf_text.tables.visual import VisualGrid
+    x_edges = tuple(float(c * 100) for c in range(cols + 1))
+    y_edges = tuple(float(r * 20) for r in range(rows + 1))
+    return VisualGrid(x_edges=x_edges, y_edges=y_edges, confidence=0.9)
+
+
+def test_visual_pipe_guard_rejects_rotated_garbled_content() -> None:
+    """>=8% embedded pipe cells (pipe not at leading/trailing border) must reject (Fix-V9-09).
+
+    Mirrors V9 p003: 90°-rotated grid table where Tesseract reads vertical grid
+    lines as '|' mid-token.  'Je|nbay' and '09'9€T'Z| SU' both have '|' in the
+    core text after stripping leading/trailing borders → 2/13 ≈ 15.4% >= 8%.
+    """
+    cells = [
+        _make_visual_cell(0, 0, "ovijenyis"),
+        _make_visual_cell(0, 1, "Je|nbay"),             # embedded pipe mid-word
+        _make_visual_cell(0, 2, "opuepienbyopue"),
+        _make_visual_cell(0, 3, "Jejnboy"),
+        _make_visual_cell(1, 0, "1jez0JoL"),
+        _make_visual_cell(1, 1, "TZ'09Z'T. SH"),
+        _make_visual_cell(1, 2, "09'9€T'Z| SU"),   # embedded pipe mid-string
+        _make_visual_cell(1, 3, "OS'Z90'Z R$:SU"),
+        _make_visual_cell(2, 0, "ep30"),
+        _make_visual_cell(2, 1, "LO"),
+        _make_visual_cell(2, 2, "OT"),
+        _make_visual_cell(2, 3, "05"),
+        _make_visual_cell(3, 0, ""),
+        _make_visual_cell(3, 1, "TOO"),
+        _make_visual_cell(3, 2, "too"),
+        _make_visual_cell(3, 3, "003"),
+    ]
+    grid = _make_grid(4, 4)
+    # 13 populated cells; 2 have embedded '|' → 2/13 ≈ 15.4% >= 8%
+    assert not _has_visual_table_text_support(cells, grid)
+
+
+def test_visual_pipe_guard_accepts_border_pipe_tables() -> None:
+    """Border-pipe tables (V4-style) must NOT be rejected by the embedded-pipe guard.
+
+    V4 p145-183: pipe-format tables where OCR reads column borders as '|'.
+    Cells like '| Caneta TOIA |' and '| Pago' have '|' only at borders —
+    after stripping, the core text has no embedded '|'.
+    """
+    cells = [
+        _make_visual_cell(0, 0, ""),
+        _make_visual_cell(0, 1, ""),
+        _make_visual_cell(0, 2, ""),
+        _make_visual_cell(0, 3, ""),
+        _make_visual_cell(1, 0, "| Caneta TOIA |"),  # border pipes only
+        _make_visual_cell(1, 1, "02"),
+        _make_visual_cell(1, 2, "R$ 4,25"),
+        _make_visual_cell(1, 3, "| Pago"),           # leading border pipe only
+        _make_visual_cell(2, 0, "| Caderno TO1A AR"),
+        _make_visual_cell(2, 1, "ES"),
+        _make_visual_cell(2, 2, "R$ 17,90 |"),       # trailing border pipe only
+        _make_visual_cell(2, 3, "Pendente Eua 5"),
+        _make_visual_cell(3, 0, "| Borracha TO1A"),
+        _make_visual_cell(3, 1, "(05"),
+        _make_visual_cell(3, 2, "R$ 1,10"),
+        _make_visual_cell(3, 3, "| Pago"),
+    ]
+    grid = _make_grid(4, 4)
+    # 12 populated cells; 0 have embedded '|' (all pipes are leading/trailing borders)
+    assert _has_visual_table_text_support(cells, grid)
+
+
+def test_visual_pipe_guard_accepts_clean_content() -> None:
+    """Real table cells without pipe chars must not be rejected by the pipe guard."""
+    cells = [
+        _make_visual_cell(0, 0, "Unidade"),
+        _make_visual_cell(0, 1, "Semestre I"),
+        _make_visual_cell(0, 2, "Semestre II"),
+        _make_visual_cell(1, 0, "Norte"),
+        _make_visual_cell(1, 1, "R$ 48.000,00"),
+        _make_visual_cell(1, 2, "R$ 61.000,00"),
+        _make_visual_cell(2, 0, "Sul"),
+        _make_visual_cell(2, 1, "R$ 30.000,00"),
+        _make_visual_cell(2, 2, "R$ 40.000,00"),
+    ]
+    grid = _make_grid(3, 3)
+    assert _has_visual_table_text_support(cells, grid)

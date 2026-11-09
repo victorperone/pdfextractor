@@ -225,3 +225,43 @@ def test_wcc05_minimum_three_rows_with_wraps():
     region = _region([hdr] + rows)
     candidates = _candidates(region)
     assert len(candidates) >= 1
+
+
+# ---------------------------------------------------------------------------
+# WCC-06: two consecutive 1-group lines break the run (paragraph guard)
+# ---------------------------------------------------------------------------
+
+def test_wcc06_two_consecutive_1group_breaks_run():
+    """Two consecutive 1-group lines within continuation_height must break the
+    run — this distinguishes paragraph text (V3/V4) from wrapped cells (V9).
+    Three multi-group rows followed by two adjacent 1-group lines then three
+    more multi-group rows must NOT merge into a single long run."""
+    lh = 12.0
+    rows: list[TextLine] = []
+    # First block: 4 multi-group rows (should form one run)
+    for i in range(4):
+        merged, _ = _data_row(50.0 + i * 20.0, lh)
+        rows.append(merged)
+
+    # Two consecutive 1-group lines close together (paragraph text)
+    para1 = _line([_token("texto", 57, 140.0, 200.0, 152.0)], 140.0, 152.0)
+    para2 = _line([_token("continua", 57, 153.0, 210.0, 165.0)], 153.0, 165.0)
+    rows.extend([para1, para2])
+
+    # Second block: 4 multi-group rows
+    for i in range(4):
+        merged, _ = _data_row(200.0 + i * 20.0, lh)
+        rows.append(merged)
+
+    region = _region(rows)
+    candidates = _candidates(region)
+
+    # We expect two separate runs (one per block), not one merged run.
+    # The two consecutive 1-group lines must have broken the first run.
+    assert len(candidates) >= 1
+    # Verify that no single candidate contains all 8 multi-group lines
+    if candidates:
+        max_run_len = max(len(c.lines) for c in candidates)
+        assert max_run_len <= 6, (
+            f"Expected max 4 lines per run (two 1-group lines must break), got {max_run_len}"
+        )
