@@ -15,6 +15,10 @@ class PaddlePipeline(AuthorizedBackendPipeline):
     fusion_policy = FUSION_POLICY
     figure_segmentation_policy = FIGURE_SEGMENTATION_POLICY
     raster_boundary_policy = RASTER_BOUNDARY_POLICY
+    # Restore pre-decoupling local crop/resize/rotate/map path for regional recovery.
+    # OCRPageFacade.canonical_page_output returns False when this is True, causing
+    # OcrRegionRefiner to apply transforms locally and map tokens via inverse affine.
+    legacy_raster_preparation = True
 
     def __init__(self, resolved, backend):
         entry = get_entry(resolved.engine)

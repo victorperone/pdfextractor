@@ -522,8 +522,14 @@ class OCRPageFacade:
 
     @property
     def canonical_page_output(self):
-        """Recognitions are mapped by the authorized raster frame to PDF points."""
-        return True
+        """Recognitions are mapped by the authorized raster frame to PDF points.
+
+        Returns False when the pipeline declares legacy_raster_preparation=True
+        (currently PaddlePipeline), instructing OcrRegionRefiner to apply local
+        crop/resize/rotate transforms and map tokens via inverse affine rather
+        than delegating scale/rotation to the coordinator.
+        """
+        return not getattr(self.coordinator.pipeline, "legacy_raster_preparation", False)
 
     def consume_page_diagnostics(self):
         return self.coordinator.consume_engine_diagnostics()
@@ -652,6 +658,25 @@ class OCRPageFacade:
                        integration_targets=(), defer_integration=False, mandatory=True):
         if page_index != self.coordinator.page_index:
             raise ValueError("OCR request page does not match the active page coordinator")
+
+        # Legacy raster preparation: OcrRegionRefiner has already applied local
+        # crop/resize/rotate on the authorized page image. Route directly to the
+        # raw backend engine to process the pixel image and return raster-space
+        # tokens. The caller (_map_token_to_page) handles the inverse mapping.
+        # This path is active only when no coordinator integration is in play
+        # (target_bbox=None and integration_targets=()) so that coordinator-owned
+        # deferred integration calls still go through the full authorized path.
+        if (not target_bbox and not integration_targets
+                and getattr(self.coordinator.pipeline, "legacy_raster_preparation", False)):
+            raw = getattr(self.coordinator.pipeline, "raw_engine", None)
+            if raw is not None and callable(getattr(raw, "recognize_page", None)):
+                kw: dict = {}
+                if quality_policy is not None:
+                    kw["quality_policy"] = quality_policy
+                if quality_variants is not None:
+                    kw["quality_variants"] = quality_variants
+                return raw.recognize_page(image, page_index, page_bbox, **kw)
+
         selected_bbox = (
             target_bbox if target_bbox is not None
             else None if integration_targets
