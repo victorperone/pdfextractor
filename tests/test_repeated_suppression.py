@@ -560,3 +560,14 @@ def test_ocr_only_pages_still_confirmed_without_native_observations() -> None:
     assert expected_key in confirmed, (
         f"OCR-only stable observations should still be confirmed; got: {list(confirmed)}"
     )
+
+
+def test_signature_ignores_ocr_separator_dot_glyph_variants():
+    """PaddleOCR reads the V3 footer bullet as "·" where other engines read "•" (09/11/2026 campaign)."""
+    from structured_pdf_text.assemble.repeated_regions import _normalize_signature
+
+    variants = [f"RODAPÉ DECORATIVO {dot} OMITIR NO GABARITO   Página 112 de 144" for dot in "·•∙⋅‧"]
+    assert len({_normalize_signature(text) for text in variants}) == 1
+    # Other punctuation and the numbers that are not page labels stay significant.
+    assert _normalize_signature("Seção 3 • Anexo 4") != _normalize_signature("Seção 3 - Anexo 4")
+    assert _normalize_signature("Seção 3 • Anexo 4") != _normalize_signature("Seção 3 • Anexo 5")

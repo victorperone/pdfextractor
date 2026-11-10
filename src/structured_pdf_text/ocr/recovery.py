@@ -552,6 +552,7 @@ def _run_tiled_regional_ocr(
                     decision_reason="regional_tile_recovery" if canonical_output else None,
                     integration_targets=request.integration_targets if canonical_output else (),
                     defer_integration=bool(request.integration_targets and canonical_output),
+                    raster_preparation="page_crop" if canonical_output else None,
                 )
                 grid_passes += _engine_metric(engine, "passes")
                 grid_batches += _engine_metric(engine, "batches")
@@ -913,6 +914,7 @@ class OcrRegionRefiner:
                             decision_reason="critical_data_refinement" if request.goal == RegionRefinementGoal.NUMERIC else "quality_region_refinement",
                             integration_targets=request.integration_targets,
                             defer_integration=bool(request.integration_targets),
+                            raster_preparation="page_crop",
                         )
                         mapped = tokens
                     else:
@@ -1256,6 +1258,7 @@ def _recognize(
     decision_reason: str | None = None,
     integration_targets: tuple[object, ...] = (),
     defer_integration: bool = False,
+    raster_preparation: str | None = None,
 ) -> list[OcrToken]:
     """Call the OCR engine with only the keyword args its signature declares.
 
@@ -1292,6 +1295,8 @@ def _recognize(
         kwargs["integration_targets"] = integration_targets
     if defer_integration and ("defer_integration" in parameters or accepts_kwargs):
         kwargs["defer_integration"] = True
+    if raster_preparation is not None and ("raster_preparation" in parameters or accepts_kwargs):
+        kwargs["raster_preparation"] = raster_preparation
 
     if "page_bbox" in params or len(params) >= 4:
         return engine.recognize_page(image, page_index, bbox, **kwargs)

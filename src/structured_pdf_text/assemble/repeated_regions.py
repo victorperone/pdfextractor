@@ -254,6 +254,9 @@ def _normalize_signature(text: str) -> str:
     # over a fixed total. Other numbers stay part of the signature.
     value = re.sub(r"^\d{1,4}(\s*/\s*\d{1,4})$", r"<page-number>\1", value)
 
+    # OCR engines read the same separator dot as "·", "•", "∙" or "⋅"; the
+    # glyph variant carries no meaning in a repeated running header/footer.
+    value = re.sub(r"[•∙⋅‧]", "·", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip(" -|·")
 

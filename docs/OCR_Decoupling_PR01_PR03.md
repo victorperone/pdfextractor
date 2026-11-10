@@ -140,6 +140,12 @@ erros de identidade. Documentos `success` com avaliação `partial` servem como
 validação de equivalência, não de qualidade. A execução local é Linux/WSL2; o
 job Windows foi configurado, mas sua execução remota não foi realizada.
 
+> **Escopo (nota de 09/11/2026):** a identidade acima vale apenas para essas
+> sete páginas V5 no estado PR-01–03. Fatias posteriores mudaram a origem dos
+> pixels regionais (render autorizado da fonte em vez de recorte local); para o
+> PaddleOCR, ver [ADR 0002](adr/0002-paddleocr-restauracao-raster-regional.md).
+> Não há prova de equivalência byte a byte do Markdown completo com o legado.
+
 O [baseline](OCR_Decoupling_Baseline_2026-10-20.md) conserva artefatos, hashes,
 modelos, limitações de avaliação e defeitos anteriores. Vazamento nativo de
 conteúdo coberto V3 e perda de CNPJ em listas nativas V5 permanecem fora desta

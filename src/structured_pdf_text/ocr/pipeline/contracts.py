@@ -96,6 +96,30 @@ def strings(values) -> tuple[str, ...]:
     return tuple(identifier(value) for value in values)
 
 
+# Core statement of where a request's pixels historically came from. It travels
+# in OCRWorkRequest.native_context; a pipeline may honour it or ignore it.
+#   page_crop       - crop of the visual page raster, enlarged/rotated locally
+#   visual_source   - direct source render kept in visual page orientation
+#   enlarged_source - direct source render enlarged locally by an exact factor
+RASTER_PREPARATIONS = frozenset({"page_crop", "visual_source", "enlarged_source"})
+
+
+def raster_preparation_context(kind: str | None, enlargement: float | None = None) -> dict:
+    if kind is None:
+        if enlargement is not None:
+            raise ValueError("Raster enlargement requires a raster preparation")
+        return {}
+    if kind not in RASTER_PREPARATIONS:
+        raise ValueError("Unsupported raster preparation")
+    if kind != "enlarged_source":
+        if enlargement is not None:
+            raise ValueError("Only enlarged_source accepts a raster enlargement")
+        return {"raster_preparation": kind}
+    if enlargement is None or finite(enlargement) <= 1:
+        raise ValueError("enlarged_source requires an enlargement factor above 1")
+    return {"raster_preparation": kind, "raster_enlargement": float(enlargement)}
+
+
 class WorkStatus(str, Enum):
     OK = "ok"
     NO_TEXT = "no_text"

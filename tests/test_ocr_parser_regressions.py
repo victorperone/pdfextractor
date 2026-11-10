@@ -1249,3 +1249,108 @@ class TestOcrAwareLayoutReclassification:
         result = reclassify_ocr_regions(original)
         assert result is not original
         assert original[0].kind == RegionKind.UNKNOWN  # original unchanged
+
+
+# ---------------------------------------------------------------------------
+# PaddleOCR document preprocessor: boxes come back in the turned frame
+# ---------------------------------------------------------------------------
+
+def _paddlex_turn(image, angle):
+    """Oracle: the exact turn PaddleX's doc preprocessor applies (warp_image.rotate_image)."""
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    h, w = image.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    cos, sin = np.abs(matrix[0, 0]), np.abs(matrix[0, 1])
+    new_w, new_h = int(h * sin + w * cos), int(h * cos + w * sin)
+    matrix[0, 2] += (new_w - w) / 2
+    matrix[1, 2] += (new_h - h) / 2
+    return cv2.warpAffine(image, matrix, (new_w, new_h), flags=cv2.INTER_NEAREST)
+
+
+def _marker_box(image):
+    np = pytest.importorskip("numpy")
+    ys, xs = np.nonzero(image[..., 0] > 128)
+    return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+
+
+@pytest.mark.parametrize("angle", [90, 180, 270])
+def test_paddle_parser_maps_document_preprocessor_turn_back_to_input(angle):
+    np = pytest.importorskip("numpy")
+    image = np.zeros((168, 119, 3), dtype=np.uint8)
+    image[20:30, 70:110] = 255
+    turned = _paddlex_turn(image, angle)
+    raw = [{
+        "doc_preprocessor_res": {"angle": angle, "output_img": turned},
+        "rec_texts": ["marker"], "rec_scores": [0.9], "rec_boxes": [_marker_box(turned)],
+    }]
+
+    [token] = _tokens_from_result(raw, 0, image, None)
+
+    assert token.bbox == BBox(*_marker_box(image))
+    assert token.rotation == angle
+
+
+@pytest.mark.parametrize("angle", [90, 180, 270])
+def test_paddle_parser_clips_turned_border_fill_to_the_input_canvas(angle):
+    """A box over the whole turned frame (V5 p.31) includes PaddleX's border-fill pixel."""
+    np = pytest.importorskip("numpy")
+    image = np.zeros((891, 892, 3), dtype=np.uint8)
+    turned = _paddlex_turn(image, angle)
+    height, width = turned.shape[:2]
+    raw = [{
+        "doc_preprocessor_res": {"angle": angle, "output_img": turned},
+        "rec_texts": ["whole"], "rec_scores": [0.9], "rec_boxes": [[0, 0, width, height]],
+    }]
+
+    [token] = _tokens_from_result(raw, 0, image, None)
+
+    # Inside the input canvas; the turn's one-pixel shift may drop an edge pixel.
+    assert 0 <= token.bbox.x0 <= 1 and 0 <= token.bbox.y0 <= 1
+    assert 891 <= token.bbox.x1 <= 892 and 890 <= token.bbox.y1 <= 891
+
+
+def test_paddle_parser_rescales_unwarped_output_before_turning_back():
+    np = pytest.importorskip("numpy")
+    image = np.zeros((100, 60, 3), dtype=np.uint8)
+    # A 90-degree turn yields a 100x60 frame; the unwarper returned it at 200x120.
+    raw = [{
+        "doc_preprocessor_res": {"angle": 90, "output_img": np.zeros((120, 200, 3), dtype=np.uint8)},
+        "rec_texts": ["marker"], "rec_scores": [0.9], "rec_boxes": [[20, 40, 60, 60]],
+    }]
+
+    [token] = _tokens_from_result(raw, 0, image, None)
+
+    # Rescaled to pixels 10..29 x 20..29 of the turned frame, then turned back.
+    assert token.bbox == BBox(31, 10, 41, 30)
+
+
+@pytest.mark.parametrize("document", [
+    None, {"angle": 0}, {"angle": -1}, {"angle": 45}, {"angle": "unknown"},
+])
+def test_paddle_parser_keeps_boxes_without_a_document_turn(document):
+    class Image:
+        size = (119, 168)
+
+    record = {"rec_texts": ["text"], "rec_scores": [0.9], "rec_boxes": [[5, 6, 50, 20]]}
+    if document is not None:
+        record["doc_preprocessor_res"] = document
+
+    [token] = _tokens_from_result([record], 0, Image(), None)
+
+    assert token.bbox == BBox(5, 6, 50, 20)
+    assert token.rotation == 0
+
+
+def test_paddle_parser_does_not_guess_a_turn_for_several_results():
+    class Image:
+        size = (119, 168)
+
+    records = [
+        {"doc_preprocessor_res": {"angle": 90}, "rec_texts": ["a"], "rec_scores": [0.9], "rec_boxes": [[5, 6, 50, 20]]},
+        {"doc_preprocessor_res": {"angle": 270}, "rec_texts": ["b"], "rec_scores": [0.9], "rec_boxes": [[5, 6, 50, 20]]},
+    ]
+
+    tokens = _tokens_from_result(records, 0, Image(), None)
+
+    assert [token.bbox for token in tokens] == [BBox(5, 6, 50, 20)] * 2

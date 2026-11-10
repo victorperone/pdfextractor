@@ -252,14 +252,18 @@ def test_validate_local_ocr_models_raises_when_missing(tmp_path: Path) -> None:
         validate_local_ocr_models(language="pt", cache_home=str(tmp_path))
 
 
-def test_missing_uvdoc_is_rejected_before_runtime_initialization(tmp_path: Path) -> None:
+def test_missing_uvdoc_is_rejected_only_when_unwarping_is_requested(tmp_path: Path) -> None:
+    from structured_pdf_text.ocr.paddle import _resolve_required_local_models
+
     _make_model_dirs(tmp_path)
     uvdoc = tmp_path / "official_models" / "UVDoc"
     (uvdoc / "model.pdparams").unlink()
     uvdoc.rmdir()
 
+    # UVDoc is opt-in: the default configuration never loads it.
+    validate_local_ocr_models(language="pt", cache_home=str(tmp_path))
     with pytest.raises(PaddleOcrUnavailable, match="UVDoc"):
-        validate_local_ocr_models(language="pt", cache_home=str(tmp_path))
+        _resolve_required_local_models(tmp_path, language="pt", options={"use_doc_unwarping": True})
 
 
 def test_direct_engine_uses_central_mkldnn_policy(

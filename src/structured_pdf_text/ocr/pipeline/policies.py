@@ -5,6 +5,9 @@ from dataclasses import dataclass, field, replace
 import math
 import re
 
+from structured_pdf_text.geometry import BBox, Point
+from structured_pdf_text.ocr.quality import _union_area
+
 from .contracts import IntegrationProposal, ProposalKind, WorkGoal
 
 
@@ -51,13 +54,67 @@ class RasterBoundaryPolicy:
     """Local choice of authorized raster boundary representation."""
 
     mode: str = "mask"
+    confine_masked_border: bool = False
 
     def __post_init__(self):
         if self.mode not in ("mask", "trim"):
             raise ValueError("Raster boundary policy must be mask or trim")
 
+    def confine(self, token, authorized: BBox, frame):
+        """Clip a mapped token whose overshoot of ``authorized`` lies only on masked pixels.
+
+        In ``mask`` mode every pixel whose footprint is not fully authorized is
+        painted white, so the part of ``frame.bbox`` outside ``authorized`` holds
+        no page content. A detector may still extend a box onto that blank
+        border; clipping it there removes no evidence and cannot widen the
+        authorization, which the core still validates exactly. Tokens reaching
+        beyond the rendered frame are left untouched for validation to reject.
+        """
+        if not self.confine_masked_border or self.mode != "mask":
+            return token
+        box, outer, eps = token.bbox, frame.bbox, _ROUNDING_TOLERANCE
+        if not (outer.x0 - eps <= box.x0 and outer.y0 - eps <= box.y0
+                and box.x1 <= outer.x1 + eps and box.y1 <= outer.y1 + eps):
+            return token
+        clipped = BBox(max(box.x0, authorized.x0), max(box.y0, authorized.y0),
+                       min(box.x1, authorized.x1), min(box.y1, authorized.y1))
+        if clipped == box or clipped.x1 <= clipped.x0 or clipped.y1 <= clipped.y0:
+            return token
+        polygon = tuple(
+            Point(min(max(p.x, clipped.x0), clipped.x1), min(max(p.y, clipped.y0), clipped.y1))
+            for p in token.polygon
+        ) if token.polygon else token.polygon
+        return replace(token, bbox=clipped, polygon=polygon)
+
+
+# Same float-rounding allowance the authorization registry forgives.
+_ROUNDING_TOLERANCE = 1e-6
+
 
 LEGACY_RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRasterPreparation:
+    """Render each authorized box from the source at the requested scale.
+
+    Pixels are canonical-oriented; a preprocessing rotation is a derived lease.
+    Returns the lease and engine diagnostics (none for this default).
+    """
+
+    preparation_id: str = "source-render-v1"
+
+    def prepare(self, request, services, authorization_id, box, *, base_scale, boundary_policy, stack):
+        lease = stack.enter_context(services.render(
+            request, authorization_id, box, scale=request.render_scale,
+            boundary_policy=boundary_policy,
+        ))
+        if request.preprocessing_rotation % 360:
+            lease = stack.enter_context(services.rotate(lease, request.preprocessing_rotation))
+        return lease, {}
+
+
+SOURCE_RASTER_PREPARATION = SourceRasterPreparation()
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +128,56 @@ class EvidenceAdmissionPolicy:
 
 
 LEGACY_EVIDENCE_ADMISSION_POLICY = EvidenceAdmissionPolicy()
+
+
+@dataclass(frozen=True, slots=True)
+class FigureShapeAdmissionPolicy:
+    """Abstain on figure detections that are drawn shapes rather than text.
+
+    A lone glyph read from a figure is rejected when it is uncertain, far taller
+    than any label, or a closed-contour character (``O``, ``口``...) in a square
+    box below near-certain confidence. Uncertain detections spanning almost the
+    whole authorized figure are rejected too. Multi-character text and real
+    single-letter labels stay eligible. Each engine owns its calibration.
+    """
+
+    policy_id: str
+    reason_prefix: str
+    minimum_confidence: float = .70
+    minimum_scope_coverage: float = .85
+    lone_glyph_minimum_confidence: float = .80
+    shape_glyphs: str = "Ooe0口□○◯〇●◎"
+    shape_glyph_minimum_confidence: float = .995
+    shape_aspect_range: tuple[float, float] = (.85, 1.25)
+    lone_glyph_maximum_height: float = 36.0
+
+    def __post_init__(self):
+        for value in (self.minimum_confidence, self.minimum_scope_coverage,
+                      self.lone_glyph_minimum_confidence, self.shape_glyph_minimum_confidence):
+            if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError("Figure admission calibration must be finite in [0, 1]")
+
+    def rejection_reason(self, token, request):
+        if request.goal is not WorkGoal.FIGURE or token.confidence_normalized is None:
+            return None
+        glyphs = "".join(token.text.split())
+        if len(glyphs) == 1:
+            confidence = token.confidence_normalized
+            if confidence < self.lone_glyph_minimum_confidence:
+                return f"{self.reason_prefix}_uncertain_lone_figure_glyph"
+            if token.bbox.height > self.lone_glyph_maximum_height:
+                return f"{self.reason_prefix}_oversized_lone_figure_glyph"
+            aspect = token.bbox.width / token.bbox.height if token.bbox.height > 0 else 0.
+            low, high = self.shape_aspect_range
+            if glyphs in self.shape_glyphs and confidence < self.shape_glyph_minimum_confidence and low <= aspect <= high:
+                return f"{self.reason_prefix}_geometric_shape_glyph"
+        if token.confidence_normalized >= self.minimum_confidence:
+            return None
+        authorization = next(a for a in request.authorizations if a.authorization_id == token.authorization_id)
+        # Actual authorized rectangles, not a convex envelope with unobserved gaps.
+        if token.bbox.area / _union_area(list(authorization.regions)) >= self.minimum_scope_coverage:
+            return f"{self.reason_prefix}_uncertain_figure_spanning_detection"
+        return None
 
 
 @dataclass(frozen=True, slots=True)

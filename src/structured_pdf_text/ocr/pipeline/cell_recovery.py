@@ -8,12 +8,14 @@ def refine_cell(facade, target, *, quality_policy, base_scale, header_text, poli
     page_index = target.page_index
     scale = base_scale * policy.render_scale_factor
     candidates = []
-    attempts = [(False, scale)]
+    attempts = [(False, scale, None)]
     if facade.capabilities.get("direct_recognition", False):
-        attempts.append((True, scale))
-    attempts.append((False, scale * policy.enlarged_scale_factor))
+        attempts.append((True, scale, None))
+    # Historically this attempt enlarged the cell render locally; the factor is
+    # stated so a pipeline may reproduce that instead of re-rendering.
+    attempts.append((False, scale * policy.enlarged_scale_factor, policy.enlarged_scale_factor))
     try:
-        for direct, attempt_scale in attempts:
+        for direct, attempt_scale, enlargement in attempts:
             try:
                 kwargs = dict(
                     quality_policy=quality_policy, render_scale=attempt_scale,
@@ -23,6 +25,8 @@ def refine_cell(facade, target, *, quality_policy, base_scale, header_text, poli
                 if direct:
                     tokens = facade.recognize_direct(None, page_index, target.cell.bbox, **kwargs)
                 else:
+                    if enlargement is not None:
+                        kwargs.update(raster_preparation="enlarged_source", raster_enlargement=enlargement)
                     tokens = facade.recognize_page(
                         None, page_index, target.cell.bbox,
                         selection_stage="cell", decision_reason="weak_table_cell", **kwargs,

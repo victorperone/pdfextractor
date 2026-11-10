@@ -13,6 +13,7 @@ def refine_footnote(facade, target, *, base_scale, quality_policy, policy):
                 quality_policy=quality_policy, render_scale=base_scale * policy.footnote_scale_factor,
                 selection_stage="footnote", decision_reason="core_selected_small_footnote",
                 integration_targets=(target,), defer_integration=True, mandatory=False,
+                raster_preparation="visual_source",
             )
         except FatalExtractionError:
             raise

@@ -10,7 +10,7 @@ from structured_pdf_text.geometry import BBox
 from .authorization import AuthorizationRegistry, ResultReceiptLedger
 from .contracts import (
     Authorization, EngineSelection, OCRWorkRequest, PageGeometry, ResourceAllocation,
-    TargetRef, WorkGoal, WorkScope, WorkStatus, contains,
+    TargetRef, WorkGoal, WorkScope, WorkStatus, contains, raster_preparation_context,
 )
 from .integrator import CellTarget, FigureRefinementTarget, FigureTarget, ProposalIntegrator, RegionTarget, TokenTarget
 from .table_integration import VisualTableTarget
@@ -128,7 +128,9 @@ class PageCoordinator:
                    quality_policy=None, mandatory: bool = True, reason: str = "core_authorized_work",
                    recognition_method: str = "page", render_scale: float | None = None,
                    preprocessing_rotation: float = 0.0, integration_targets=(),
-                   defer_integration: bool = False):
+                   defer_integration: bool = False, raster_preparation: str | None = None,
+                   raster_enlargement: float | None = None):
+        raster_context = raster_preparation_context(raster_preparation, raster_enlargement)
         with self._lock:
             if self._closed:
                 raise RuntimeError("OCR page coordinator is closed")
@@ -192,7 +194,7 @@ class PageCoordinator:
                               if render_scale is None else render_scale),
                 preprocessing_rotation=preprocessing_rotation,
                 target_ref=target_ref,
-                native_context=target_context,
+                native_context={**target_context, **raster_context},
             )
             result = self.pipeline.execute(planned.request, self.services)
             self.services.validate_result(planned.request, result)
@@ -522,14 +524,8 @@ class OCRPageFacade:
 
     @property
     def canonical_page_output(self):
-        """Recognitions are mapped by the authorized raster frame to PDF points.
-
-        Returns False when the pipeline declares legacy_raster_preparation=True
-        (currently PaddlePipeline), instructing OcrRegionRefiner to apply local
-        crop/resize/rotate transforms and map tokens via inverse affine rather
-        than delegating scale/rotation to the coordinator.
-        """
-        return not getattr(self.coordinator.pipeline, "legacy_raster_preparation", False)
+        """Recognitions are mapped by the authorized raster frame to PDF points."""
+        return True
 
     def consume_page_diagnostics(self):
         return self.coordinator.consume_engine_diagnostics()
@@ -655,37 +651,23 @@ class OCRPageFacade:
                        quality_variants=None, page_rotation=None, render_scale=None,
                        preprocessing_rotation=0.0, target_bbox=None,
                        selection_stage="page", decision_reason="core_page_or_region_decision",
-                       integration_targets=(), defer_integration=False, mandatory=True):
+                       integration_targets=(), defer_integration=False, mandatory=True,
+                       raster_preparation=None, raster_enlargement=None):
         if page_index != self.coordinator.page_index:
             raise ValueError("OCR request page does not match the active page coordinator")
-
-        # Legacy raster preparation: OcrRegionRefiner has already applied local
-        # crop/resize/rotate on the authorized page image. Route directly to the
-        # raw backend engine to process the pixel image and return raster-space
-        # tokens. The caller (_map_token_to_page) handles the inverse mapping.
-        # This path is active only when no coordinator integration is in play
-        # (target_bbox=None and integration_targets=()) so that coordinator-owned
-        # deferred integration calls still go through the full authorized path.
-        if (not target_bbox and not integration_targets
-                and getattr(self.coordinator.pipeline, "legacy_raster_preparation", False)):
-            raw = getattr(self.coordinator.pipeline, "raw_engine", None)
-            if raw is not None and callable(getattr(raw, "recognize_page", None)):
-                kw: dict = {}
-                if quality_policy is not None:
-                    kw["quality_policy"] = quality_policy
-                if quality_variants is not None:
-                    kw["quality_variants"] = quality_variants
-                return raw.recognize_page(image, page_index, page_bbox, **kw)
-
         selected_bbox = (
             target_bbox if target_bbox is not None
             else None if integration_targets
             else page_bbox
         )
+        goal = (WorkGoal.REGION if integration_targets else
+                WorkGoal.PAGE if selected_bbox == self.coordinator.page_bbox else WorkGoal.REGION)
+        if raster_preparation is None and goal is WorkGoal.PAGE:
+            # The whole-page request is, by definition, the page raster.
+            raster_preparation = "page_crop"
         tokens = self.coordinator.recognize(
             selected_bbox,
-            goal=(WorkGoal.REGION if integration_targets else
-                  WorkGoal.PAGE if selected_bbox == self.coordinator.page_bbox else WorkGoal.REGION),
+            goal=goal,
             quality_policy=quality_policy,
             reason=decision_reason,
             recognition_method=selection_stage,
@@ -694,6 +676,8 @@ class OCRPageFacade:
             integration_targets=integration_targets,
             defer_integration=defer_integration,
             mandatory=mandatory,
+            raster_preparation=raster_preparation,
+            raster_enlargement=raster_enlargement,
         )
         return tokens
 

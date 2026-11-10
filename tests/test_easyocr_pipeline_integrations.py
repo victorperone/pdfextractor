@@ -101,6 +101,36 @@ def test_scanned_two_column_lines_are_ordered_column_by_column() -> None:
     ]
 
 
+def test_scanned_column_regions_never_bridge_the_gutter() -> None:
+    """V4 p.82 (Paddle): the left column's last line and the right column's label
+    shared a kind, and one region spanning the gutter broke the column order."""
+    from structured_pdf_text.layout.ocr_aware import reconstruct_ocr_layout
+
+    page = BBox(0, 0, 600, 800)
+    region = LayoutRegion(
+        region_id="columns", kind=RegionKind.TEXT, bbox=page,
+        layout_confidence=None, native_lines=[], ocr_tokens=[],
+        quality=RegionQuality(RegionDecision.MERGE_OCR),
+        ocr_lines=[
+            _line("Coluna esquerda", 25, 75, 95, 10),
+            _line("Coluna esquerda, linha 1 do corpo", 25, 100, 250, 7),
+            _line("Coluna esquerda, linha 2 do corpo", 25, 110, 250, 7),
+            _line("Coluna esquerda, linha 3 do corpo", 25, 120, 250, 7),
+            _line("SEÇÃO SEGUINTE", 25, 140, 90, 10),
+            _line("Coluna direita", 325, 75, 80, 10),
+            _line("Coluna direita, linha 1 do corpo", 325, 100, 250, 7),
+            _line("Coluna direita, linha 2 do corpo", 325, 110, 250, 7),
+            _line("Coluna direita, linha 3 do corpo", 325, 120, 250, 7),
+        ],
+    )
+
+    result = reconstruct_ocr_layout([region], page)
+
+    assert [line.text for item in result for line in item.ocr_lines][4:6] == ["SEÇÃO SEGUINTE", "Coluna direita"]
+    for item in result:
+        assert item.bbox.x1 <= 300 or item.bbox.x0 >= 300, item.region_id
+
+
 def test_ocr_paragraph_assembly_joins_wrapped_lines_and_splits_paragraphs() -> None:
     from structured_pdf_text.assemble.content import _emit_prose_blocks
 

@@ -308,6 +308,22 @@ origin is translated here. Operations are serialized per service instance.
                 if image is not None:
                     image.close()
 
+    def derive(self, lease, width: int, height: int, operation, current_to_parent):
+        """Publish a pipeline-local pixel operation on an authorized lease.
+
+        ``operation`` receives only the lease pixels and must fit the preflight
+        ``width``/``height`` reserved here. ``current_to_parent(image)`` returns
+        the six affine coefficients mapping derived pixels to the parent raster,
+        so recognized geometry is still mapped once by the composed RasterFrame
+        and validated against the authorization like any other lease.
+        """
+        integer(width, minimum=1)
+        integer(height, minimum=1)
+        if not callable(operation) or not callable(current_to_parent):
+            raise ValueError("Derived rasters need a pixel operation and its inverse geometry")
+        return self._derive(lease, width, height, operation,
+                            lambda image: affine(tuple(current_to_parent(image))))
+
     def resize(self, lease, width: int, height: int):
         integer(width, minimum=1)
         integer(height, minimum=1)

@@ -267,11 +267,14 @@ def reconstruct_ocr_layout(
                 kind = RegionKind.FOOTER
             else:
                 kind = RegionKind.TEXT
-            assigned.append((line, kind))
+            # A line in another flow lying wholly above its predecessor starts
+            # the next column: one region must never bridge the gutter.
+            new_column = bool(previous and not same_flow and line.bbox.y1 <= previous.bbox.y0)
+            assigned.append((line, kind, new_column))
 
         groups: list[tuple[RegionKind, list[TextLine]]] = []
-        for line, kind in assigned:
-            if groups and groups[-1][0] == kind:
+        for line, kind, new_column in assigned:
+            if groups and groups[-1][0] == kind and not new_column:
                 groups[-1][1].append(line)
             else:
                 groups.append((kind, [line]))

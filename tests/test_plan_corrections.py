@@ -343,31 +343,23 @@ def test_paddle_cpu_runtime_policy_defaults_to_safe_one_dnn_off(monkeypatch) -> 
     assert resolve_paddle_runtime_policy(system="Linux").enable_mkldnn is True
 
 
-def test_models_status_requires_uvdoc_when_unwarping_is_enabled(tmp_path, capsys) -> None:
+def test_models_status_requires_uvdoc_only_when_unwarping_is_enabled(tmp_path, capsys) -> None:
     from structured_pdf_text.cli import _cmd_models_status
     from structured_pdf_text.ocr.models import required_model_directories
 
     profile = get_profile("pt")
-    required = required_model_directories(profile)
-    assert required["doc_unwarping_model_dir"] == "UVDoc"
+    assert required_model_directories(profile, use_doc_unwarping=True)["doc_unwarping_model_dir"] == "UVDoc"
+    required = required_model_directories(profile, use_doc_unwarping=False)
+    assert "UVDoc" not in required.values()
     for model_name in required.values():
-        if model_name == "UVDoc":
-            continue
         model_dir = tmp_path / "official_models" / model_name
         model_dir.mkdir(parents=True)
         (model_dir / "model.pdparams").write_text("x" * 2048, encoding="utf-8")
 
-    assert _cmd_models_status("pt", str(tmp_path)) == 1
-    output = capsys.readouterr().out
-    assert "[missing] UVDoc" in output
-    assert "Offline OCR readiness: NOT READY" in output
-
-    uvdoc_dir = tmp_path / "official_models" / "UVDoc"
-    uvdoc_dir.mkdir()
-    (uvdoc_dir / "model.pdparams").write_text("x" * 2048, encoding="utf-8")
+    # The default configuration does not use UVDoc (ADR 0002).
     assert _cmd_models_status("pt", str(tmp_path)) == 0
     output = capsys.readouterr().out
-    assert "[ok] UVDoc" in output
+    assert "UVDoc" not in output
     assert "Offline OCR readiness: READY" in output
 
 

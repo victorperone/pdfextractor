@@ -4,7 +4,7 @@ import structured_pdf_text.ocr.factory as factory
 from structured_pdf_text.ocr.pipeline.adapters import AuthorizedBackendPipeline
 from structured_pdf_text.ocr.pipeline.contracts import EngineSelection
 from structured_pdf_text.ocr.registry import get_entry
-from .policy import CELL_POLICY, FIGURE_SEGMENTATION_POLICY, FUSION_POLICY, INTEGRATION_POLICY, RASTER_BOUNDARY_POLICY, RECOVERY_POLICY, TOKEN_REFINEMENT_POLICY
+from .policy import ADMISSION_POLICY, CELL_POLICY, FIGURE_SEGMENTATION_POLICY, FUSION_POLICY, INTEGRATION_POLICY, RASTER_BOUNDARY_POLICY, RASTER_PREPARATION, RECOVERY_POLICY, TOKEN_REFINEMENT_POLICY
 
 
 class PaddlePipeline(AuthorizedBackendPipeline):
@@ -15,10 +15,8 @@ class PaddlePipeline(AuthorizedBackendPipeline):
     fusion_policy = FUSION_POLICY
     figure_segmentation_policy = FIGURE_SEGMENTATION_POLICY
     raster_boundary_policy = RASTER_BOUNDARY_POLICY
-    # Restore pre-decoupling local crop/resize/rotate/map path for regional recovery.
-    # OCRPageFacade.canonical_page_output returns False when this is True, causing
-    # OcrRegionRefiner to apply transforms locally and map tokens via inverse affine.
-    legacy_raster_preparation = True
+    raster_preparation = RASTER_PREPARATION
+    admission_policy = ADMISSION_POLICY
 
     def __init__(self, resolved, backend):
         entry = get_entry(resolved.engine)

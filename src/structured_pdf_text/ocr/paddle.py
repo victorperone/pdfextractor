@@ -246,9 +246,10 @@ def _resolve_required_local_models(
 
     required_dirs = required_model_directories(
         profile,
-        use_doc_orientation_classify=bool(resolved.get("use_doc_orientation_classify", True)),
-        use_doc_unwarping=bool(resolved.get("use_doc_unwarping", True)),
-        use_textline_orientation=bool(resolved.get("use_textline_orientation", True)),
+        **{
+            name: bool(resolved.get(name, default))
+            for name, default in PADDLE_OCR_FEATURE_DEFAULTS.items()
+        },
     )
     missing: list[str] = []
 
@@ -1097,7 +1098,11 @@ def _tokens_from_result(
     records = _records(raw)
     tokens: list[OcrToken] = []
     record_rotation = _dominant_record_rotation(records)
-    effective_rotation = rotation or record_rotation
+    # PaddleOCR's document preprocessor may turn (and unwarp) the image before
+    # detection; its boxes are in that output frame, not in ``image``.
+    document_angle, document_size = _document_preprocessor_frame(raw)
+    turned_size, document_transform = _document_turn_to_input(document_angle, width, height)
+    effective_rotation = ((rotation or record_rotation) + document_angle) % 360
     for text, confidence, box, _ in records:
         if not text or box is None:
             continue
@@ -1107,6 +1112,18 @@ def _tokens_from_result(
                 continue
             if x1 <= x0 or y1 <= y0:
                 continue
+            if document_size is not None and document_size != turned_size:
+                x0, x1 = (value * turned_size[0] / document_size[0] for value in (x0, x1))
+                y0, y1 = (value * turned_size[1] / document_size[1] for value in (y0, y1))
+            if document_transform is not None:
+                x0, y0, x1, y1 = document_transform(x0, y0, x1, y1)
+                # PaddleX turns about (w/2, h/2), half a pixel off the pixel-centre
+                # axis, so the turned frame's far edge is border fill: clip to the
+                # input canvas, beyond which no pixel exists.
+                x0, y0 = max(x0, 0.0), max(y0, 0.0)
+                x1, y1 = min(x1, float(width)), min(y1, float(height))
+                if x1 <= x0 or y1 <= y0:
+                    continue
             if box_transform is not None:
                 x0, y0, x1, y1 = box_transform(
                     x0, y0, x1, y1, coordinate_width, coordinate_height,
@@ -1845,6 +1862,70 @@ def _half_turn_box_to_original(
 ) -> tuple[float, float, float, float]:
     """Map a box from a 180-degree-rotated image back to source coordinates."""
     return original_width - x1, original_height - y1, original_width - x0, original_height - y0
+
+
+_DOCUMENT_TURNS = (90, 180, 270)
+
+
+def _document_turn_to_input(
+    angle: int, width: int, height: int,
+) -> tuple[tuple[int, int], Callable[[float, float, float, float], tuple[float, float, float, float]] | None]:
+    """Invert PaddleX's document-orientation turn of a ``width`` x ``height`` input.
+
+    PaddleX (``warp_image.rotate_image``) turns the input counter-clockwise by
+    ``angle`` with ``cv2.getRotationMatrix2D`` about ``(w/2, h/2)`` on an
+    ``int``-sized canvas; ``warpAffine`` samples pixel centres on integer
+    coordinates, so boxes are mapped through the same matrix on their first
+    and last pixel. Returns the turned canvas size and the box mapping.
+    """
+    if angle not in _DOCUMENT_TURNS:
+        return (width, height), None
+    radians = math.radians(angle)
+    alpha, beta = math.cos(radians), math.sin(radians)
+    turned = (int(height * abs(beta) + width * abs(alpha)), int(height * abs(alpha) + width * abs(beta)))
+    shift_x = (1 - alpha) * width / 2 - beta * height / 2 + (turned[0] - width) / 2
+    shift_y = beta * width / 2 + (1 - alpha) * height / 2 + (turned[1] - height) / 2
+
+    def to_input(x: float, y: float) -> tuple[float, float]:
+        # The rotation part is orthonormal: its inverse is its transpose.
+        x, y = x - shift_x, y - shift_y
+        return round(alpha * x - beta * y, 6), round(beta * x + alpha * y, 6)
+
+    def transform(x0: float, y0: float, x1: float, y1: float) -> tuple[float, float, float, float]:
+        points = [to_input(x, y) for x in (x0, x1 - 1) for y in (y0, y1 - 1)]
+        xs, ys = [point[0] for point in points], [point[1] for point in points]
+        return min(xs), min(ys), max(xs) + 1, max(ys) + 1
+
+    return turned, transform
+
+
+def _document_preprocessor_frame(raw: Any) -> tuple[int, tuple[int, int] | None]:
+    """Return the document-preprocessor turn and output size of a single result.
+
+    Anything ambiguous (several results, no preprocessor, unknown angle) maps
+    to ``(0, None)`` so boxes are left exactly as before.
+    """
+    items = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+    frames = []
+    for item in items:
+        data = item if isinstance(item, dict) else getattr(item, "json", None)
+        data = data() if callable(data) else data
+        if not isinstance(data, dict):
+            continue
+        if "doc_preprocessor_res" not in data and isinstance(data.get("res"), dict):
+            data = data["res"]
+        document = data.get("doc_preprocessor_res")
+        if not isinstance(document, dict):
+            frames.append((0, None))
+            continue
+        try:
+            angle = int(document.get("angle", 0)) % 360
+        except (TypeError, ValueError):
+            angle = 0
+        shape = getattr(document.get("output_img"), "shape", None)
+        size = (int(shape[1]), int(shape[0])) if shape is not None and len(shape) >= 2 else None
+        frames.append((angle if angle in _DOCUMENT_TURNS else 0, size))
+    return frames[0] if len(frames) == 1 else (0, None)
 
 
 def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:

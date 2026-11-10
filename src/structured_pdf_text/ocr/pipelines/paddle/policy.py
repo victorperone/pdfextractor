@@ -2,7 +2,8 @@
 from structured_pdf_text.ocr.pipeline.policies import CellRecoveryPolicy, ConservativeIntegrationPolicy, RegionalCandidatePolicy, RegionalRecoveryProfile, TokenRefinementPolicy
 from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPolicy
 from structured_pdf_text.ocr.pipeline.policies import FigureSegmentationPolicy
-from structured_pdf_text.ocr.pipeline.policies import RasterBoundaryPolicy
+from structured_pdf_text.ocr.pipeline.policies import FigureShapeAdmissionPolicy, RasterBoundaryPolicy
+from .raster import LEGACY_RASTER_PREPARATION
 
 # Paddle can evolve this profile independently after its own equivalence gate.
 CANDIDATE_POLICY = RegionalCandidatePolicy()
@@ -24,6 +25,15 @@ CELL_POLICY = CellRecoveryPolicy()
 
 TOKEN_REFINEMENT_POLICY = TokenRefinementPolicy()
 FIGURE_SEGMENTATION_POLICY = FigureSegmentationPolicy()
-RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy()
+# Paddle detectors extend boxes onto the white partial-pixel border of a masked
+# crop (the historical crop held real pixels there); see ADR 0002.
+RASTER_BOUNDARY_POLICY = RasterBoundaryPolicy(confine_masked_border=True)
+
+# ADR 0002: Paddle restores the pre-decoupling crop/resize/rotate pixel path.
+RASTER_PREPARATION = LEGACY_RASTER_PREPARATION
 
 FUSION_POLICY = CandidateFusionPolicy()
+
+# PP-OCRv6 reads chart circles, markers and textless emblems as one huge glyph
+# ("O", "é", "0"). Same v6 calibration RapidOCR validated for these models.
+ADMISSION_POLICY = FigureShapeAdmissionPolicy("paddle-figure-admission-v1", "paddle")

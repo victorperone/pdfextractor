@@ -14,7 +14,7 @@ from .contracts import (
 )
 from .converters import from_domain
 from .diagnostics import LegacyDiagnosticsProjector
-from .policies import LEGACY_CELL_POLICY, LEGACY_COMPATIBILITY_RECOVERY_PROFILE, LEGACY_INTEGRATION_POLICY, LEGACY_RASTER_BOUNDARY_POLICY, LEGACY_EVIDENCE_ADMISSION_POLICY
+from .policies import LEGACY_CELL_POLICY, LEGACY_COMPATIBILITY_RECOVERY_PROFILE, LEGACY_INTEGRATION_POLICY, LEGACY_RASTER_BOUNDARY_POLICY, LEGACY_EVIDENCE_ADMISSION_POLICY, SOURCE_RASTER_PREPARATION
 
 
 class AuthorizedBackendPipeline:
@@ -27,6 +27,7 @@ No other engine or readiness probe is loaded by the execution adapter.
     integration_policy = LEGACY_INTEGRATION_POLICY
     cell_policy = LEGACY_CELL_POLICY
     raster_boundary_policy = LEGACY_RASTER_BOUNDARY_POLICY
+    raster_preparation = SOURCE_RASTER_PREPARATION
     admission_policy = LEGACY_EVIDENCE_ADMISSION_POLICY
 
     def __init__(self, engine, *, selection: EngineSelection | None = None, render_scale: float = 1.0,
@@ -214,12 +215,13 @@ No other engine or readiness probe is loaded by the execution adapter.
                     try:
                         services.check_cancelled()
                         with ExitStack() as stack:
-                            lease = stack.enter_context(services.render(
-                                request, auth.authorization_id, box, scale=request.render_scale,
-                                boundary_policy=self.raster_boundary_policy.mode,
-                            ))
-                            if request.preprocessing_rotation % 360:
-                                lease = stack.enter_context(services.rotate(lease, request.preprocessing_rotation))
+                            # The pipeline-owned strategy only chooses how authorized
+                            # pixels are derived; every lease still comes from services.
+                            lease, preparation = self.raster_preparation.prepare(
+                                request, services, auth.authorization_id, box,
+                                base_scale=self._scale, boundary_policy=self.raster_boundary_policy.mode,
+                                stack=stack,
+                            )
                             attempt_id = services.consume_attempt(request)
                             services.check_cancelled()
                             calls += 1
@@ -232,6 +234,7 @@ No other engine or readiness probe is loaded by the execution adapter.
                             finally:
                                 attempt_diagnostics.append({
                                     "attempt_id": attempt_id,
+                                    **({"raster_preparation": preparation} if preparation else {}),
                                     "metrics": LegacyDiagnosticsProjector.operation_metrics(self._engine),
                                     "diagnostics": LegacyDiagnosticsProjector.snapshot(
                                         self._engine, engine_name=self._selection.engine, provider=self._selection.provider,
@@ -265,6 +268,7 @@ No other engine or readiness probe is loaded by the execution adapter.
                                     elif not has_bbox_argument:
                                         token = replace(token, bbox=lease.frame.bbox_to_page(token.bbox),
                                                         polygon=tuple(lease.frame.point_to_page(p) for p in token.polygon) if token.polygon else None)
+                                    token = self.raster_boundary_policy.confine(token, box, lease.frame)
                                     evidence = from_domain(token, token_id=f"{attempt_id}:token:{number}",
                                                            authorization_id=auth.authorization_id, attempt_id=attempt_id)
                                     services.validate_token(request, evidence)

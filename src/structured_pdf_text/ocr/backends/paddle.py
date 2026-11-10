@@ -1,7 +1,10 @@
 """PaddleOCR backend — wraps the existing PaddleOcrEngine.
 
-Delegates all pipeline calls to the original implementation so that the
-output is byte-for-byte identical to the pre-refactor baseline.  The new
+Delegates all pipeline calls to the original ``PaddleOcrEngine``; this backend
+adds no transformation of its own. It does not by itself make extraction output
+identical to the pre-decoupling baseline: the pixels it receives are prepared
+by the Paddle pipeline (see docs/adr/0002-paddleocr-restauracao-raster-regional.md),
+and end-to-end equivalence was only verified where recorded there.  The new
 ``recognize`` / ``identity`` / ``capabilities`` / ``healthcheck`` methods
 add the benchmarking contract without touching any existing code paths.
 
@@ -42,6 +45,7 @@ from structured_pdf_text.ocr.runtime_policy import (
     apply_paddle_runtime_policy,
     resolve_paddle_runtime_policy,
 )
+from structured_pdf_text.ocr.models import PADDLE_OCR_FEATURE_DEFAULTS
 from structured_pdf_text.ocr.slow_work import warn_if_slow
 from structured_pdf_text.ocr.pipelines.paddle.wire import PROTOCOL_VERSION, deserialize_tokens
 from structured_pdf_text.ocr.contracts import (
@@ -417,19 +421,20 @@ class PaddleOCRBackend:
                 "ocr_batch_size": self._config.ocr_batch_size,
                 "num_threads": _resolve_num_threads(self._config.num_threads),
                 "one_dnn": self._runtime_policy.enable_mkldnn and not str(device).startswith("gpu"),
-                "orientation_classifier": True,
-                "unwarping": True,
+                "orientation_classifier": PADDLE_OCR_FEATURE_DEFAULTS["use_doc_orientation_classify"],
+                "unwarping": PADDLE_OCR_FEATURE_DEFAULTS["use_doc_unwarping"],
             },
         )
 
     def _resolve_artifact_hashes(self) -> dict[str, str]:
-        from structured_pdf_text.ocr.models import UV_DOC_MODEL, get_profile
+        from structured_pdf_text.ocr.models import get_profile, required_model_directories
         from structured_pdf_text.ocr.paddle import _local_model_root
         from structured_pdf_text.ocr.backends._parser_utils import sha256_file
 
         root = _local_model_root(self._cache_home)
         profile = get_profile(self._config.paddle_model_profile)
-        names = set(profile.model_names.values()) | {UV_DOC_MODEL}
+        # Hash exactly the models the effective configuration loads.
+        names = set(required_model_directories(profile, **PADDLE_OCR_FEATURE_DEFAULTS).values())
         hashes: dict[str, str] = {}
         for name in sorted(names):
             directory = root / name

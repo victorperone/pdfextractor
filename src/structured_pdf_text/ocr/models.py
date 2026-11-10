@@ -24,7 +24,10 @@ from dataclasses import dataclass
 
 PADDLE_OCR_FEATURE_DEFAULTS: dict[str, bool] = {
     "use_doc_orientation_classify": True,
-    "use_doc_unwarping": True,
+    # UVDoc is off by default: its learned warp zooms and shears crops (cutting
+    # line starts) and returns boxes in a warped frame that cannot be mapped
+    # back. Pass use_doc_unwarping=True explicitly to opt in (ADR 0002).
+    "use_doc_unwarping": False,
     "use_textline_orientation": True,
 }
 UV_DOC_MODEL = "UVDoc"
