@@ -1284,6 +1284,7 @@ class PdfTextExtractor:
                             complexity=complexity,
                             table_ocr_overrides=table_ocr_overrides,
                             figure_ocr_bindings=figure_ocr_bindings,
+                            page_raster_primary=raster_primary and page_ocr_requested,
                         )
                     if ocr_tokens:
                         regions = reconstruct_ocr_layout(regions, native_page.bbox)
@@ -1942,7 +1943,14 @@ def _recover_selected_regions(
         # signature, decorative element) — returning no text is a valid outcome.
         # Only treat no_text as a failure for non-figure regions or when there
         # were actual runtime errors alongside the empty result.
-        ocr_required = not is_figure or bool(all_errors)
+        # A region smaller than one legible glyph (e.g. a 6x6 pt fragment of a
+        # footer rule) cannot hold recoverable text; an empty result there is
+        # not a degraded page (T3-P03). Runtime errors still count as failures.
+        below_glyph = (
+            region.bbox.width < _MIN_TEXT_REGION_SIDE_PT
+            and region.bbox.height < _MIN_TEXT_REGION_SIDE_PT
+        )
+        ocr_required = (not is_figure and not below_glyph) or bool(all_errors)
         ocr_failed = (
             result.status in {"budget_blocked", "invalid_region", "runtime_error", "timeout", "resource_exhausted"}
             or (ocr_empty and ocr_required)
@@ -2771,6 +2779,14 @@ def _failed_page(page_index: int, exc: Exception, elapsed_ms: float) -> Structur
     )
 
 
+# Smallest box (both sides, PDF points) that can hold a legible glyph.
+_MIN_TEXT_REGION_SIDE_PT = 8.0
+
+
+# Same raster-dominance bound used by ``_is_raster_primary_candidate``.
+_PAGE_SIZED_FIGURE_COVERAGE = 0.75
+
+
 def _append_hybrid_ocr_regions(
     regions: list[LayoutRegion],
     tables: list[Any],
@@ -2781,8 +2797,15 @@ def _append_hybrid_ocr_regions(
     complexity: Any,
     table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] | None = None,
     figure_ocr_bindings: list[tuple[BBox, list[TextLine], list[OcrToken]]] | None = None,
+    page_raster_primary: bool = False,
 ) -> None:
-    """Attach unmatched OCR to tables/remaining body without duplicating regions."""
+    """Attach unmatched OCR to tables/remaining body without duplicating regions.
+
+    ``page_raster_primary`` marks a raster-dominant page whose page OCR was
+    requested because the raster *is* the page. A figure region covering
+    almost the whole page then stands for the page image itself, so it must
+    not swallow the page OCR (T3-P01); smaller figures keep their ownership.
+    """
     remaining = list(unmatched_lines)
     for table in tables:
         if table.method != TableMethod.VISUAL_MODEL or not table.page_fragments:
@@ -2822,7 +2845,12 @@ def _append_hybrid_ocr_regions(
     # by the conservation gate, while its initial region OCR remains useful as
     # diagnostic evidence on the figure itself.
     figure_boxes: list[BBox] = [
-        region.bbox for region in regions if region.kind == RegionKind.FIGURE
+        region.bbox for region in regions
+        if region.kind == RegionKind.FIGURE
+        and not (
+            page_raster_primary
+            and region.bbox.area >= _PAGE_SIZED_FIGURE_COVERAGE * max(page_bbox.area, 1.0)
+        )
     ]
     for index, (figure_bbox, figure_lines, figure_tokens) in enumerate(
         figure_ocr_bindings or (),
@@ -2840,6 +2868,27 @@ def _append_hybrid_ocr_regions(
         existing.ocr_lines = list(figure_lines)
         existing.ocr_tokens = list(figure_tokens)
         remaining = [line for line in remaining if not _line_in_box(line, figure_bbox)]
+
+    # Page OCR over a figure that the region policy flagged as text-bearing
+    # (OCR_REGION / MERGE_OCR) belongs to that figure. Without this, the
+    # filter below drops it and the figure renders empty (T3-P01).
+    for region in regions:
+        quality = getattr(region, "quality", None)
+        if (
+            region.kind != RegionKind.FIGURE
+            or region.ocr_lines
+            or region.bbox not in figure_boxes
+            or quality is None
+            or quality.decision not in {RegionDecision.OCR_REGION, RegionDecision.MERGE_OCR}
+        ):
+            continue
+        owned = [line for line in remaining if _line_in_box(line, region.bbox)]
+        if not owned:
+            continue
+        region.ocr_lines = owned
+        region.ocr_tokens = [token for token in unmatched_tokens if _line_in_box(token, region.bbox)]
+        owned_ids = {id(line) for line in owned}
+        remaining = [line for line in remaining if id(line) not in owned_ids]
 
     visual_tables = [table for table in tables
                      if table.method == TableMethod.VISUAL_MODEL and table.page_fragments]

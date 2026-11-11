@@ -1,0 +1,95 @@
+"""T3-P00: o executor da série Tesseract deve usar a config canônica de benchmark."""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+from structured_pdf_text.config import ExtractionMode, OcrQualityPolicy
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_tesseract_batch_wsl.py"
+
+
+def _load_runner():
+    spec = importlib.util.spec_from_file_location("run_tesseract_batch_wsl", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_runner_config_enables_tables_and_suppresses_headers():
+    config = _load_runner().build_config()
+    assert config.enable_tables is True
+    assert config.merge_cross_page_tables is True
+    assert config.preserve_headers_footers is False
+
+
+def test_runner_config_keeps_requested_round_parameters():
+    config = _load_runner().build_config()
+    assert ExtractionMode(config.mode) is ExtractionMode.BALANCED
+    assert config.language == "pt-BR"
+    assert config.ocr_engine == "tesseract"
+    assert config.num_threads == 6
+    assert config.effective_ocr_quality_policy() is OcrQualityPolicy.ADAPTIVE
+
+
+def _write_pdf(path: Path, pages: int) -> None:
+    import pypdfium2
+
+    doc = pypdfium2.PdfDocument.new()
+    try:
+        for _ in range(pages):
+            doc.new_page(595, 842)
+        doc.save(str(path))
+    finally:
+        doc.close()
+
+
+def _paged(pages: int, marker: str = "## Página {n:03d}") -> str:
+    return "\n\n".join(f"{marker.format(n=n)}\n\nTexto da página {n}." for n in range(1, pages + 1)) + "\n"
+
+
+def test_preflight_uses_paginated_reference_when_primary_sources_unusable(tmp_path, monkeypatch):
+    """V10: _REFERENCIA.md com marcadores HTML e manifesto sem expected_markdown."""
+    runner = _load_runner()
+    folder = tmp_path / "corpus" / "VX"
+    folder.mkdir(parents=True)
+    _write_pdf(folder / "Doc_VX.pdf", 3)
+    (folder / "Doc_VX_REFERENCIA.md").write_text(
+        "\n".join(f"<!-- PAGE {n:03d} START -->\nTexto {n}\n<!-- PAGE {n:03d} END -->" for n in range(1, 4)),
+        encoding="utf-8",
+    )
+    (folder / "Doc_VX_MANIFESTO.json").write_text(
+        '{"pages": [{"page_number": 1, "expected_text": "Texto 1"}]}', encoding="utf-8"
+    )
+    paged = folder / "Doc_VX_REFERENCIA_PAGINADA.md"
+    paged.write_text(_paged(3), encoding="utf-8")
+    monkeypatch.setattr(runner, "REPO", tmp_path)
+    monkeypatch.setattr(runner, "CORPORA", [("VX", "corpus/VX/Doc_VX.pdf")])
+
+    (job,) = runner.preflight()
+
+    assert job["source"] == "reference_paginada"
+    assert job["reference"] == paged
+    assert job["missing_reference_pages"] == []
+
+
+def test_preflight_prefers_primary_reference_over_paginated_fallback(tmp_path, monkeypatch):
+    runner = _load_runner()
+    folder = tmp_path / "corpus" / "VX"
+    folder.mkdir(parents=True)
+    _write_pdf(folder / "Doc_VX.pdf", 2)
+    primary = folder / "Doc_VX_REFERENCIA.md"
+    primary.write_text(_paged(2, "## Página {n:03d} | título"), encoding="utf-8")
+    (folder / "Doc_VX_REFERENCIA_PAGINADA.md").write_text(_paged(2), encoding="utf-8")
+    monkeypatch.setattr(runner, "REPO", tmp_path)
+    monkeypatch.setattr(runner, "CORPORA", [("VX", "corpus/VX/Doc_VX.pdf")])
+
+    (job,) = runner.preflight()
+
+    assert job["source"] == "reference"
+    assert job["reference"] == primary
+
+
+def test_runner_includes_v10():
+    assert ("V10", "corpus/V10/Document_AI_V10.pdf") in _load_runner().CORPORA

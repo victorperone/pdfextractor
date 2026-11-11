@@ -1,285 +1,279 @@
-# Problemas da Baseline Tesseract — Registro Técnico Vivo
+# Problemas da Baseline Tesseract — Registro Técnico
 
-> **Protocolo de atualização**: este documento deve ser atualizado obrigatoriamente após cada run. Contém apenas problemas da **Série 2** (2026-11-05+). Histórico da Série 1 em `docs/Problemas_Baseline_Tesseract_SERIE1_historico.md`.
+> **Escopo**: Série 3 (executor `scripts/run_tesseract_batch_wsl.py`, diretórios `output/tesseract/NNN`).
+> A versão anterior deste documento (Série 2, runs 001–008 via `run_loop.py`) está preservada no git (`git show 5cc81d6:docs/Problemas_Baseline_Tesseract.md`); um resumo está em §7.
+> **Protocolo**: atualizar após cada rodada. Um problema só é marcado como RESOLVIDO quando o critério mensurável dele for atendido numa rodada completa, sem regressão relevante nos demais corpora.
 
 ---
 
-## §0 Estado Atual
+## §0 Estado atual
 
 | Campo | Valor |
 |---|---|
-| **Última atualização** | 2026-11-06 (pós-run 008 — Fix-F-V9-04 INCONCLUSIVO) |
-| **Série** | 2 (nova — inclui V9) |
-| **Branch** | `feat/tesseract-optimization` |
-| **Correção aceita** | Fix-F-V9-02 — form_label_colon_pattern em text_tracks.py (cp_0122) |
-| **Fase atual** | DECIDING → WAITING_FOR_RESOURCES (disco C: 100%) |
-| **Engine** | tesseract, balanced/adaptive, pt-BR |
-| **Esquema do avaliador** | `evaluation-3.0.0` |
-| **Cron** | `a8e6758f` — ativo, 5 min, expira ~2026-11-12 |
-| **Corpora ativos** | V3, V4, V5, V6, V7, V8, **V9** |
-| **provisional_corrections_count** | 2 (Fix-F-V9-01 + Fix-F-V9-02 aceitos) |
+| **Última atualização** | 2026-11-11 — diagnóstico da 001, rodada 002 intermediária e correções para a 003 |
+| **Branch** | `feat/tesseract-optimization` (sem commit/push das alterações abaixo) |
+| **Baseline imutável** | `output/tesseract/001/` |
+| **Baseline corrigida** | `output/tesseract/002/` (somente a correção do executor, T3-P00) |
+| **Próxima rodada** | `python3 -u scripts/run_tesseract_batch_wsl.py 003` — valida T3-P01, T3-P03 e inclui o V10 (T3-P11) |
+| **Configuração** | balanced · pt-BR · adaptive · tesseract · 6 threads · Markdown paginado · supplemental-audit |
+| **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0 — **não alterado** |
+| **Corpus/gabaritos/manifestos** | **não alterados** |
 
-### Métricas baseline — Runs 001+002 (sem correção) e Run 003 (Fix-F-V9-01)
+### Situação dos problemas
 
-| Métrica | V3 (144p) | V4 (224p) | V5 (42p) | V6 (95p) | V7 (80p) | V8 (90p) | **V9 (96p) baseline** | **V9 run 003** |
-|---|---|---|---|---|---|---|---|---|
-| `cer_markdown_raw` | 0.0508 | 0.2315 | 0.1253 | 0.0209 | 0.0089 | 0.0113 | **0.4849** | **0.4318 (−10.95%)** |
-| `text_coverage_recall` | 0.9593 | — | 0.9210 | 0.9881 | 0.9994 | 0.9938 | **0.6577** | **0.6659 (+1.2%)** |
-| `heading_detection_f1` | 0.8667 | — | 0.8571 | 0.9904 | 0.9891 | 0.9927 | **0.3846** | 0.3846 |
-| `heading_level_match_rate` | **0.0000** | — | 0.9608 | 1.0000 | 1.0000 | 1.0000 | 0.9111 | 0.9111 |
-| `heading_text_cer` | 0.1987 | — | 0.3442 | 0.0187 | 0.0258 | 0.0094 | **0.7195** | 0.6737 |
-| `table_detection_f1` | 0.9740 | — | 1.0000 | 1.0000 | 1.0000 | 1.0000 | **0.7027** | 0.6847 (−2.6%) |
-| `cell_cer` | 0.0400 | — | 0.0000 | 0.0148 | 0.0000 | 0.0006 | **1.2173** | — |
-| `table_column_count_accuracy` | 0.9494 | — | 1.0000 | 1.0000 | 1.0000 | 1.0000 | **0.4167** | — |
-| `reading_order_accuracy` | 1.0000 | — | 0.9998 | 1.0000 | 1.0000 | 1.0000 | 0.9988 | 0.9985 |
-| `paragraph_detection_f1` | 0.8970 | — | 0.8215 | 0.9627 | 0.9679 | 0.9527 | **0.4570** | — |
-
-**Run 003 decisão**: ACEITAR_PROVISORIAMENTE — V9 CER −10.95%, V3–V8 idênticos ao baseline. `table_detection_f1` V9 ligeiramente menor (−2.6%) esperado: remoção de tabelas falsas reduz falsos positivos que por acaso coincidiam com referência. `provisional_corrections_count` = 1.
-
----
-
-## §P — Fila de Problemas (por prioridade decrescente)
-
-### PRIORIDADE 1 — V9: Extração massivamente deficiente (CER=0.4849)
-
-> V9 é o corpus mais novo e apresenta os piores resultados da série. É a prioridade máxima da série 2.
-
-#### P-V9-01 | CRÍTICO | Cobertura de texto: apenas 65.8% do conteúdo detectado
-
-- **Métrica afetada**: `text_coverage_recall = 0.6577` (baseline) → **0.6659** (run 003 com Fix-F-V9-01)
-- **Impacto**: 34% do texto do gabarito não aparecia na extração (agora 33.4% com fix parcial)
-- **Corpora afetados**: V9 exclusivamente
-- **Causa raiz confirmada (análise run 002)**: Três categorias distintas de falha:
-  - **Tipo A** (17 páginas): Imagens rasterizadas (DPI 115-155), Tesseract falha ao extrair conteúdo — difícil de corrigir sem melhoria de pré-processamento de imagem
-  - **Tipo B** (11 páginas): Mix de texto nativo + imagens → tabela falsa via detecção de colunas
-  - **Tipo C** (7 páginas, ✅ **corrigido por Fix-F-V9-01**): Zero imagens, `_detect_rectangular_grid` criava tabela cobrindo ~89% da página com bordas do formulário
-- **Fix-F-V9-01** (run 003): Height guard em `_detect_rectangular_grid` → grid >85% altura rejeitado. CER −10.95%. Checkpoint `cp_0120`.
-- **Próximo**: Tipo B (11 páginas) — false table via mix native+imagens
-
-#### P-V9-02 | CRÍTICO | Detecção de headings: apenas 38.5% dos títulos detectados
-
-- **Métrica afetada**: `heading_detection_f1 = 0.3846`, `heading_recall = 0.2980`
-- **Impacto**: 70% dos headings de V9 não são detectados
-- **Corpora afetados**: V9 (V3–V8 todos ≥ 0.857 F1)
-- **Hipótese**: Headings de V9 têm características visuais distintas (tamanho de fonte, posicionamento) que a heurística de detecção atual não captura
-- **Comparação**: V6=0.9904, V7=0.9891, V8=0.9927 — problema isolado em V9
-
-#### P-V9-03 | CRÍTICO | Texto de headings corrompido (CER=0.7195)
-
-- **Métrica afetada**: `heading_text_cer = 0.7195`
-- **Impacto**: Dos headings detectados, 72% do texto está errado
-- **Corpora afetados**: V9 (demais ≤ 0.344)
-- **Hipótese**: Tesseract tem baixa acurácia em texto de heading de V9 — possivelmente texto em fonte especial, negrito ou sobre fundo não-branco
-
-#### P-V9-04 | CRÍTICO | Tabelas: 30% não detectadas, conteúdo completamente errado
-
-- **Métricas afetadas**:
-  - `table_detection_f1 = 0.7027` (recall=0.6393 — 36% de tabelas faltando)
-  - `table_column_count_accuracy = 0.4167` — colunas erradas em 58% das tabelas detectadas
-  - `cell_cer = 1.2173` — conteúdo de células com mais de 100% de erros (inserções + substituições)
-  - `cell_content_exact_match = 0.3865` — apenas 39% das células corretas
-  - `cell_alignment_accuracy = 0.3955` — alinhamento de células quase aleatório
-- **Impacto**: Tabelas de V9 praticamente ilegíveis
-- **Corpora afetados**: V9 (V5–V8 todas com `cell_cer ≤ 0.015`)
-- **Hipótese**: V9 contém tabelas rasterizadas (imagem) ou com layout complexo — Tesseract não reconhece estrutura tabular; extrator interpreta incorretamente
-
-#### P-V9-05 | ALTO | Detecção de parágrafos: apenas 45.7% dos limites corretos
-
-- **Métrica afetada**: `paragraph_detection_f1 = 0.4570`
-- **Impacto**: Metade das quebras de parágrafo erradas — afeta a estrutura lógica do documento
-- **Corpora afetados**: V9 (demais ≥ 0.820)
-- **Hipótese**: Consequência direta do CER alto — quando o texto não é extraído, os blocos de parágrafo são fragmentados ou fundidos incorretamente
-
-#### P-V9-06 | MÉDIO | Dados críticos com recall incompleto
-
-- **Métricas afetadas**:
-  - `numeric = 0.8445` (recall de números: 15.6% perdidos)
-  - `dates = 0.8451` (recall de datas: 15.5% perdidas)
-  - `numeric_page = 0.8074` (por página: 19.3% perdidos)
-- **Impacto**: Dados financeiros e datas do documento V9 não são extraídos corretamente
-- **Corpora afetados**: V9 (V7 e V8 com 1.0000; V3 e V6 com ≥ 0.962)
-- **Observação**: CPF, CNPJ e moeda em bom nível (≥ 0.909)
+| ID | Gravidade | Prioridade | Componente | Status |
+|---|---|---|---|---|
+| T3-P00 | CRÍTICO | P0 | executor | **RESOLVIDO** (rodada 002) |
+| T3-P01 | CRÍTICO | P1 | `api.py` (compartilhado, autorizado) | CORRIGIDO NO CÓDIGO — validar na 003 |
+| T3-P02 | ALTO | P1 | backend Tesseract | PENDENTE — abordagem OSD avaliada e não adotada |
+| T3-P03 | MÉDIO | P2 | `api.py` (compartilhado, autorizado) | CORRIGIDO NO CÓDIGO — validar na 003 |
+| T3-P04 | INFO | P3 | avaliador | HIPÓTESE REFUTADA — causa em aberto |
+| T3-P05 | MÉDIO | P3 | montagem de linhas nativas (compartilhado) | DOCUMENTADO — fora do escopo |
+| T3-P06 | ALTO | P2 | headings | PENDENTE (persistiu na 002) |
+| T3-P07 | MÉDIO | P2 | tabelas sem borda / ordem (V5) | PENDENTE (reavaliar na 003) |
+| T3-P08 | MÉDIO | P2 | dados críticos V9 | PARCIAL na 002 — depende de T3-P01 |
+| T3-P09 | INFO | — | `ocr/tesseract/postprocess.py` | RISCO DOCUMENTADO |
+| T3-P10 | ALTO | P2 | ordem de leitura do OCR multicoluna (compartilhado) | NOVO — exposto por T3-P01 |
+| T3-P11 | ALTO | P1 | executor (V10) | CORRIGIDO NO EXECUTOR — validar na 003 |
+| T3-P12 | MÉDIO | P3 | desempenho de extração | NOVO — consequência de T3-P00 |
+| T3-P13 | BAIXO | P3 | regressões pontuais 001→002 | MONITORAR |
+| T3-P14 | INFO | — | suíte de testes | 13 falhas pré-existentes no `HEAD` |
 
 ---
 
-### PRIORIDADE 2 — V3: Heading levels incorretos (crítico estrutural)
+## §1 Rodadas da Série 3
 
-#### P-V3-01 | ALTO | Níveis de heading todos errados (H1/H2/H3 indiferenciados)
+### §1.1 Resumo operacional
 
-- **Métrica afetada**: `heading_level_match_rate = 0.0000`
-- **Impacto**: NENHUM heading de V3 tem o nível correto — todos são promovidos ou rebaixados incorretamente
-- **Corpora afetados**: V3 exclusivamente (V5=0.9608, V6-V8=1.0000, V9=0.9111)
-- **Hipótese**: V3 usa `--reference` (sem `expected_markdown` por página no manifesto) — a heurística de níveis não funciona para o perfil de headings de V3 (documento de 144 páginas com estrutura profunda)
-- **Prioridade alta**: afeta toda navegação estrutural do documento mais longo
+| Corpus | Páginas | Gabarito | Extração 001 → 002 (s) | Métricas 001 → 002 (s) | Aplicáveis 001 → 002 | Resultado 001 | Resultado 002 |
+|---|---|---|---|---|---|---|---|
+| V3 | 144 | reference | 84 → 379 | 3.3 → 2.8 | 57 → 61 | ok | ok |
+| V4 | 224 | manifesto | 606 → 2491 | 206.4 → 208.0 | 57 → 61 | ok | ok |
+| V5 | 42 | reference | 21 → 91 | 1.9 → 1.5 | 63 → 67 | ok | ok |
+| V6 | 95 | reference | 94 → 658 | 3.5 → 3.2 | 59 → 63 | ok | ok |
+| V7 | 80 | reference | 60 → 169 | 7.6 → 3.0 | 61 → 65 | ok | ok |
+| V8 | 90 | reference | 99 → 410 | 7.8 → 4.0 | 61 → 65 | needs_review (partial_success/partial) | needs_review (partial_success/partial) |
+| V9 | 96 | manifesto | 170 → 559 | 9.7 → 9.3 | 63 → 67 | ok | ok |
+| V10 | 84 | reference_paginada | não executado | — | — | — | — (incluído a partir da 003) |
 
-#### P-V3-02 | MÉDIO | 18.75% dos headings não detectados
+### §1.2 Métricas-chave, 001 → 002
 
-- **Métrica afetada**: `heading_recall = 0.8125`, `heading_detection_f1 = 0.8667`
-- **Impacto**: ~19% dos títulos de V3 ausentes na extração
-- **Corpora afetados**: V3 (V6=0.9847, V7=0.9784, V8=0.9927)
-- **Hipótese**: Headings em páginas de alta densidade (V3 tem 144 páginas com múltiplas seções) não satisfazem os critérios de promoção atuais
+`n/a` = métrica não aplicável (sem objeto no gabarito; não é falha). Na 001, todas as métricas de tabela tinham status `false_negative_only` (ver T3-P00).
 
-#### P-V3-03 | MÉDIO | Texto de headings com 19.9% de erro
+| Métrica | V3 | V4 | V5 | V6 | V7 | V8 | V9 |
+|---|---|---|---|---|---|---|---|
+| `cer_markdown_raw` | 0.234 → 0.051 | 0.257 → 0.237 | 0.293 → 0.125 | 0.073 → 0.021 | 0.109 → 0.009 | 0.078 → 0.011 | 0.476 → 0.418 |
+| `cer_sequential_normalized` | 0.064 → 0.039 | 0.242 → 0.231 | 0.218 → 0.109 | 0.017 → 0.008 | 0.057 → 0.001 | 0.043 → 0.006 | 0.446 → 0.392 |
+| `wer_sequential` | 0.076 → 0.051 | 0.331 → 0.318 | 0.269 → 0.116 | 0.031 → 0.015 | 0.063 → 0.003 | 0.052 → 0.007 | 0.484 → 0.410 |
+| `text_coverage_recall` | 0.963 → 0.959 | 0.833 → 0.832 | 0.927 → 0.921 | 0.988 → 0.988 | 1.000 → 0.999 | 0.994 → 0.994 | 0.653 → 0.664 |
+| `text_coverage_precision` | 0.961 → 0.979 | 0.889 → 0.902 | 0.885 → 0.995 | 0.989 → 0.992 | 0.950 → 0.997 | 0.958 → 0.998 | 0.932 → 0.979 |
+| `heading_detection_f1` | 0.867 → 0.867 | 0.500 → 0.502 | 0.791 → 0.857 | 0.973 → 0.990 | 0.950 → 0.989 | 0.986 → 0.993 | 0.403 → 0.426 |
+| `heading_level_match_rate` | 0.000 → 0.000 | 0.000 → 0.000 | 0.961 → 0.961 | 0.988 → 1.000 | 1.000 → 1.000 | 1.000 → 1.000 | 0.927 → 0.924 |
+| `heading_text_cer` | 0.199 → 0.199 | 0.634 → 0.631 | 0.388 → 0.344 | 0.043 → 0.019 | 0.045 → 0.026 | 0.013 → 0.009 | 0.693 → 0.667 |
+| `paragraph_detection_f1` | 0.601 → 0.897 | 0.299 → 0.371 | 0.556 → 0.822 | 0.744 → 0.963 | 0.703 → 0.968 | 0.692 → 0.953 | 0.373 → 0.524 |
+| `list_group_detection_f1` | 0.632 → 0.824 | 0.500 → 0.560 | 0.765 → 0.867 | 0.877 → 1.000 | 1.000 → 1.000 | 0.931 → 1.000 | 0.947 → 0.857 |
+| `list_item_detection_f1` | 0.892 → 0.969 | 0.840 → 0.875 | 0.959 → 1.000 | 0.934 → 1.000 | 1.000 → 1.000 | 0.975 → 1.000 | 1.000 → 0.867 |
+| `pairwise_reading_order_accuracy` | 1.000 → 1.000 | 1.000 → 1.000 | 0.996 → 1.000 | 1.000 → 1.000 | 0.999 → 1.000 | 1.000 → 1.000 | 0.997 → 0.999 |
+| `table_detection_f1` | 0.000 → 0.974 | 0.000 → 0.875 | 0.000 → 1.000 | 0.000 → 1.000 | 0.000 → 1.000 | 0.000 → 1.000 | 0.000 → 0.789 |
+| `table_column_count_accuracy` | 0.000 → 0.949 | 0.000 → 0.707 | 0.000 → 1.000 | 0.000 → 1.000 | 0.000 → 1.000 | 0.000 → 1.000 | 0.000 → 0.545 |
+| `cell_content_exact_match` | 0.000 → 0.953 | 0.000 → 0.621 | 0.000 → 1.000 | 0.000 → 0.939 | 0.000 → 1.000 | 0.000 → 0.996 | 0.000 → 0.498 |
+| `cell_cer` | 1.000 → 0.040 | 1.000 → 0.355 | 1.000 → 0.000 | 1.000 → 0.014 | 1.000 → 0.000 | 1.000 → 0.001 | 1.000 → 0.618 |
+| `numeric` | 0.957 → 0.972 | 0.890 → 0.891 | 0.871 → 0.993 | 0.953 → 0.967 | 0.872 → 1.000 | 0.917 → 0.989 | 0.743 → 0.852 |
+| `currency` | 0.963 → 0.963 | 0.890 → 0.884 | 1.000 → 1.000 | 0.961 → 1.000 | 1.000 → 1.000 | 1.000 → 1.000 | 0.831 → 0.914 |
+| `dates` | 1.000 → 1.000 | 0.953 → 0.953 | 1.000 → 1.000 | 0.993 → 0.993 | 1.000 → 1.000 | 0.998 → 0.998 | 0.784 → 0.859 |
+| `duplicate_excess_rate` | 0.447 → 0.056 | 0.813 → 0.702 | 0.387 → 0.055 | 0.238 → 0.032 | 0.318 → 0.015 | 0.312 → 0.039 | 0.579 → 0.412 |
 
-- **Métrica afetada**: `heading_text_cer = 0.1987`
-- **Impacto**: Erros OCR nos títulos de V3
-- **Corpora afetados**: V3 (demais ≤ 0.034 exceto V5=0.344 e V9=0.720)
+Métricas não aplicáveis em ambas as rodadas: `process_numbers` (nenhum corpus), `cpf` (só V5/V9), `cnpj`/`identifiers_combined` (não em V3/V4), `percent` (não em V6). Na 001 também eram n/a `table_row_order_accuracy`, `table_column_order_accuracy`, `table_page_location_accuracy` e `cell_content_exact_match_matched`, por falta de tabelas.
 
-#### P-V3-04 | BAIXO | Listas: precisão de grupo baixa (0.700)
-
-- **Métrica afetada**: `list_group_detection_precision = 0.7000`
-- **Impacto**: 30% de falsos positivos em grupos de lista — blocos não-lista classificados como lista
-- **Corpora afetados**: V3 (V5-V8 ≥ 0.820)
-
----
-
-### PRIORIDADE 3 — V5: Headings e parágrafos com recall baixo
-
-#### P-V5-01 | MÉDIO | 25% dos headings não detectados
-
-- **Métrica afetada**: `heading_recall = 0.7500`, `heading_detection_f1 = 0.8571`
-- **Impacto**: 25% dos títulos de V5 ausentes
-- **Corpora afetados**: V5 (outros ≥ 0.812)
-
-#### P-V5-02 | MÉDIO | Heading text CER = 0.344
-
-- **Métrica afetada**: `heading_text_cer = 0.3442`
-- **Impacto**: Erros OCR significativos nos títulos de V5 (melhor que V9, pior que V3-V8)
-- **Corpora afetados**: V5
-
-#### P-V5-03 | BAIXO | Parágrafo recall = 78.1%
-
-- **Métrica afetada**: `paragraph_detection_recall = 0.7814`
-- **Impacto**: 22% das quebras de parágrafo de V5 não detectadas
-- **Corpora afetados**: V5 (demais ≥ 0.927)
+**Consistência**: os valores de `cer_markdown_raw` da 002 coincidem com os melhores da Série 2 (V3 0.0508, V5 0.1253, V6 0.0209, V7 0.0089, V8 0.0113). Isso confirma que a 001 media uma configuração diferente da canônica.
 
 ---
 
-### PRIORIDADE 4 — V6/V8: Problemas pontuais de baixo impacto
+## §2 Problemas — detalhamento
 
-#### P-V6-01 | BAIXO | Conteúdo de células: 6.2% de erros exatos
+### T3-P00 | CRÍTICO | P0 | Executor sem tabelas e sem supressão de cabeçalho/rodapé — RESOLVIDO
 
-- **Métrica afetada**: `cell_content_exact_match = 0.9382`, `cell_cer = 0.0148`
-- **Impacto**: Pequena proporção de células com texto incorreto
-- **Corpora afetados**: V6 (V5, V7 com 1.0000; V8=0.9955)
+- **Descrição**: `extract_one` criava `ExtractorConfig(mode="balanced", language="pt-BR", ocr_quality_policy="adaptive", ocr_engine="tesseract", num_threads=6)` diretamente. Assim herdava os defaults `enable_tables=False`, `merge_cross_page_tables=False` e `preserve_headers_footers=True`. O caminho canônico (`scripts/evaluate_e2e.py::_build_config`) parte de `best_extraction_config()`.
+- **Corpora/páginas**: todos; todas as páginas com tabela ou com cabeçalho/rodapé repetido.
+- **Métricas (001)**: `table_detection_f1`=0 e `cell_cer`=1.0 em V3–V9 (status `false_negative_only`); `cer_markdown_raw` V7=0.109; `paragraph_detection_precision` 0.24–0.60; `duplicate_excess_rate` 0.24–0.81.
+- **Evidências**: nenhum bloco `<table>` ou pipe table nos 7 `*_extracted_paginated.md`; 79 rodapés "Página N de 80" no V7, cujo gabarito diz "Ignorar cabeçalhos e rodapés decorativos". Reprodução em memória na V7 p.2: 0 tabelas com a config antiga; tabela 6×6 idêntica ao gabarito com a config canônica.
+- **Causa raiz**: CONFIRMADA — configuração do executor.
+- **Correção**: `build_config()` em `scripts/run_tesseract_batch_wsl.py` = `replace(best_extraction_config(language="pt-BR", preserve_headers=False), mode=BALANCED, ocr_quality_policy="adaptive", ocr_engine="tesseract", num_threads=6)`. O run manifest passou a registrar `extractor_flags` (enable_tables, merge_cross_page_tables, preserve_headers_footers, ocr_quality_variants, política efetiva).
+- **Testes**: `tests/test_tesseract_batch_runner_config.py` — flags da config e parâmetros da rodada.
+- **Critério → resultado (002)**: `table_detection_f1` ≥ 0.97 em V5–V8 → 1.000 em V5, V6, V7 e V8 ✅; nenhum rodapé "Página N de M" no V7 → `cer_markdown_raw` 0.009 ✅.
+- **Status**: RESOLVIDO.
 
-#### P-V8-01 | BAIXO | Dados numéricos: recall 1.1% abaixo do perfeito
+### T3-P01 | CRÍTICO | P1 | OCR de página descartado por figuras — CORRIGIDO NO CÓDIGO
 
-- **Métrica afetada**: `numeric = 0.9891`
-- **Impacto**: Muito pequeno — pode ser arredondamento ou formatação
-- **Corpora afetados**: V8
+- **Descrição**: em páginas com OCR de página, as linhas OCR que caem dentro de regiões `FIGURE` eram removidas por `_append_hybrid_ocr_regions`, que impede o OCR de figura de virar texto de corpo. Há dois casos:
+  1. **Página raster inteira** (raster-primary): a imagem da página vira uma `FIGURE` de 100% da página, e a camada nativa residual (≥ 20 caracteres, por exemplo "Autenticação digital: …") impede o OCR de ser primário (`_should_use_page_ocr_as_primary`). Resultado: todo o OCR é descartado.
+  2. **Imagens de texto** (títulos, parágrafos e carimbos rasterizados, marcados pela política de região como `OCR_REGION`/`MERGE_OCR`): o OCR de página é removido e a figura fica sem texto.
+- **Corpora/páginas**: V9 — 47 páginas `mixed` com `ocr_outcome=success` e CER médio 0.57 na 001 (p2, p4, p8, p11, p23, p28, p31, p50, p63, p76, p79, p80, p85, p92 ≈ 0.91–0.98) e 5 páginas raster não-full (p10, p16, p33, p61, p87). Na 002, `text_coverage_recall` do V9 = 0.664.
+- **Evidências (V9 p.2, em memória)**: `page_ocr_requested=true`; 259 tokens aceitos (`core_authorized_page`); 23 `ocr_supplemental_lines`; região única `FIGURE [0,0,595,842]`; saída de 36 caracteres. A página já era marcada como `raster_primary_candidate` (imagem ≥ 75%, nativo ≤ 200 caracteres) para *pedir* o OCR, mas esse sinal não chegava à montagem.
+- **Refuta** a hipótese "Tipo A" da Série 2 ("Tesseract não reconhece imagens de baixa DPI"): o Tesseract reconhece o texto e a montagem o descartava.
+- **Correção** (`src/structured_pdf_text/api.py`):
+  - `_append_hybrid_ocr_regions(..., page_raster_primary=False)`: em página raster-primary com OCR de página, uma figura com área ≥ 75% da página (`_PAGE_SIZED_FIGURE_COVERAGE`, o mesmo limiar de `_is_raster_primary_candidate`) não bloqueia o OCR, que vai para o suplemento de corpo. O texto nativo é preservado.
+  - Uma figura sem OCR próprio, com decisão `OCR_REGION`/`MERGE_OCR`, recebe as linhas do OCR de página contidas nela (a figura continua dona do texto, que não vira corpo nem é duplicado). Figuras sem essa decisão (logos, decorativas) continuam sem receber texto.
+  - Chamada: `page_raster_primary=raster_primary and page_ocr_requested`.
+- **Validação em memória (V9)**: p2 36 → 1801 caracteres; p4 84 → 1535; p10 0 → 62 (carimbos "EM BRANCO / CONFIRMAÇÃO …"); p23 81 → 543; p31 287 → 2144; p50 221 → 1519. p8 e p16 sem mudança (já estavam corretas).
+- **Testes**: `tests/test_tesseract_serie3_regressions.py` (6 testes de T3-P01, incluindo: figura pequena não é liberada; figura sem decisão de texto não recebe OCR; figura com OCR próprio não é sobrescrita; texto não é duplicado). O teste existente `tests/test_hybrid_figure_ocr_ownership.py` continua passando.
+- **Riscos a observar na 003**: (a) texto de figuras legítimas aparecendo onde o gabarito não o espera (V5 páginas híbridas, V7 `decorative_graphic` p53/p75); (b) T3-P10.
+- **Critério de resolução**: V9 `text_coverage_recall` ≥ 0.80 e queda do `cer_sequential_normalized` do V9 (< 0.392); nenhuma regressão > 0.005 em `text_coverage_precision`, `cer_sequential_normalized` ou `duplicate_excess_rate` em V3–V8 em relação à 002.
+- **Status**: CORRIGIDO NO CÓDIGO — aguardando a rodada 003. As verificações em memória de controle em V3–V8 não foram executadas.
+
+### T3-P02 | ALTO | P1 | Páginas escaneadas rotacionadas sem correção de orientação — PENDENTE
+
+- **Corpora/páginas**: V3 p96 (90°), p97 (180°), p98 (270°), p99 (tabela a 90°); CER normalizado por página 0.89 / 0.90 / 1.38 / 1.42 (001). Provavelmente também V3 p116 (OSD indica 90°).
+- **Evidência**: `V3_extracted_paginated.md` p.99 "00'00S+ 00'0SE-" (= "+500,00 -350,00" invertido); p.96 "96 euibed" (= "página 96").
+- **Causa raiz**: CONFIRMADA. O backend tem OSD (`_run_tesseract_osd`), mas ele vem desligado (`TESSERACT_OSD=0`).
+- **Experimento (2026-11-11)**: OSD em páginas renderizadas com escala 2.0:
+
+  | Página | Rotação real | OSD rotate | Confiança |
+  |---|---|---|---|
+  | V3 p96 | 90° | 90 | 0.79 |
+  | V3 p97 | 180° | 180 | 7.57 |
+  | V3 p98 | 270° | 270 | 0.94 |
+  | V3 p99 | 90° | 90 | 1.19 |
+  | V3 p100 | 0° | 180 ❌ | 0.28 |
+  | V6 p31 (`rotation`, CER 0.13 já correta) | — | 270 ⚠️ | 6.34 |
+  | V3 p80/p95, V6 p3/p33, V8 p39/p67, V9 p9/p44 | 0° | 0 | 4.1–10.2 |
+  | V9 p2 | 0° | 0 | 0.89 |
+
+- **Conclusão**: com o limiar padrão (2.0), só a p97 seria corrigida. A V6 p31 seria girada com confiança alta, apesar de já sair correta (risco de regressão). Com limiar menor, entram falsos positivos (p100). **Não adotado** como default.
+- **Próxima estratégia**: aplicar OSD apenas em OCR de página inteira sem texto nativo útil, aceitar a rotação só quando o reconhecimento girado tiver confiança média maior que o não girado (comparar as duas leituras) e verificar como a página é canonizada antes do OCR (`/Rotate`) para entender o caso V6 p31.
+- **Critério**: CER de V3 p96–p98 < 0.30, sem mudança em páginas não rotacionadas de V3–V10.
+
+### T3-P03 | MÉDIO | P2 | V8 `partial_success` por região menor que um glifo — CORRIGIDO NO CÓDIGO
+
+- **Por que `partial` com `metrics_status: ok`**: `metrics_status` indica apenas que o cálculo de métricas é válido. Já `benchmark_status` vem de `evaluate_e2e._classify_document_status`, e basta uma página com `partial_reasons` para o documento inteiro ficar `partial`.
+- **Páginas**: V8 p22 e p25 (`/Rotate 180`, paisagem). O resultado se repetiu na 002.
+- **Evidência**: `page-22:region-9`, `UNKNOWN`, bbox 6×6 pt junto ao rodapé, `native_text_missing + visible_ink_present`. O OCR retorna `no_text` → `ocr_required` (não é figura) → `ocr_failed` → `ocr_region_recovery_unavailable`. O conteúdo da página está completo em relação ao gabarito.
+- **Correção** (`api.py::_recover_selected_regions`): uma região com largura **e** altura < 8 pt (`_MIN_TEXT_REGION_SIDE_PT`) e resultado vazio deixa de ser OCR obrigatório. Erros de execução continuam contando como falha.
+- **Testes**: `tests/test_tesseract_serie3_regressions.py` — a região 6×6 é opcional; uma região do tamanho de uma linha de texto continua falhando quando vazia.
+- **Critério**: V8 `extraction_status=success` e `benchmark_status=valid` na 003, com `cer_sequential_normalized` do V8 inalterado (0.006).
+- **Status**: CORRIGIDO NO CÓDIGO — aguardando a 003.
+
+### T3-P04 | INFO | P3 | V4: métricas em ~207 s — HIPÓTESE REFUTADA
+
+- **Dados**: 001: 206.4 s wall / 1850 s CPU; 002: 208.0 s. Demais corpora: 1.5–9.7 s.
+- **Hipótese refutada**: o tempo não caiu com a emissão das tabelas (T3-P00), embora `duplicate_excess_rate` tenha caído de 0.81 para 0.70.
+- **Observação**: o V4 continua com `duplicate_excess_rate` 0.70 e 83 páginas com CER > 0.15. O custo provavelmente está no alinhamento por blocos de um documento grande (224 páginas) com muitos blocos sem par. É desempenho do **avaliador**, não qualidade da extração.
+- **Próximo passo**: perfilar `compute_metrics.py` no V4 (`python -m cProfile`) sem alterar o algoritmo. Não bloqueia a validação.
+
+### T3-P05 | MÉDIO | P3 | Títulos nativos com espaçamento entre letras — DOCUMENTADO
+
+- V7 p1 (CER 0.75 na 001: "R E LATÓ R I O D E M O N ITO RAM E NTO"), V8 p46/p47 (`tracked_heading`, 0.21). O texto é **nativo** (`ocr_outcome=not_requested`), então está fora do pipeline Tesseract. A correção exige mexer na montagem de linhas compartilhada e ainda não tem autorização.
+
+### T3-P06 | ALTO | P2 | Headings — PENDENTE
+
+- Valores na 002: `heading_level_match_rate`=0.000 em V3 e V4; `heading_recall` V4=0.335, V9=0.351; `heading_text_cer` V4=0.631, V9=0.667. Os números persistiram após T3-P00, portanto não se tratava de contaminação. Investigar a heurística de nível em V3/V4 (gabaritos `reference` × `manifesto`). Para o V9, reavaliar após T3-P01, porque os títulos rasterizados agora passam a ter texto.
+
+### T3-P07 | MÉDIO | P2 | V5: tabelas sem borda e ordem embaralhada — PENDENTE
+
+- 001: p10/p37 (`native_table_borderless`, CER 0.61), p6/p28 (`scrambled_internal_order`, 0.38–0.40), páginas híbridas p17/p20/p26/p32 (~0.4). Na 002, o CER do V5 caiu de 0.218 para 0.109. Reavaliar por página na 003.
+
+### T3-P08 | MÉDIO | P2 | V9: dados críticos — PARCIAL
+
+- 001 → 002: `numeric` 0.743 → 0.852, `currency` 0.831 → 0.914, `dates` 0.784 → 0.859. Espera-se nova melhora com T3-P01.
+
+### T3-P09 | INFO | Risco de sobreajuste em `ocr/tesseract/postprocess.py`
+
+- O módulo tem regras ligadas a marcadores do corpus ("OMITIR NO GABARITO", cabeçalhos "OCR PURO * SCAN"). Documentado; nenhuma regra desse tipo foi introduzida nesta série.
+
+### T3-P10 | ALTO | P2 | OCR de páginas multicoluna intercala colunas — NOVO
+
+- Exposto por T3-P01. Nas páginas do V9 com 2–3 colunas rasterizadas (p23, p28, p31, p50), o texto OCR recuperado intercala as colunas. Exemplo da p50: "Na reunião de acompanhamento, Marina Duarte A Unidade de Fiscalização consolidou os resultados destacou a necessidade…".
+- **Causa provável**: a reconstrução de linhas OCR (`reconstruct_ocr_lines`/`reconstruct_ocr_layout`) agrupa palavras na mesma altura de colunas diferentes. Componente compartilhado — requer autorização.
+- **Impacto**: mesmo assim, recuperar o texto aumenta a cobertura. A ordem afeta CER, WER e `pairwise_reading_order_accuracy`.
+- **Critério**: `pairwise_reading_order_accuracy` do V9 ≥ 0.999 com o texto recuperado, e o CER dessas páginas < 0.30.
+
+### T3-P11 | ALTO | P1 | V10 não era avaliável pelo executor — CORRIGIDO NO EXECUTOR
+
+- **Sintoma**: a pré-verificação não encontrava um gabarito paginado válido para o V10.
+- **Causa raiz (CONFIRMADA)**:
+  1. `Document_AI_V10_REFERENCIA.md` delimita as páginas com `<!-- PAGE 001 START -->`/`<!-- PAGE 001 END -->`. O parser (`split_pages`) só reconhece `## Página NNN`, então o arquivo é lido como **1 página** e descartado como "não paginado".
+  2. `Document_AI_V10_MANIFESTO.json` traz `expected_text`, mas não `expected_markdown`. `manifest_pages()` recusa: "Page 1 requires string expected_markdown; provide --reference for a metadata-only manifesto".
+  3. `Document_AI_V10_REFERENCIA_PAGINADA.md` é válido (84/84 páginas, `## Página NNN`) e tem conteúdo idêntico ao `_REFERENCIA.md`, mas o executor não o procurava.
+- **Correção (sem alterar `corpus/`)**: o executor inclui o V10 em `CORPORA` e, na pré-verificação, considera `<base>_REFERENCIA_PAGINADA.md` como gabarito de **último recurso** (prioridade abaixo de `_REFERENCIA.md` e do manifesto). Assim a escolha de gabarito de V3–V9 continua a mesma da 001 (confirmado em `--check-only`). O manifesto continua sendo passado como metadados.
+- **Verificação**: autoavaliação no scratchpad (gabarito paginado × ele mesmo, com `--manifesto`): `status=ok`, `rank_eligible=True`, 28 métricas aplicáveis, todas perfeitas (CER 0, cobertura 1.0).
+- **Limitação do gabarito V10 (não é defeito do executor)**: o gabarito é texto corrido, sem títulos de conteúdo (só o título do documento e os marcadores de página), sem tabelas (`TABLES.json` vazio) e sem listas. Por isso headings, tabelas e listas ficam `n/a` (41 métricas indisponíveis). As quebras de linha seguem as linhas visuais, que em Markdown viram quebras suaves dentro do mesmo parágrafo. Se você quiser avaliar estrutura no V10, o gerador precisa emitir títulos/listas/tabelas em Markdown e preencher `expected_markdown` no manifesto.
+- **Testes**: `tests/test_tesseract_batch_runner_config.py` — uso do fallback quando os gabaritos primários são inutilizáveis, preferência pelo `_REFERENCIA.md` primário e presença do V10 em `CORPORA`.
+- **Critério**: a 003 conclui o V10 com `metrics_status=ok` e `rank_eligible=True`.
+
+### T3-P12 | MÉDIO | P3 | Tempo de extração 3–7× maior com a config canônica — NOVO
+
+- 001 → 002: V3 84 → 379 s, V4 606 → 2491 s (41 min), V6 94 → 658 s, V8 99 → 410 s, V9 170 → 559 s. É o custo da detecção e do refinamento de tabelas (visual + OCR de tabela) que a 001 não executava. Não é regressão de qualidade, mas afeta a duração da rodada: a 003, com o V10 de 84 páginas, deve levar cerca de 1h30. Investigar onde está o tempo (`timings_ms` por página) antes de qualquer otimização.
+
+### T3-P13 | BAIXO | P3 | Regressões pontuais 001 → 002 — MONITORAR
+
+- Δ ≤ −0.005: V3 `percent` 0.956 → 0.944; V4 `currency` 0.890 → 0.884; V5 `text_coverage_recall` 0.928 → 0.921, `paragraph_boundary_recall` 0.821 → 0.804; V6 `paragraph_detection_recall` 0.976 → 0.970; V9 `heading_recall` 0.364 → 0.351, `paragraph_boundary_recall` 0.667 → 0.623, `list_item_detection_precision` 1.000 → 0.765, `list_group_detection_precision` 0.900 → 0.750.
+- **Hipótese**: a mudança de representação (texto passa a ser célula de tabela e cabeçalhos/rodapés são suprimidos) desloca a contagem. Verificar na 003 se alguma delas se agrava.
+
+### T3-P14 | INFO | — | Falhas pré-existentes na suíte de testes
+
+- Estas 13 falhas também ocorrem no `HEAD` (`5cc81d6`) sem as alterações desta série; foram verificadas numa worktree temporária, já removida:
+  - `test_line_detector.py` (8 testes `test_reconciliation_*`);
+  - `test_rapidocr_improvement_005/006/008.py` (3);
+  - `test_no_timeouts.py::test_production_code_has_no_timeout_keyword_argument`;
+  - `test_evaluation_exact_optimizations.py::test_full_ground_truth_self_control_is_complete_and_perfect[V3]`.
+- Não foram investigadas nesta série.
 
 ---
 
-### PRIORIDADE 5 — V7: Sem problemas significativos (referência de excelência)
+## §3 Alterações de código desta série (não commitadas)
 
-V7 atingiu pontuação perfeita (1.0000) em 55 de 55 métricas avaliadas. Serve como referência do melhor resultado possível com o pipeline atual.
+| Item | Arquivo | Mudança |
+|---|---|---|
+| T3-P00 | `scripts/run_tesseract_batch_wsl.py` | `build_config()` canônica; `extractor_flags` no run manifest |
+| T3-P11 | `scripts/run_tesseract_batch_wsl.py` | V10 em `CORPORA`; fallback `_REFERENCIA_PAGINADA.md` com prioridade −1 |
+| T3-P01 | `src/structured_pdf_text/api.py` | `_append_hybrid_ocr_regions(page_raster_primary=…)`, `_PAGE_SIZED_FIGURE_COVERAGE=0.75`, atribuição de OCR de página a figuras `OCR_REGION`/`MERGE_OCR` |
+| T3-P03 | `src/structured_pdf_text/api.py` | `_MIN_TEXT_REGION_SIDE_PT=8.0` em `_recover_selected_regions` |
+| testes | `tests/test_tesseract_batch_runner_config.py` (5), `tests/test_tesseract_serie3_regressions.py` (8) | novos |
 
----
+Não alterados: `corpus/`, gabaritos, manifestos, avaliador (`src/structured_pdf_text/evaluation/`), outros backends, `output/tesseract/001/` e `output/tesseract/002/`.
 
-## §V4 — Resultados confirmados
+## §4 Testes executados (2026-11-11)
 
-V4 (224 páginas) extraído com sucesso na run 002: `cer_markdown_raw = 0.231543` — idêntico ao best_known série 1 (run 0091).
+| Execução | Resultado |
+|---|---|
+| `pytest tests/test_tesseract_batch_runner_config.py` | 5 passed |
+| `pytest tests/test_tesseract_serie3_regressions.py` | 8 passed |
+| `pytest tests` (suíte completa, com todas as alterações) | 3109 passed, 13 failed, 4 skipped — as 13 falhas são pré-existentes (T3-P14) |
+| `run_tesseract_batch_wsl.py 003 --check-only` | aprovada; V3–V9 com os mesmos gabaritos da 001; V10 `reference_paginada` 84/84 |
+| Rodada completa 002 | executada (somente T3-P00) |
+| Rodada completa 003 | **não executada** — será feita manualmente |
 
-Nenhuma regressão em V4. O threshold de memória foi reduzido para 11.0 GB por instrução do usuário em 2026-11-05 (Tesseract usa muito menos RAM que EasyOCR).
+## §5 Validação esperada na rodada 003
 
----
+Comparar 003 × 001 (baseline imutável) e 003 × 002 (efeito isolado de T3-P01/T3-P03). O V10 não tem rodada anterior, então a 003 vira sua baseline.
 
-## §Histórico de Runs — Série 2
+| Verificação | Critério |
+|---|---|
+| T3-P01 | V9 `text_coverage_recall` ≥ 0.80; V9 `cer_sequential_normalized` < 0.392 |
+| Controle T3-P01 | V3–V8: Δ `text_coverage_precision`, `cer_sequential_normalized`, `duplicate_excess_rate` dentro de ±0.005 da 002 |
+| T3-P03 | V8 `success`/`valid`; V8 `cer_sequential_normalized` ≈ 0.006 |
+| T3-P11 | V10 `metrics_status=ok`, `rank_eligible=True` |
+| Geral | nenhuma extração com `extract_error`/`metrics_error`; não declarar sucesso geral se houver regressão relevante |
 
-| Run | Data | V3 | V4 | V5 | V6 | V7 | V8 | V9 | Status | Fix |
-|---|---|---|---|---|---|---|---|---|---|---|
-| **001** | 2026-11-05 | 0.0508 | pulado | 0.1253 | 0.0209 | 0.0089 | 0.0113 | 0.4849 | finished_partial | baseline |
-| **002** | 2026-11-05 | 0.0508 | 0.2315 | 0.1253 | 0.0209 | 0.0089 | 0.0113 | 0.4849 | finished_complete | baseline |
-| **003** | 2026-11-05 | 0.0508 | 0.2315 | 0.1253 | 0.0209 | 0.0089 | 0.0113 | **0.4318** | finished_complete | Fix-F-V9-01 ✅ |
-| **004** | 2026-11-06 | pulado | pulado | 0.1253 | 0.0209 | 0.0089 | 0.0113 | **0.4285** | finished_partial | Fix-F-V9-02 (V3+V4 sem memória) |
-| **005** | 2026-11-06 | 0.0508 | 0.2315 | 0.1253 | 0.0209 | 0.0089 | 0.0113 | **0.4285** | finished_complete | Fix-F-V9-02 ✅ best_known |
-| **006** | 2026-11-06 | 0.0508 | 0.2315 | 0.1253 | 0.0209 | 0.0089 | FALHOU | FALHOU | disco_cheio | Fix-F-V9-03 (disco C: 100%) |
-| **007** | 2026-11-06 | — | — | — | — | — | 0.0113 | 0.4285 | retry_parcial | Fix-F-V9-03 V8+V9 → REVERTER |
-| **008** | 2026-11-06 | — | — | 0.1253 | — | — | — | 0.4285 | parcial_INVALIDO | Fix-F-V9-04 → INCONCLUSIVO |
+Comando: `python3 -u scripts/run_tesseract_batch_wsl.py 003` (pré-verificação: `--check-only`). O diretório `output/tesseract/003` não pode existir antes da execução.
 
----
+## §6 Diagnóstico da rodada 001 — notas por corpus
 
-## §Resolvidos — Série 2
+- **V3**: tabelas ausentes (T3-P00); p96–p99 rotacionadas (T3-P02); p116 "OCR tabelas" com CER 1.15; níveis de heading 0 (T3-P06).
+- **V4**: tabelas ausentes; 83/224 páginas com CER > 0.15, concentradas em "OCR de tabelas" (p145–p182, CER 1.1–2.7); `heading_recall` 0.335; métricas lentas (T3-P04).
+- **V5**: tabelas ausentes; páginas sem borda/embaralhadas/híbridas (T3-P07).
+- **V6**: só T3-P00; páginas `rotation` p31/p47/p75 com CER 0.12–0.13.
+- **V7**: T3-P00 (rodapés e tabelas); p1 com título espaçado (T3-P05); p25/p29/p73 `grid_borderless` com 0.20–0.23.
+- **V8**: T3-P00; `partial` por T3-P03; p46/p47 `tracked_heading` (T3-P05).
+- **V9**: T3-P01 (47+5 páginas); T3-P00; títulos e dados críticos como consequência (T3-P06/T3-P08).
 
-### Fix-F-V9-02 | form_label_colon_pattern — Supressão de rótulo de formulário como tabela (V9)
+## §7 Histórico resumido da Série 2 (2026-11-05 a 2026-11-06, executor `run_loop.py`)
 
-- **Arquivo**: `src/structured_pdf_text/tables/text_tracks.py` — classe `ProseVsTableClassifier`
-- **Problema**: Rótulos de formulário no padrão "Campo: valor" eram interpretados como linhas de tabela borderless
-- **Fix**: Novo método `_is_form_label_colon_pattern()` → rejeita candidatos com padrão "PALAVRA: valor" em proporção alta
-- **Checkpoint**: `cp_0122`
-- **Testes**: adicionados em `tests/test_audit_mixed_visual_tables.py`
-- **Run validação**: 005 (completo) — V9 CER 0.4318 → 0.4285 (−0.76%), table_prec +8.7%, cell_cer −5.9%
-- **Decisão**: ACEITAR_PROVISORIAMENTE — contador: 1→2
+| Correção | Arquivo | Decisão |
+|---|---|---|
+| Fix-F-V9-01 — guarda de altura (> 85%) em `_detect_rectangular_grid` | `tables/detector.py` | aceita (V9 CER 0.4849 → 0.4318) |
+| Fix-F-V9-02 — `_is_form_label_colon_pattern` | `tables/text_tracks.py` | aceita (V9 CER → 0.4285) |
+| Fix-F-V9-03 — agrupamento em `ocr_tracks.py` | `tables/ocr_tracks.py` | revertida (sem efeito) |
+| Fix-F-V9-04 — `_group_short_regions` | `tables/detector.py` | inconclusiva, código preservado |
 
----
-
-### Fix-F-V9-03 | _group_adjacent_text_regions + Pass2 em ocr_tracks.py — REVERTER
-
-- **Arquivo**: `src/structured_pdf_text/tables/ocr_tracks.py`
-- **Hipótese**: Tesseract gera uma LayoutRegion por parágrafo OCR (1 linha) → `_candidates()` vê muito poucas linhas
-- **Fix**: Pass 2 agrupando regiões TEXT curtas adjacentes em composita para detector borderless
-- **Runs**: 006 (disco cheio, V9 não avaliado), 007 (V8+V9 retry) — V9 CER=0.4285=best_known
-- **Diagnóstico**: Código não ativou para V9 — `image_boxes` vazio → `detect_ocr_track_tables()` não chamado para tabelas nativas
-- **Decisão**: REVERTER — zero efeito, código morto para V9. cp_0123 restaurado. Contador=2 (não incrementado).
-
----
-
-### Fix-F-V9-04 | _group_short_regions + Pass2 em detector.py — INCONCLUSIVO
-
-- **Arquivo**: `src/structured_pdf_text/tables/detector.py` — `detect_tables_native()`
-- **Hipótese**: Tesseract gera LayoutRegion com 1-2 native_lines → `_candidates()` requer ≥3 linhas → tabela perdida
-- **Fix**: `_group_short_regions()` agrupa regiões curtas adjacentes em região composta para Pass 2
-- **Checkpoint**: `cp_0124`
-- **Testes**: `tests/test_v9_grouped_borderless.py` — 6/6 PASS
-- **Run**: 008 (parcial V5+V9) — V9 CER=0.4285=best_known, tbl_f1=0.7103=best_known, fn=23 páginas (inalterado)
-- **Diagnóstico zero efeito**: Hipótese errada — páginas 42/82 de V9 usam nativo PDF (não OCR curto). Regiões não são curtas (≥3 linhas cada). `_group_short_regions()` não ativa. Causa real: layout engine/reading_order reordena colunas de tabela nativa.
-- **Código**: PRESERVADO (válido para outros casos com regiões curtas Tesseract)
-- **Decisão**: INCONCLUSIVO — zero efeito, sem regressão. Contador=2 (não incrementado).
-
----
-
-### Fix-F-V9-01 | Tipo C — Tabela falsa por borda de formulário (7 páginas V9)
-
-- **Arquivo**: `src/structured_pdf_text/tables/detector.py` — função `_detect_rectangular_grid`
-- **Problema**: Bordas de formulário (2 horizontais topo/base + ~20 retângulos internos) criavam grid cobrindo 89% da altura da página → tabela falsa absorvia todo o conteúdo
-- **Fix**: Guard de altura — grid rejeitado se `y1 - y0 > limit.height * 0.85`
-- **Páginas corrigidas**: p042, p047, p057, p068, p077, p090, p094 (Tipo C de V9)
-- **Checkpoint**: `cp_0120` (pre-fix-v9-false-table)
-- **Testes**: `tests/test_v9_false_table_guard.py` — 3/3 PASS
-- **Run validação**: 003 — V9 CER 0.4849 → 0.4318 (−10.95%), V3–V8 inalterados
-- **Decisão**: ACEITAR_PROVISORIAMENTE
-
----
-
-## §Análise V9 — Classificação de Páginas por Tipo de Falha (run 002)
-
-Diagnóstico realizado com `PdfiumNativeEvidenceSource` + `ComplexityAnalyzer` sobre as 96 páginas do V9.
-
-| Tipo | Páginas | Padrão | Mecanismo de Falha |
-|---|---|---|---|
-| **A** | 17 | Imagens cobrindo 5-100% da página, `useful_len < 200` | Tesseract não reconhece imagens de baixa DPI (115-155 DPI). `raster_primary` só trigga quando `image_coverage >= 0.75`. |
-| **B** | 11 | Imagens presentes, texto nativo moderado, resultado com `<table>` | Mix OCR+nativo interpretado como tabela multi-coluna |
-| **C** | 7 | Zero imagens, `useful_len >= 680`, `path_coverage ≈ 0.24-0.26` | `_detect_rectangular_grid` cria grid cobrindo ~89% da página com bordas do formulário |
-| **OK** | 61 | Diversos | Extração correta |
-
-**Páginas Tipo C**: p042, p047, p057, p068, p077, p090, p094
-
-**Diagnóstico p068 (exemplar)**:
-- 68 paths no total; apenas 2 qualificam como horizontais (bordas superior e inferior da página a y≈47 e y≈795)
-- Zero verticals candidatos
-- `_detect_strict_grid` → `_detect_rectangular_grid` com todos os 68 paths
-- Grid resultante cobre 89% da altura da página → tabela falsa absorvendo heading + metadados + parágrafos + tabela real
-- `grid_line_count = 0` (complexidade não detecta grid real)
-
-**Fix planejado (Fix-F-V9-01)**: Em `_detect_rectangular_grid`, rejeitar grids que cobrem > 85% da altura da região limite. Discriminador generalista: bordas de formulário de página inteira geram grids de 85%+ de altura; tabelas de dados reais são subseções da página.
-
----
-
-## §Notas Técnicas
-
-### Fix de compatibilidade do avaliador com V9 (2026-11-05)
-O manifesto V9 usa a chave `page_number` em vez de `page`/`page_num` usada pelos demais corpora. O avaliador (`reference_inputs.py` linha 41 e `reporting.py` linha 22) foi atualizado para aceitar `page_number` como fallback. Checkpoint: `pre-fix-v9-page-number-key`.
-
-### Threshold V4 reduzido (2026-11-05)
-`CORPUS_MIN_COMMIT_GB["V4"]` reduzido de 15.0 → 11.0 GB por instrução do usuário. Tesseract usa significativamente menos memória que EasyOCR (baseline de EasyOCR que motivou 15 GB não se aplica ao pipeline Tesseract atual).
+A hipótese "Tipo A" da Série 2 (V9: Tesseract não reconhece imagens de baixa DPI) foi **refutada** na Série 3 (T3-P01). Notas técnicas mantidas: o avaliador aceita a chave `page_number` do manifesto V9; o limiar de memória do V4 é 11 GB.
