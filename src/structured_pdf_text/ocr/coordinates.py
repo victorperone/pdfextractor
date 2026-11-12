@@ -144,6 +144,7 @@ def map_tokens_to_page(
             polygon=tuple(_to_point(p) for p in t.polygon) if t.polygon else None,
             level=t.level,
             ocr_provenance=t.ocr_provenance,
+            layout_line_id=t.layout_line_id,
         )
         for t in tokens
     ]
@@ -165,6 +166,7 @@ def offset_tokens(tokens: list[OcrToken], x: float, y: float) -> list[OcrToken]:
             polygon=tuple(Point(p.x + x, p.y + y) for p in t.polygon) if t.polygon else None,
             level=t.level,
             ocr_provenance=t.ocr_provenance,
+            layout_line_id=t.layout_line_id,
         )
         for t in tokens
     ]

@@ -16,7 +16,8 @@ def from_domain(token: OcrToken, *, token_id: str, authorization_id: str, attemp
         polygon=token.polygon, language=token.language, level=token.level,
         metadata={"domain": {"source": token.source.value, "rotation": token.rotation,
                              "provenance": token.provenance,
-                             "ocr_provenance": asdict(token.ocr_provenance) if token.ocr_provenance else None}},
+                             "ocr_provenance": asdict(token.ocr_provenance) if token.ocr_provenance else None,
+                             "layout_line_id": token.layout_line_id}},
     )
 
 
@@ -28,7 +29,8 @@ def to_domain(token: TokenEvidence) -> OcrToken:
                     rotation=metadata.get("rotation", 0), provenance=metadata.get("provenance"),
                     polygon=token.polygon, level=token.level,
                     ocr_provenance=OcrProvenance(**provenance) if provenance is not None else None,
-                    evidence_id=token.token_id)
+                    evidence_id=token.token_id,
+                    layout_line_id=metadata.get("layout_line_id"))
 
 
 def from_raw(token: OCRToken, frame: RasterFrame, *, token_id: str, authorization_id: str, attempt_id: str) -> TokenEvidence:

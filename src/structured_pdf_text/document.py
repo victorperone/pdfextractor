@@ -263,6 +263,12 @@ class OcrToken:
     # Assigned by the authorized pipeline, preserved when reconstructing lines
     # and transferring recognized evidence into cells. Raw backends may omit it.
     evidence_id: str | None = field(default=None, compare=False)
+    # Text-line identity reported by the engine's own layout analysis (only
+    # Tesseract sets it: recognition scope + page/block/paragraph/line numbers).
+    # Words sharing it belong to one visual line of one text flow; line
+    # reconstruction uses it to keep columns apart. ``None`` for every other
+    # engine, which keeps their reconstruction unchanged.
+    layout_line_id: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

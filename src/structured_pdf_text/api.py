@@ -798,9 +798,16 @@ class PdfTextExtractor:
                     and not ocr_tokens
                     and not page_ocr_failed
                 ):
-                    blank_page_ocr = _is_visually_blank(ocr_image)
+                    visually_blank = _is_visually_blank(ocr_image)
+                    # T3-P16: a page holding only an emblem, photo or chart has
+                    # nothing to read; an empty OCR result is then correct.
+                    blank_page_ocr = visually_blank or not _has_text_like_ink(
+                        ocr_image, max(native_page.bbox.width, native_page.bbox.height),
+                    )
                     warnings.append(
                         "OCR produced no tokens for a visually blank page"
+                        if visually_blank else
+                        "OCR produced no tokens for a page without text-like ink"
                         if blank_page_ocr else
                         "OCR completed successfully but produced no usable tokens for an OCR-primary page"
                     )
@@ -2669,6 +2676,69 @@ def _is_visually_blank(image: Any) -> bool:
         raise
     except Exception:
         return False
+
+
+# Glyph-sized connected components: longest side between these sizes in PDF
+# points (about 4 pt to 40 pt type), and not much more elongated than a letter.
+_GLYPH_MIN_PT = 2.5
+_GLYPH_MAX_PT = 30.0
+_GLYPH_MAX_ASPECT = 3.0
+# Height of the band in which glyph bottoms (or left edges) count as aligned.
+_TEXT_LINE_BAND_PT = 4.0
+# Long side of an A4 page, used only when the page size is unknown.
+_DEFAULT_PAGE_LONG_SIDE_PT = 842.0
+_GLYPH_MIN_AREA_PX = 6
+# Glyphs are "aligned" when at least this many share one text-line band ...
+_GLYPHS_PER_TEXT_LINE = 4
+# ... and a page shows text-like ink with at least this many aligned glyphs.
+_MIN_ALIGNED_GLYPHS = 8
+
+
+def _has_text_like_ink(image: Any, page_long_side_pt: float | None = None) -> bool:
+    """Whether a raster page shows ink shaped like lines of text.
+
+    Consulted only after OCR returned no tokens for an OCR-primary page. Text
+    produces many glyph-sized connected components sharing baselines (rows,
+    or columns for text rotated by 90°/270°). Emblems, photos and charts give
+    at most a few scattered ones: on the V10 negative pages 0 aligned glyphs,
+    against 139 on a page with only two short stamps (V9 p10) and more than a
+    thousand on body text. Any uncertainty counts as text, keeping the page
+    flagged as a possible OCR failure. Sizes are physical (PDF points),
+    converted with the raster scale given by ``page_long_side_pt``.
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+        gray = np.asarray(image.convert("L"))
+        height, width = gray.shape[:2]
+        if min(height, width) < 64:
+            return True
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    except MemoryError:
+        raise
+    except Exception:
+        return True
+    long_side = page_long_side_pt if page_long_side_pt and page_long_side_pt > 0 else _DEFAULT_PAGE_LONG_SIDE_PT
+    pixels_per_pt = float(max(height, width)) / long_side
+    band = max(1.0, _TEXT_LINE_BAND_PT * pixels_per_pt)
+    rows: dict[int, int] = {}
+    columns: dict[int, int] = {}
+    for x, y, w, h, area in stats[1:].tolist():
+        longest, shortest = max(w, h), max(1, min(w, h))
+        if (area < _GLYPH_MIN_AREA_PX or longest / shortest > _GLYPH_MAX_ASPECT
+                or not _GLYPH_MIN_PT * pixels_per_pt <= longest <= _GLYPH_MAX_PT * pixels_per_pt):
+            continue
+        rows[int((y + h) / band)] = rows.get(int((y + h) / band), 0) + 1
+        columns[int(x / band)] = columns.get(int(x / band), 0) + 1
+    aligned = max(
+        sum(count for count in rows.values() if count >= _GLYPHS_PER_TEXT_LINE),
+        sum(count for count in columns.values() if count >= _GLYPHS_PER_TEXT_LINE),
+    )
+    return aligned >= _MIN_ALIGNED_GLYPHS
 
 
 def _selected_page_indices(page_indices: tuple[int, ...] | None, page_count: int) -> list[int]:

@@ -46,6 +46,33 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def input_hashes(job: dict) -> dict[str, str]:
+    """SHA-256 dos arquivos de entrada que a rodada usa para um corpus (T3-P15)."""
+    paths = {"pdf": job["pdf"], "reference": job.get("reference"), "manifest": job.get("manifest")}
+    return {name: sha256(path) for name, path in paths.items() if path is not None}
+
+
+def changed_inputs(job: dict) -> list[str]:
+    """Entradas alteradas ou removidas desde a pré-verificação.
+
+    O protocolo exige PDF, referência e manifesto idênticos entre extração e
+    métricas (``corpus_policy``). Na RUN 003 o corpus V10 foi substituído
+    durante a rodada; a extração e o avaliador leram arquivos diferentes dos
+    validados na pré-verificação.
+    """
+    expected = job.get("input_hashes", {})
+    changed = []
+    for name, digest in expected.items():
+        path = {"pdf": job["pdf"], "reference": job.get("reference"), "manifest": job.get("manifest")}[name]
+        try:
+            current = sha256(path)
+        except OSError:
+            current = None
+        if current != digest:
+            changed.append(name)
+    return changed
+
+
 def preflight() -> list[dict]:
     """Inspeciona os dois possíveis gabaritos e escolhe a melhor cobertura válida.
 
@@ -62,9 +89,11 @@ def preflight() -> list[dict]:
         pdf = REPO / relative
         base = pdf.with_suffix("")
         ref = base.with_name(base.name + "_REFERENCIA.md")
-        # Fallback: alguns corpora (V10) marcam páginas no _REFERENCIA.md com
-        # comentários HTML e trazem o manifesto sem expected_markdown; a versão
-        # paginada com "## Página NNN" é o gabarito utilizável.
+        # Fallback: um corpus pode marcar páginas no _REFERENCIA.md com
+        # comentários HTML (não reconhecidos por split_pages) e trazer o
+        # manifesto sem expected_markdown; a versão paginada com "## Página NNN"
+        # é então o gabarito utilizável. (O V10 revisado de 2026-11-12 traz
+        # expected_markdown no manifesto, que passa a ser o gabarito escolhido.)
         ref_paged = base.with_name(base.name + "_REFERENCIA_PAGINADA.md")
         manifest = base.with_name(base.name + "_MANIFESTO.json")
         if not pdf.is_file():
@@ -135,6 +164,7 @@ def preflight() -> list[dict]:
             "pages": pdf_pages,
             "details": "; ".join(diagnostics),
         })
+        jobs[-1]["input_hashes"] = input_hashes(jobs[-1])
     if errors:
         # Exibe também os corpora utilizáveis; nenhuma extração é iniciada.
         details = [
@@ -315,7 +345,15 @@ def run() -> int:
                 label = pdf.name
                 item = {"version": version, "pdf": str(pdf.relative_to(REPO)),
                         "pages": job["pages"], "started_utc": utc_now()}
+                item["input_hashes"] = job["input_hashes"]
                 summary["results"].append(item)
+                changed = changed_inputs(job)
+                if changed:
+                    item["result"] = "corpus_changed"
+                    say(f"ERRO no {version}: entradas alteradas desde a pré-verificação ({', '.join(changed)}); "
+                        "extração e métricas não executadas.")
+                    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    continue
                 say("\n" + "=" * 72)
                 say(f"[{idx}/{len(jobs)}] Tesseract: {label} -> Extract")
                 say("=" * 72)
@@ -334,6 +372,15 @@ def run() -> int:
                 meta = json.loads(run_manifest.read_text(encoding="utf-8"))
                 item["extraction_status"] = meta["document_status"]
                 item["benchmark_status"] = meta["benchmark_status"]
+                changed = changed_inputs(job)
+                if meta.get("pdf_sha256") != job["input_hashes"]["pdf"] and "pdf" not in changed:
+                    changed.append("pdf")
+                if changed:
+                    item["result"] = "corpus_changed"
+                    say(f"ERRO no {version}: entradas alteradas durante a rodada ({', '.join(changed)}); "
+                        "métricas não executadas.")
+                    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    continue
                 say("\n" + "=" * 72)
                 say(f"[{idx}/{len(jobs)}] Tesseract: {label} -> Metrics")
                 say("=" * 72)

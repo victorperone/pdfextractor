@@ -387,6 +387,19 @@ def test_body_text_with_pagina_word_not_suppressed():
     assert b.suppressed is False
 
 
+def test_pagina_block_that_continues_with_body_text_is_kept():
+    """T3-P02/RUN 003: o separador fundido ao corpo da página não apaga o corpo."""
+    text = ("Página 096 | OCR com rotação física de 90 graus Controle de página: QA-P096 "
+            "O lote OCR-2026-0007 apresenta ação, informação, coração e saúde. "
+            "Valor: R$ 9.876,54; desconto: -2,15%; quantidade: 00042.")
+    b = _Block(order_index=0, text=text, kind="text")
+    multi = _Block(order_index=1, text="Página 097 | Título\nCorpo da página.", kind="text")
+    doc = _Doc([_Page([b, multi])])
+    _suppress_pagina_separator_blocks(doc)
+    assert b.suppressed is False
+    assert multi.suppressed is False
+
+
 def test_pagina_suppressor_skips_already_suppressed():
     """Already-suppressed blocks are not re-processed."""
     b = _Block(order_index=0, text="Página 001", kind="title",

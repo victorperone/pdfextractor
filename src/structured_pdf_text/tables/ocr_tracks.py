@@ -2,7 +2,7 @@
 from dataclasses import replace
 
 from structured_pdf_text.document import RegionKind, TableMethod
-from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+from structured_pdf_text.ocr.reconstruct import ocr_text_column_gutters, reconstruct_ocr_lines
 from .headers import infer_visual_header_rows
 from .text_tracks import detect_borderless_tables
 
@@ -29,9 +29,16 @@ def detect_ocr_track_tables(page, regions, image, claimed_tables):
                 continue
             lines = reconstruct_ocr_lines(region.ocr_tokens, page.page_index, page.bbox,
                                           dehyphenate=False, page_rotation=page.objects.rotation)
+            gutters = ocr_text_column_gutters(region.ocr_tokens, page.bbox, page.objects.rotation)
             view = replace(region, native_lines=lines)
             for table in detect_borderless_tables(page, view, f"{region.region_id}:ocr-tracks"):
                 box = table.page_fragments[0].bbox
+                if _crosses_text_column_gutter(box, gutters):
+                    # Columns of running text recur on the same x tracks as a
+                    # borderless table; on skewed scans their lines even pair
+                    # up row by row (T3-P17). The engine's own segmentation
+                    # already established these tracks as text flows.
+                    continue
                 if not any(image_box.x0-3 <= box.x0 and image_box.y0-3 <= box.y0
                            and box.x1 <= image_box.x1+3 and box.y1 <= image_box.y1+3
                            for image_box in image_boxes):
@@ -53,3 +60,12 @@ def detect_ocr_track_tables(page, regions, image, claimed_tables):
         if raster is not image and hasattr(raster, "close"):
             raster.close()
     return output
+
+
+def _crosses_text_column_gutter(box, gutters) -> bool:
+    """Whether a validated running-text gutter runs through most of *box*."""
+    for mid, top, bottom in gutters:
+        overlap = min(box.y1, bottom) - max(box.y0, top)
+        if box.x0 < mid < box.x1 and overlap >= 0.5 * max(box.height, 1.0):
+            return True
+    return False

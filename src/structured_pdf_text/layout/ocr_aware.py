@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.ocr.reconstruct import ocr_text_column_gutters, text_column_bands
 
 if TYPE_CHECKING:
     pass
@@ -227,7 +228,9 @@ def reconstruct_ocr_layout(
             output.append(_reclassify_one(region, _body_ocr_height_median(regions), page_bbox.height))
             continue
 
-        lines = _order_ocr_lines_by_columns(region.ocr_lines, page_bbox)
+        gutters = ocr_text_column_gutters(region.ocr_tokens, page_bbox)
+        lines = (_order_ocr_lines_by_text_gutters(region.ocr_lines, gutters) if gutters
+                 else _order_ocr_lines_by_columns(region.ocr_lines, page_bbox))
         heights = [line.bbox.height for line in lines if line.bbox.height > 0]
         body_height = statistics.median(heights) if heights else 1.0
         assigned: list[tuple[TextLine, RegionKind]] = []
@@ -247,6 +250,8 @@ def reconstruct_ocr_layout(
             top = line.bbox.y0 <= page_bbox.height * 0.08
             bottom = line.bbox.y1 >= page_bbox.height * 0.84
             marker = _BULLET_RE.match(text)
+            if marker and _is_dash_continuation(line, previous, same_flow, assigned, body_height):
+                marker = None
             uppercase = sum(char.isupper() for char in text if char.isalpha())
             letters = sum(char.isalpha() for char in text)
             uppercase_ratio = uppercase / max(letters, 1)
@@ -293,6 +298,80 @@ def reconstruct_ocr_layout(
                 heading_level=None,
             ))
     return reclassify_ocr_regions(output, page_height=page_bbox.height)
+
+
+_DASH_START_RE = re.compile(r"^[–—]\s+")
+
+
+def _is_dash_continuation(
+    line: TextLine,
+    previous: TextLine | None,
+    same_flow: bool,
+    assigned: list[tuple[TextLine, RegionKind]],
+    body_height: float,
+) -> bool:
+    """Whether a line opening with an en/em dash continues the line above.
+
+    A wrapped title such as "Secretaria Regional de Controle — Extrato de
+    tramitação" puts the dash at the start of its second line; it is not a
+    list bullet. The line continues the previous one when both belong to the
+    same text flow, sit one line apart, the previous line does not end a
+    sentence or a clause and is not itself a list item. Hyphen and symbol
+    bullets are unaffected.
+    """
+    if previous is None or not same_flow or not _DASH_START_RE.match(line.text.strip()):
+        return False
+    if assigned and assigned[-1][1] == RegionKind.LIST:
+        return False
+    previous_text = previous.text.strip()
+    if not previous_text or previous_text.endswith((".", ":", ";", "!", "?")):
+        return False
+    return line.bbox.y0 - previous.bbox.y1 <= body_height
+
+
+def _order_ocr_lines_by_text_gutters(
+    lines: list[TextLine], gutters: list[tuple[float, float, float]],
+) -> list[TextLine]:
+    """Order OCR lines column by column inside each band of text columns.
+
+    ``gutters`` are the running-text column gutters validated from the
+    engine's own line segmentation (``ocr_text_column_gutters``, Tesseract
+    only). Gutters sharing most of their vertical extent form one band, so a
+    page with three columns above and two below reads the upper band column
+    by column and then the lower one (T3-P10). Lines outside every band, or
+    running across a band's gutter, keep their top-to-bottom position; a band
+    is emitted where its first line appears in that order.
+    """
+    visual_order = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    bands = text_column_bands(gutters)
+
+    def band_of(line: TextLine) -> int | None:
+        for index, (top, bottom, mids) in enumerate(bands):
+            if top <= line.bbox.cy <= bottom and not any(line.bbox.x0 < mid < line.bbox.x1 for mid in mids):
+                return index
+        return None
+
+    members: dict[int, list[TextLine]] = {}
+    assignment: dict[int, int | None] = {}
+    for line in visual_order:
+        band = band_of(line)
+        assignment[id(line)] = band
+        if band is not None:
+            members.setdefault(band, []).append(line)
+    result: list[TextLine] = []
+    emitted: set[int] = set()
+    for line in visual_order:
+        band = assignment[id(line)]
+        if band is None:
+            result.append(line)
+        elif band not in emitted:
+            emitted.add(band)
+            mids = bands[band][2]
+            result.extend(sorted(
+                members[band],
+                key=lambda item: (sum(mid < item.bbox.cx for mid in mids), item.bbox.y0, item.bbox.x0),
+            ))
+    return result
 
 
 def _order_ocr_lines_by_columns(lines: list[TextLine], page_bbox: BBox) -> list[TextLine]:

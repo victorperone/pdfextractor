@@ -26,6 +26,12 @@ _NUMBERED_PREFIX_RE = re.compile(r"^((?:\d+\.)+\d+|\d+\.)\s*\S")
 # (not content), creating one excess block per page.  The text may contain an
 # optional leading markdown "# " that the OCR read literally.
 _PAGINA_SEP_RE = re.compile(r"(?i)^\s*(?:#\s+)?p[aá]gina\s+\d+")
+# A page separator is one short line ("Página 096 | OCR com rotação física de
+# 90 graus" has 47 characters). A longer block that merely starts with it also
+# carries body text; suppressing it deletes content (V3 p96 after the
+# quarter-turn retry: the whole page body), so only the separator shape is
+# suppressed.
+_PAGINA_SEP_MAX_CHARS = 160
 
 # OCR corpus-type header: "OCR PURO * SCAN", "OCR TABELAS * SCAN" etc.
 # These appear in V3/V4-style test documents as running headers identifying
@@ -237,6 +243,8 @@ def _suppress_pagina_separator_blocks(document: "StructuredDocument") -> None:
 
     Targets both TITLE blocks (layout engine classified them) and TEXT blocks
     whose raw text starts with "# Página NNN" (OCR read a literal ``#`` glyph).
+    Only separator-shaped blocks (one line, at most ``_PAGINA_SEP_MAX_CHARS``
+    characters) are suppressed; a block that continues with body text is kept.
     Idempotent: already-suppressed blocks are skipped.
     """
     suppressed = 0
@@ -247,7 +255,8 @@ def _suppress_pagina_separator_blocks(document: "StructuredDocument") -> None:
             text = (block.text or "").strip()
             if not text:
                 continue
-            if _PAGINA_SEP_RE.match(text):
+            if (_PAGINA_SEP_RE.match(text) and "\n" not in text
+                    and len(text) <= _PAGINA_SEP_MAX_CHARS):
                 block.suppressed = True
                 block.suppression_reason = "tesseract_pagina_separator"
                 suppressed += 1

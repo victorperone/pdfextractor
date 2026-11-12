@@ -93,3 +93,48 @@ def test_preflight_prefers_primary_reference_over_paginated_fallback(tmp_path, m
 
 def test_runner_includes_v10():
     assert ("V10", "corpus/V10/Document_AI_V10.pdf") in _load_runner().CORPORA
+
+
+def test_preflight_pins_input_hashes_and_detects_changes(tmp_path, monkeypatch):
+    """T3-P15: o corpus V10 foi substituído durante a RUN 003; a mudança deve ser detectada."""
+    runner = _load_runner()
+    folder = tmp_path / "corpus" / "VX"
+    folder.mkdir(parents=True)
+    _write_pdf(folder / "Doc_VX.pdf", 2)
+    reference = folder / "Doc_VX_REFERENCIA.md"
+    reference.write_text(_paged(2), encoding="utf-8")
+    monkeypatch.setattr(runner, "REPO", tmp_path)
+    monkeypatch.setattr(runner, "CORPORA", [("VX", "corpus/VX/Doc_VX.pdf")])
+
+    (job,) = runner.preflight()
+
+    assert set(job["input_hashes"]) == {"pdf", "reference"}
+    assert runner.changed_inputs(job) == []
+    reference.write_text(_paged(2, marker="<!-- PAGE_START VX-P{n:03d} -->"), encoding="utf-8")
+    assert runner.changed_inputs(job) == ["reference"]
+    reference.unlink()
+    assert runner.changed_inputs(job) == ["reference"]
+
+
+def test_preflight_prefers_manifest_when_reference_uses_unrecognized_page_markers(tmp_path, monkeypatch):
+    """V10 revisado: referência com <!-- PAGE_START --> e manifesto com expected_markdown."""
+    import json
+
+    runner = _load_runner()
+    folder = tmp_path / "corpus" / "VX"
+    folder.mkdir(parents=True)
+    _write_pdf(folder / "Doc_VX.pdf", 3)
+    marker = "<!-- PAGE_START VX-P{n:03d} -->"
+    (folder / "Doc_VX_REFERENCIA.md").write_text(_paged(3, marker=marker), encoding="utf-8")
+    (folder / "Doc_VX_REFERENCIA_PAGINADA.md").write_text(_paged(3, marker=marker), encoding="utf-8")
+    pages = [{"page_number": n, "expected_markdown": f"Texto da página {n}."} for n in range(1, 4)]
+    (folder / "Doc_VX_MANIFESTO.json").write_text(json.dumps({"pages": pages}), encoding="utf-8")
+    monkeypatch.setattr(runner, "REPO", tmp_path)
+    monkeypatch.setattr(runner, "CORPORA", [("VX", "corpus/VX/Doc_VX.pdf")])
+
+    (job,) = runner.preflight()
+
+    assert job["source"] == "manifesto"
+    assert job["reference"] is None
+    assert job["missing_reference_pages"] == []
+    assert set(job["input_hashes"]) == {"pdf", "manifest"}

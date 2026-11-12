@@ -31,6 +31,10 @@ TESSERACT_OSD            Set to 1 to enable OSD pre-flight (PSM 0) before each p
                          Default: 0 (disabled). Enables page_orientation capability.
 TESSERACT_OSD_CONF_MIN   Minimum OSD orientation confidence to apply rotation
                          (default: 2.0). Values below this are treated as "no rotation".
+TESSERACT_ROTATION_RETRY Set to 0 to disable the quarter-turn retry of full-page
+                         reads with low mean word confidence (default: 1). A
+                         rotated read replaces the upright one only when it is
+                         clearly more confident; see ``_retry_quarter_turns``.
 
 Named profiles
 --------------
@@ -53,6 +57,7 @@ import shutil
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -293,7 +298,15 @@ def _run_tesseract_osd(image: object, extra_flags: list[str], executable: str = 
 
 
 def _parse_tsv(tsv_text: str) -> list[dict]:
-    reader = csv.DictReader(io.StringIO(tsv_text), delimiter="\t")
+    """Parse Tesseract TSV rows.
+
+    Tesseract never quotes TSV fields. With the csv module's default quoting a
+    recognized word starting with ``"`` opened a quoted field that swallowed
+    the following rows (tabs and newlines included) into one token text; the
+    post-processor then suppressed the whole block as a "coordinate dump",
+    deleting real content (V3 p96: 43 of 54 words; V4 p107: 9.6k characters).
+    """
+    reader = csv.DictReader(io.StringIO(tsv_text), delimiter="\t", quoting=csv.QUOTE_NONE)
     return list(reader)
 
 
@@ -331,6 +344,62 @@ def _valid_word_row(
     return text, score, (left, top, right, bottom)
 
 
+# Quarter-turn retry (T3-P02). Upright pages are read with a high mean word
+# confidence (86–96 on the V3–V9 controls); pages scanned at 90°/180°/270°
+# fall to 31–51, degraded but upright scans stay around 63–65. Only reads
+# below the first threshold are retried, and a rotated read is kept only when
+# it is clearly better. Tesseract OSD was evaluated and rejected: wrong angle on
+# V4 p109, confident 270° on the already correct V6 p31.
+_ROTATION_RETRY_MAX_MEAN_CONF = 60.0
+_ROTATION_ACCEPT_MIN_MEAN_CONF = 70.0
+_ROTATION_ACCEPT_MIN_GAIN = 25.0
+_ROTATION_RETRY_MIN_WORDS = 3
+# Tesseract may also read a page turned by 90°/270° as vertical text lines,
+# with a high confidence (V4 p113/p114: all 50 lines vertical, mean 86).
+# Upright documents have horizontal lines, so a majority of vertical lines
+# (with at least this many words) triggers the retry as well.
+_VERTICAL_LINES_MIN_RATIO = 0.6
+
+
+def _tsv_vertical_line_ratio(tsv_text: str) -> float:
+    """Fraction of Tesseract text lines (3+ words) laid out top to bottom."""
+    lines: dict[tuple[str, ...], list[tuple[float, float]]] = {}
+    for row in _parse_tsv(tsv_text):
+        if row.get("level") != "5" or not (row.get("text") or "").strip():
+            continue
+        try:
+            center = (float(row["left"]) + float(row["width"]) / 2.0,
+                      float(row["top"]) + float(row["height"]) / 2.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        key = tuple(row.get(name) or "" for name in ("page_num", "block_num", "par_num", "line_num"))
+        lines.setdefault(key, []).append(center)
+    shaped = [centers for centers in lines.values() if len(centers) >= 3]
+    if not shaped:
+        return 0.0
+    vertical = sum(
+        (max(y for _, y in centers) - min(y for _, y in centers))
+        > (max(x for x, _ in centers) - min(x for x, _ in centers))
+        for centers in shaped
+    )
+    return vertical / len(shaped)
+
+
+def _tsv_word_confidence(tsv_text: str) -> tuple[int, float]:
+    """Number of recognized words and their mean confidence (0–100)."""
+    confidences = []
+    for row in _parse_tsv(tsv_text):
+        if row.get("level") != "5" or not (row.get("text") or "").strip():
+            continue
+        try:
+            confidence = float(row["conf"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(confidence) and 0.0 <= confidence <= 100.0:
+            confidences.append(confidence)
+    return len(confidences), (sum(confidences) / len(confidences) if confidences else 0.0)
+
+
 def _tsv_to_ocr_tokens(
     rows: list[dict],
     source_engine: str,
@@ -362,12 +431,33 @@ def _tsv_to_ocr_tokens(
     return tokens
 
 
+def _tsv_line_id(row: dict, scope: str) -> str | None:
+    """Tesseract's own text-line identity for one word row, unique per call.
+
+    Page segmentation (PSM 3) separates columns into blocks before building
+    lines, so words sharing ``block/par/line`` belong to one visual line of
+    one text flow. Numbers restart in every call, hence the call scope.
+    """
+    try:
+        parts = [int(row[key]) for key in ("page_num", "block_num", "par_num", "line_num")]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return scope + ":" + ":".join(str(part) for part in parts)
+
+
 def _tsv_to_pipeline_tokens(
     rows: list[dict], page_index: int, language: str,
     offset_x: float = 0.0, offset_y: float = 0.0,
     conf_min: float = 0.0,
     source: "SourceKind" = SourceKind.OCR_PAGE,
+    layout_scope: str | None = None,
 ) -> list[OcrToken]:
+    """Convert TSV word rows to pipeline tokens.
+
+    With ``layout_scope`` each token also carries Tesseract's line identity
+    (``OcrToken.layout_line_id``), used by line reconstruction to keep
+    columns of running text apart (T3-P10) and skewed lines whole (T3-P18).
+    """
     tokens = []
     for row in rows:
         parsed = _valid_word_row(row, offset_x, offset_y, conf_min=conf_min)
@@ -384,6 +474,7 @@ def _tsv_to_pipeline_tokens(
             confidence=score / 100.0,
             language=language,
             source=source,
+            layout_line_id=_tsv_line_id(row, layout_scope) if layout_scope is not None else None,
         ))
     return tokens
 
@@ -436,6 +527,7 @@ class TesseractBackend:
         # Disabled by default; enable with TESSERACT_OSD=1.
         self._osd_enabled: bool = env_bool("TESSERACT_OSD", False)
         self._osd_conf_min: float = env_float("TESSERACT_OSD_CONF_MIN", 2.0, minimum=0.0)
+        self._rotation_retry: bool = env_bool("TESSERACT_ROTATION_RETRY", True)
 
         info = _tesseract_info(self._tesseract_cmd, self._extra_flags)
         self._version = info["version"]
@@ -467,7 +559,13 @@ class TesseractBackend:
             if osd is not None and osd["confidence"] >= self._osd_conf_min and osd["rotate"] != 0:
                 pil = pil.rotate(-osd["rotate"], expand=True)
                 osd_rotation = int(osd["rotate"]) % 360
-        tsv = _run_tesseract_tsv(
+        tsv = self._read_tsv(pil, dpi)
+        if not osd_rotation and getattr(self, "_rotation_retry", False):
+            tsv, osd_rotation = self._retry_quarter_turns(pil, dpi, tsv)
+        return tsv, osd_rotation, original_width, original_height
+
+    def _read_tsv(self, pil: object, dpi: int) -> str:
+        return _run_tesseract_tsv(
             pil, self._tess_lang, self._psm, self._oem,
             dpi=dpi,
             extra_flags=self._extra_flags,
@@ -476,7 +574,36 @@ class TesseractBackend:
             num_threads=self._config.num_threads,
             process_callback=self._track_process,
         )
-        return tsv, osd_rotation, original_width, original_height
+
+    def _retry_quarter_turns(self, pil: object, dpi: int, tsv: str) -> tuple[str, int]:
+        """Re-read a low-confidence page at 90°/180°/270° (T3-P02).
+
+        Returns the TSV to use and the clockwise rotation applied to obtain
+        it (0 keeps the upright read). A read with at least
+        ``_ROTATION_RETRY_MIN_WORDS`` words is retried when its mean
+        confidence is below ``_ROTATION_RETRY_MAX_MEAN_CONF`` or when most of
+        its lines are vertical. A rotated read must have horizontal lines and
+        a mean confidence of at least ``_ROTATION_ACCEPT_MIN_MEAN_CONF``; for a
+        low-confidence upright read it must also gain
+        ``_ROTATION_ACCEPT_MIN_GAIN`` points.
+        """
+        words, upright = _tsv_word_confidence(tsv)
+        vertical = _tsv_vertical_line_ratio(tsv) >= _VERTICAL_LINES_MIN_RATIO
+        if words < _ROTATION_RETRY_MIN_WORDS or (upright >= _ROTATION_RETRY_MAX_MEAN_CONF and not vertical):
+            return tsv, 0
+        best: tuple[float, int, str] | None = None
+        for rotation in (90, 180, 270):
+            candidate = self._read_tsv(pil.rotate(-rotation, expand=True), dpi)
+            count, confidence = _tsv_word_confidence(candidate)
+            if count < _ROTATION_RETRY_MIN_WORDS or _tsv_vertical_line_ratio(candidate) >= _VERTICAL_LINES_MIN_RATIO:
+                continue
+            if best is None or confidence > best[0]:
+                best = (confidence, rotation, candidate)
+        if best is None or best[0] < _ROTATION_ACCEPT_MIN_MEAN_CONF:
+            return tsv, 0
+        if vertical or best[0] - upright >= _ROTATION_ACCEPT_MIN_GAIN:
+            return best[2], best[1]
+        return tsv, 0
 
     def _track_process(self, process):
         with self._process_lock:
@@ -532,6 +659,7 @@ class TesseractBackend:
                 "effective_threads": max(1, os.cpu_count() or 1) if self._config.num_threads == 0 else self._config.num_threads,
                 "active_page_orientation": self._osd_enabled,
                 "osd_conf_min": self._osd_conf_min if self._osd_enabled else None,
+                "rotation_retry": getattr(self, "_rotation_retry", False),
             },
         )
 
@@ -629,9 +757,15 @@ class TesseractBackend:
         tokens = _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
             conf_min=self._conf_min,
+            layout_scope=uuid.uuid4().hex,
         )
         if osd_rotation:
             tokens = _map_rotated_tokens_to_original(tokens, osd_rotation, original_width, original_height)
+            # Same convention as EasyOCR: a clockwise raster correction gives
+            # tokens the inverse orientation, so line reconstruction groups and
+            # orders them in the upright reading frame.
+            from dataclasses import replace
+            tokens = [replace(token, rotation=(-osd_rotation) % 360) for token in tokens]
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, original_width, original_height, page_rotation)
 
@@ -667,6 +801,7 @@ class TesseractBackend:
             offset_x=float(cx0), offset_y=float(cy0),
             conf_min=self._conf_min,
             source=SourceKind.OCR_REGION,
+            layout_scope=uuid.uuid4().hex,
         )
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)
@@ -692,6 +827,7 @@ class TesseractBackend:
         tokens = _tsv_to_pipeline_tokens(
             _parse_tsv(tsv), page_index, self._language,
             conf_min=self._conf_min, source=SourceKind.OCR_REGION,
+            layout_scope=uuid.uuid4().hex,
         )
         from structured_pdf_text.ocr.coordinates import map_tokens_to_page
         return map_tokens_to_page(tokens, page_bbox, width, height)

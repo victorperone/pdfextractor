@@ -60,39 +60,12 @@ def reconstruct_ocr_lines(
         return []
     page_width, page_height = _page_size(visible, page_bbox)
     virtual_boxes = {id(token): _virtual_bbox(token, page_bbox, page_width, page_height, page_rotation) for token in visible}
-    # A skewed scan tilts every text line by the same angle. Grouping by the
-    # raw center then joins a cell with the next row's cells; measure the
-    # center along the dominant tilt instead (upright pages only).
-    slope = 0.0 if page_rotation % 360 else _dominant_slope(visible)
-    # The axis-aligned box of a tilted observation is taller than its text by
-    # |slope| * width; a wide title would otherwise widen the tolerance until
-    # its wrapped second line joins the next line.
-    heights = [max(box.height - abs(slope) * box.width, box.height * 0.35)
-               for box in virtual_boxes.values() if box.height > 0]
-    tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.65)
-
-    def level(token: OcrToken) -> float:
-        box = virtual_boxes[id(token)]
-        return box.cy - slope * box.cx
-
-    groups: list[list[OcrToken]] = []
-    centers: list[float] = []
-    for token in sorted(visible, key=lambda item: (level(item), virtual_boxes[id(item)].x0)):
-        center = level(token)
-        best_index = min(
-            range(len(centers)),
-            key=lambda index: abs(centers[index] - center),
-            default=None,
-        )
-        if best_index is None or abs(centers[best_index] - center) > tolerance:
-            groups.append([token])
-            centers.append(center)
-        else:
-            groups[best_index].append(token)
-            centers[best_index] = median(level(item) for item in groups[best_index])
-
-    if not page_rotation % 360:
-        groups = _split_at_prose_gutter(groups, virtual_boxes)
+    if (not page_rotation % 360 and any(token.layout_line_id for token in visible)
+            and not _engine_lines_mostly_vertical(visible, virtual_boxes)):
+        # Only Tesseract reports its own line identity (T3-P10/T3-P18).
+        groups = _group_engine_lines(visible, virtual_boxes, page_width)
+    else:
+        groups = _group_tokens_by_level(visible, virtual_boxes, page_rotation)
 
     lines: list[TextLine] = []
     for line_index, group in enumerate(groups):
@@ -364,6 +337,348 @@ def _inverse_visual_bbox(box: BBox, rotation: int, page_width: float, page_heigh
     if angle == 270:
         return BBox(page_width - box.y1, box.x0, page_width - box.y0, box.x1)
     return box
+
+
+def _group_tokens_by_level(
+    visible: list[OcrToken], virtual_boxes: dict[int, BBox], page_rotation: int,
+) -> list[list[OcrToken]]:
+    """Group OCR observations into visual lines by their vertical level."""
+    # A skewed scan tilts every text line by the same angle. Grouping by the
+    # raw center then joins a cell with the next row's cells; measure the
+    # center along the dominant tilt instead (upright pages only).
+    slope = 0.0 if page_rotation % 360 else _dominant_slope(visible)
+    # The axis-aligned box of a tilted observation is taller than its text by
+    # |slope| * width; a wide title would otherwise widen the tolerance until
+    # its wrapped second line joins the next line.
+    heights = [max(box.height - abs(slope) * box.width, box.height * 0.35)
+               for box in virtual_boxes.values() if box.height > 0]
+    tolerance = max(2.0, (median(heights) if heights else 10.0) * 0.65)
+
+    def level(token: OcrToken) -> float:
+        box = virtual_boxes[id(token)]
+        return box.cy - slope * box.cx
+
+    groups: list[list[OcrToken]] = []
+    centers: list[float] = []
+    for token in sorted(visible, key=lambda item: (level(item), virtual_boxes[id(item)].x0)):
+        center = level(token)
+        best_index = min(
+            range(len(centers)),
+            key=lambda index: abs(centers[index] - center),
+            default=None,
+        )
+        if best_index is None or abs(centers[best_index] - center) > tolerance:
+            groups.append([token])
+            centers.append(center)
+        else:
+            groups[best_index].append(token)
+            centers[best_index] = median(level(item) for item in groups[best_index])
+
+    if not page_rotation % 360:
+        groups = _split_at_prose_gutter(groups, virtual_boxes)
+    return groups
+
+
+# Column gutters between flows of running text (engine line identity path).
+# A gutter needs a horizontal gap of at least this many body-text heights ...
+_GUTTER_MIN_GAP_HEIGHTS = 1.5
+# ... with running text on both sides in this many vertically contiguous rows,
+_GUTTER_MIN_ROWS = 3
+# where consecutive supporting rows are at most this many heights apart.
+_GUTTER_MAX_ROW_GAP_HEIGHTS = 6.0
+# A gutter grows over at most this many adjacent rows above and below its
+# supporting rows (column headings, short final lines of the flows).
+_GUTTER_MAX_EXTENSION_ROWS = 2
+# Running text: an engine line with at least this many words that spans at
+# least this fraction of the page width. Table cells and labels are shorter.
+_PROSE_MIN_WORDS = 4
+_PROSE_MIN_PAGE_WIDTH = 0.15
+
+
+def _group_engine_lines(
+    tokens: list[OcrToken], boxes: dict[int, BBox], page_width: float,
+) -> list[list[OcrToken]]:
+    """Group word tokens into visual lines using the engine's line identity.
+
+    Tesseract's page segmentation already separates columns into blocks and
+    reports which words form one text line (``layout_line_id``). Word-level
+    grouping by height alone joins the same row of neighbouring columns into
+    one line (T3-P10) and, on skewed scans, mixes words of adjacent lines
+    because Tesseract boxes carry no polygon for slope estimation (T3-P18).
+
+    Engine lines are kept whole. Lines at the same height are still joined
+    into one visual row, which preserves table rows whose cells the engine
+    put in separate blocks. A row is split only at a validated column gutter
+    (see ``_validated_gutters``).
+    """
+    rows, centers, spans, body = _engine_rows(tokens, boxes)
+    gutters = _validated_gutters(rows, centers, spans, body, page_width)
+    bands = text_column_bands(gutters)
+    # (row index, band index or None, column index, tokens) per visual line.
+    entries: list[tuple[int, int | None, int, list[OcrToken]]] = []
+    for row_index, (row, center) in enumerate(zip(rows, centers)):
+        active = [mid for mid, top, bottom in gutters if top <= center <= bottom]
+        band = next((index for index, (top, bottom, _) in enumerate(bands) if top <= center <= bottom), None)
+        mids = bands[band][2] if band is not None else []
+        segments: list[tuple[float, float, list[OcrToken]]] = []
+        current = list(row[0])
+        start_x, reach = spans[id(row[0])]
+        for unit in row[1:]:
+            start, end = spans[id(unit)]
+            if any(reach <= mid <= start for mid in active):
+                segments.append((start_x, reach, current))
+                current, start_x = [], start
+            current.extend(unit)
+            reach = max(reach, end)
+        segments.append((start_x, reach, current))
+        for left, right, segment in segments:
+            crossing = any(left < mid < right for mid in mids)
+            entries.append((row_index, None if crossing else band,
+                            sum(mid < left for mid in mids), segment))
+    # Inside a band of text columns, read column by column. Upright lines are
+    # re-sorted by position later, so this order matters for tokens whose
+    # orientation was corrected (rotated scans), which keep the order given.
+    groups: list[list[OcrToken]] = []
+    emitted: set[int] = set()
+    for row_index, band, column, segment in entries:
+        if band is None:
+            groups.append(segment)
+        elif band not in emitted:
+            emitted.add(band)
+            members = sorted((entry for entry in entries if entry[1] == band), key=lambda entry: (entry[2], entry[0]))
+            groups.extend(entry[3] for entry in members)
+    return groups
+
+
+def text_column_bands(
+    gutters: list[tuple[float, float, float]],
+) -> list[tuple[float, float, list[float]]]:
+    """Group column gutters into bands ``(top, bottom, sorted gutter x)``.
+
+    Gutters sharing most of their vertical extent separate the columns of one
+    band; a page with three columns above and two below has two bands.
+    """
+    bands: list[tuple[float, float, list[float]]] = []
+    for mid, top, bottom in sorted(gutters, key=lambda item: (item[1], item[0])):
+        for index, (band_top, band_bottom, mids) in enumerate(bands):
+            overlap = min(bottom, band_bottom) - max(top, band_top)
+            if overlap >= 0.5 * min(bottom - top, band_bottom - band_top):
+                bands[index] = (min(top, band_top), max(bottom, band_bottom), sorted({*mids, mid}))
+                break
+        else:
+            bands.append((top, bottom, [mid]))
+    return bands
+
+
+def ocr_text_column_gutters(
+    tokens: list[OcrToken], page_bbox: BBox | None = None, page_rotation: int = 0,
+) -> list[tuple[float, float, float]]:
+    """Column gutters between flows of running text, in page coordinates.
+
+    Returns ``(x_mid, y_top, y_bottom)`` for each gutter validated by
+    ``_validated_gutters``. Only tokens carrying the engine's line identity
+    (Tesseract) can produce gutters; for every other engine, and on rotated
+    pages, the result is empty. Table detectors use it to avoid reading
+    columns of prose as a borderless table (T3-P17).
+    """
+    visible = [token for token in tokens if token.text and token.bbox.width >= 0 and token.bbox.height >= 0]
+    if (page_rotation % 360 or not visible
+            or not all(isinstance(token, OcrToken) and not token.rotation % 360 for token in visible)
+            or not any(token.layout_line_id for token in visible)):
+        return []
+    page_width, page_height = _page_size(visible, page_bbox)
+    boxes = {id(token): _virtual_bbox(token, page_bbox, page_width, page_height, 0) for token in visible}
+    rows, centers, spans, body = _engine_rows(visible, boxes)
+    origin_x = page_bbox.x0 if page_bbox is not None else 0.0
+    origin_y = page_bbox.y0 if page_bbox is not None else 0.0
+    return [(mid + origin_x, top + origin_y, bottom + origin_y)
+            for mid, top, bottom in _validated_gutters(rows, centers, spans, body, page_width)]
+
+
+def _engine_lines_mostly_vertical(tokens: list[OcrToken], boxes: dict[int, BBox]) -> bool:
+    """Whether most engine lines run top to bottom (text turned by 90°/270°).
+
+    Row grouping assumes horizontal engine lines. When the engine read a
+    turned page as vertical lines and no orientation correction applied,
+    the previous word-level grouping is kept.
+    """
+    lines: dict[str, list[OcrToken]] = {}
+    for token in tokens:
+        if token.layout_line_id:
+            lines.setdefault(token.layout_line_id, []).append(token)
+    shaped = [line for line in lines.values() if len(line) >= 3]
+    if not shaped:
+        return False
+    vertical = sum(
+        (max(boxes[id(t)].cy for t in line) - min(boxes[id(t)].cy for t in line))
+        > (max(boxes[id(t)].cx for t in line) - min(boxes[id(t)].cx for t in line))
+        for line in shaped
+    )
+    return vertical >= 0.6 * len(shaped)
+
+
+def _engine_rows(
+    tokens: list[OcrToken], boxes: dict[int, BBox],
+) -> tuple[list[list[list[OcrToken]]], list[float], dict[int, tuple[float, float]], float]:
+    """Join engine lines at the same (tilt-corrected) height into visual rows.
+
+    Returns the rows (engine lines ordered left to right), their vertical
+    centers, the horizontal span of every engine line and the body height.
+    """
+    by_id: dict[str, list[OcrToken]] = {}
+    units: list[list[OcrToken]] = []
+    for token in tokens:
+        if token.layout_line_id:
+            if token.layout_line_id not in by_id:
+                by_id[token.layout_line_id] = []
+                units.append(by_id[token.layout_line_id])
+            by_id[token.layout_line_id].append(token)
+        else:
+            units.append([token])
+    slope = _engine_line_slope(units, boxes)
+    heights = [max(boxes[id(token)].height - abs(slope) * boxes[id(token)].width, boxes[id(token)].height * 0.35)
+               for token in tokens if boxes[id(token)].height > 0]
+    body = median(heights) if heights else 10.0
+    tolerance = max(2.0, body * 0.65)
+    spans = {id(unit): (min(boxes[id(t)].x0 for t in unit), max(boxes[id(t)].x1 for t in unit)) for unit in units}
+    levels = {id(unit): median(boxes[id(t)].cy - slope * boxes[id(t)].cx for t in unit) for unit in units}
+
+    rows: list[list[list[OcrToken]]] = []
+    centers: list[float] = []
+    for unit in sorted(units, key=lambda item: (levels[id(item)], spans[id(item)][0])):
+        center = levels[id(unit)]
+        best_index = min(range(len(centers)), key=lambda index: abs(centers[index] - center), default=None)
+        if best_index is None or abs(centers[best_index] - center) > tolerance:
+            rows.append([unit])
+            centers.append(center)
+        else:
+            rows[best_index].append(unit)
+            centers[best_index] = median(levels[id(item)] for item in rows[best_index])
+    rows = [sorted(row, key=lambda item: spans[id(item)][0]) for row in rows]
+    return rows, centers, spans, body
+
+
+def _validated_gutters(
+    rows: list[list[list[OcrToken]]],
+    centers: list[float],
+    spans: dict[int, tuple[float, float]],
+    body: float,
+    page_width: float,
+) -> list[tuple[float, float, float]]:
+    """Return ``(x_mid, y_top, y_bottom)`` of column gutters between text flows.
+
+    A candidate is a gap of at least ``_GUTTER_MIN_GAP_HEIGHTS`` text heights
+    between two engine lines of running text in the same row. A gutter is
+    accepted when candidates sharing one empty vertical band occur in at least
+    ``_GUTTER_MIN_ROWS`` vertically contiguous rows; it applies only within
+    the vertical extent of those rows, so a table or a wide line elsewhere on
+    the page is never split.
+    """
+    def prose(unit: list[OcrToken]) -> bool:
+        start, end = spans[id(unit)]
+        words = sum(len(token.text.split()) for token in unit)
+        return words >= _PROSE_MIN_WORDS and end - start >= _PROSE_MIN_PAGE_WIDTH * page_width
+
+    candidates: list[tuple[float, float, float]] = []
+    for row, center in zip(rows, centers):
+        left = row[0]
+        for unit in row[1:]:
+            low, high = spans[id(left)][1], spans[id(unit)][0]
+            if high - low >= _GUTTER_MIN_GAP_HEIGHTS * body and prose(left) and prose(unit):
+                candidates.append((center, low, high))
+            if spans[id(unit)][1] >= spans[id(left)][1]:
+                left = unit
+
+    gutters: list[tuple[float, float, float]] = []
+    for center, low, high in sorted(candidates):
+        mid = (low + high) / 2.0
+        if any(top <= center <= bottom and abs(mid - existing) <= (high - low) / 2.0
+               for existing, top, bottom in gutters):
+            continue
+        support = sorted(item for item in candidates if item[1] <= mid <= item[2])
+        runs: list[list[tuple[float, float, float]]] = []
+        for item in support:
+            if runs and item[0] - runs[-1][-1][0] <= _GUTTER_MAX_ROW_GAP_HEIGHTS * body:
+                runs[-1].append(item)
+            else:
+                runs.append([item])
+        run = next(run for run in runs if run[0][0] <= center <= run[-1][0])
+        if len(run) < _GUTTER_MIN_ROWS:
+            continue
+        band_low = max(item[1] for item in run)
+        band_high = min(item[2] for item in run)
+        gutter_mid = (band_low + band_high) / 2.0
+        top, bottom = _extend_gutter(rows, centers, spans, gutter_mid, run[0][0], run[-1][0], body)
+        gutters.append((gutter_mid, top - 2.0 * body, bottom + 2.0 * body))
+    return gutters
+
+
+def _extend_gutter(
+    rows: list[list[list[OcrToken]]],
+    centers: list[float],
+    spans: dict[int, tuple[float, float]],
+    mid: float,
+    top: float,
+    bottom: float,
+    body: float,
+) -> tuple[float, float]:
+    """Grow a gutter's vertical extent over adjacent rows that leave it empty.
+
+    Column headings above the first prose row and short final lines below the
+    last one belong to the same flows. Growth stops at a row with an engine
+    line running across the gutter (a full-width title, a table), at a
+    vertical gap larger than the one allowed between supporting rows, or after
+    ``_GUTTER_MAX_EXTENSION_ROWS`` rows, so a table right below the columns
+    is never split.
+    """
+    order = sorted(range(len(rows)), key=lambda index: centers[index])
+    limit = _GUTTER_MAX_ROW_GAP_HEIGHTS * body
+
+    def clear(index: int) -> bool:
+        return not any(spans[id(unit)][0] < mid < spans[id(unit)][1] for unit in rows[index])
+
+    above = list(reversed([index for index in order if centers[index] < top]))
+    for index in above[:_GUTTER_MAX_EXTENSION_ROWS]:
+        if top - centers[index] > limit or not clear(index):
+            break
+        top = centers[index]
+    below = [index for index in order if centers[index] > bottom]
+    for index in below[:_GUTTER_MAX_EXTENSION_ROWS]:
+        if centers[index] - bottom > limit or not clear(index):
+            break
+        bottom = centers[index]
+    return top, bottom
+
+
+def _engine_line_slope(units: list[list[OcrToken]], boxes: dict[int, BBox]) -> float:
+    """Shared tilt (dy/dx) of engine text lines, else 0.
+
+    Tesseract word boxes are axis-aligned and carry no polygon, so the
+    polygon-based ``_dominant_slope`` never sees a tilt. The words of one
+    engine line follow its baseline; fit their centers instead. The same
+    agreement checks as ``_dominant_slope`` apply.
+    """
+    slopes = []
+    for unit in units:
+        if len(unit) < 4:
+            continue
+        xs = [boxes[id(token)].cx for token in unit]
+        ys = [boxes[id(token)].cy for token in unit]
+        height = median(boxes[id(token)].height for token in unit)
+        if max(xs) - min(xs) < 6.0 * max(height, 1.0):
+            continue
+        mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
+        spread_x = sum((x - mean_x) ** 2 for x in xs)
+        if spread_x <= 0:
+            continue
+        slopes.append(sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / spread_x)
+    if len(slopes) < 3:
+        return 0.0
+    middle = median(slopes)
+    spread = median(abs(value - middle) for value in slopes)
+    if not 0.005 <= abs(middle) <= 0.2 or spread > max(0.004, abs(middle) * 0.35):
+        return 0.0
+    return middle
 
 
 def _split_at_prose_gutter(groups: list[list[OcrToken]], boxes: dict[int, BBox]) -> list[list[OcrToken]]:
