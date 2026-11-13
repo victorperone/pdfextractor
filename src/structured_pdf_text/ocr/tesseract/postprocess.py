@@ -32,6 +32,9 @@ _PAGINA_SEP_RE = re.compile(r"(?i)^\s*(?:#\s+)?p[aá]gina\s+\d+")
 # quarter-turn retry: the whole page body), so only the separator shape is
 # suppressed.
 _PAGINA_SEP_MAX_CHARS = 160
+# A TITLE block may wrap the same separator over two lines ("Página 001 |
+# Corpus integrado de validação: texto nativo,\nOCR e tabelas", V3); it is
+# still the separator. Body text never forms a TITLE block.
 
 # OCR corpus-type header: "OCR PURO * SCAN", "OCR TABELAS * SCAN" etc.
 # These appear in V3/V4-style test documents as running headers identifying
@@ -65,6 +68,14 @@ _CORPUS_DOC_HEADER_RE = re.compile(r"(?i)^corpus\s+integrado\s+v\d+\s*/\s*labora
 # test-family type; the reference corpus does not include them.  The
 # separator character (• or *) distinguishes these markers from body
 # sentences that happen to contain the word "adversarial" mid-sentence.
+# Corpus marker blocks are short: 39 to 239 characters, at most two lines, on
+# the V3/V4 pages measured after RUN 004. A longer block that contains a marker
+# also carries page content: on native pages with /Rotate 90 (V4 p213/p214) the
+# whole page (about 3.9k characters, 35 lines) became one block that includes
+# the corpus header and the "OMITIR NO GABARITO" footer, and suppressing it
+# emptied the page (T3-P27). Table blocks keep the split-marker rule.
+_MARKER_BLOCK_MAX_CHARS = 400
+
 _FAMILY_SUFFIX_RE = re.compile(r"(?i)^(?:adversarial|texto\s+nativo)\s*[•*]\s*\S")
 
 # IRINF / DOSSIÊ DE INFRAESTRUTURA running header: appears in V6-style
@@ -243,8 +254,10 @@ def _suppress_pagina_separator_blocks(document: "StructuredDocument") -> None:
 
     Targets both TITLE blocks (layout engine classified them) and TEXT blocks
     whose raw text starts with "# Página NNN" (OCR read a literal ``#`` glyph).
-    Only separator-shaped blocks (one line, at most ``_PAGINA_SEP_MAX_CHARS``
-    characters) are suppressed; a block that continues with body text is kept.
+    Only separator-shaped blocks are suppressed: at most
+    ``_PAGINA_SEP_MAX_CHARS`` characters and either a TITLE block (a long
+    title may wrap over two lines) or a single line. A TEXT block that
+    continues with body text is kept (T3-P25, T3-P26).
     Idempotent: already-suppressed blocks are skipped.
     """
     suppressed = 0
@@ -255,8 +268,8 @@ def _suppress_pagina_separator_blocks(document: "StructuredDocument") -> None:
             text = (block.text or "").strip()
             if not text:
                 continue
-            if (_PAGINA_SEP_RE.match(text) and "\n" not in text
-                    and len(text) <= _PAGINA_SEP_MAX_CHARS):
+            if (_PAGINA_SEP_RE.match(text) and len(text) <= _PAGINA_SEP_MAX_CHARS
+                    and (getattr(block, "kind", None) == "title" or "\n" not in text)):
                 block.suppressed = True
                 block.suppression_reason = "tesseract_pagina_separator"
                 suppressed += 1
@@ -312,6 +325,10 @@ def _suppress_ocr_corpus_markers(document: "StructuredDocument") -> None:
 
     The frequency-based running-header suppressor does not catch these because
     each variant text is unique per page (different family names, OCR noise).
+
+    Only marker-sized blocks are suppressed (at most ``_MARKER_BLOCK_MAX_CHARS``
+    characters); a larger non-table block that merely contains a marker holds
+    page content and is kept (T3-P27).
     """
     suppressed = 0
     for page in document.pages:
@@ -320,6 +337,8 @@ def _suppress_ocr_corpus_markers(document: "StructuredDocument") -> None:
                 continue
             text = (block.text or "").strip()
             if not text:
+                continue
+            if len(text) > _MARKER_BLOCK_MAX_CHARS and getattr(block, "kind", None) != "table":
                 continue
             if (
                 _OCR_CORPUS_HEADER_RE.match(text)

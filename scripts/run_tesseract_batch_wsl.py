@@ -190,7 +190,7 @@ def build_config():
     base = best_extraction_config(language="pt-BR", preserve_headers=False)
     return replace(
         base, mode=ExtractionMode.BALANCED, ocr_quality_policy="adaptive",
-        ocr_engine="tesseract", num_threads=6,
+        ocr_engine="tesseract", num_threads=8,
     )
 
 

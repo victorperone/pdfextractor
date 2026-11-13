@@ -11,13 +11,13 @@
 
 | Campo | Valor |
 |---|---|
-| **Última atualização** | 2026-11-12 — análise da RUN 003 e correções pós-003 validadas por página |
+| **Última atualização** | 2026-11-13 — análise da RUN 004 e duas correções pós-004 validadas por página (T3-P26, T3-P27) |
 | **Branch** | `feat/tesseract-optimization` (alterações pós-003 não commitadas) |
 | **Baseline imutável** | `output/tesseract/001/` |
 | **Baseline corrigida** | `output/tesseract/002/` (T3-P00) |
-| **Baseline atual** | `output/tesseract/003/` (T3-P01, T3-P03; V10 incluído) |
-| **Próxima rodada** | `python3 -u scripts/run_tesseract_batch_wsl.py 004` (manual) — valida as correções pós-003 (§5) |
-| **Configuração** | balanced · pt-BR · adaptive · tesseract · 6 threads · Markdown paginado · supplemental-audit |
+| **Baseline atual** | `output/tesseract/004/` (correções pós-003, commit `976f7f0`) |
+| **Próxima rodada** | `python3 -u scripts/run_tesseract_batch_wsl.py 005` (manual) — valida T3-P26 e T3-P27 (§5) |
+| **Configuração** | balanced · pt-BR · adaptive · tesseract · 6 threads até a 003 · Markdown paginado · supplemental-audit. **Atenção**: há uma alteração local não commitada em `build_config()` (`num_threads=8`); a 004 provavelmente rodou com ela, mas o run manifest grava `threads: 6` fixo no código. Compare tempos com cautela |
 | **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0 — **não alterado** |
 | **Corpus/gabaritos/manifestos** | **não alterados por nós**. O diretório `corpus/V10/` foi substituído externamente em 2026-11-12, entre 07:56 e 07:59, durante a RUN 003 (ver T3-P15) |
 
@@ -27,30 +27,35 @@
 |---|---|---|---|---|
 | T3-P00 | CRÍTICO | — | executor | **RESOLVIDO** (002) |
 | T3-P01 | CRÍTICO | — | `api.py` | **RESOLVIDO** (003) |
-| T3-P02 | ALTO | P1 | backend Tesseract | **CORRIGIDO — VALIDADO PONTUALMENTE** |
+| T3-P02 | ALTO | — | backend Tesseract | **RESOLVIDO** (004; V3 p116 restante) |
 | T3-P03 | MÉDIO | — | `api.py` | **RESOLVIDO** (003) |
 | T3-P04 | INFO | P3 | avaliador | aberta |
 | T3-P05 | MÉDIO | P3 | montagem de linhas nativas | DOCUMENTADO — fora do escopo |
 | T3-P06 | ALTO | P2 | headings | PENDENTE (parte era consequência de T3-P10) |
 | T3-P07 | MÉDIO | P2 | V5 tabelas sem borda/ordem | PENDENTE (sem mudança na 003) |
 | T3-P08 | MÉDIO | P3 | dados críticos V9 | MELHOROU na 003 — monitorar |
-| T3-P09 | INFO | — | `ocr/tesseract/postprocess.py` | RISCO MATERIALIZADO e mitigado em um caso (T3-P25) |
-| T3-P10 | CRÍTICO | P0 | reconstrução de linhas OCR + ordem de leitura | **CORRIGIDO — VALIDADO PONTUALMENTE** |
-| T3-P11 | ALTO | — | executor (V10) | REABERTO na 003 → corrigido via T3-P15 |
-| T3-P12 | MÉDIO | P2 | detecção visual de tabelas | PENDENTE — causa medida |
+| T3-P09 | INFO | — | `ocr/tesseract/postprocess.py` | RISCO MATERIALIZADO — mitigado em T3-P25, T3-P26 e T3-P27 |
+| T3-P10 | CRÍTICO | — | reconstrução de linhas OCR + ordem de leitura | **RESOLVIDO** (004) |
+| T3-P11 | ALTO | — | executor (V10) | **RESOLVIDO** (004, via T3-P15) |
+| T3-P12 | MÉDIO | P2 | detecção visual de tabelas | PENDENTE — causa medida; tempos da 004 não comparáveis (threads) |
 | T3-P13 | BAIXO | — | regressões pontuais 001→002 | sem mudança na 003 (saídas V3–V8 idênticas) |
 | T3-P14 | INFO | — | suíte de testes | 13 falhas pré-existentes (inalteradas) |
-| T3-P15 | ALTO | P1 | executor | **CORRIGIDO — VALIDADO POR TESTES** |
-| T3-P16 | MÉDIO | P2 | classificação de página OCR vazia (`api.py`) | **CORRIGIDO — VALIDADO PONTUALMENTE** |
-| T3-P17 | ALTO | P1 | `tables/ocr_tracks.py` | **PARCIAL** — falsos positivos em colunas eliminados; L01/L02 inclinadas restantes |
-| T3-P18 | ALTO | P1 | reconstrução de linhas OCR | **CORRIGIDO — VALIDADO PONTUALMENTE** |
+| T3-P15 | ALTO | — | executor | **RESOLVIDO** (004) |
+| T3-P16 | MÉDIO | — | classificação de página OCR vazia (`api.py`) | **RESOLVIDO** (004) |
+| T3-P17 | ALTO | P2 | `tables/ocr_tracks.py` | **RESOLVIDO** pelo critério (V10 precisão 0.947); L01/L02 inclinadas restantes |
+| T3-P18 | ALTO | P1 | reconstrução de linhas OCR | **PARCIAL** (004: V4 p107/p108 e V10 L01/L02 acima do critério) |
 | T3-P19 | INFO | — | avaliador (`duplicate_excess_rate`) | INTERPRETAÇÃO DOCUMENTADA — não alterar |
 | T3-P20 | MÉDIO | P2 | segmentação de parágrafos OCR | PARCIAL (melhorou com T3-P10) |
 | T3-P21 | INFO | P3 | V4: recall ≈ 0.85 em OCR de coluna única | ABERTA (T3-P23 explica só uma parte) |
 | T3-P22 | MÉDIO | P3 | montagem de linhas nativas multicoluna | NOVO — documentado, fora do escopo |
-| T3-P23 | CRÍTICO | — | backend Tesseract (`_parse_tsv`) | **CORRIGIDO — VALIDADO PONTUALMENTE** |
-| T3-P24 | BAIXO | — | `layout/ocr_aware.py` (listas) | **CORRIGIDO — VALIDADO PONTUALMENTE** |
-| T3-P25 | ALTO | — | `ocr/tesseract/postprocess.py` | **CORRIGIDO — VALIDADO PONTUALMENTE** |
+| T3-P23 | CRÍTICO | — | backend Tesseract (`_parse_tsv`) | **RESOLVIDO** (004) |
+| T3-P24 | BAIXO | — | `layout/ocr_aware.py` (listas) | **RESOLVIDO** (004) |
+| T3-P25 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (004), com efeito colateral corrigido em T3-P26 |
+| T3-P26 | ALTO | P0 | `ocr/tesseract/postprocess.py` | **CORRIGIDO — VALIDADO PONTUALMENTE** (regressão da 004 nos títulos do V3) |
+| T3-P27 | CRÍTICO | P0 | `ocr/tesseract/postprocess.py` | **CORRIGIDO — VALIDADO PONTUALMENTE** (V4 p213/p214 vazias desde a 001) |
+| T3-P28 | ALTO | P1 | refinamento de células de tabela | NOVO — valor monetário colado na V8 p4/p58 |
+| T3-P29 | MÉDIO | P2 | layout de página nativa com `/Rotate 90` | NOVO — página inteira num único bloco (V4 p213/p214) |
+| T3-P30 | INFO | — | executor | NOVO — run manifest grava `threads` fixo (6) |
 
 ---
 
@@ -166,6 +171,71 @@ V10 no escopo, além da tabela:
 
 ---
 
+### §1.5 RUN 004 — comparação com a 003 (2026-11-13)
+
+- **Execução**: 8/8 corpora `ok`; extração `success`/`valid` em todos, incluindo V8 e V10. V10 avaliado com o manifesto (`metrics_status=ok`, `rank_eligible`, 61 métricas aplicáveis). Nenhum `corpus_changed`.
+- **Comparabilidade**: avaliador e gabaritos inalterados. O V10 da 003 foi recalculado com o manifesto (mesmos hashes de PDF `5c694f86…` e manifesto `5262e4ed…`). Saídas de **V5 e V7 idênticas byte a byte** às da 003. V6 mudou só a p21 (ordem dentro de uma célula de cabeçalho de tabela: "o Semestre Il" → "Semestre Il o"); V8 só p4/p58 (ver T3-P28).
+- **Tempo de extração (s, 003 → 004)**: V3 357 → 349 · V4 2380 → 2460 · V5 86 → 130 · V6 619 → 782 · V7 165 → 182 · V8 385 → 385 · V9 592 → 585 · V10 609 → 514. O V5 (+51%) e o V7 (+10%) têm saída idêntica, então essas variações não vêm das correções. A provável mudança local para 8 threads e a carga da máquina impedem atribuir causa (T3-P30). Métricas do V4: 222 → 130 s; do V10: 87 s.
+
+| Métrica (003 → 004) | V3 | V4 | V9 | V10 |
+|---|---|---|---|---|
+| `cer_sequential_normalized` | 0.039 → 0.035 | 0.231 → **0.080** | 0.214 → **0.102** | 0.516 → **0.264** |
+| `wer_sequential` | 0.051 → 0.050 | 0.318 → 0.172 | 0.260 → 0.119 | 0.641 → 0.327 |
+| `text_coverage_recall` | 0.959 → 0.985 | 0.832 → 0.877 | 0.948 → 0.964 | 0.876 → 0.919 |
+| `text_coverage_precision` | 0.979 → **0.968** | 0.902 → 0.918 | 0.983 → 0.982 | 0.943 → 0.945 |
+| `heading_detection_f1` | 0.867 → **0.619** | 0.502 → 0.502 | 0.426 → 0.426 | 0.423 → 0.426 |
+| `heading_text_cer` | 0.199 → **2.694** | 0.631 → 0.631 | 0.667 → 0.667 | 0.826 → 0.821 |
+| `paragraph_detection_f1` | 0.897 → 0.925 | 0.371 → 0.372 | 0.519 → 0.516 | 0.196 → 0.359 |
+| `list_item_detection_precision` | 0.939 → 1.000 | 0.778 → 0.764 | 0.765 → 0.765 | 0.641 → 0.771 |
+| `table_detection_f1` | 0.974 → 1.000 | 0.875 → 0.901 | 0.789 → 0.842 | 0.545 → 0.923 |
+| `table_detection_precision` | 0.974 → 1.000 | 0.928 → 0.921 | 0.896 → 0.906 | 0.391 → **0.947** |
+| `cell_content_exact_match` | 0.953 → 0.985 | 0.621 → 0.650 | 0.498 → 0.520 | 0.306 → 0.827 |
+| `cell_cer` | 0.040 → 0.004 | 0.355 → 0.302 | 0.618 → 0.594 | 7.048 → 0.181 |
+| `numeric` | 0.972 → 0.985 | 0.891 → 0.904 | 0.934 → 0.954 | 0.927 → 0.925 |
+| `currency` | 0.963 → 1.000 | 0.884 → 0.960 | 0.936 → 0.962 | 1.000 → 1.000 |
+| `dates` | 1.000 → 1.000 | 0.953 → 0.976 | 0.964 → 0.981 | 0.967 → 0.974 |
+| `duplicate_excess_rate` | 0.056 → 0.064 | 0.702 → 0.713 | 0.480 → 0.491 | 0.821 → 0.579 |
+
+V5–V8: todas as métricas dentro de ±0.005 da 003 (V8 `numeric` 0.989 → 0.988).
+
+**Critérios da §5 para a 004:**
+
+| Verificação | Critério | 004 | Situação |
+|---|---|---|---|
+| T3-P15 | V10 `metrics_status=ok`, `rank_eligible` | ok, `rank_eligible` | ✅ |
+| T3-P16 | V10 `success` | `success`/`valid` | ✅ |
+| T3-P10 | multicoluna V4 ≤ 0.25, V9 ≤ 0.30, V10 L03–L06 ≤ 0.30 | 0.743 → **0.178**; 0.518 → **0.142**; **0.181** | ✅ |
+| T3-P10 | CER documental V4 ≤ 0.17, V9 ≤ 0.15, V10 ≤ 0.35 | 0.080; 0.102; 0.264 | ✅ |
+| T3-P02 | V3 p96–p99, V4 p109–p114 < 0.30 | V3 0.246 / 0.000 / 0.000 / 0.159; V4 0.031–0.060 | ✅ (V3 p116 = 0.436, fora do critério) |
+| T3-P17 | V10 `table_detection_precision` ≥ 0.85 | 0.947 | ✅ |
+| T3-P18 | V3 p80, V4 p105–p108, p135–p136 < 0.30 | p80 0.005; p105 0.040; p106 0.134; **p107 0.311**; **p108 0.466**; p135 0.066; p136 0.111 | ⚠️ parcial |
+| T3-P23 | V4 recall > 0.832 | 0.877 | ✅ |
+| Controle V3 | Δ ≤ ±0.005 | **títulos regrediram** (T3-P26) | ❌ → corrigido pontualmente |
+| Controle V5–V8 | Δ ≤ ±0.005 | atendido | ✅ |
+| Desempenho | ±10% | não comparável (T3-P30) | ⚠️ |
+
+**Erros remanescentes de maior peso na 004** (edições por página):
+- V10: L01/L02 (raster de baixa qualidade, ±4–5°: p5, 13, 18, 25, 31, 45, 48, 53, 62, 68, 75, 83; CER 0.44–0.70) e p9 nativa (T3-P22).
+- V4: p213/p214 vazias (T3-P27), p104/p108 (blur, inclinação −2.5°).
+- V9: p81 (inclinação, quase sem texto), p23 (3 colunas + 2 tabelas, 3–5°), p43/p51 (multicoluna 0.47/0.55, inalteradas desde a 003).
+- V3: as páginas com títulos "Página NNN" (T3-P26).
+
+### §1.6 Validação pontual das correções pós-004 (2026-11-13)
+
+**Método**: o mesmo harness da §1.4, recriado no scratchpad. Usa `build_config()` atual do executor + `page_indices`, com verificação de que só as páginas pedidas foram processadas, e métricas oficiais com escopo `selected_pages`. Usa a configuração local do executor (8 threads), igual entre ANTES e DEPOIS. Etapas: ANTES (código `976f7f0`) → após T3-P26 → após T3-P27.
+
+**Páginas**:
+
+| Corpus | Páginas |
+|---|---|
+| V3 | 1, 2, 44, 64, 66, 67, 69, 108, 123, 124, 126, 134 (alvos T3-P26); controles 5, 20, 60, 80, 96, 97, 116, 138 |
+| V4 | 213, 214 (alvos T3-P27); controles 10, 50, 81, 82, 85, 107, 150, 190, 220 |
+| Controles | V5 10, 17 · V6 3, 21 · V7 1, 25 · V8 4, 22, 58 · V9 2, 8, 25 · V10 1, 4, 6, 9 |
+
+**Resultados**: ver T3-P26 e T3-P27. Em cada etapa, as páginas fora do alvo saíram **idênticas byte a byte** à etapa anterior, e V5–V10 ficaram idênticos ao ANTES.
+
+**Limitação**: subconjuntos não substituem a rodada completa (§5).
+
 ## §2 Problemas — detalhamento
 
 ### T3-P00 | CRÍTICO | Executor sem tabelas e sem supressão de cabeçalho/rodapé — RESOLVIDO
@@ -192,7 +262,9 @@ V10 no escopo, além da tabela:
 - **Efeito colateral observado**: o texto recuperado expôs T3-P10 (colunas) e T3-P20 (parágrafos fragmentados) no V9.
 - **Status**: RESOLVIDO.
 
-### T3-P02 | ALTO | Páginas escaneadas rotacionadas — CORRIGIDO — VALIDADO PONTUALMENTE
+### T3-P02 | ALTO | Páginas escaneadas rotacionadas — RESOLVIDO (004)
+
+- **RUN 004**: V3 p96 0.246, p97 0.000, p98 0.000, p99 0.159; V4 p109–p114 0.031–0.060. Critério atendido. Restante: V3 p116 (tabela girada) 0.436.
 
 - **Corpora/páginas**: V3 p96 (90°), p97 (180°), p98 (270°), p99 (tabela a 90°), p116 (tabela girada); **V4 p109–p114** (OCR de texto com rotação 90/180/270, CER 0.81–0.97 na 003).
 - **Diagnóstico pós-003** (confiança média das palavras do Tesseract, 300 dpi):
@@ -255,7 +327,9 @@ V10 no escopo, além da tabela:
 - O risco se materializou duas vezes: a supressão de "dump de coordenadas" escondia o bug real do parser (T3-P23), e a supressão de separador "Página NNN" apagava corpo de texto (T3-P25). As duas foram tratadas.
 - **Risco remanescente**: `_suppress_ocr_corpus_markers` ainda suprime o bloco inteiro quando `_OMITIR_GABARITO_RE` casa em qualquer ponto do texto. Não foi alterada, porque também trata intencionalmente tabelas com o marcador partido.
 
-### T3-P10 | CRÍTICO | Linhas OCR fundidas entre colunas — CORRIGIDO — VALIDADO PONTUALMENTE
+### T3-P10 | CRÍTICO | Linhas OCR fundidas entre colunas — RESOLVIDO (004)
+
+- **RUN 004**: CER multicoluna V4 0.743 → 0.178, V9 0.518 → 0.142, V10 L03–L06 + controles 41/50 = 0.181; CER documental V4 0.080, V9 0.102, V10 0.264. Critérios atendidos. Restante: V9 p43/p51 (0.47/0.55, inalteradas desde a 003 — a investigar) e V10 L01/L02 (T3-P18).
 
 - **Sintoma (003)**: o texto é reconhecido (recall ≈ 0.99), mas cada linha junta a mesma altura de todas as colunas. Exemplo da V10 p6: "No procedimento V10-006-01-458, a No procedimento V10-006-02-498, a Unidade No procedimento V10-006-03-404, a Setor de…". Números de processo ficam associados ao texto errado.
 - **Corpora/páginas (003)**: V4 — as 21 páginas OCR `two_columns` (82…142), CER 0.743, igual desde a 001; V9 — 20 páginas de 2–3 colunas rasterizadas; V10 — 35 páginas L01–L06 e os controles 41 e 50.
@@ -287,6 +361,8 @@ V10 no escopo, além da tabela:
 
 ### T3-P12 | MÉDIO | Extração 3–7× mais lenta desde a 002 — PENDENTE (causa medida)
 
+- **RUN 004**: tempos entre −16% e +51% em relação à 003, inclusive em corpora com saída idêntica (V5 +51%, V7 +10%). Não é possível atribuir às correções (T3-P30).
+
 - **Medição** (cProfile em memória, subconjuntos de páginas):
 
   | Amostra | Config 001 | Config canônica | Chamadas ao Tesseract | Detecção visual de tabela | OCR |
@@ -309,7 +385,9 @@ V10 no escopo, além da tabela:
 
 - As mesmas 13 falhas: `test_line_detector.py` (8 `test_reconciliation_*`), `test_rapidocr_improvement_005/006/008.py` (3), `test_no_timeouts.py::test_production_code_has_no_timeout_keyword_argument` e `test_evaluation_exact_optimizations.py::test_full_ground_truth_self_control_is_complete_and_perfect[V3]`. Nenhuma toca o código alterado.
 
-### T3-P15 | ALTO | V10 `metrics_error` na 003: corpus trocado durante a rodada — CORRIGIDO NO EXECUTOR
+### T3-P15 | ALTO | V10 `metrics_error` na 003: corpus trocado durante a rodada — RESOLVIDO (004)
+
+- **RUN 004**: V10 com `metrics_status=ok`, `rank_eligible`, 61 métricas; nenhum `corpus_changed`.
 
 - **Sintoma**: `ERROR: canonical evaluation failed: Selected pages without ground truth: [2..84]` (run.log, linha 1373).
 - **Causa raiz (CONFIRMADA)**:
@@ -325,7 +403,9 @@ V10 no escopo, além da tabela:
 - **Testes**: `tests/test_tesseract_batch_runner_config.py` — hashes registrados e mudança detectada (incluindo remoção); referência com `PAGE_START` + manifesto com `expected_markdown` → gabarito `manifesto` (7 testes passam).
 - **Critério para a 004**: V10 `metrics_status=ok`, `rank_eligible=True`; nenhum `corpus_changed`. Não altere `corpus/` durante a rodada.
 
-### T3-P16 | MÉDIO | V10 `partial_success` falso — CORRIGIDO — VALIDADO PONTUALMENTE
+### T3-P16 | MÉDIO | V10 `partial_success` falso — RESOLVIDO (004)
+
+- **RUN 004**: V10 `success`/`valid`.
 
 - **Evidência (003)**: as 19 páginas `degraded` (`ocr_no_text`) são **exatamente** as 19 com gabarito vazio (N01/N02/N03 e o controle 72 `graphic_text`): só brasão ou imagem não textual. A saída vazia está correta, mas o documento inteiro era rebaixado.
 - **Causa**: `api.py` só aceitava OCR vazio sem falha quando a página era branca uniforme (`_is_visually_blank`).
@@ -336,7 +416,9 @@ V10 no escopo, além da tabela:
 - **Testes**: `tests/test_tesseract_run003_regressions.py` (texto em qualquer orientação; página gráfica; entrada ilegível → conservador).
 - **Critério para a 004**: V10 `extraction_status=success`; nenhuma página com texto marcada como `blank_page`.
 
-### T3-P17 | ALTO | Colunas de texto detectadas como tabela sem borda — PARCIAL
+### T3-P17 | ALTO | Colunas de texto detectadas como tabela sem borda — RESOLVIDO pelo critério (004)
+
+- **RUN 004**: V10 `table_detection_precision` 0.391 → 0.947, `table_row_detection_precision` 0.191 → 0.972, `cell_cer` 7.05 → 0.18. As páginas L01/L02 seguem com CER alto por causa do OCR (T3-P18).
 
 - **Evidência (003)**: V10 com 63 tabelas para 20 esperadas, todas as extras em páginas raster L01/L02 inclinadas (p13, 18, 25, 31, 45, 48, 53, 62, 68, 83) e no controle p50.
 - **Causa**: o adaptador `tables/ocr_tracks.py` passa as linhas OCR ao detector nativo de tabelas sem borda (`text_tracks.detect_borderless_tables`). Em página inclinada, `_merge_same_baseline_lines` junta a linha k de uma coluna com a k+1 da vizinha, e o classificador prosa × tabela deixa passar. Com T3-P10 separando as colunas, o mesmo mecanismo passou a gerar uma tabela falsa na V9 p9 (detectado no teste pontual e corrigido).
@@ -345,7 +427,9 @@ V10 no escopo, além da tabela:
 - **Restante**: L01/L02 com Tesseract fundindo colunas na própria segmentação (V10 p18), onde não há calha validada. Ver T3-P18.
 - **Testes**: `tests/test_tesseract_run003_regressions.py::test_ocr_track_table_crossed_by_a_text_column_gutter_is_rejected`.
 
-### T3-P18 | ALTO | Inclinação não compensada em tokens Tesseract — CORRIGIDO — VALIDADO PONTUALMENTE
+### T3-P18 | ALTO | Inclinação não compensada em tokens Tesseract — PARCIAL (004)
+
+- **RUN 004**: V3 p80 0.005; V4 p105 0.040, p106 0.134, p135 0.066, p136 0.111. **Acima do critério**: V4 p107 0.311 e p108 0.466 (−2.5°), V10 L01/L02 0.44–0.70 (±4–5°, baixa qualidade). Próximo passo: endireitar a imagem antes do OCR nas páginas em que o Tesseract funde ou perde linhas.
 
 - **Causa (CONFIRMADA)**: `_dominant_slope` estima a inclinação pelos polígonos dos tokens, e os tokens Tesseract não têm polígono. A inclinação ficava sempre 0, e palavras de linhas vizinhas se misturavam. Exemplo da V3 p80 (+2°) ANTES: "amostra combina evidência, extração e leitura; sinais literaisvalor associado é…".
 - **Correção** (`reconstruct.py`): com a identidade de linha, as linhas do Tesseract são mantidas inteiras. `_engine_line_slope` estima a inclinação ajustando os centros das palavras de cada linha (mesmos critérios de aceitação de `_dominant_slope`), usada para juntar células da mesma linha visual em tabelas inclinadas.
@@ -376,7 +460,9 @@ V10 no escopo, além da tabela:
 - Outras L03 nativas estão corretas (p23, p39, p73, p79 ≈ 0.07); p59 tem 0.263.
 - O componente é a montagem de linhas nativas (compartilhada, ligada a T3-P05). Requer autorização.
 
-### T3-P23 | CRÍTICO | Parser TSV engolia linhas após palavra iniciada por aspas — CORRIGIDO — VALIDADO PONTUALMENTE
+### T3-P23 | CRÍTICO | Parser TSV engolia linhas após palavra iniciada por aspas — RESOLVIDO (004)
+
+- **RUN 004**: V4 `text_coverage_recall` 0.832 → 0.877; V4 `currency` 0.884 → 0.960, `dates` 0.953 → 0.976.
 
 - **Causa raiz (CONFIRMADA)**:
   - `_parse_tsv` usava `csv.DictReader` com a cotação padrão (`"`). Quando o OCR reconhece uma palavra que começa com aspas ASCII (o V4 tem `"aspas"` em todos os parágrafos OCR), o módulo `csv` abre um campo entre aspas que engole as linhas seguintes, com tabs e quebras de linha, até a próxima aspa.
@@ -389,7 +475,9 @@ V10 no escopo, além da tabela:
 - **Resultados**: V4 p107 recall 0.354 → 0.590; V4 p150 (tabela OCR) 0.904 → 0.185; parte dos ganhos de V3 p96/p97.
 - **Testes**: `test_tsv_word_starting_with_a_quote_does_not_swallow_following_rows`.
 
-### T3-P24 | BAIXO | Título quebrado com travessão virava item de lista — CORRIGIDO — VALIDADO PONTUALMENTE
+### T3-P24 | BAIXO | Título quebrado com travessão virava item de lista — RESOLVIDO (004)
+
+- **RUN 004**: V10 `list_item_detection_precision` 0.641 → 0.771, `list_group_detection_precision` 0.377 → 0.548.
 
 - **Evidência**: com as colunas separadas (T3-P10), cada título de coluna quebrado ("Secretaria Regional de Controle / — Extrato de tramitação") gerou um falso item de lista. Na validação intermediária, a precisão de itens do V10 caiu de 0.765 para 0.639.
 - **Causa**: `reconstruct_ocr_layout` trata toda linha OCR iniciada por `–`/`—` como marcador de lista.
@@ -397,7 +485,9 @@ V10 no escopo, além da tabela:
 - **Resultado (V10, escopo pontual)**: precisão de itens 0.765 → **0.886**, de grupos 0.455 → **0.667**. Os itens falsos que já existiam antes também foram removidos.
 - **Testes**: `test_em_dash_line_continuing_a_wrapped_title_is_not_a_list_item`.
 
-### T3-P25 | ALTO | Supressão de separador "Página NNN" apagava o corpo da página — CORRIGIDO — VALIDADO PONTUALMENTE
+### T3-P25 | ALTO | Supressão de separador "Página NNN" apagava o corpo da página — RESOLVIDO (004), com efeito colateral (T3-P26)
+
+- **RUN 004**: V3 p96 0.246 com recall 1.0. **Efeito colateral**: a exigência de "uma linha" deixou de suprimir títulos-separadores quebrados em duas linhas em 12 páginas nativas do V3 (T3-P26).
 
 - **Evidência**: com a rotação corrigida, a V3 p96 foi lida corretamente, mas a página saiu **vazia**. O bloco "Página 096 | OCR com rotação física de 90 graus Controle de página: QA-P096 O lote…" foi suprimido inteiro por `_suppress_pagina_separator_blocks`, que suprimia qualquer bloco **iniciado** por "Página N".
 - **Correção** (`ocr/tesseract/postprocess.py`): só blocos com formato de separador (uma linha, ≤ 160 caracteres) são suprimidos. Um bloco que continua com o corpo é mantido, ao custo de o texto do separador ficar na saída.
@@ -405,6 +495,58 @@ V10 no escopo, além da tabela:
 - **Testes**: `tests/test_tesseract_postprocess.py::test_pagina_block_that_continues_with_body_text_is_kept`; os 7 testes anteriores do separador continuam passando.
 
 ---
+
+### T3-P26 | ALTO | Títulos-separadores "Página NNN" do V3 voltaram à saída — CORRIGIDO — VALIDADO PONTUALMENTE
+
+- **Origem**: regressão da RUN 004, causada por T3-P25.
+- **Evidência (004)**: 12 títulos "# Página NNN | …" a mais no V3 (p1, 2, 44, 64, 66, 67, 69, 108, 123, 124, 126, 134). O gabarito do V3 declara essas linhas como "delimitadores canônicos" (no V4 elas são marcadores de página removidos por `manifest_pages`). Métricas do V3: `heading_precision` 0.929 → 0.500, `heading_detection_f1` 0.867 → 0.619, `heading_text_cer` 0.199 → 2.694, `text_coverage_precision` 0.979 → 0.968.
+- **Causa raiz (CONFIRMADA)**: esses títulos são blocos TITLE longos, que quebram em duas linhas ("Página 001 | Corpus integrado de validação: texto nativo,\nOCR e tabelas", 71 caracteres). A condição "sem quebra de linha" introduzida em T3-P25 deixou de suprimi-los.
+- **Correção** (`ocr/tesseract/postprocess.py::_suppress_pagina_separator_blocks`, só Tesseract): um bloco com o padrão do separador e no máximo 160 caracteres é suprimido quando é TITLE (pode ter duas linhas) ou tem uma linha só. Blocos TEXT longos ou com corpo (caso de T3-P25, V3 p96) continuam preservados.
+- **Validação pontual (CER, ANTES → DEPOIS)**: V3 p1 0.097 → 0.000, p2 0.053 → 0.000, p44 0.333 → 0.000, p64 0.265 → 0.000, p66 0.387 → 0.000, p67 0.600 → 0.000, p69 0.656 → 0.000, p108 0.425 → 0.123, p123 0.309 → 0.000, p124 0.312 → 0.000, p126 0.343 → 0.006, p134 0.353 → 0.000.
+- **Escopo V3 (20 páginas)**:
+  - CER 0.162 → 0.044.
+  - `heading_detection_f1` 0.400 → 1.000; `heading_text_cer` 9.500 → 0.000.
+  - `text_coverage_precision` 0.876 → 0.984; `numeric` 0.951 → 0.993; `duplicate_excess_rate` 0.162 → 0.046.
+  - `text_coverage_recall` 0.980 → 0.969. A cobertura é contada por palavras do documento, e palavras dos títulos removidos também aparecem no gabarito; o recall por página não mudou.
+- **Controles**: V3 p96/p97 (separador com corpo; rotação) inalterados; V4–V10 com saída idêntica byte a byte.
+- **Testes**: `tests/test_tesseract_postprocess.py::test_wrapped_pagina_title_block_is_suppressed`. `test_pagina_block_that_continues_with_body_text_is_kept` (T3-P25) continua passando.
+- **Critério para a 005**: V3 `heading_precision` ≥ 0.92 e `heading_text_cer` ≤ 0.20 (valores da 003); V3 `text_coverage_precision` ≥ 0.979.
+
+### T3-P27 | CRÍTICO | Página nativa inteira descartada como marcador do corpus (V4 p213/p214) — CORRIGIDO — VALIDADO PONTUALMENTE
+
+- **Evidência**: V4 p213 e p214 (`rotation_metadata_90`, página nativa com `/Rotate 90` e cerca de 4000 caracteres) saem **vazias** desde a 001: CER 1.000 e recall 0.000 nas rodadas 001–004. O run manifest marca as páginas como `valid`/`clean`, ou seja, a perda era silenciosa.
+- **Causa raiz (CONFIRMADA)**:
+  1. O layout de página nativa com `/Rotate 90` junta a página inteira num único bloco HEADER (3925 caracteres, 35 linhas). Ver T3-P29.
+  2. Esse bloco contém o cabeçalho do corpus e o rodapé "RODAPÉ DECORATIVO • OMITIR NO GABARITO".
+  3. `_suppress_ocr_corpus_markers` suprime o bloco quando `_OMITIR_GABARITO_RE.search` encontra o marcador **em qualquer ponto** do texto. É o risco registrado em T3-P09.
+- **Medição**: os blocos de marcador legítimos suprimidos em V3 p96/97/99/116 e V4 p82/111/150/190/213 têm 39–239 caracteres e no máximo 2 linhas.
+- **Correção** (`ocr/tesseract/postprocess.py`, só Tesseract): `_MARKER_BLOCK_MAX_CHARS = 400`. Um bloco não-tabela maior que isso não é suprimido como marcador, porque contém conteúdo. Blocos de tabela mantêm a regra do marcador partido entre linhas (Fix-N).
+- **Validação pontual (ANTES → DEPOIS)**:
+  - V4 p213/p214: CER 1.000 → **0.041**, recall 0.000 → **1.000**, precisão 0.963, `numeric` 0.977, `dates` 1.000.
+  - Escopo V4 (11 páginas): CER 0.264 → 0.090, recall 0.694 → 0.876, `dates` 0.889 → 0.992, `currency` 0.890 → 0.980.
+  - Todas as outras páginas do V4 e todos os demais corpora: saída **idêntica byte a byte**.
+- **Restante**:
+  - O cabeçalho e o rodapé do corpus ficam no texto dessas duas páginas (custo pequeno de CER).
+  - A página continua num único bloco: `paragraph_detection_f1` 0 nessas páginas, e `aligned_block_text_cer` do escopo V4 0.754 → 0.884. Ver T3-P29.
+- **Testes**: `tests/test_tesseract_postprocess.py::test_marker_inside_whole_page_block_does_not_suppress_page_content`, `test_marker_sized_blocks_are_still_suppressed`. Os testes existentes de marcadores, inclusive os de tabela, continuam passando.
+- **Critério para a 005**: V4 p213/p214 com recall ≥ 0.95; V4 `text_coverage_recall` > 0.877.
+
+### T3-P28 | ALTO | Valor monetário colado em célula de tabela (V8 p4/p58) — NOVO
+
+- **Evidência (004)**: célula "€ 98,40" sai como `€ 98,4096,40` em V8 p4 e p58 (a mesma tabela). Na mesma linha, "1-01" passou a "L-01", que é o correto segundo o gabarito. `numeric` da página 0.909 → 0.857.
+- **Hipótese**: duas leituras sobrepostas do mesmo valor ("98,40" e "96,40", de passes diferentes de OCR de célula) ficaram no mesmo grupo de linha. O agrupamento por linha do Tesseract (T3-P10) não as deduplica como o agrupamento anterior por palavra. Precisa de depuração no refinamento de células (`_refine_visual_table_ocr`).
+- **Abrangência**: busca por números colados nas saídas de V3–V10 da 004 encontrou só esse caso.
+- **Critério**: V8 p4/p58 com `€ 98,40` e `numeric` ≥ 0.909.
+
+### T3-P29 | MÉDIO | Página nativa com `/Rotate 90` montada como um único bloco — NOVO
+
+- V4 p213/p214: toda a página vira um bloco HEADER, sem parágrafos nem títulos. Após T3-P27 o texto é preservado, mas a estrutura não.
+- **Componente**: layout de regiões e montagem de linhas nativas em páginas rotacionadas (compartilhado, não Tesseract). Requer investigação própria.
+
+### T3-P30 | INFO | Executor grava `threads` fixo no run manifest — NOVO
+
+- `extract_one` grava `"threads": 6` e `requested_threads: 6` literais, independentemente de `build_config().num_threads`. Com a alteração local para 8 threads, a 004 não registra a configuração efetiva.
+- **Ação sugerida**: gravar `config.num_threads` (e `effective_threads`). Não alterado nesta etapa, por estar fora das duas correções autorizadas.
 
 ## §3 Alterações de código
 
@@ -417,7 +559,7 @@ V10 no escopo, além da tabela:
 | T3-P01 | `src/structured_pdf_text/api.py` | `_append_hybrid_ocr_regions(page_raster_primary=…)`, `_PAGE_SIZED_FIGURE_COVERAGE=0.75`, atribuição de OCR de página a figuras `OCR_REGION`/`MERGE_OCR` |
 | T3-P03 | `src/structured_pdf_text/api.py` | `_MIN_TEXT_REGION_SIDE_PT=8.0` em `_recover_selected_regions` |
 
-### Pós-003 (2026-11-12, não commitadas)
+### Pós-003 (2026-11-12, commit `976f7f0`)
 
 | Item | Arquivo | Mudança | Escopo |
 |---|---|---|---|
@@ -433,6 +575,16 @@ V10 no escopo, além da tabela:
 | testes | `tests/test_tesseract_run003_regressions.py` (novo, 26 testes), `tests/test_tesseract_batch_runner_config.py` (+2), `tests/test_tesseract_postprocess.py` (+1) | — | — |
 
 **Não alterados**: `corpus/`, gabaritos, manifestos, avaliador (`src/structured_pdf_text/evaluation/`), `output/tesseract/001–003/`.
+
+### Pós-004 (2026-11-13, não commitadas)
+
+| Item | Arquivo | Mudança | Escopo |
+|---|---|---|---|
+| T3-P26 | `src/structured_pdf_text/ocr/tesseract/postprocess.py` | separador "Página NNN": TITLE de até 160 caracteres pode ter duas linhas | só Tesseract |
+| T3-P27 | `src/structured_pdf_text/ocr/tesseract/postprocess.py` | `_MARKER_BLOCK_MAX_CHARS = 400` em `_suppress_ocr_corpus_markers` (exceto tabelas) | só Tesseract |
+| testes | `tests/test_tesseract_postprocess.py` | +3 testes | — |
+
+A alteração local `num_threads=8` em `scripts/run_tesseract_batch_wsl.py` não é desta etapa e foi mantida como está.
 
 ## §4 Testes executados
 
@@ -451,9 +603,30 @@ V10 no escopo, além da tabela:
 | 2026-11-12 | validação pontual por página (§1.4) | ANTES e FINAL, 8 corpora, ~85 páginas |
 | 2026-11-12 | estimativa do gatilho de rotação (reconhecimento cru, V4 p81–184) | 7/104 páginas disparam |
 
-**Não executado**: nenhuma rodada completa após as correções; `output/tesseract/004` não existe.
+| 2026-11-13 | RUN 004 completa (manual) | 8/8 `ok` |
+| 2026-11-13 | métricas da 003 do V10 recalculadas com o manifesto (scratchpad) | `ok`, 61 aplicáveis |
+| 2026-11-13 | validação pontual T3-P26/T3-P27 (§1.6) | ANTES → T3-P26 → T3-P27, 8 corpora, 47 páginas |
+| 2026-11-13 | `pytest tests/test_tesseract_postprocess.py` | todos passaram (3 testes novos) |
+| 2026-11-13 | `pytest tests` (após T3-P26/T3-P27) | 14 falhas: as 13 de T3-P14 + `test_tesseract_batch_runner_config.py::test_runner_config_keeps_requested_round_parameters`, que espera `num_threads == 6` e falha pela alteração local para 8 threads (T3-P30), não pelas correções |
 
-## §5 Validação esperada na RUN 004
+**Não executado**: nenhuma rodada completa após as correções pós-004; `output/tesseract/005` não existe.
+
+## §5 Validação esperada na RUN 005
+
+Comparar 005 × 004.
+
+| Verificação | Critério |
+|---|---|
+| T3-P26 | V3 `heading_precision` ≥ 0.92, `heading_text_cer` ≤ 0.20, `text_coverage_precision` ≥ 0.979 |
+| T3-P27 | V4 p213/p214 com recall ≥ 0.95; V4 `text_coverage_recall` > 0.877 |
+| Controle | V5–V10: saída idêntica à 004 nas páginas sem os padrões de T3-P26/T3-P27 (esperado: idênticas); métricas dentro de ±0.005 |
+| Geral | nenhum `extract_error`/`metrics_error`/`corpus_changed` |
+
+**Limitações**: a validação pontual cobriu 47 páginas. As regras alteradas rodam em toda página Tesseract, então só a 005 confirma a ausência de efeito em páginas não testadas com blocos "Página NNN" de duas linhas ou blocos grandes com marcador. Tempos dependem da configuração de threads (T3-P30).
+
+Comando: `python3 -u scripts/run_tesseract_batch_wsl.py 005` (pré-verificação: `--check-only`). **Não altere `corpus/` durante a rodada.**
+
+## §5.1 (histórico) Validação esperada na RUN 004 — resultado em §1.5
 
 Comparar 004 × 003. Para o V10, a 003 só tem métricas recalculadas com o manifesto (§1.3).
 

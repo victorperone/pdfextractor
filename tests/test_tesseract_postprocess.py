@@ -400,6 +400,16 @@ def test_pagina_block_that_continues_with_body_text_is_kept():
     assert multi.suppressed is False
 
 
+def test_wrapped_pagina_title_block_is_suppressed():
+    """T3-P26/RUN 004: título-separador longo quebrado em duas linhas (V3 p1) é suprimido."""
+    title = _Block(order_index=0, kind="title",
+                   text="Página 001 | Corpus integrado de validação: texto nativo,\nOCR e tabelas")
+    doc = _Doc([_Page([title])])
+    _suppress_pagina_separator_blocks(doc)
+    assert title.suppressed is True
+    assert title.suppression_reason == "tesseract_pagina_separator"
+
+
 def test_pagina_suppressor_skips_already_suppressed():
     """Already-suppressed blocks are not re-processed."""
     b = _Block(order_index=0, text="Página 001", kind="title",
@@ -691,6 +701,27 @@ def test_adversarial_mid_sentence_not_suppressed():
 def test_corpus_multiline_block_suppressed():
     """Two-line block 'CORPUS INTEGRADO V3 / LABORAT...\nTEXTO NATIVO • NATIVE' is suppressed."""
     text = "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO\nTEXTO NATIVO • NATIVE"
+    doc = _make_doc([text])
+    _suppress_ocr_corpus_markers(doc)
+    assert doc.pages[0].content_blocks[0].suppressed is True
+
+
+def test_marker_inside_whole_page_block_does_not_suppress_page_content():
+    """T3-P27/RUN 004: página nativa com /Rotate 90 (V4 p213) virou um único bloco
+    que contém o cabeçalho e o rodapé do corpus; o bloco não pode ser descartado."""
+    body = "\n".join(f"Parágrafo 213.{i:02d}: Análise e normalização devem preservar a leitura." for i in range(1, 30))
+    text = ("CORPUS STRESS OCR MARKDOWN V4 / LABORATÓRIO SINTÉTICO\nPágina 213 | Adversarial: rotation_metadata_90\n"
+            + body + "\nRODAPÉ DECORATIVO • OMITIR NO GABARITO")
+    doc = _make_doc([text])
+    _suppress_ocr_corpus_markers(doc)
+    assert doc.pages[0].content_blocks[0].suppressed is False
+
+
+def test_marker_sized_blocks_are_still_suppressed():
+    """Os maiores marcadores observados (V3 p116: 239 caracteres) continuam suprimidos."""
+    text = ("CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO OCR TABELAS * SCAN Página 116 | OCR tabelas "
+            "com ruído e contraste baixo, colunas numéricas, totais e descrições curtas em células "
+            "estreitas — RODAPÉ DECORATIVO * OMITIR NO GABARITO Página 116 de 144")
     doc = _make_doc([text])
     _suppress_ocr_corpus_markers(doc)
     assert doc.pages[0].content_blocks[0].suppressed is True
