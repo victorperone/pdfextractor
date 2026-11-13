@@ -2,7 +2,7 @@
 from dataclasses import replace
 
 from structured_pdf_text.document import RegionKind, TableMethod
-from structured_pdf_text.ocr.reconstruct import ocr_text_column_gutters, reconstruct_ocr_lines
+from structured_pdf_text.ocr.reconstruct import ocr_text_column_layout, reconstruct_ocr_lines
 from .headers import infer_visual_header_rows
 from .text_tracks import detect_borderless_tables
 
@@ -29,11 +29,11 @@ def detect_ocr_track_tables(page, regions, image, claimed_tables):
                 continue
             lines = reconstruct_ocr_lines(region.ocr_tokens, page.page_index, page.bbox,
                                           dehyphenate=False, page_rotation=page.objects.rotation)
-            gutters = ocr_text_column_gutters(region.ocr_tokens, page.bbox, page.objects.rotation)
+            gutters, slope = ocr_text_column_layout(region.ocr_tokens, page.bbox, page.objects.rotation)
             view = replace(region, native_lines=lines)
             for table in detect_borderless_tables(page, view, f"{region.region_id}:ocr-tracks"):
                 box = table.page_fragments[0].bbox
-                if _crosses_text_column_gutter(box, gutters):
+                if _crosses_text_column_gutter(box, gutters, slope):
                     # Columns of running text recur on the same x tracks as a
                     # borderless table; on skewed scans their lines even pair
                     # up row by row (T3-P17). The engine's own segmentation
@@ -62,10 +62,18 @@ def detect_ocr_track_tables(page, regions, image, claimed_tables):
     return output
 
 
-def _crosses_text_column_gutter(box, gutters) -> bool:
-    """Whether a validated running-text gutter runs through most of *box*."""
+def _crosses_text_column_gutter(box, gutters, slope: float = 0.0) -> bool:
+    """Whether a validated running-text gutter runs through most of *box*.
+
+    Gutters are expressed in the frame rectified by ``slope`` (see
+    ``ocr_text_column_layout``); the box corners are mapped to it.
+    """
+    corners = [(x, y) for x in (box.x0, box.x1) for y in (box.y0, box.y1)]
+    xs = [x + slope * y for x, y in corners]
+    ys = [y - slope * x for x, y in corners]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
     for mid, top, bottom in gutters:
-        overlap = min(box.y1, bottom) - max(box.y0, top)
-        if box.x0 < mid < box.x1 and overlap >= 0.5 * max(box.height, 1.0):
+        overlap = min(y1, bottom) - max(y0, top)
+        if x0 < mid < x1 and overlap >= 0.5 * max(y1 - y0, 1.0):
             return True
     return False

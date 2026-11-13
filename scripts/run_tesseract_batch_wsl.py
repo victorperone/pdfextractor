@@ -194,6 +194,31 @@ def build_config():
     )
 
 
+def tesseract_thread_limit(num_threads: int) -> int | None:
+    """``OMP_THREAD_LIMIT`` the Tesseract backend sets for ``num_threads``.
+
+    Mirrors ``ocr/backends/tesseract.py::_run_tesseract_tsv``: -1 leaves the
+    environment untouched (None), 0 uses every CPU, otherwise the value itself.
+    """
+    if num_threads == -1:
+        return None
+    return max(1, os.cpu_count() or 1) if num_threads == 0 else num_threads
+
+
+def round_settings(config) -> dict:
+    """Round parameters recorded in ``run_summary.json`` and run manifests.
+
+    Built from the effective config (T3-P30): rounds 001–005 recorded a
+    hard-coded ``threads: 6`` even after ``build_config()`` moved to 8.
+    """
+    return {
+        "mode": "balanced", "language": "pt-BR", "ocr_quality_policy": "adaptive",
+        "ocr_engine": "tesseract", "threads": config.num_threads,
+        "tesseract_omp_thread_limit": tesseract_thread_limit(config.num_threads),
+        "output": "markdown_paginated", "supplemental_audit": True,
+    }
+
+
 def extract_one(version: str, pdf: Path, folder: Path, expected_pages: int) -> int:
     from structured_pdf_text.api import PdfTextExtractor
     from structured_pdf_text.renderers.markdown import render_markdown
@@ -255,7 +280,8 @@ def extract_one(version: str, pdf: Path, folder: Path, expected_pages: int) -> i
         "mode": "balanced",
         "language": "pt-BR",
         **protocol_manifest(language="pt-BR", mode="balanced", quality_policy="adaptive"),
-        "threads": 6,
+        "threads": config.num_threads,
+        "tesseract_omp_thread_limit": tesseract_thread_limit(config.num_threads),
         "extractor_flags": {
             "enable_tables": config.enable_tables,
             "merge_cross_page_tables": config.merge_cross_page_tables,
@@ -277,7 +303,7 @@ def extract_one(version: str, pdf: Path, folder: Path, expected_pages: int) -> i
         "extracted_markdown": str(paged_output),
         "pages": page_entries,
         "runtime_environment": {"platform": platform.platform(), "python": platform.python_version(),
-                                "requested_threads": 6},
+                                "requested_threads": config.num_threads, "cpu_count": os.cpu_count()},
     }
     run_manifest = folder / f"{version}_run_manifest.json"
     atomic_create_text(run_manifest, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
@@ -316,11 +342,8 @@ def run() -> int:
 
     folder.mkdir(parents=True, exist_ok=False)
     summary_path = folder / "run_summary.json"
-    summary = {"rodada": args.rodada, "started_utc": utc_now(), "settings": {
-        "mode": "balanced", "language": "pt-BR", "ocr_quality_policy": "adaptive",
-        "ocr_engine": "tesseract", "threads": 6, "output": "markdown_paginated",
-        "supplemental_audit": True,
-    }, "results": []}
+    summary = {"rodada": args.rodada, "started_utc": utc_now(),
+               "settings": round_settings(build_config()), "results": []}
 
     with (folder / "run.log").open("x", encoding="utf-8", buffering=1) as log:
         def say(message: str = "") -> None:

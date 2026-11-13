@@ -35,6 +35,9 @@ TESSERACT_ROTATION_RETRY Set to 0 to disable the quarter-turn retry of full-page
                          reads with low mean word confidence (default: 1). A
                          rotated read replaces the upright one only when it is
                          clearly more confident; see ``_retry_quarter_turns``.
+TESSERACT_DESKEW         Set to 0 to disable the small-angle deskew of full-page
+                         reads whose Tesseract lines share a 1°–10° tilt
+                         (default: 1); see ``_deskew_page``.
 
 Named profiles
 --------------
@@ -361,6 +364,124 @@ _ROTATION_RETRY_MIN_WORDS = 3
 _VERTICAL_LINES_MIN_RATIO = 0.6
 
 
+# Small-angle deskew (T3-P18). Tesseract recognizes skewed scans word by
+# word, but its page segmentation degrades: on 4°–5° scans whole lines are
+# lost (V10 p48: 353 words upright, 728 after deskew; V4 p107 at 2.5°: 358 ->
+# 838) and lines of neighbouring columns merge (V10 p18: 34 -> 13 lines across
+# columns). The tilt is measured on the engine's own lines.
+_DESKEW_MIN_DEGREES = 1.0
+_DESKEW_MAX_DEGREES = 10.0
+_DESKEW_MIN_LINES = 3
+_DESKEW_MIN_LINE_WORDS = 4
+# The deskewed read is kept unless it is clearly worse: a skewed read splits
+# words into fragments, so word counts favour it (V10 p25: 859 "words" at
+# mean confidence 90.7 upright). The measured tilt already justifies the
+# re-read; it must not lose confidence nor recognized characters.
+_DESKEW_MAX_CONFIDENCE_LOSS = 1.0
+_DESKEW_MIN_CHAR_RATIO = 0.9
+
+
+def _tsv_line_slope(tsv_text: str) -> float | None:
+    """Shared tilt (dy/dx, image y down) of Tesseract text lines, or None.
+
+    Each line with at least ``_DESKEW_MIN_LINE_WORDS`` words spanning six
+    word heights gives a least-squares slope of its word centers; the median
+    is returned when at least ``_DESKEW_MIN_LINES`` lines agree (same
+    agreement rule as ``reconstruct._dominant_slope``).
+    """
+    lines: dict[tuple[str, ...], list[tuple[float, float, float]]] = {}
+    for row in _parse_tsv(tsv_text):
+        if row.get("level") != "5" or not (row.get("text") or "").strip():
+            continue
+        try:
+            left, top = float(row["left"]), float(row["top"])
+            width, height = float(row["width"]), float(row["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        key = tuple(row.get(name) or "" for name in ("page_num", "block_num", "par_num", "line_num"))
+        lines.setdefault(key, []).append((left + width / 2.0, top + height / 2.0, height))
+    slopes = []
+    for points in lines.values():
+        if len(points) < _DESKEW_MIN_LINE_WORDS:
+            continue
+        xs = [x for x, _, _ in points]
+        ys = [y for _, y, _ in points]
+        heights = sorted(h for _, _, h in points)
+        if max(xs) - min(xs) < 6.0 * max(heights[len(heights) // 2], 1.0):
+            continue
+        mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
+        spread_x = sum((x - mean_x) ** 2 for x in xs)
+        if spread_x > 0:
+            slopes.append(sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / spread_x)
+    if len(slopes) < _DESKEW_MIN_LINES:
+        return None
+    slopes.sort()
+    middle = slopes[len(slopes) // 2]
+    deviations = sorted(abs(value - middle) for value in slopes)
+    if deviations[len(deviations) // 2] > max(0.004, abs(middle) * 0.35):
+        return None
+    return middle
+
+
+def _tsv_recognized_chars(tsv_text: str) -> int:
+    """Number of non-space characters in the recognized words."""
+    return sum(
+        len("".join((row.get("text") or "").split()))
+        for row in _parse_tsv(tsv_text)
+        if row.get("level") == "5"
+    )
+
+
+def _unrotate_tsv(
+    tsv_text: str,
+    angle_degrees: float,
+    rotated_size: tuple[int, int],
+    original_size: tuple[int, int],
+) -> str:
+    """Map TSV boxes read on ``image.rotate(angle_degrees, expand=True)`` back.
+
+    PIL turns the image counterclockwise about its center and enlarges the
+    canvas. Every box becomes the axis-aligned bounds of its four corners in
+    the original image; all other fields (text, ids, confidence) are kept.
+    """
+    theta = math.radians(angle_degrees)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    rotated_cx, rotated_cy = rotated_size[0] / 2.0, rotated_size[1] / 2.0
+    original_cx, original_cy = original_size[0] / 2.0, original_size[1] / 2.0
+
+    def back(x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - rotated_cx, y - rotated_cy
+        return original_cx + dx * cos_t - dy * sin_t, original_cy + dx * sin_t + dy * cos_t
+
+    lines = tsv_text.split("\n")
+    if not lines:
+        return tsv_text
+    header = lines[0].split("\t")
+    try:
+        columns = [header.index(name) for name in ("left", "top", "width", "height")]
+    except ValueError:
+        return tsv_text
+    output = [lines[0]]
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) < len(header):
+            output.append(line)
+            continue
+        try:
+            left, top, width, height = (float(fields[index]) for index in columns)
+        except ValueError:
+            output.append(line)
+            continue
+        corners = [back(x, y) for x, y in ((left, top), (left + width, top),
+                                            (left + width, top + height), (left, top + height))]
+        x0, y0 = min(x for x, _ in corners), min(y for _, y in corners)
+        x1, y1 = max(x for x, _ in corners), max(y for _, y in corners)
+        for index, value in zip(columns, (x0, y0, x1 - x0, y1 - y0)):
+            fields[index] = f"{value:.2f}"
+        output.append("\t".join(fields))
+    return "\n".join(output)
+
+
 def _tsv_vertical_line_ratio(tsv_text: str) -> float:
     """Fraction of Tesseract text lines (3+ words) laid out top to bottom."""
     lines: dict[tuple[str, ...], list[tuple[float, float]]] = {}
@@ -528,6 +649,7 @@ class TesseractBackend:
         self._osd_enabled: bool = env_bool("TESSERACT_OSD", False)
         self._osd_conf_min: float = env_float("TESSERACT_OSD_CONF_MIN", 2.0, minimum=0.0)
         self._rotation_retry: bool = env_bool("TESSERACT_ROTATION_RETRY", True)
+        self._deskew: bool = env_bool("TESSERACT_DESKEW", True)
 
         info = _tesseract_info(self._tesseract_cmd, self._extra_flags)
         self._version = info["version"]
@@ -562,7 +684,37 @@ class TesseractBackend:
         tsv = self._read_tsv(pil, dpi)
         if not osd_rotation and getattr(self, "_rotation_retry", False):
             tsv, osd_rotation = self._retry_quarter_turns(pil, dpi, tsv)
+        if not osd_rotation and getattr(self, "_deskew", False):
+            tsv = self._deskew_page(pil, dpi, tsv)
         return tsv, osd_rotation, original_width, original_height
+
+    def _deskew_page(self, pil: object, dpi: int, tsv: str) -> str:
+        """Re-read a page whose Tesseract lines share a small tilt (T3-P18).
+
+        The image is turned by the measured angle (between
+        ``_DESKEW_MIN_DEGREES`` and ``_DESKEW_MAX_DEGREES``) and read again.
+        The deskewed read replaces the upright one unless its mean confidence
+        drops by more than ``_DESKEW_MAX_CONFIDENCE_LOSS`` or it recognizes
+        fewer than ``_DESKEW_MIN_CHAR_RATIO`` of the upright characters; its
+        boxes are mapped back to the original image, so callers keep page
+        coordinates.
+        """
+        slope = _tsv_line_slope(tsv)
+        if slope is None:
+            return tsv
+        angle = math.degrees(math.atan(slope))
+        if not _DESKEW_MIN_DEGREES <= abs(angle) <= _DESKEW_MAX_DEGREES:
+            return tsv
+        from PIL import Image
+
+        rotated = pil.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor="white")
+        candidate = self._read_tsv(rotated, dpi)
+        _, confidence = _tsv_word_confidence(tsv)
+        _, candidate_confidence = _tsv_word_confidence(candidate)
+        if (candidate_confidence < confidence - _DESKEW_MAX_CONFIDENCE_LOSS
+                or _tsv_recognized_chars(candidate) < _DESKEW_MIN_CHAR_RATIO * _tsv_recognized_chars(tsv)):
+            return tsv
+        return _unrotate_tsv(candidate, angle, rotated.size, pil.size)
 
     def _read_tsv(self, pil: object, dpi: int) -> str:
         return _run_tesseract_tsv(
@@ -660,6 +812,7 @@ class TesseractBackend:
                 "active_page_orientation": self._osd_enabled,
                 "osd_conf_min": self._osd_conf_min if self._osd_enabled else None,
                 "rotation_retry": getattr(self, "_rotation_retry", False),
+                "deskew": getattr(self, "_deskew", False),
             },
         )
 

@@ -29,8 +29,28 @@ def test_runner_config_keeps_requested_round_parameters():
     assert ExtractionMode(config.mode) is ExtractionMode.BALANCED
     assert config.language == "pt-BR"
     assert config.ocr_engine == "tesseract"
-    assert config.num_threads == 6
+    assert config.num_threads == 8  # estabelecido para a RUN 005 (antes: 6)
     assert config.effective_ocr_quality_policy() is OcrQualityPolicy.ADAPTIVE
+
+
+def test_round_settings_record_the_effective_thread_configuration():
+    """T3-P30: as rodadas 001–005 gravaram ``threads: 6`` fixo, mesmo com 8 threads."""
+    from dataclasses import replace
+
+    runner = _load_runner()
+    settings = runner.round_settings(runner.build_config())
+    assert settings["threads"] == runner.build_config().num_threads
+    assert settings["tesseract_omp_thread_limit"] == runner.build_config().num_threads
+    assert runner.round_settings(replace(runner.build_config(), num_threads=3))["threads"] == 3
+    assert runner.tesseract_thread_limit(-1) is None
+    assert runner.tesseract_thread_limit(0) >= 1
+
+
+def test_runner_has_no_hard_coded_thread_count():
+    """O manifesto e o resumo devem derivar as threads da config efetiva."""
+    import re
+
+    assert not re.search(r'"(?:requested_)?threads":\s*\d', SCRIPT.read_text(encoding="utf-8"))
 
 
 def _write_pdf(path: Path, pages: int) -> None:

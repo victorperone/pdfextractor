@@ -63,7 +63,7 @@ def reconstruct_ocr_lines(
     if (not page_rotation % 360 and any(token.layout_line_id for token in visible)
             and not _engine_lines_mostly_vertical(visible, virtual_boxes)):
         # Only Tesseract reports its own line identity (T3-P10/T3-P18).
-        groups = _group_engine_lines(visible, virtual_boxes, page_width)
+        groups = _group_engine_lines(_drop_conflicting_rereads(visible, virtual_boxes), virtual_boxes, page_width)
     else:
         groups = _group_tokens_by_level(visible, virtual_boxes, page_rotation)
 
@@ -395,6 +395,46 @@ _PROSE_MIN_WORDS = 4
 _PROSE_MIN_PAGE_WIDTH = 0.15
 
 
+# Two engine calls reading the same spot (page OCR and a region re-read of a
+# table cell) produce boxes that almost coincide; joined into one line they
+# read "€ 98,4096,40" (V8 p4/p58, T3-P28).
+_REREAD_MIN_IOU = 0.6
+
+
+def _drop_conflicting_rereads(tokens: list[OcrToken], boxes: dict[int, BBox]) -> list[OcrToken]:
+    """Keep one reading where different engine calls read the same spot.
+
+    Applies only to tokens carrying the engine's line identity, whose prefix
+    identifies the recognition call (Tesseract). Two tokens from different
+    calls whose boxes overlap with IoU >= ``_REREAD_MIN_IOU`` are two readings
+    of the same word: the higher-confidence one is kept (V8 p4: "98,40" at
+    0.925 over "96,40" at 0.632). Partial overlaps at crop borders, tokens of
+    one call and tokens of other engines are left untouched.
+    """
+    scoped = [token for token in tokens if token.layout_line_id]
+    if len({token.layout_line_id.split(":", 1)[0] for token in scoped}) < 2:
+        return tokens
+    dropped: set[int] = set()
+    ordered = sorted(scoped, key=lambda token: boxes[id(token)].x0)
+    for index, first in enumerate(ordered):
+        if id(first) in dropped:
+            continue
+        first_box = boxes[id(first)]
+        for second in ordered[index + 1:]:
+            second_box = boxes[id(second)]
+            if second_box.x0 >= first_box.x1:
+                break
+            if (id(second) in dropped
+                    or first.layout_line_id.split(":", 1)[0] == second.layout_line_id.split(":", 1)[0]
+                    or first_box.iou(second_box) < _REREAD_MIN_IOU):
+                continue
+            loser = first if (first.confidence or 0.0) < (second.confidence or 0.0) else second
+            dropped.add(id(loser))
+            if loser is first:
+                break
+    return [token for token in tokens if id(token) not in dropped]
+
+
 def _group_engine_lines(
     tokens: list[OcrToken], boxes: dict[int, BBox], page_width: float,
 ) -> list[list[OcrToken]]:
@@ -411,7 +451,7 @@ def _group_engine_lines(
     put in separate blocks. A row is split only at a validated column gutter
     (see ``_validated_gutters``).
     """
-    rows, centers, spans, body = _engine_rows(tokens, boxes)
+    rows, centers, spans, body, _ = _engine_rows(tokens, boxes)
     gutters = _validated_gutters(rows, centers, spans, body, page_width)
     bands = text_column_bands(gutters)
     # (row index, band index or None, column index, tokens) per visual line.
@@ -473,26 +513,42 @@ def text_column_bands(
 def ocr_text_column_gutters(
     tokens: list[OcrToken], page_bbox: BBox | None = None, page_rotation: int = 0,
 ) -> list[tuple[float, float, float]]:
-    """Column gutters between flows of running text, in page coordinates.
+    """Column gutters between flows of running text (see ``ocr_text_column_layout``)."""
+    return ocr_text_column_layout(tokens, page_bbox, page_rotation)[0]
 
-    Returns ``(x_mid, y_top, y_bottom)`` for each gutter validated by
-    ``_validated_gutters``. Only tokens carrying the engine's line identity
-    (Tesseract) can produce gutters; for every other engine, and on rotated
-    pages, the result is empty. Table detectors use it to avoid reading
-    columns of prose as a borderless table (T3-P17).
+
+def ocr_text_column_layout(
+    tokens: list[OcrToken], page_bbox: BBox | None = None, page_rotation: int = 0,
+) -> tuple[list[tuple[float, float, float]], float]:
+    """Column gutters between flows of running text and the text tilt.
+
+    Returns ``(gutters, slope)``. Each gutter is ``(x_mid, y_top, y_bottom)``
+    validated by ``_validated_gutters``, expressed in the page frame
+    rectified by the engine-line tilt ``slope`` (dy/dx): a point ``(x, y)``
+    maps to ``(x + slope * y, y - slope * x)``. On a skewed scan a column
+    gutter is slanted in page coordinates but vertical in this frame; with
+    ``slope == 0`` the frame is the page itself. Only tokens carrying the
+    engine's line identity (Tesseract) produce gutters; for every other
+    engine, and on rotated pages, the result is empty. Used to order text
+    columns (T3-P10, T3-P18) and to reject prose columns read as a
+    borderless table (T3-P17).
     """
     visible = [token for token in tokens if token.text and token.bbox.width >= 0 and token.bbox.height >= 0]
     if (page_rotation % 360 or not visible
             or not all(isinstance(token, OcrToken) and not token.rotation % 360 for token in visible)
             or not any(token.layout_line_id for token in visible)):
-        return []
+        return [], 0.0
     page_width, page_height = _page_size(visible, page_bbox)
     boxes = {id(token): _virtual_bbox(token, page_bbox, page_width, page_height, 0) for token in visible}
-    rows, centers, spans, body = _engine_rows(visible, boxes)
+    rows, centers, spans, body, slope = _engine_rows(visible, boxes)
     origin_x = page_bbox.x0 if page_bbox is not None else 0.0
     origin_y = page_bbox.y0 if page_bbox is not None else 0.0
-    return [(mid + origin_x, top + origin_y, bottom + origin_y)
-            for mid, top, bottom in _validated_gutters(rows, centers, spans, body, page_width)]
+    # Boxes are page-local; shift the rectified frame back to page coordinates.
+    shift_x = origin_x + slope * origin_y
+    shift_y = origin_y - slope * origin_x
+    gutters = [(mid + shift_x, top + shift_y, bottom + shift_y)
+               for mid, top, bottom in _validated_gutters(rows, centers, spans, body, page_width)]
+    return gutters, slope
 
 
 def _engine_lines_mostly_vertical(tokens: list[OcrToken], boxes: dict[int, BBox]) -> bool:
@@ -519,11 +575,14 @@ def _engine_lines_mostly_vertical(tokens: list[OcrToken], boxes: dict[int, BBox]
 
 def _engine_rows(
     tokens: list[OcrToken], boxes: dict[int, BBox],
-) -> tuple[list[list[list[OcrToken]]], list[float], dict[int, tuple[float, float]], float]:
+) -> tuple[list[list[list[OcrToken]]], list[float], dict[int, tuple[float, float]], float, float]:
     """Join engine lines at the same (tilt-corrected) height into visual rows.
 
     Returns the rows (engine lines ordered left to right), their vertical
-    centers, the horizontal span of every engine line and the body height.
+    centers, the horizontal span of every engine line, the body height and
+    the engine-line tilt. Centers and spans are measured in the frame
+    rectified by the tilt (``x + slope * y``, ``y - slope * x``), so column
+    gutters of a skewed scan are vertical (T3-P18).
     """
     by_id: dict[str, list[OcrToken]] = {}
     units: list[list[OcrToken]] = []
@@ -540,7 +599,8 @@ def _engine_rows(
                for token in tokens if boxes[id(token)].height > 0]
     body = median(heights) if heights else 10.0
     tolerance = max(2.0, body * 0.65)
-    spans = {id(unit): (min(boxes[id(t)].x0 for t in unit), max(boxes[id(t)].x1 for t in unit)) for unit in units}
+    spans = {id(unit): (min(boxes[id(t)].x0 + slope * boxes[id(t)].cy for t in unit),
+                        max(boxes[id(t)].x1 + slope * boxes[id(t)].cy for t in unit)) for unit in units}
     levels = {id(unit): median(boxes[id(t)].cy - slope * boxes[id(t)].cx for t in unit) for unit in units}
 
     rows: list[list[list[OcrToken]]] = []
@@ -555,7 +615,7 @@ def _engine_rows(
             rows[best_index].append(unit)
             centers[best_index] = median(levels[id(item)] for item in rows[best_index])
     rows = [sorted(row, key=lambda item: spans[id(item)][0]) for row in rows]
-    return rows, centers, spans, body
+    return rows, centers, spans, body, slope
 
 
 def _validated_gutters(

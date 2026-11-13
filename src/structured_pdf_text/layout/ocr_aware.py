@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.reconstruct import ocr_text_column_gutters, text_column_bands
+from structured_pdf_text.ocr.reconstruct import ocr_text_column_layout, text_column_bands
 
 if TYPE_CHECKING:
     pass
@@ -228,8 +228,8 @@ def reconstruct_ocr_layout(
             output.append(_reclassify_one(region, _body_ocr_height_median(regions), page_bbox.height))
             continue
 
-        gutters = ocr_text_column_gutters(region.ocr_tokens, page_bbox)
-        lines = (_order_ocr_lines_by_text_gutters(region.ocr_lines, gutters) if gutters
+        gutters, slope = ocr_text_column_layout(region.ocr_tokens, page_bbox)
+        lines = (_order_ocr_lines_by_text_gutters(region.ocr_lines, gutters, slope) if gutters
                  else _order_ocr_lines_by_columns(region.ocr_lines, page_bbox))
         heights = [line.bbox.height for line in lines if line.bbox.height > 0]
         body_height = statistics.median(heights) if heights else 1.0
@@ -330,7 +330,7 @@ def _is_dash_continuation(
 
 
 def _order_ocr_lines_by_text_gutters(
-    lines: list[TextLine], gutters: list[tuple[float, float, float]],
+    lines: list[TextLine], gutters: list[tuple[float, float, float]], slope: float = 0.0,
 ) -> list[TextLine]:
     """Order OCR lines column by column inside each band of text columns.
 
@@ -340,14 +340,23 @@ def _order_ocr_lines_by_text_gutters(
     page with three columns above and two below reads the upper band column
     by column and then the lower one (T3-P10). Lines outside every band, or
     running across a band's gutter, keep their top-to-bottom position; a band
-    is emitted where its first line appears in that order.
+    is emitted where its first line appears in that order. Gutters and line
+    positions are compared in the frame rectified by ``slope`` (see
+    ``ocr_text_column_layout``), so a skewed scan orders its columns too.
     """
-    visual_order = sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    def x_at(line: TextLine, x: float) -> float:
+        return x + slope * line.bbox.cy
+
+    def y_at(line: TextLine, y: float) -> float:
+        return y - slope * line.bbox.cx
+
+    visual_order = sorted(lines, key=lambda line: (y_at(line, line.bbox.y0), x_at(line, line.bbox.x0)))
     bands = text_column_bands(gutters)
 
     def band_of(line: TextLine) -> int | None:
+        cy, x0, x1 = y_at(line, line.bbox.cy), x_at(line, line.bbox.x0), x_at(line, line.bbox.x1)
         for index, (top, bottom, mids) in enumerate(bands):
-            if top <= line.bbox.cy <= bottom and not any(line.bbox.x0 < mid < line.bbox.x1 for mid in mids):
+            if top <= cy <= bottom and not any(x0 < mid < x1 for mid in mids):
                 return index
         return None
 
@@ -369,7 +378,8 @@ def _order_ocr_lines_by_text_gutters(
             mids = bands[band][2]
             result.extend(sorted(
                 members[band],
-                key=lambda item: (sum(mid < item.bbox.cx for mid in mids), item.bbox.y0, item.bbox.x0),
+                key=lambda item: (sum(mid < x_at(item, item.bbox.cx) for mid in mids),
+                                  y_at(item, item.bbox.y0), x_at(item, item.bbox.x0)),
             ))
     return result
 
