@@ -165,3 +165,25 @@ def test_osd_rotation_maps_pipeline_and_canonical_tokens(monkeypatch) -> None:
         assert canonical.tokens[0].bbox_px[0] >= 5
         assert canonical.tokens[0].bbox_px[1] >= 7
         assert canonical.tokens[0].polygon_px
+
+
+def test_temporary_image_given_to_tesseract_is_lossless(tmp_path):
+    """The fast PNG level only changes encoding cost, never the pixels read."""
+    import numpy as np
+
+    captured = tmp_path / "seen.png"
+    executable = tmp_path / "copying-tesseract"
+    executable.write_text(
+        "#!/usr/bin/env python3\nimport shutil, sys\n"
+        f"shutil.copyfile(sys.argv[1], {str(captured)!r})\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    rng = np.random.default_rng(7)
+    pixels = rng.integers(0, 256, size=(37, 53, 3), dtype=np.uint8)
+    tesseract_module._run_tesseract_tsv(
+        Image.fromarray(pixels), "por", 3, 1, 300, [], executable=str(executable),
+    )
+    with Image.open(captured) as seen:
+        assert seen.format == "PNG"
+        assert np.array_equal(np.asarray(seen.convert("RGB")), pixels)

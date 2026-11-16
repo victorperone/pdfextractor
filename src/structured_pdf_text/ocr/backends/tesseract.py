@@ -170,6 +170,17 @@ def _to_pil(image: object) -> object:
     return image  # assume already PIL
 
 
+# The temporary image handed to the CLI is lossless at any zlib level; level 1
+# keeps the decoded pixels (and the TSV) identical to Pillow's default level 6
+# while cutting the encode cost of a 288-DPI page from ~0.2-0.6 s to ~0.1-0.25 s
+# (measured on V3-V10 pages; the encode runs once per Tesseract call).
+_TEMP_PNG_COMPRESS_LEVEL = 1
+
+
+def _save_temp_png(pil: object, path: str) -> None:
+    pil.save(path, format="PNG", compress_level=_TEMP_PNG_COMPRESS_LEVEL)
+
+
 def _run_tesseract_tsv(
     image: object,
     lang: str,
@@ -205,7 +216,7 @@ def _run_tesseract_tsv(
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp = f.name
-        pil.save(tmp, format="PNG")
+        _save_temp_png(pil, tmp)
         cmd = [
             executable, tmp, "stdout",
             "--oem", str(oem),
@@ -257,7 +268,7 @@ def _run_tesseract_osd(image: object, extra_flags: list[str], executable: str = 
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp = f.name
-        pil.save(tmp, format="PNG")
+        _save_temp_png(pil, tmp)
         cmd = [
             executable, tmp, "stdout",
             "--psm", "0",
@@ -362,6 +373,14 @@ _ROTATION_RETRY_MIN_WORDS = 3
 # Upright documents have horizontal lines, so a majority of vertical lines
 # (with at least this many words) triggers the retry as well.
 _VERTICAL_LINES_MIN_RATIO = 0.6
+# Cells of a table turned by 90°/270° hold one or two words per line, so the
+# line test above never sees them; Tesseract still reads such a crop with a
+# high confidence (V9 p20: 24 words, mean 95) but returns upright tokens and
+# the table grid comes out transposed. A word of at least this many letters
+# or digits laid out upright is wider than tall; when most such words are
+# taller than wide (by the ratio below), the read is treated as vertical too.
+_VERTICAL_WORD_MIN_CHARS = 3
+_VERTICAL_WORD_MIN_ASPECT = 1.2
 
 
 # Small-angle deskew (T3-P18). Tesseract recognizes skewed scans word by
@@ -504,6 +523,38 @@ def _tsv_vertical_line_ratio(tsv_text: str) -> float:
         for centers in shaped
     )
     return vertical / len(shaped)
+
+
+def _tsv_vertical_word_ratio(tsv_text: str) -> tuple[int, float]:
+    """Words with ``_VERTICAL_WORD_MIN_CHARS``+ alphanumerics and their vertical share.
+
+    A word is vertical when its box is ``_VERTICAL_WORD_MIN_ASPECT`` times
+    taller than wide, which upright text of that length never is.
+    """
+    shaped = vertical = 0
+    for row in _parse_tsv(tsv_text):
+        if row.get("level") != "5":
+            continue
+        text = (row.get("text") or "").strip()
+        if sum(character.isalnum() for character in text) < _VERTICAL_WORD_MIN_CHARS:
+            continue
+        try:
+            width, height = float(row["width"]), float(row["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(width) and math.isfinite(height)) or width <= 0 or height <= 0:
+            continue
+        shaped += 1
+        vertical += height >= _VERTICAL_WORD_MIN_ASPECT * width
+    return shaped, (vertical / shaped if shaped else 0.0)
+
+
+def _tsv_reads_vertically(tsv_text: str) -> bool:
+    """Whether Tesseract laid most lines, or most words, out top to bottom."""
+    if _tsv_vertical_line_ratio(tsv_text) >= _VERTICAL_LINES_MIN_RATIO:
+        return True
+    shaped, ratio = _tsv_vertical_word_ratio(tsv_text)
+    return shaped >= _ROTATION_RETRY_MIN_WORDS and ratio >= _VERTICAL_LINES_MIN_RATIO
 
 
 def _tsv_word_confidence(tsv_text: str) -> tuple[int, float]:
@@ -738,23 +789,39 @@ class TesseractBackend:
         a mean confidence of at least ``_ROTATION_ACCEPT_MIN_MEAN_CONF``; for a
         low-confidence upright read it must also gain
         ``_ROTATION_ACCEPT_MIN_GAIN`` points.
+
+        Tesseract also reads vertical text with a high confidence, in any of
+        the four orientations. A confident read whose words are mostly
+        vertical (a table turned by 90°/270°, T3-P32) is retried as well, and
+        only a rotated read with horizontal words replaces it. Among accepted
+        rotated reads, one with horizontal words is preferred, since only it
+        gives the tokens their reading orientation.
         """
         words, upright = _tsv_word_confidence(tsv)
-        vertical = _tsv_vertical_line_ratio(tsv) >= _VERTICAL_LINES_MIN_RATIO
+        vertical_lines = _tsv_vertical_line_ratio(tsv) >= _VERTICAL_LINES_MIN_RATIO
+        vertical = _tsv_reads_vertically(tsv)
         if words < _ROTATION_RETRY_MIN_WORDS or (upright >= _ROTATION_RETRY_MAX_MEAN_CONF and not vertical):
             return tsv, 0
-        best: tuple[float, int, str] | None = None
+        best: tuple[bool, float, int, str] | None = None
         for rotation in (90, 180, 270):
             candidate = self._read_tsv(pil.rotate(-rotation, expand=True), dpi)
             count, confidence = _tsv_word_confidence(candidate)
             if count < _ROTATION_RETRY_MIN_WORDS or _tsv_vertical_line_ratio(candidate) >= _VERTICAL_LINES_MIN_RATIO:
                 continue
-            if best is None or confidence > best[0]:
-                best = (confidence, rotation, candidate)
-        if best is None or best[0] < _ROTATION_ACCEPT_MIN_MEAN_CONF:
+            if confidence < _ROTATION_ACCEPT_MIN_MEAN_CONF:
+                continue
+            horizontal = not _tsv_reads_vertically(candidate)
+            if best is None or (horizontal, confidence) > best[:2]:
+                best = (horizontal, confidence, rotation, candidate)
+        if best is None:
             return tsv, 0
-        if vertical or best[0] - upright >= _ROTATION_ACCEPT_MIN_GAIN:
-            return best[2], best[1]
+        horizontal, confidence, rotation, candidate = best
+        if vertical and not vertical_lines and upright >= _ROTATION_RETRY_MAX_MEAN_CONF and not horizontal:
+            # Retried only because of vertical words: a reading that is
+            # vertical again carries no orientation evidence.
+            return tsv, 0
+        if vertical or confidence - upright >= _ROTATION_ACCEPT_MIN_GAIN:
+            return candidate, rotation
         return tsv, 0
 
     def _track_process(self, process):

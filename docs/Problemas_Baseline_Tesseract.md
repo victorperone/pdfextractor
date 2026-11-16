@@ -11,13 +11,13 @@
 
 | Campo | Valor |
 |---|---|
-| **Última atualização** | 2026-11-13 — análise da RUN 005; correções pós-005 validadas por página (T3-P18, T3-P28) e registro de threads (T3-P30) |
-| **Branch** | `feat/tesseract-optimization` (alterações pós-003 não commitadas) |
+| **Última atualização** | 2026-11-16 — análise da RUN 006; correções pós-006 validadas por página (T3-P32, T3-P31) e PNG temporário sem perdas mais rápido (T3-P12) |
+| **Branch** | `feat/tesseract-optimization` (alterações pós-005 e pós-006 não commitadas) |
 | **Baseline imutável** | `output/tesseract/001/` |
 | **Baseline corrigida** | `output/tesseract/002/` (T3-P00) |
-| **Baseline atual** | `output/tesseract/005/` (commit `fff2a4b`) |
-| **Próxima rodada** | `python3 -u scripts/run_tesseract_batch_wsl.py 006` (manual) — valida T3-P18 e T3-P28 (§5) |
-| **Configuração** | balanced · pt-BR · adaptive · tesseract · Markdown paginado · supplemental-audit. **Threads**: 6 até a 003; `num_threads=8` commitado em `fff2a4b` (antes da 005). A 005 rodou com 8; a 004 é indeterminada (a alteração existia só localmente). Os manifestos 001–005 registram `threads: 6` fixo (T3-P30). Medição controlada: 6 e 8 dão o mesmo tempo de OCR |
+| **Baseline atual** | `output/tesseract/006/` (commit `dfbf5e9`) |
+| **Próxima rodada** | `python3 -u scripts/run_tesseract_batch_wsl.py 007` (manual) — valida T3-P32, T3-P31 e o PNG temporário (§5) |
+| **Configuração** | balanced · pt-BR · adaptive · tesseract · Markdown paginado · supplemental-audit. **Threads**: 6 até a 003; 8 desde a 005 (a 006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`). O Tesseract 5.5.0 usa no máximo 4 threads OpenMP por chamada (`num_threads(4)` fixo no LSTM), então 6 e 8 equivalem a 4 (§1.10) |
 | **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0 — **não alterado** |
 | **Corpus/gabaritos/manifestos** | **não alterados por nós**. O diretório `corpus/V10/` foi substituído externamente em 2026-11-12, entre 07:56 e 07:59, durante a RUN 003 (ver T3-P15) |
 
@@ -37,13 +37,13 @@
 | T3-P09 | INFO | — | `ocr/tesseract/postprocess.py` | RISCO MATERIALIZADO — mitigado em T3-P25, T3-P26 e T3-P27 |
 | T3-P10 | CRÍTICO | — | reconstrução de linhas OCR + ordem de leitura | **RESOLVIDO** (004) |
 | T3-P11 | ALTO | — | executor (V10) | **RESOLVIDO** (004, via T3-P15) |
-| T3-P12 | MÉDIO | P2 | detecção visual de tabelas | PENDENTE — causa medida; 6 → 8 threads sem efeito mensurável (T3-P30) |
+| T3-P12 | MÉDIO | P2 | detecção visual de tabelas | PENDENTE — causa medida e reconfirmada na 006 (HoughLinesP ≈ 66% do tempo nas páginas pesadas; Tesseract 26%); PNG temporário mais rápido aplicado (§1.10) |
 | T3-P13 | BAIXO | — | regressões pontuais 001→002 | sem mudança na 003 (saídas V3–V8 idênticas) |
 | T3-P14 | INFO | — | suíte de testes | 13 falhas pré-existentes (inalteradas) |
 | T3-P15 | ALTO | — | executor | **RESOLVIDO** (004) |
 | T3-P16 | MÉDIO | — | classificação de página OCR vazia (`api.py`) | **RESOLVIDO** (004) |
 | T3-P17 | ALTO | P2 | `tables/ocr_tracks.py` | **RESOLVIDO** pelo critério (V10 precisão 0.947); L01/L02 inclinadas restantes |
-| T3-P18 | ALTO | P0 | backend Tesseract + ordem de colunas | **CORRIGIDO — VALIDADO PONTUALMENTE** (endireitamento pós-005); V10 p62 restante |
+| T3-P18 | ALTO | — | backend Tesseract + ordem de colunas | **RESOLVIDO** (006: critérios de CER/recall atendidos); efeitos colaterais em T3-P31 e V4 p106/p156 |
 | T3-P19 | INFO | — | avaliador (`duplicate_excess_rate`) | INTERPRETAÇÃO DOCUMENTADA — não alterar |
 | T3-P20 | MÉDIO | P2 | segmentação de parágrafos OCR | PARCIAL (melhorou com T3-P10) |
 | T3-P21 | INFO | P3 | V4: recall ≈ 0.85 em OCR de coluna única | ABERTA (T3-P23 explica só uma parte) |
@@ -53,10 +53,13 @@
 | T3-P25 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (004), com efeito colateral corrigido em T3-P26 |
 | T3-P26 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (005) |
 | T3-P27 | CRÍTICO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (005) |
-| T3-P28 | ALTO | P0 | montagem de linhas Tesseract | **CORRIGIDO — VALIDADO PONTUALMENTE** (V8 p4/p58) |
-| T3-P29 | MÉDIO | P2 | layout de página nativa com `/Rotate 90` | NOVO — página inteira num único bloco (V4 p213/p214) |
-| T3-P30 | INFO | — | executor | **CORRIGIDO NO EXECUTOR** (validado por testes); manifestos 001–005 seguem com `threads: 6` |
-| T3-P31 | BAIXO | P2 | listas em páginas endireitadas | NOVO — títulos de coluna com travessão viram itens de lista (5 tentativas, não resolvido) |
+| T3-P28 | ALTO | — | montagem de linhas Tesseract | **RESOLVIDO** (006: V8 p4/p58 `€ 98,40`, V8 `numeric` 0.991) |
+| T3-P29 | MÉDIO | P2 | layout de página nativa com `/Rotate 90` | PENDENTE — página inteira num único bloco (V4 p213/p214) |
+| T3-P30 | INFO | — | executor | **RESOLVIDO** (006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`) |
+| T3-P31 | **MÉDIO** (regressão confirmada na 006) | P0 | layout de regiões só-OCR + ordem genérica de linhas | **NÃO RESOLVIDO** — 5 tentativas pós-006; a melhor corrige as listas, mas intercala colunas (V10 p18); nenhuma mantida |
+| T3-P32 | ALTO | P0 | backend Tesseract (orientação) | NOVO na 006 — **CORRIGIDO — VALIDADO PONTUALMENTE** para tabelas lidas como palavras verticais (V9 p20/p71); V9 p36/p92 pendentes |
+| T3-P33 | MÉDIO | P1 | tabela por trilhas OCR → `text_tracks._build_table` (compartilhado) | NOVO na 006 — exceção `Invalid BBox` na V9 p36 → V9 `partial_success`; PENDENTE |
+| T3-P34 | ALTO | P1 | tabela raster com inclinação pequena em página mista | NOVO na 006 (inventário) — tabela não detectada (V9 p58/p66/p78; fraca em p8/p25); PENDENTE |
 
 ---
 
@@ -309,6 +312,84 @@ V5–V8: todas as métricas dentro de ±0.005 da 003 (V8 `numeric` 0.989 → 0.9
 
 **Tempo de extração do subconjunto (s, ANTES → FINAL; mesma concorrência)**: V3 48 → 51 · V4 295 → 323 · V5 5 → 7 · V6 159 → 166 · V7 2 → 2 · V8 146 → 153 · V9 190 → 211 · V10 301 → 346. O aumento nos corpora com páginas inclinadas (V4 +9%, V9 +11%, V10 +15%) é o custo da releitura endireitada. Corpora sem páginas disparadas variaram até +28% por ruído (V5 com saída idêntica).
 
+### §1.9 RUN 006 — comparação com a 005 (2026-11-16)
+
+- **Execução**: 8/8 corpora com métricas `ok`, `rank_eligible` e o mesmo número de métricas aplicáveis da 005. Extração `success`/`valid` em 7 corpora; **V9 `partial_success`/`partial` → `needs_review`**. Avaliador e gabaritos inalterados; nenhum `corpus_changed`.
+- **V9 `partial`**: causado por **uma única página, a p36** (`ocr_table_structure_unavailable`). É um **problema de execução**: `tables/ocr_tracks.py::detect_ocr_track_tables` → `text_tracks._build_table` levanta `ValueError: Invalid BBox` (y1 < y0). As demais páginas `recovered` (3, 19, 24, 49, 56, 58, 66, 71) são recuperações bem-sucedidas, não falhas. Em qualidade, a p36 é uma página raster inclinada (1.2°) com uma **tabela girada 270°** que sai ilegível na 005 e na 006 (T3-P32); a exceção ocorreu justamente num candidato de tabela formado por linhas do parágrafo vizinho fundidas com o lixo da tabela girada (na 005 o mesmo candidato virou uma tabela falsa). Ver T3-P33. `metrics_status: ok` só indica que o cálculo foi válido.
+- **Saídas**: V5 e V7 idênticas byte a byte à 005. Mudaram: V3 p80, p81, p115 (endireitamento: CER → 0.000); V4 10 páginas; V6 p6, p21, p45, p89 (Δ ≤ 0.003); V8 p4/p58 (T3-P28); V9 10 páginas; V10 as 12 L01/L02.
+
+| Métrica (005 → 006) | V3 | V4 | V9 | V10 |
+|---|---|---|---|---|
+| `cer_sequential_normalized` | 0.013 → 0.013 | 0.069 → **0.062** | 0.102 → **0.077** | 0.264 → **0.194** |
+| `wer_sequential` | = | 0.161 → 0.154 | 0.119 → 0.088 | 0.327 → 0.231 |
+| `text_coverage_recall` | = | 0.888 → 0.894 | 0.964 → **0.990** | 0.919 → **0.991** |
+| `text_coverage_precision` | = | 0.918 → 0.920 | 0.982 → 0.989 | 0.945 → 0.974 |
+| `numeric` / `dates` | = | 0.904 → 0.897 / 0.983 → 0.973 | 0.954 → 0.953 / 0.981 → 0.991 | 0.925 → 0.945 / 0.974 → 0.991 |
+| `cell_content_exact_match` / `cell_cer` | = | 0.650 → 0.634 / 0.302 → 0.333 | 0.520 → 0.527 / 0.594 → 0.579 | = |
+| `table_detection_precision` | = | 0.921 → 0.911 | 0.906 → 0.923 | = |
+| `list_item_detection_precision` | = | 0.764 → 0.778 | = | 0.771 → **0.659** |
+| `list_group_detection_precision` | = | 0.368 → 0.389 | = | 0.548 → **0.354** |
+| `heading_level_match_rate` | = | = | = | 0.989 → 0.977 |
+| `paragraph_detection_f1` | 0.925 → 0.923 | 0.372 → 0.375 | 0.516 → 0.524 | 0.359 → 0.372 |
+
+V5–V8: dentro de ±0.003, exceto V8 `numeric` 0.988 → 0.991 e `cell_content_exact_match` 0.997 → 0.999 (T3-P28).
+
+**Critérios da §5 para a 006:**
+
+| Verificação | Critério | 006 | Situação |
+|---|---|---|---|
+| T3-P18 | V10 L01/L02: CER médio ≤ 0.40 e recall ≥ 0.90 | CER médio **0.314** (0.157–0.468); recall 0.909–0.997 | ✅ |
+| T3-P18 | V9 p81, p17, p23 < 0.30 | 0.000 / 0.269 / 0.156 | ✅ |
+| T3-P18 | V4 p107/p108 < 0.10 | 0.035 / 0.035 | ✅ |
+| T3-P18 | CER documental V10 < 0.264, V9 < 0.102, V4 < 0.069 | 0.194 / 0.077 / 0.062 | ✅ |
+| T3-P28 | V8 p4/p58 `€ 98,40`; V8 `numeric` ≥ 0.988 | `€ 98,40` nas duas; 0.991 | ✅ |
+| T3-P30 | `threads: 8` e `tesseract_omp_thread_limit: 8` | registrados em resumo e manifestos | ✅ |
+| Controle | V3, V5–V8 iguais à 005 fora das páginas inclinadas e de V8 p4/p58 | V5/V7 idênticos; V3 só páginas inclinadas; V6 4 páginas com Δ ≤ 0.003 | ✅ |
+| Controle | tabelas/listas/dados críticos de V4/V9/V10 sem piora > 0.01 (exceto listas do V10) | V4 `cell_cer` +0.031, `cell_detection_precision` −0.026, `cell_content_exact` −0.016, `dates` −0.010; V10 listas −0.19 (T3-P31) | ⚠️ |
+| Desempenho | V4/V9/V10 até +10% | +3% / +12% / +12% (V5 +11% e V8 +14% com saída idêntica ou quase: ruído do ambiente) | ⚠️ dentro do ruído |
+| Geral | sem `extract_error`/`metrics_error`/`corpus_changed` | nenhum; V9 `partial` (T3-P33) | ⚠️ |
+
+**Leitura das pioras do V4** (por página, critério de gravidade): a queda de tabelas vem quase toda da **p164** (tabela OCR inclinada de 12 colunas), que na 005 saía como texto ilegível (CER 0.663) e na 006 passou a sair **como tabela** de 12 colunas com os códigos legíveis (CER 0.345). A métrica de detecção não casa essa tabela com o gabarito (precisão 0) e o `cell_cer` sobe, mas o conteúdo melhorou. Pioras reais e reproduzíveis, porém pequenas: **p106** (`currency` 0.933 → 0.769: um valor monetário a menos reconhecido; CER 0.134 → 0.211) e **p156** (recall 0.706 → 0.647). Registradas como efeito colateral de T3-P18, prioridade baixa.
+
+**Desempenho**: extração com 102–134% de CPU (igual às rodadas anteriores). Perfil medido (17 páginas de V3–V10, 2026-11-16): subprocessos Tesseract 26% do tempo, gravação do PNG temporário 6%, Python 68% — dominado por `cv2.HoughLinesP` em `tables/visual_alignment.py` (≈ 66% nas páginas pesadas, T3-P12). Ver §1.10.
+
+**Erros remanescentes de maior peso na 006** (fração das edições de cada corpus):
+
+| Grupo | Páginas | Observação |
+|---|---|---|
+| Nativo multicoluna (T3-P22) | V9 p51 (10.5%), p43 (6.6%), p5 (5.0%); V10 p9 (7.9%); V4 p25/26/28 (12.4%) | recall 1.0; ordem errada; componente nativo (fora do escopo desta etapa) |
+| L01/L02 restantes (T3-P18) | V10 p62 (5.4%), p68, p48, p25, p75 | CER 0.32–0.47 |
+| OCR de texto degradado (T3-P21) | V4 p104 (blur, recall 0.34, 6.8%), p118, p88, p142, p130 | limite de reconhecimento |
+| Tabelas raster giradas (T3-P32) | V9 p20, p36, p55, p71, p92 | `cell_content_exact` 0–0.04 (p55 0.66) |
+| Tabelas raster inclinadas (T3-P34) | V9 p58, p66, p78 (não detectadas), p8, p25 | `currency` 0.63–0.86 |
+| Títulos espaçados (T3-P05) | V8 p46/p47 (85% das edições do V8), V7 p1 | nativo |
+| V3 | p116 (tabela girada, 27.5%), p138 (adversarial, recall 0), p86, p103 | — |
+
+**Inventário e priorização pós-006** (gravidade considerando dados críticos > conteúdo > estrutura; só regressões reproduzíveis):
+
+| Problema | Gravidade | Abrangência (006) | Evidência | Componente | Tratável no Tesseract? | Prioridade |
+|---|---|---|---|---|---|---|
+| T3-P32 tabela raster girada transposta/ilegível | ALTO (dados críticos em tabela) | V9: 5 de 6 tabelas giradas (p20, p36, p55, p71, p92) | `cell_content_exact` 0–0.04; R$ na célula errada | backend Tesseract (orientação) | sim | **P0 — escolhido (1)** |
+| T3-P31 listas falsas em páginas endireitadas | MÉDIO (regressão confirmada, estrutura) | V10: 12 páginas, 20 itens | `list_group_precision` −0.19 | layout só-OCR | sim (provável) | **P0 — escolhido (2)** |
+| T3-P22 nativo multicoluna | ALTO (ordem) | V4 3, V9 3, V10 2 páginas; 10–25% das edições | recall 1.0, CER 0.26–0.69 | layout nativo | não (nativo; fora do escopo) | P1 |
+| T3-P34 tabela raster inclinada não detectada | ALTO (dados críticos) | V9: 5 páginas | `currency` 0.63–0.86 | detecção visual de tabela (compartilhada) | parcial | P1 |
+| T3-P33 exceção na estrutura por trilhas OCR | MÉDIO (execução) | V9 p36 → documento `partial` | `ValueError: Invalid BBox` | `text_tracks` (compartilhado) | não (nativo) | P1 |
+| T3-P21 OCR de texto degradado | MÉDIO | V4 p104 (recall 0.34) e outras | limite do reconhecimento | Tesseract | baixa | P2 |
+| Efeitos colaterais de T3-P18 no V4 | BAIXO | p106 (`currency` −0.16), p156 (recall −0.06) | pequenos e pontuais | backend | sim | P2 |
+| T3-P06/T3-P20 títulos e parágrafos | MÉDIO | V4/V9/V10 | `heading_recall` V10 0.30 | layout | — | P2 |
+| T3-P12 desempenho | MÉDIO | todos | 102–134% de CPU; Hough 66% | detecção visual de tabelas | não (nativo) | P2 |
+
+- **Por que T3-P32 primeiro**: é o único problema que corrompe **valores numéricos de tabela** com causa localizada no backend Tesseract; afeta qualquer documento real com tabela girada e a correção não depende do corpus. O `partial` do V9 (T3-P33) foi comparado e tem impacto menor: muda o status, mas a exceção impediu uma tabela falsa.
+- **Por que T3-P31 em segundo**: é uma regressão introduzida pela correção anterior (T3-P18) e confirmada na rodada completa, no pipeline Tesseract. Causa raiz independente de T3-P32.
+- **Por que não T3-P22/T3-P33/T3-P34 agora**: maiores em páginas ou em dados, mas dependem de componentes compartilhados/nativos (layout nativo, detector de tabelas sem borda, detecção visual), fora do escopo autorizado (prioridade a correções exclusivas do Tesseract e não alterar o extrator nativo).
+
+### §1.10 Paralelismo e desempenho do OCR (investigação de 2026-11-16)
+
+- **Tesseract 5.5.0** (com OpenMP): o paralelismo interno existe só no LSTM e tem teto fixo de 4 threads (`num_threads(GFS=4)` em `src/lstm/lstm.cpp`, `kNumThreads = 4` em `src/lstm/fullyconnected.cpp`); `OMP_THREAD_LIMIT` só reduz. Segmentação, binarização e carga do modelo são seriais.
+- **Medição** (8 páginas a 288 DPI, 3 repetições): `OMP_THREAD_LIMIT` 1/2/4/8 → 16.0 / 14.8 / 14.6 / 14.7 s, com CPU 100/134/196/197%. **8 ≡ 4**; o ganho máximo sobre 1 thread é ≈ 9%. TSV idêntico byte a byte em todas as configurações.
+- **Processos concorrentes** escalam (OMP=1: K=3 → 2.6×, K=4 → 3.0×), mas dentro de uma página só ≈ 6% do tempo está em tentativas OCR independentes (retry de rotação, escalas de refino) e ≈ 3% entre regiões. **Paralelismo interno à página não foi implementado** (ganho pequeno frente ao risco).
+- **Aplicado**: o PNG temporário entregue ao Tesseract é gravado com `compress_level=1` (era o padrão 6). É sem perdas: pixels decodificados e TSV idênticos nas 8 páginas; o tempo de gravação + Tesseract cai 11–14% por chamada de página inteira (≈ 3% do tempo total da extração). Teste: `tests/test_tesseract_effective.py::test_temporary_image_given_to_tesseract_is_lossless`.
+
 ## §2 Problemas — detalhamento
 
 ### T3-P00 | CRÍTICO | Executor sem tabelas e sem supressão de cabeçalho/rodapé — RESOLVIDO
@@ -500,7 +581,9 @@ V5–V8: todas as métricas dentro de ±0.005 da 003 (V8 `numeric` 0.989 → 0.9
 - **Restante**: L01/L02 com Tesseract fundindo colunas na própria segmentação (V10 p18), onde não há calha validada. Ver T3-P18.
 - **Testes**: `tests/test_tesseract_run003_regressions.py::test_ocr_track_table_crossed_by_a_text_column_gutter_is_rejected`.
 
-### T3-P18 | ALTO | Inclinação não compensada em tokens Tesseract — CORRIGIDO — VALIDADO PONTUALMENTE (pós-005)
+### T3-P18 | ALTO | Inclinação não compensada em tokens Tesseract — RESOLVIDO (006)
+
+- **RUN 006**: todos os critérios atendidos (§1.9): V10 L01/L02 CER médio 0.314 e recall ≥ 0.909; V9 p81 0.000, p17 0.269, p23 0.156; V4 p107/p108 0.035; CER documental V10 0.194, V9 0.077, V4 0.062. Efeitos colaterais: T3-P31 (listas no V10, confirmado) e pequenas pioras pontuais no V4 (p106 `currency`, p156 recall). V10 p62 continua com 0.468.
 
 - **RUN 005 (antes da correção)**: V10 L01/L02 com CER 0.44–0.70 e recall 0.35–0.93; V9 p81 0.91 (recall 0.07), p17 0.55, p9 0.52, p23 0.64; V4 p107 0.311, p108 0.466.
 - **Causa raiz (CONFIRMADA por experimento)**: o Tesseract reconhece palavras inclinadas, mas a segmentação de página se degrada. Linhas inteiras se perdem (V10 p48: 353 palavras lidas; 728 com a imagem endireitada; V4 p107: 358 → 838) e linhas de colunas vizinhas se fundem (V10 p18: 34 → 13 linhas atravessando colunas). Agrupar linhas (correção de 004) não recupera o que o Tesseract não leu.
@@ -658,7 +741,9 @@ V5–V8: todas as métricas dentro de ±0.005 da 003 (V8 `numeric` 0.989 → 0.9
 - **Testes**: `tests/test_tesseract_postprocess.py::test_marker_inside_whole_page_block_does_not_suppress_page_content`, `test_marker_sized_blocks_are_still_suppressed`. Os testes existentes de marcadores, inclusive os de tabela, continuam passando.
 - **Critério para a 005**: V4 p213/p214 com recall ≥ 0.95; V4 `text_coverage_recall` > 0.877.
 
-### T3-P28 | ALTO | Valor monetário colado em célula de tabela (V8 p4/p58) — CORRIGIDO — VALIDADO PONTUALMENTE (pós-005)
+### T3-P28 | ALTO | Valor monetário colado em célula de tabela (V8 p4/p58) — RESOLVIDO (006)
+
+- **RUN 006**: V8 p4/p58 com `€ 98,40` e CER 0.000; V8 `numeric` 0.991, `cell_content_exact_match` 0.999; nenhuma outra página do V8 alterada.
 
 - **Causa raiz (CONFIRMADA)**:
   1. Na mesma célula existem duas leituras do mesmo valor, com caixas quase idênticas (x 310.07 e 310.45): a da página, "96,40" (confiança 0.632, errada), e a de uma releitura de região, "98,40" (confiança 0.925, correta).
@@ -682,7 +767,9 @@ V5–V8: todas as métricas dentro de ±0.005 da 003 (V8 `numeric` 0.989 → 0.9
 - V4 p213/p214: toda a página vira um bloco HEADER, sem parágrafos nem títulos. Após T3-P27 o texto é preservado, mas a estrutura não.
 - **Componente**: layout de regiões e montagem de linhas nativas em páginas rotacionadas (compartilhado, não Tesseract). Requer investigação própria.
 
-### T3-P30 | INFO | Executor grava `threads` fixo no run manifest — CORRIGIDO NO EXECUTOR (pós-005)
+### T3-P30 | INFO | Executor grava `threads` fixo no run manifest — RESOLVIDO (006)
+
+- **RUN 006**: `run_summary.json` e os 8 manifestos registram `threads: 8`, `tesseract_omp_thread_limit: 8` e `requested_threads: 8`.
 
 - **Correção** (`scripts/run_tesseract_batch_wsl.py`):
   - `round_settings(config)` gera as configurações do `run_summary.json` a partir de `build_config()`.
@@ -700,6 +787,61 @@ V5–V8: todas as métricas dentro de ±0.005 da 003 (V8 `numeric` 0.989 → 0.9
 - **Diagnóstico**: a regra de T3-P24 reconhece a continuação corretamente (verificado). A divisão do bloco ocorre antes: numa página inclinada, a caixa de cada linha (alinhada aos eixos) fica mais alta por |inclinação| × largura, mais nas linhas longas do corpo do que nos títulos. A razão título/corpo cai abaixo de 1.28 e o título vira TEXT; a continuação vai para outro bloco, e a detecção de listas da montagem de conteúdo usa o travessão como marcador.
 - **Tentativas (5)**: endireitar (causa), ordenação retificada, critério de aceite (mantidas por T3-P18); altura corrigida pela inclinação na classificação (resolveu as listas, mas regrediu o CER de V10 p13/p48 por mudar a divisão em regiões, que embaralha linhas na montagem); tokens por `evidence_id` (sem efeito). As duas últimas foram revertidas.
 - **Próximo passo**: entender por que a divisão em mais regiões embaralha linhas na montagem de conteúdo de páginas inclinadas antes de reaplicar a correção de altura.
+
+- **RUN 006 (confirmação)**: a regressão se materializou no documento inteiro. V10 `list_item_detection_precision` 0.771 → 0.659, `list_group_detection_precision` 0.548 → 0.354, `list_item_detection_f1` 0.871 → 0.795; `heading_level_match_rate` 0.989 → 0.977. **20 itens de lista falsos** em 12 páginas (as L01/L02: 5, 13, 18, 25, 31, 45, 48, 53, 62, 68, 75, 83), todos continuações "— Prestação de contas" / "— Extrato de tramitação" / "— Procedimento de verificação" de títulos de coluna. O gabarito espera esses pares como um título ("### Secretaria Regional de Controle — Prestação de contas"). Texto preservado (recall 0.91–1.00).
+- **Mecanismo (medido pós-006)**: a regra de T3-P24 marca a continuação como não-lista **no layout OCR**, mas, como o título inclinado não passa no teste de altura, título, continuação e corpo ficam numa mesma região TEXT; na montagem, `text/lists.py::segment_list_lines` (compartilhado) vê duas ou mais linhas iniciadas por travessão e cria a lista. Além disso, na p18 a ordem correta das colunas dentro dessa região dependia da geometria das linhas: `text/reading_order.py::_order_prose_lines` (compartilhado) mantém um único grupo com as linhas como estão, e qualquer mudança de geometria ou de fronteiras de região faz a detecção genérica intercalar as colunas inclinadas.
+- **Tentativas pós-006 (5, nenhuma mantida)** — 54 páginas de 6 corpora (V3, V4, V6, V8, V9, V10) com o código do Problema 1 como referência:
+
+| # | Hipótese | Alteração | Resultado no escopo V10 (19 págs.) | Decisão |
+|---|---|---|---|---|
+| 1 | Unir a continuação à linha que ela continua impede qualquer componente de ler o travessão como marcador | `layout/ocr_aware.py`: `_join_dash_continuations` + `_merge_continuation` (altura de classificação = maior linha de origem) | listas: precisão de itens 0.182 → **0.533**, de grupos 0.059 → **0.400**, F1 de itens 0.308 → 0.696; recall +0.003 a +0.013; demais corpora idênticos; **p18 CER 0.322 → 0.525** (parágrafos das duas colunas intercalados linha a linha) | descartada (regressão grave e reproduzível de ordem) |
+| 2 | Região só-OCR não deve atravessar uma calha de coluna validada | + quebra de região a cada mudança de coluna | listas iguais à #1; p5 0.157 → 0.356, p45 0.265 → 0.498, p31, p48, p75 pioram | descartada |
+| 3 | A ordem por calhas do motor deve ser preservada na montagem | + marca `order_mode` e ramo em `text/reading_order.py` | p62 0.468 → 0.210, p13, p31 melhoram; p45 → 0.498, p48 → 0.470, p75 → 0.439 e **controle reto p50 0.064 → 0.123** pioram | descartada |
+| 4 | O par "Órgão — Assunto" unido é título de seção | + TITLE para linha unida curta (≤ 80 caracteres, sem pontuação de frase) | listas iguais à #1; p5 → 0.308, p45 → 0.524, p75 → 0.549, controle p6 0.036 → 0.053 | descartada |
+| 5 | Preservar as fronteiras de região anteriores (a linha unida fecha a região) | + fechamento de grupo após a linha unida | premissa refutada (a continuação não formava região própria no layout); medição: p45 → 0.539, p18 → 0.532, p75 → 0.511 | descartada |
+
+- **Conclusão**: com o pipeline atual, a separação correta das colunas inclinadas nessas páginas é frágil; os falsos itens de lista funcionavam como separadores acidentais. Corrigir as listas sem tocar a ordem exige uma ordem de linhas robusta à inclinação na montagem (`text/reading_order.py`, compartilhado com o nativo) ou uma junção que não altere a geometria vista por ela — fora do escopo autorizado nesta etapa (não alterar o extrator nativo). Todo o código das 5 tentativas foi revertido; `layout/ocr_aware.py` e `text/reading_order.py` estão idênticos ao commit `dfbf5e9`.
+- **Próximos passos sugeridos**: (a) junção que mantém a caixa da linha de título (a altura de duas linhas é o que dispara a separação em pistas, verificado no rastreamento da p18); (b) com autorização para o componente compartilhado, ordenar linhas OCR no referencial retificado pela inclinação medida (T3-P18).
+
+### T3-P32 | ALTO | Tabela raster girada 90°/270° com a grade transposta — CORRIGIDO — VALIDADO PONTUALMENTE (pós-006, parcial)
+
+- **Evidência (006)**: no V9, das 6 tabelas raster giradas (manifesto `rotation_degrees` ±90/270), só p3 sai correta. p20 e p71 saem com o **texto certo e a grade transposta e invertida** (primeira linha "004 | 003 | 002 | 001 | Rubrica"; `cell_content_exact_match` 0.042 e 0.000; os valores monetários ficam em células erradas). p36 e p92 saem ilegíveis; p55 mistura as duas coisas.
+- **Gravidade**: dados críticos (valores R$, quantidades) associados à linha errada ou perdidos em tabela; mecanismo genérico de qualquer documento com tabela girada.
+- **Causa raiz (CONFIRMADA por rastreamento)**: o Tesseract (PSM 3) também lê texto vertical, e o faz com confiança alta. No recorte da tabela da p20 a leitura direta tem 24 palavras com confiança média 95, todas com caixa mais alta que larga. O retry de quarto de volta (T3-P02) só disparava com confiança < 60 ou com ≥ 60% das **linhas de 3+ palavras** verticais; células de tabela têm 1–2 palavras por linha, então nenhum gatilho valia. Os tokens ficavam com `rotation = 0` e o construtor de tabelas montava a grade no referencial da página. Na p3 a leitura direta tinha confiança 45, o retry disparava, os tokens recebiam `rotation = 270` e a tabela saía certa.
+- **Tentativas**:
+
+| # | Hipótese | Alteração | Resultado (54 páginas, 6 corpora) | Decisão |
+|---|---|---|---|---|
+| 1 | A forma das palavras (≥ 3 alfanuméricos, altura ≥ 1.2 × largura) indica leitura vertical também em linhas curtas | `_tsv_vertical_word_ratio`/`_tsv_reads_vertically`; usado no gatilho **e** como filtro dos candidatos girados | p20 0.042 → 0.950, p71 0.000 → 1.000; **regressão** V8 p4/p58 ("L-01" → "1-01", `numeric` 1.000 → 0.909) | ajustar |
+| 2 | Leitura vertical confiante pode ter o texto certo em qualquer orientação; o formato deve **ordenar** os candidatos, não eliminá-los | candidatos ≥ 70 ordenados por (palavras horizontais, confiança); quando o retry foi disparado só pelas palavras verticais, só uma leitura horizontal substitui a original | p20/p71 mantidos; V8 volta a "L-01"; V3, V4, V6, V8, V10 idênticos ao ANTES | **mantida** |
+
+  A regressão do V8 p4 da tentativa 1 foi explicada: o recorte de uma linha da tabela tem confiança 56 ("-01"); a leitura a 90° é vertical, mas com o texto certo ("L-01", 82), e era aceita antes. Na tentativa 2 ela continua aceita, porque não há candidato horizontal com confiança ≥ 70.
+- **Correção** (`ocr/backends/tesseract.py`, só Tesseract): `_VERTICAL_WORD_MIN_CHARS = 3`, `_VERTICAL_WORD_MIN_ASPECT = 1.2`, `_tsv_vertical_word_ratio`, `_tsv_reads_vertically`; `_retry_quarter_turns` com gatilho pelas palavras e preferência por leitura horizontal. Nenhuma regra depende de texto ou de página.
+- **Validação pontual (ANTES → DEPOIS)**:
+
+| Página | CER | `cell_content_exact_match` | `cell_cer` | Observação |
+|---|---|---|---|---|
+| V9 p20 | 0.069 → **0.001** | 0.042 → **0.950** | 1.294 → 0.008 | grade correta |
+| V9 p71 | 0.068 → **0.000** | 0.000 → **1.000** | 1.372 → 0.000 | recall 0.991 → 1.000 |
+| V9 p55 | 0.179 → 0.177 | 0.657 → 0.794 | 0.319 → 0.180 | ver abaixo |
+| V9 p3 (controle girado) | 0.026 | 1.000 | 0.000 | idêntica |
+| Escopo V9 (15 págs.) | 0.149 → 0.139 | 0.350 → 0.479 | 0.747 → 0.592 | `numeric` 0.906 → 0.906 |
+
+- **Resíduo e risco (p55)**: a tabela girada passa a sair orientada (Ação × Prazo nas linhas certas), mas a coluna "Situação" fica fora da grade como parágrafos soltos, e dois números da coluna "Ação" ("02", "03") saem como "=" / "pm" (antes eram lidos, mas em células transpostas). `numeric` da página 0.974 → 0.919. É uma perda pontual de dado numérico, reproduzível, que fica registrada para a 007.
+- **Não resolvido**: p36 (tabela girada dentro de página raster inclinada; nenhuma leitura de região da tabela é feita) e p92 (tabela girada não detectada). Exigem detectar a região da tabela antes de relê-la.
+- **Testes**: `tests/test_tesseract_run006_regressions.py` — medida das palavras verticais, gatilho em recorte confiante vertical, recorte horizontal não relido, números curtos não disparam, leitura vertical de baixa confiança continua aceitando o candidato vertical (comportamento T3-P02), preferência pela leitura horizontal, retry por palavras não troca vertical por vertical.
+
+### T3-P33 | MÉDIO | Exceção `Invalid BBox` na estrutura de tabela por trilhas OCR (V9 p36) — PENDENTE
+
+- **Evidência**: único motivo do `partial_success` do V9 na 006: `OCR table structure unavailable: ValueError: Invalid BBox coordinates: BBox(x0=63.2, y0=526.1, x1=237.8, y1=521.3)`. Reproduzido no harness.
+- **Causa (CONFIRMADA)**: `text_tracks._build_table` (detector nativo de tabelas sem borda, compartilhado) define as bordas das linhas da tabela pelo ponto médio entre centros consecutivos, supondo centros crescentes. O candidato da p36 é formado por linhas OCR que se sobrepõem verticalmente (alturas 9–32 pt, y0 513–536): o parágrafo da coluna esquerda fundido com o lixo da tabela girada 270°. Uma linha alta tem centro abaixo da seguinte e a borda inverte.
+- **Impacto real**: a exceção impediu uma tabela falsa (na 005 o mesmo candidato virou `<table>` com "Os comprovantes de pagamento." nas células). O defeito é de execução/status, não de conteúdo.
+- **Não escolhido nesta etapa**: a correção natural é no detector compartilhado (rejeitar candidato cujas linhas não formam uma sequência vertical válida), fora do pipeline Tesseract e do escopo autorizado (não alterar o extrator nativo). A causa da página (tabela girada ilegível) é T3-P32.
+
+### T3-P34 | ALTO | Tabela raster com inclinação pequena em página mista não detectada — PENDENTE (inventário 006)
+
+- **Evidência (006)**: V9 p58 (−3.4°), p66 (−4.0°), p78 (−3.6°) sem tabela detectada (`cell_content_exact_match` 0; `currency` 0.86 / 0.63); p25 (−4.0°) 0.118 e p8 (−1.8°) 0.375. As linhas da tabela saem como texto corrido ("001 peças de reposição |1 | R$ 206,74 R$ 206,74 Regular 002 | …").
+- **Hipótese**: a detecção visual da grade (`tables/visual.py`, Hough + grade alinhada aos eixos) rejeita réguas inclinadas, e a releitura endireitada (T3-P18) só corrige o texto. Componente de detecção visual compartilhado. Próxima prioridade de tabelas.
 
 ## §3 Alterações de código
 
@@ -751,6 +893,17 @@ A alteração local `num_threads=8` em `scripts/run_tesseract_batch_wsl.py` não
 | T3-P30 | `scripts/run_tesseract_batch_wsl.py` | `tesseract_thread_limit`, `round_settings`; threads da config no manifesto e no resumo | executor |
 | testes | `tests/test_tesseract_run005_regressions.py` (novo, 12 testes); `tests/test_tesseract_batch_runner_config.py` (+2, expectativa de threads = 8) | — | — |
 
+As alterações pós-005 entraram no commit `dfbf5e9` (avaliadas na RUN 006).
+
+### Pós-006 (2026-11-16, não commitadas)
+
+| Item | Arquivo | Mudança | Escopo |
+|---|---|---|---|
+| T3-P32 | `src/structured_pdf_text/ocr/backends/tesseract.py` | `_VERTICAL_WORD_MIN_CHARS`, `_VERTICAL_WORD_MIN_ASPECT`, `_tsv_vertical_word_ratio`, `_tsv_reads_vertically`; `_retry_quarter_turns` também dispara quando a maioria das palavras é vertical e prefere a leitura girada com palavras horizontais | só Tesseract |
+| T3-P12 | `src/structured_pdf_text/ocr/backends/tesseract.py` | `_TEMP_PNG_COMPRESS_LEVEL = 1` / `_save_temp_png` para o PNG temporário (TSV e OSD) | só Tesseract; sem perdas |
+| testes | `tests/test_tesseract_run006_regressions.py` (novo, 9 testes); `tests/test_tesseract_effective.py` (+1) | — | — |
+| T3-P31 | `layout/ocr_aware.py`, `text/reading_order.py` | 5 tentativas, **todas revertidas** (arquivos idênticos a `dfbf5e9`) | — |
+
 ## §4 Testes executados
 
 | Data | Execução | Resultado |
@@ -782,7 +935,52 @@ A alteração local `num_threads=8` em `scripts/run_tesseract_batch_wsl.py` não
 
 **Não executado**: nenhuma rodada completa após as correções pós-005; `output/tesseract/006` não existe; suíte completa não executada.
 
-## §5 Validação esperada na RUN 006
+| 2026-11-16 | RUN 006 completa (manual) | 8/8 com métricas; V9 `needs_review` (T3-P33) |
+| 2026-11-16 | benchmarks pontuais de threads/concorrência/PNG (scratchpad, §1.10) | 8 ≡ 4 threads; TSV idêntico; PNG nível 1 sem perdas |
+| 2026-11-16 | harness por página (`page_indices`, métricas oficiais `selected_pages`): ANTES (54 págs.) | 49/51 páginas comparáveis idênticas à 006 (V4 p85/p110 dependem do documento) |
+| 2026-11-16 | T3-P32 tentativas 1 e 2; T3-P31 tentativas 1–5 (mesmas 54 páginas; a 5ª só no V10) | §2 T3-P32 e T3-P31 |
+| 2026-11-16 | validação final: 39 páginas de controle extras + alvos do T3-P32 (V4, V5, V6, V7, V8, V9, V10) | só V9 p20/p55/p71 mudam por efeito do código; diferenças em V4 p25/86/140/150/190, V6 p3/p33, V10 p59 são de contexto de documento (rastreamento: nenhuma decisão de retry diferente da regra antiga) |
+| 2026-11-16 | `pytest` direcionado (`test_tesseract_*`, `test_easyocr_pipeline_integrations.py`, ordem de leitura) | todos passaram |
+| 2026-11-16 | `pytest tests` (código final pós-006) | **13 falhas = exatamente as de T3-P14** (`test_line_detector.py` 8 `test_reconciliation_*`, `test_rapidocr_improvement_005/006/008.py` 3, `test_no_timeouts.py` 1, `test_evaluation_exact_optimizations.py[V3]` 1); nenhuma falha nova |
+
+**Páginas processadas nos testes pontuais pós-006** (extração real apenas dessas páginas, via `page_indices`; resultados em diretórios experimentais no scratchpad, nada gravado em `output/`):
+
+| Corpus | Conjunto principal (ANTES, T1, T2, P2T1–P2T4; P2T5 só V10) | Controles extras (FINAL) |
+|---|---|---|
+| V3 | 80, 96, 97, 99, 116 | — |
+| V4 | 85, 107, 108, 109, 110, 113, 164 | 25, 26, 82, 86, 116, 136, 140, 150, 190 |
+| V5 | — | 10, 17, 23 |
+| V6 | 21, 31 | 3, 33, 89 |
+| V7 | — | 24, 25 |
+| V8 | 4, 22, 58 | 4, 46, 58 |
+| V9 | 3, 4, 9, 17, 20, 23, 25, 36, 44, 50, 55, 58, 71, 81, 92 | 2, 3, 8, 20, 31, 41, 51, 53, 55, 62, 67, 71, 72, 84 |
+| V10 | 4, 5, 6, 9, 13, 15, 18, 25, 30, 31, 41, 45, 48, 50, 53, 62, 68, 75, 83 | 8, 11, 19, 21, 24, 40, 52, 59, 72 |
+
+Configuração: `build_config()` do executor (tesseract, balanced, pt-BR, adaptive, 8 threads, `OMP_THREAD_LIMIT` 8), Markdown paginado com os números de página originais.
+
+**Tempo de extração do conjunto principal (s, ANTES → T2 final)**: V3 28.7 → 29.0 · V4 123.3 → 125.1 · V6 53.4 → 49.4 · V8 42.2 → 43.2 · V9 157.8 → 158.9 · V10 224.6 → 228.8 — sem mudança além do ruído. O retry extra só ocorre em recortes com palavras majoritariamente verticais (3 leituras a mais por recorte).
+
+## §5 Validação esperada na RUN 007
+
+Comparar 007 × 006.
+
+| Verificação | Critério |
+|---|---|
+| T3-P32 | V9 p20 e p71 com a tabela na orientação de leitura (`cell_content_exact_match` ≥ 0.9 nas páginas); V9 `cell_content_exact_match` documental > 0.527 e `cell_cer` < 0.579; V9 `numeric` ≥ 0.950 e `currency` ≥ 0.962 |
+| T3-P32 (risco) | V9 p55: conferir a coluna "Situação" e os números "01–04" da tabela girada; V3 p96–p99/p116 e V4 p109–p114 (rotação de página) sem mudança de CER > 0.01 |
+| PNG temporário | saídas de V3–V10 idênticas à 006 em todas as páginas sem tabela girada (a mudança é sem perdas) |
+| Controle | V3, V4, V5, V6, V7, V8 e V10 idênticos byte a byte à 006, exceto páginas com recortes lidos como texto vertical (esperado: nenhuma fora do V9); métricas de texto de V9/V10 sem piora > 0.005 |
+| T3-P31 | sem mudança (não corrigido): V10 `list_group_detection_precision` = 0.354 |
+| Desempenho | extração dentro de ±10% da 006 (ruído observado: até +14% em corpora com saída idêntica) |
+| Geral | nenhum `extract_error`/`metrics_error`/`corpus_changed`; V9 continua `partial` por T3-P33 (esperado) |
+
+**Limitações**:
+- A validação cobriu 93 páginas distintas; o gatilho por palavras verticais roda em toda leitura Tesseract, então só a 007 confirma a ausência de efeito no restante.
+- Fusão de tabelas entre páginas e supressão de repetidos não são exercitadas por subconjuntos (ver diferenças de contexto acima).
+
+Comando: `python3 -u scripts/run_tesseract_batch_wsl.py 007` (pré-verificação: `--check-only`). **Não altere `corpus/` durante a rodada.**
+
+## §5.0 (histórico) Validação esperada na RUN 006 — resultado em §1.9
 
 Comparar 006 × 005.
 
