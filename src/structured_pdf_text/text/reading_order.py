@@ -803,6 +803,8 @@ def _order_prose_lines_with_decision(
     region_width: float,
     region_bbox: BBox,
     flow_lines: list[TextLine] | None = None,
+    *,
+    allow_slabs: bool = True,
 ) -> _ProseFlowResult:
     """Order prose lines and return the ordering decision alongside the result.
 
@@ -885,6 +887,14 @@ def _order_prose_lines_with_decision(
         spanning_count = 0
         segment_count = 1
         groups = 0
+    if mode != "MULTI_COLUMN" and allow_slabs and flow_lines is None:
+        slabbed = _order_horizontal_slabs(ordered)
+        if slabbed is not None:
+            output, segment_count = slabbed
+            groups = segment_count
+            spanning_count = 0
+            mode = "MULTI_COLUMN"
+            reasons = (*reasons, "horizontal_slabs")
     output = _order_stamp_fragments(output)
     preserved = _preserves_flat_line_set(lines, output)
     if not preserved:
@@ -904,6 +914,52 @@ def _order_prose_lines_with_decision(
         line_preservation_ok=preserved,
     )
     return _ProseFlowResult(tuple(output), decision, groups)
+
+
+def _order_horizontal_slabs(ordered: list[TextLine]) -> tuple[list[TextLine], int] | None:
+    """Read a region slab by slab when its column layout changes down the page (T3-P22).
+
+    A region can hold text in three columns above and two below (V10 p9):
+    no gutter persists over its whole height, so the region as a whole reads
+    as a form or falls back to top-to-bottom order, interleaving the columns.
+    The region is cut where no line occupies a vertical gap of at least two
+    line heights; each slab with enough lines is ordered by the same
+    detector, without further cuts. The slab order is used only when at
+    least two slabs are decidedly multi-column, i.e. the column layout
+    really changes down the region; a single multi-column slab (such as
+    key/value pairs under a few prose rows) leaves the region decision as
+    it is. Returns the lines and the number of column segments, or ``None``.
+    """
+    heights = [line.bbox.height for line in ordered if line.bbox.height > 0]
+    if len(ordered) < 8 or not heights:
+        return None
+    minimum_gap = 2.0 * median(heights)
+    slabs: list[list[TextLine]] = []
+    bottom = None
+    for line in sorted(ordered, key=lambda item: (item.bbox.y0, item.bbox.x0)):
+        if bottom is None or line.bbox.y0 - bottom >= minimum_gap:
+            slabs.append([])
+            bottom = line.bbox.y1
+        slabs[-1].append(line)
+        bottom = max(bottom, line.bbox.y1)
+    if len(slabs) < 2:
+        return None
+    output: list[TextLine] = []
+    segments = 0
+    multi_column = 0
+    for slab in slabs:
+        if len(slab) < 4:
+            output.extend(slab)
+            segments += 1
+            continue
+        box = BBox.union_all([line.bbox for line in slab])
+        result = _order_prose_lines_with_decision(slab, box.x0, box.width, box, allow_slabs=False)
+        multi_column += result.decision.mode == "MULTI_COLUMN"
+        output.extend(result.lines)
+        segments += max(1, result.column_groups)
+    if multi_column < 2 or not _preserves_flat_line_set(ordered, output):
+        return None
+    return output, segments
 
 
 def _order_stamp_fragments(lines: list[TextLine]) -> list[TextLine]:
@@ -1050,15 +1106,19 @@ def _detect_persistent_gutters(
         start = max(0, min(band_count - 1, start))
         occupied_by_band[start].append((line.bbox.x0, line.bbox.x1))
     candidate_gaps: list[tuple[float, float]] = []
+    gaps_by_band: list[list[tuple[float, float]]] = []
     minimum_gap = max(6.0, region_bbox.width * 0.012)
     inner_left = region_bbox.x0 + region_bbox.width * 0.04
     inner_right = region_bbox.x1 - region_bbox.width * 0.04
     for intervals in occupied_by_band:
         merged = _merge_intervals(intervals)
+        band_gaps = []
         for first, second in zip(merged, merged[1:]):
             gap = (first[1], second[0])
             if gap[1] - gap[0] >= minimum_gap and gap[0] >= inner_left and gap[1] <= inner_right:
                 candidate_gaps.append(gap)
+                band_gaps.append(gap)
+        gaps_by_band.append(band_gaps)
     if not candidate_gaps:
         return []
     clusters: list[list[tuple[float, float]]] = []
@@ -1074,11 +1134,56 @@ def _detect_persistent_gutters(
     # adaptive to the selected number of bands.
     required_observations = min(3, max(2, len(lines) // 2))
     persistence = max(0.50, min(1.0, required_observations / band_count))
-    return [
+    gutters = [
         (median(gap[0] for gap in cluster), median(gap[1] for gap in cluster))
         for cluster in clusters
         if len(cluster) / band_count >= persistence
     ]
+    gutters.extend(_ragged_column_gutters(
+        gaps_by_band, gutters, minimum_gap, region_bbox.width, persistence,
+    ))
+    return sorted(gutters)
+
+
+def _ragged_column_gutters(
+    gaps_by_band: list[list[tuple[float, float]]],
+    known: list[tuple[float, float]],
+    minimum_gap: float,
+    region_width: float,
+    persistence: float,
+) -> list[tuple[float, float]]:
+    """Gutters next to a ragged-right column, missed by the centre clustering (T3-P22).
+
+    Left-aligned columns end at varying x, so the empty band before the next
+    column keeps its right edge and moves its left edge from band to band
+    (V10 p59: 337–393 … 367–393). Centres then drift beyond the clustering
+    tolerance and the gutter never reaches ``persistence``. Here gaps of the
+    same gutter are grouped by overlap: the group keeps the x range empty in
+    all of them (at least ``minimum_gap`` wide), and a band supports it when
+    one of its gaps covers that range. Gaps wider than a third of the region
+    (a column absent from the band) only count as support. Gutters already
+    found by the centre clustering are kept as they are.
+    """
+    cores: list[tuple[float, float]] = []
+    for gap in sorted(gap for band in gaps_by_band for gap in band if gap[1] - gap[0] <= region_width / 3.0):
+        for index, (left, right) in enumerate(cores):
+            shared = (max(left, gap[0]), min(right, gap[1]))
+            if shared[1] - shared[0] >= minimum_gap:
+                cores[index] = shared
+                break
+        else:
+            cores.append(gap)
+    found = []
+    for left, right in cores:
+        if any(min(right, known_right) > max(left, known_left) for known_left, known_right in [*known, *found]):
+            continue
+        support = sum(
+            any(gap[0] <= left and gap[1] >= right for gap in band)
+            for band in gaps_by_band
+        )
+        if support / len(gaps_by_band) >= persistence:
+            found.append((left, right))
+    return found
 
 
 def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:

@@ -12,11 +12,11 @@
 | Campo | Valor |
 |---|---|
 | **Última atualização** | 2026-11-16 — análise da RUN 006; T3-P32 (tentativas 1–4) validado por página; T3-P31 não resolvido (5 tentativas); PNG temporário sem perdas mais rápido (T3-P12) |
-| **Branch** | `feat/tesseract-optimization` — pós-005 em `dfbf5e9`; pós-006 (T3-P32 tentativas 1–2, PNG temporário) em `f03710a`; T3-P32 tentativas 3–4 (texto da leitura vertical, palavra a palavra) **não commitadas** |
+| **Branch** | `feat/tesseract-optimization` — pós-005 em `dfbf5e9`; pós-006 (T3-P32 tentativas 1–2, PNG temporário) em `f03710a`; T3-P32 tentativas 3–4 em `4a732c6`; T3-P22 tentativas 1–2 (`text/reading_order.py`) **não commitadas** |
 | **Baseline imutável** | `output/tesseract/001/` |
 | **Baseline corrigida** | `output/tesseract/002/` (T3-P00) |
 | **Baseline atual** | `output/tesseract/006/` (commit `dfbf5e9`) |
-| **Próxima rodada** | `python3 -u scripts/run_tesseract_batch_wsl.py 007` (manual) — valida T3-P32, T3-P31 e o PNG temporário (§5) |
+| **Próxima rodada** | `python3 -u scripts/run_tesseract_batch_wsl.py 007` (manual) — valida T3-P32, T3-P22 e o PNG temporário (§5) |
 | **Configuração** | balanced · pt-BR · adaptive · tesseract · Markdown paginado · supplemental-audit. **Threads**: 6 até a 003; 8 desde a 005 (a 006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`). O Tesseract 5.5.0 usa no máximo 4 threads OpenMP por chamada (`num_threads(4)` fixo no LSTM), então 6 e 8 equivalem a 4 (§1.10) |
 | **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0 — **não alterado** |
 | **Corpus/gabaritos/manifestos** | **não alterados por nós**. O diretório `corpus/V10/` foi substituído externamente em 2026-11-12, entre 07:56 e 07:59, durante a RUN 003 (ver T3-P15) |
@@ -47,7 +47,7 @@
 | T3-P19 | INFO | — | avaliador (`duplicate_excess_rate`) | INTERPRETAÇÃO DOCUMENTADA — não alterar |
 | T3-P20 | MÉDIO | P2 | segmentação de parágrafos OCR | PARCIAL (melhorou com T3-P10) |
 | T3-P21 | INFO | P3 | V4: recall ≈ 0.85 em OCR de coluna única | ABERTA (T3-P23 explica só uma parte) |
-| T3-P22 | ALTO | P1 | layout de regiões em páginas nativas multicoluna | PENDENTE — diagnóstico refinado na 005 (8 páginas em V4/V9/V10) |
+| T3-P22 | ALTO | P0 | ordem de linhas em regiões multicoluna (`text/reading_order.py`, compartilhado) | **CORRIGIDO — VALIDADO PONTUALMENTE** para V10 p9/p59 e V4 p25 (parcial); V4 p26/p28 e V9 p5/p43/p51 pendentes (outros mecanismos) |
 | T3-P23 | CRÍTICO | — | backend Tesseract (`_parse_tsv`) | **RESOLVIDO** (004) |
 | T3-P24 | BAIXO | — | `layout/ocr_aware.py` (listas) | **RESOLVIDO** (004) |
 | T3-P25 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (004), com efeito colateral corrigido em T3-P26 |
@@ -666,6 +666,32 @@ V5–V8: dentro de ±0.003, exceto V8 `numeric` 0.988 → 0.991 e `cell_content_
 - Outras L03 nativas estão corretas (p23, p39, p73, p79 ≈ 0.07); p59 tem 0.263.
 - O componente é a montagem de linhas nativas (compartilhada, ligada a T3-P05). Requer autorização.
 
+- **Ciclo pré-007 (2026-11-16) — autorizado a alterar componentes compartilhados só para T3-P22.**
+- **Diagnóstico confirmado por etapa** (V10 p9): (1–2) linhas nativas **corretas**, cada uma dentro da sua coluna (127 linhas; só cabeçalho, título e "Publicação" largos) — não é segmentação; (4) o layout forma **uma** região TEXT com as duas faixas (3 colunas em cima, 2 embaixo; 116 linhas), enquanto nas páginas de controle p23/39/73/79 forma duas; (5) a ordenação da região (`text/reading_order.py::_order_prose_lines_with_decision`) decide **FORM** e lê linha a linha — **é aqui que as colunas se misturam**; (6–7) blocos e Markdown só herdam a ordem.
+- **T3-P22 reúne mecanismos distintos** (dados intermediários):
+
+| Mecanismo | Páginas | Etapa |
+|---|---|---|
+| Calha ao lado de coluna alinhada à esquerda e irregular à direita não detectada (agrupamento das lacunas pelo **centro**, tolerância 12 pt; os centros variam 15 pt) | V10 p59 (faixa de cima com 2 pistas em vez de 3), V4 p25 | ordenação |
+| Região com faixas de número de colunas diferente: nenhuma calha persiste na altura toda → FORM/FALLBACK | V10 p9 | ordenação (a região única vem do layout `_body_bands`, que não corta nos títulos da faixa de baixo porque o texto de cima termina a < 3 alturas de linha deles) |
+| Trechos de prosa de uma coluna classificados como **carimbo** (`layout/decorative.py::_looks_like_semantic_status`, ramo "contraste escuro + ≥ 3 linhas" em fonte do corpo) viram regiões separadas e são posicionados fora do lugar | V4 p25 (parágrafos 51/52), p26, p28 | layout (semântico) |
+| Três colunas detectadas como tabela sem borda | V9 p51 | detector de tabelas |
+| Títulos de colunas vizinhas fundidos numa linha ("Antecedentes Resultados") | V9 p5, p43 | montagem de linhas nativas (T3-P05) |
+
+- **Tentativas**:
+
+| # | Hipótese | Alteração | Resultado (62 páginas de V3–V10) | Decisão |
+|---|---|---|---|---|
+| 1 | Lacunas da mesma calha devem ser agrupadas pela **sobreposição** (núcleo vazio comum), não pelo centro | `_detect_persistent_gutters` + `_ragged_column_gutters` (aditivo: calhas já encontradas não mudam; mesmo limiar de persistência) | **V10 p59 CER 0.263 → 0.069** (`paragraph_f1` 0.625 → 0.914); **V4 p25 0.336 → 0.222**; V10 p62 (OCR inclinada) 0.468 → 0.251; demais 59 páginas idênticas | **mantida** |
+| 2 | Região sem colunas na altura toda pode ter faixas com estruturas diferentes: cortar nos vãos verticais livres (≥ 2 alturas de linha) e decidir cada faixa com o mesmo detector | `_order_horizontal_slabs` + `allow_slabs` em `_order_prose_lines_with_decision`; só age se a região **não** foi decidida multicoluna e se **≥ 2 faixas** forem decididamente multicoluna (com 1 só, pares chave/valor viravam colunas — pego pelo teste existente `test_table_lines_do_not_drive_mixed_prose_to_form_flow`) | **V10 p9 CER 0.689 → 0.088** (`paragraph_f1` 0.095 → 0.941); demais 61 páginas idênticas | **mantida** |
+
+- **Ordem semântica verificada**: V10 p9, p59 e p62 com os procedimentos 01→05 na ordem do gabarito; V4 p25 com as três colunas da região principal em ordem (40–42, 50, 60–62), restando 51/52 (regiões "carimbo") no fim.
+- **Censo do ramo de status semântico** (modo nativo, só layout, sem gravar saída): 110 agrupamentos em V3–V10, **apenas 1 com fonte acima do corpo** (V5 "Seção 2 - Análise"); os demais são texto de corpo (prosa do V4/V9, listas do V10, código do V6, metadados do V7). Indica que o ramo "contraste + fragmentado" gera falsos positivos em todos os corpora — **próxima hipótese** para V4 p25/p26/p28 (não implementada: ciclo encerrado a pedido antes da RUN 007).
+- **Arquivos**: `src/structured_pdf_text/text/reading_order.py` (compartilhado: consumidores `assemble/content.py`, `assemble/page.py`, `renderers/markdown.py`; nativo e regiões só-OCR de qualquer motor); `tests/test_native_multicolumn_order.py` (novo, 9 testes; os de detecção e ordem falham sem a correção).
+- **Testes**: `test_native_multicolumn_order.py`, `test_priority2_reading_order.py`, `test_content_assembly.py`, `test_final_review_blockers.py`, `test_ocr_parser_regressions.py`, `test_easyocr_figures_and_policy_regressions.py` — 218 passaram. Suíte completa **não executada** neste ciclo.
+- **Riscos**: a mudança vale para regiões nativas e só-OCR de todos os motores; nas 62 páginas só mudaram V10 p9/p59/p62 e V4 p25. Variante não coberta: região já decidida multicoluna cuja faixa de baixo tem outra estrutura (teste sintético mostra intercalação na faixa de baixo; comportamento anterior, não alterado).
+- **Status**: CORRIGIDO — VALIDADO PONTUALMENTE (V10 p9/p59; V4 p25 parcial). Pendente de validação integral na RUN 007.
+
 ### T3-P23 | CRÍTICO | Parser TSV engolia linhas após palavra iniciada por aspas — RESOLVIDO (004)
 
 - **RUN 004**: V4 `text_coverage_recall` 0.832 → 0.877; V4 `currency` 0.884 → 0.960, `dates` 0.953 → 0.976.
@@ -910,7 +936,7 @@ Avaliadas na RUN 006.
 | testes | `tests/test_tesseract_run006_regressions.py` (novo, 9 testes); `tests/test_tesseract_effective.py` (+1) | — | — |
 | T3-P31 | `layout/ocr_aware.py`, `text/reading_order.py` | 5 tentativas, **todas revertidas** (arquivos idênticos a `dfbf5e9`) | — |
 
-### Pós-006, T3-P32 tentativas 3–4 (2026-11-16, não commitadas)
+### Pós-006, T3-P32 tentativas 3–4 (2026-11-16, commit `4a732c6`)
 
 | Item | Arquivo | Mudança | Escopo |
 |---|---|---|---|
@@ -957,6 +983,8 @@ Avaliadas na RUN 006.
 | 2026-11-16 | T3-P32 tentativas 3 e 4 (V3 96–99/116, V4 109–114/164, V6 31, V8 4/22/58, V9 3/4/20/23/36/55/58/71/92, V10 5/13/48) | §2 T3-P32 |
 | 2026-11-16 | validação ampla da tentativa 4: conjunto principal (54) e controles (44) repetidos | só V9 p55 muda (melhora); demais idênticas ao código de `f03710a` |
 | 2026-11-16 | `pytest tests` (código com T3-P32 tentativa 4) | **13 falhas = exatamente as de T3-P14**; nenhuma falha nova |
+| 2026-11-16 | T3-P22: linha de base + tentativas 1 e 2 em 62 páginas (V3 1/20/44/60/80/96; V4 20/25/26/28/30/82/107/108/150; V5 4/10/17/23/30; V6 3/21/31/47/74; V7 1/24/25; V8 4/22/46/58; V9 4/5/8/20/23/43/51/55/71/81; V10 4/5/6/9/13/18/23/39/41/48/50/59/62/73/79) | só V10 p9/p59/p62 e V4 p25 mudam (melhoram); T3-P18, T3-P28 (V8 p4/p58) e T3-P32 (V9 p20/p55/p71) idênticos |
+| 2026-11-16 | `pytest` direcionado de ordem de leitura/montagem (6 arquivos) | 218 passaram; suíte completa não executada |
 | 2026-11-16 | `pytest tests` (código final pós-006) | **13 falhas = exatamente as de T3-P14** (`test_line_detector.py` 8 `test_reconciliation_*`, `test_rapidocr_improvement_005/006/008.py` 3, `test_no_timeouts.py` 1, `test_evaluation_exact_optimizations.py[V3]` 1); nenhuma falha nova |
 
 **Páginas processadas nos testes pontuais pós-006** (extração real apenas dessas páginas, via `page_indices`; resultados em diretórios experimentais no scratchpad, nada gravado em `output/`):
@@ -983,6 +1011,7 @@ Comparar 007 × 006.
 | Verificação | Critério |
 |---|---|
 | T3-P32 | V9 p20 e p71 com a tabela na orientação de leitura (`cell_content_exact_match` ≥ 0.9 nas páginas); V9 `cell_content_exact_match` documental > 0.527 e `cell_cer` < 0.579; V9 `numeric` ≥ 0.950 e `currency` ≥ 0.962 |
+| T3-P22 | V10 p9 CER ≤ 0.15 e p59 ≤ 0.10 com recall ≥ 0.99; V4 p25 < 0.336; V10 documental CER < 0.194 e `paragraph_detection_f1` > 0.372; V10 p23/p39/p73/p79 e páginas nativas de 2 colunas do V4 sem piora; V5–V8 idênticos à 006 salvo ruído de contexto |
 | T3-P32 (p55) | V9 p55 com os identificadores 01–04 nas linhas dos prazos e `numeric` da página ≥ 0.97; palavras da coluna "Situação" presentes (ainda fora da grade); V3 p96–p99/p116 e V4 p109–p114 (rotação de página) sem mudança de CER > 0.01 |
 | PNG temporário | saídas de V3–V10 idênticas à 006 em todas as páginas sem tabela girada (a mudança é sem perdas) |
 | Controle | V3, V4, V5, V6, V7, V8 e V10 idênticos byte a byte à 006, exceto páginas com recortes lidos como texto vertical (esperado: nenhuma fora do V9); métricas de texto de V9/V10 sem piora > 0.005 |
