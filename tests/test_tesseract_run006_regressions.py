@@ -121,3 +121,111 @@ def test_word_triggered_retry_never_swaps_one_vertical_reading_for_another():
     upright = _cells_tsv(95.0, vertical=True)
     assert backend._retry_quarter_turns(Image.new("RGB", (200, 300)), 300, upright) == (upright, 0)
 
+
+
+# --- T3-P32, tentativa 3: texto da leitura vertical, orientação da horizontal ---
+#
+# Upright crop 300 × 200. A word read horizontally on the crop turned by 90°
+# at (left 20, top y, 60 × 14) lies on the crop turned by 180° at
+# (left 300 - y - 14, top 20, 14 × 60) — computed by hand from the 90°/180°
+# quarter-turn formulas, so the fixture does not reuse the code under test.
+
+def _word_rows(words):
+    rows = [HEADER]
+    for line, (left, top, width, height, confidence, text) in enumerate(words, start=1):
+        rows.append(f"5\t1\t1\t1\t{line}\t1\t{left}\t{top}\t{width}\t{height}\t{confidence}\t{text}")
+    return "\n".join(rows)
+
+
+_TOPS = (40, 70, 100, 130)
+
+
+def _horizontal_at_90(confidence, texts):
+    return _word_rows([(20, top, 60, 14, confidence, text) for top, text in zip(_TOPS, texts)])
+
+
+def _vertical_at_180(confidence, texts, shift=0):
+    return _word_rows([(300 - top - 14 + shift, 20, 14, 60, confidence, text) for top, text in zip(_TOPS, texts)])
+
+
+def _texts(tsv):
+    from structured_pdf_text.ocr.backends.tesseract import _parse_tsv
+    return [row["text"] for row in _parse_tsv(tsv) if row.get("level") == "5"]
+
+
+def test_clearly_better_vertical_reading_supplies_the_text_in_the_chosen_frame():
+    from structured_pdf_text.ocr.backends.tesseract import _parse_tsv, _vertical_reading_in_frame
+
+    chosen = _horizontal_at_90(84.0, ["Ação", "oi1", "=pm", "Prazo"])
+    vertical = _vertical_at_180(92.0, ["Ação", "0101", "0202", "Prazo"])
+
+    result = _vertical_reading_in_frame({0: _cells_tsv(53.0, vertical=True), 90: chosen, 180: vertical}, 90, chosen, (300, 200))
+
+    assert _texts(result) == ["Ação", "0101", "0202", "Prazo"]
+    boxes = [(float(r["left"]), float(r["top"]), float(r["width"]), float(r["height"]))
+             for r in _parse_tsv(result) if r.get("level") == "5"]
+    assert boxes == [(20.0, top, 60.0, 14.0) for top in _TOPS]
+
+
+def test_vertical_reading_needs_a_clear_confidence_gain():
+    from structured_pdf_text.ocr.backends.tesseract import _vertical_reading_in_frame
+
+    chosen = _horizontal_at_90(90.0, ["Ação", "oi1", "=pm", "Prazo"])
+    vertical = _vertical_at_180(93.0, ["Ação", "0101", "0202", "Prazo"])
+
+    assert _vertical_reading_in_frame({90: chosen, 180: vertical}, 90, chosen, (300, 200)) is chosen
+
+
+def test_vertical_reading_of_other_positions_is_not_used():
+    from structured_pdf_text.ocr.backends.tesseract import _vertical_reading_in_frame
+
+    chosen = _horizontal_at_90(84.0, ["Ação", "oi1", "=pm", "Prazo"])
+    elsewhere = _vertical_at_180(95.0, ["Ação", "0101", "0202", "Prazo"], shift=-150)
+
+    assert _vertical_reading_in_frame({90: chosen, 180: elsewhere}, 90, chosen, (300, 200)) is chosen
+
+
+def test_retry_keeps_the_horizontal_orientation_with_the_better_vertical_text():
+    upright = _cells_tsv(53.0, vertical=True)
+    readings = {
+        90: _horizontal_at_90(84.0, ["Ação", "oi1", "=pm", "Prazo"]),
+        180: _vertical_at_180(92.0, ["Ação", "0101", "0202", "Prazo"]),
+        270: _cells_tsv(40.0, vertical=False),
+    }
+    backend, _ = _backend(readings)
+
+    tsv, rotation = backend._retry_quarter_turns(Image.new("RGB", (300, 200)), 300, upright)
+
+    assert rotation == 90
+    assert _texts(tsv) == ["Ação", "0101", "0202", "Prazo"]
+
+
+def test_better_vertical_texts_keep_the_segmentation_of_the_horizontal_read():
+    """A vertical read groups a turned table by rows; only its texts are taken."""
+    from structured_pdf_text.ocr.backends.tesseract import _parse_tsv, _vertical_reading_in_frame
+
+    chosen = _horizontal_at_90(84.0, ["Ação", "oi1", "=pm", "Prazo"])
+    rows = [HEADER]
+    for top, text in zip(_TOPS, ["Ação", "0101", "0202", "Prazo"]):
+        # every vertical word on one Tesseract line
+        rows.append(f"5\t1\t1\t1\t1\t1\t{300 - top - 14}\t20\t14\t60\t92.0\t{text}")
+    vertical = "\n".join(rows)
+
+    result = _vertical_reading_in_frame({90: chosen, 180: vertical}, 90, chosen, (300, 200))
+    words = [row for row in _parse_tsv(result) if row.get("level") == "5"]
+
+    assert [row["text"] for row in words] == ["Ação", "0101", "0202", "Prazo"]
+    assert [row["line_num"] for row in words] == ["1", "2", "3", "4"]
+
+
+def test_unpaired_words_are_kept_and_no_word_is_added():
+    from structured_pdf_text.ocr.backends.tesseract import _vertical_reading_in_frame
+
+    chosen = _word_rows([(20, top, 60, 14, 84.0, text) for top, text in zip(_TOPS, ["Ação", "oi1", "=pm", "Prazo"])]
+                        + [(150, 160, 40, 14, 70.0, "Situação")])
+    vertical = _vertical_at_180(92.0, ["Ação", "0101", "0202", "Prazo"]) + "\n" + \
+        "5\t1\t1\t1\t9\t1\t5\t150\t14\t40\t99.0\textra"
+
+    result = _vertical_reading_in_frame({90: chosen, 180: vertical}, 90, chosen, (300, 200))
+
+    assert _texts(result) == ["Ação", "0101", "0202", "Prazo", "Situação"]

@@ -11,8 +11,8 @@
 
 | Campo | Valor |
 |---|---|
-| **Última atualização** | 2026-11-16 — análise da RUN 006; correções pós-006 validadas por página (T3-P32, T3-P31) e PNG temporário sem perdas mais rápido (T3-P12) |
-| **Branch** | `feat/tesseract-optimization` (alterações pós-005 e pós-006 não commitadas) |
+| **Última atualização** | 2026-11-16 — análise da RUN 006; T3-P32 (tentativas 1–4) validado por página; T3-P31 não resolvido (5 tentativas); PNG temporário sem perdas mais rápido (T3-P12) |
+| **Branch** | `feat/tesseract-optimization` — pós-005 em `dfbf5e9`; pós-006 (T3-P32 tentativas 1–2, PNG temporário) em `f03710a`; T3-P32 tentativas 3–4 (texto da leitura vertical, palavra a palavra) **não commitadas** |
 | **Baseline imutável** | `output/tesseract/001/` |
 | **Baseline corrigida** | `output/tesseract/002/` (T3-P00) |
 | **Baseline atual** | `output/tesseract/006/` (commit `dfbf5e9`) |
@@ -57,7 +57,7 @@
 | T3-P29 | MÉDIO | P2 | layout de página nativa com `/Rotate 90` | PENDENTE — página inteira num único bloco (V4 p213/p214) |
 | T3-P30 | INFO | — | executor | **RESOLVIDO** (006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`) |
 | T3-P31 | **MÉDIO** (regressão confirmada na 006) | P0 | layout de regiões só-OCR + ordem genérica de linhas | **NÃO RESOLVIDO** — 5 tentativas pós-006; a melhor corrige as listas, mas intercala colunas (V10 p18); nenhuma mantida |
-| T3-P32 | ALTO | P0 | backend Tesseract (orientação) | NOVO na 006 — **CORRIGIDO — VALIDADO PONTUALMENTE** para tabelas lidas como palavras verticais (V9 p20/p71); V9 p36/p92 pendentes |
+| T3-P32 | ALTO | P0 | backend Tesseract (orientação e reconhecimento) | NOVO na 006 — **CORRIGIDO — VALIDADO PONTUALMENTE** (4 tentativas): V9 p20/p71 corretas, p55 sem perda numérica; V9 p36/p92 pendentes; aguarda RUN 007 |
 | T3-P33 | MÉDIO | P1 | tabela por trilhas OCR → `text_tracks._build_table` (compartilhado) | NOVO na 006 — exceção `Invalid BBox` na V9 p36 → V9 `partial_success`; PENDENTE |
 | T3-P34 | ALTO | P1 | tabela raster com inclinação pequena em página mista | NOVO na 006 (inventário) — tabela não detectada (V9 p58/p66/p78; fraca em p8/p25); PENDENTE |
 
@@ -803,7 +803,7 @@ V5–V8: dentro de ±0.003, exceto V8 `numeric` 0.988 → 0.991 e `cell_content_
 - **Conclusão**: com o pipeline atual, a separação correta das colunas inclinadas nessas páginas é frágil; os falsos itens de lista funcionavam como separadores acidentais. Corrigir as listas sem tocar a ordem exige uma ordem de linhas robusta à inclinação na montagem (`text/reading_order.py`, compartilhado com o nativo) ou uma junção que não altere a geometria vista por ela — fora do escopo autorizado nesta etapa (não alterar o extrator nativo). Todo o código das 5 tentativas foi revertido; `layout/ocr_aware.py` e `text/reading_order.py` estão idênticos ao commit `dfbf5e9`.
 - **Próximos passos sugeridos**: (a) junção que mantém a caixa da linha de título (a altura de duas linhas é o que dispara a separação em pistas, verificado no rastreamento da p18); (b) com autorização para o componente compartilhado, ordenar linhas OCR no referencial retificado pela inclinação medida (T3-P18).
 
-### T3-P32 | ALTO | Tabela raster girada 90°/270° com a grade transposta — CORRIGIDO — VALIDADO PONTUALMENTE (pós-006, parcial)
+### T3-P32 | ALTO | Tabela raster girada 90°/270° com a grade transposta — CORRIGIDO — VALIDADO PONTUALMENTE (pós-006; pendente de validação integral)
 
 - **Evidência (006)**: no V9, das 6 tabelas raster giradas (manifesto `rotation_degrees` ±90/270), só p3 sai correta. p20 e p71 saem com o **texto certo e a grade transposta e invertida** (primeira linha "004 | 003 | 002 | 001 | Rubrica"; `cell_content_exact_match` 0.042 e 0.000; os valores monetários ficam em células erradas). p36 e p92 saem ilegíveis; p55 mistura as duas coisas.
 - **Gravidade**: dados críticos (valores R$, quantidades) associados à linha errada ou perdidos em tabela; mecanismo genérico de qualquer documento com tabela girada.
@@ -813,23 +813,29 @@ V5–V8: dentro de ±0.003, exceto V8 `numeric` 0.988 → 0.991 e `cell_content_
 | # | Hipótese | Alteração | Resultado (54 páginas, 6 corpora) | Decisão |
 |---|---|---|---|---|
 | 1 | A forma das palavras (≥ 3 alfanuméricos, altura ≥ 1.2 × largura) indica leitura vertical também em linhas curtas | `_tsv_vertical_word_ratio`/`_tsv_reads_vertically`; usado no gatilho **e** como filtro dos candidatos girados | p20 0.042 → 0.950, p71 0.000 → 1.000; **regressão** V8 p4/p58 ("L-01" → "1-01", `numeric` 1.000 → 0.909) | ajustar |
-| 2 | Leitura vertical confiante pode ter o texto certo em qualquer orientação; o formato deve **ordenar** os candidatos, não eliminá-los | candidatos ≥ 70 ordenados por (palavras horizontais, confiança); quando o retry foi disparado só pelas palavras verticais, só uma leitura horizontal substitui a original | p20/p71 mantidos; V8 volta a "L-01"; V3, V4, V6, V8, V10 idênticos ao ANTES | **mantida** |
+| 2 | Leitura vertical confiante pode ter o texto certo em qualquer orientação; o formato deve **ordenar** os candidatos, não eliminá-los | candidatos ≥ 70 ordenados por (palavras horizontais, confiança); quando o retry foi disparado só pelas palavras verticais, só uma leitura horizontal substitui a original | p20/p71 mantidos; V8 volta a "L-01"; V3, V4, V6, V8, V10 idênticos ao ANTES | mantida (commit `f03710a`); regressão numérica em V9 p55 investigada nas tentativas 3–4 |
+| 3 | Orientação e texto são separáveis: a leitura horizontal fixa a orientação; uma leitura **vertical** do mesmo recorte, ≥ 5 pontos mais confiante e com as mesmas palavras nas mesmas posições (IoU ≥ 0.3 em ≥ 60% das palavras, nos dois sentidos), fornece o texto, com as caixas levadas ao referencial da orientação escolhida por transformação exata de quarto de volta | `_quarter_turn_point`, `_retarget_tsv`, `_tsv_word_boxes`, `_same_word_ratio`, `_vertical_reading_in_frame` (substitui a leitura inteira) | V9 p55 `numeric` 0.919 → **1.000** e identificadores 01–04 nas linhas certas; **mas a coluna "Situação" some da saída** (recall 0.968 → 0.959) | ajustar |
+| 4 | A leitura vertical agrupa a tabela girada por linhas da tabela; com a grade visual parcial (2 de 3 colunas), a palavra fora da grade é descartada junto com a linha reivindicada pela tabela. A leitura vertical deve fornecer **só o reconhecimento, palavra a palavra**, mantendo a segmentação (caixas, linhas, blocos) da leitura horizontal | `_adopt_better_word_texts`: pares por melhor sobreposição mútua; cada palavra horizontal recebe texto e confiança da vertical mais confiante; palavras sem par ficam; nenhuma palavra é acrescentada | V9 p55: `numeric` **1.000**, recall **0.982**, precisão **0.995**, `cell_content_exact_match` **0.841**, `cell_cer` **0.168**; p20/p71 mantidas; demais páginas idênticas | **mantida** |
+
+  **Diagnóstico da regressão de p55 (antes das tentativas 3–4)**, comparando tokens, coordenadas, orientação e confiança das leituras do recorte da tabela (região, escala 4.0, 860 × 975 px): direta 53 (vertical); 90° **horizontal, 84** — "Ação Prazo **oi** | 18/09/2026 **=** 21/09/2026 **pm** …"; 180° **vertical, 92** — "Situação Ação Prazo **01** | 18/09/2026 Regular **02** | 21/09/2026 Revisão **03** …"; 270° 47 (lixo). O mesmo padrão aparece na escala 6.0 (75 × 87) e no recorte menor (76 × 85). A **escolha da orientação** (90°) estava certa e a **transformação de coordenadas** também; o defeito é de **reconhecimento**: a leitura na orientação correta reconhece pior dígitos curtos em células. A regra anterior à 006 escolhia a leitura vertical (números certos, grade transposta); a tentativa 2 escolhe a horizontal (grade certa, números errados). A **montagem da tabela** não regrediu: a coluna "Situação" já ficava fora da grade na 005/006 (a grade visual detectada tem 2 das 3 colunas, limitação anterior do detector compartilhado).
 
   A regressão do V8 p4 da tentativa 1 foi explicada: o recorte de uma linha da tabela tem confiança 56 ("-01"); a leitura a 90° é vertical, mas com o texto certo ("L-01", 82), e era aceita antes. Na tentativa 2 ela continua aceita, porque não há candidato horizontal com confiança ≥ 70.
-- **Correção** (`ocr/backends/tesseract.py`, só Tesseract): `_VERTICAL_WORD_MIN_CHARS = 3`, `_VERTICAL_WORD_MIN_ASPECT = 1.2`, `_tsv_vertical_word_ratio`, `_tsv_reads_vertically`; `_retry_quarter_turns` com gatilho pelas palavras e preferência por leitura horizontal. Nenhuma regra depende de texto ou de página.
+- **Correção** (`ocr/backends/tesseract.py`, só Tesseract): `_VERTICAL_WORD_MIN_CHARS = 3`, `_VERTICAL_WORD_MIN_ASPECT = 1.2`, `_tsv_vertical_word_ratio`, `_tsv_reads_vertically`; `_retry_quarter_turns` com gatilho pelas palavras e preferência por leitura horizontal (tentativas 1–2, commit `f03710a`); `_VERTICAL_TEXT_MIN_GAIN = 5`, `_SAME_WORD_MIN_IOU = 0.3`, `_SAME_WORDS_MIN_RATIO = 0.6`, `_quarter_turn_point`, `_retarget_tsv`, `_vertical_reading_in_frame`, `_adopt_better_word_texts` (tentativas 3–4, não commitadas). Só age quando o retry aceitou uma leitura girada horizontal; nenhuma regra depende de texto ou de página. Nenhum componente compartilhado foi alterado.
 - **Validação pontual (ANTES → DEPOIS)**:
 
 | Página | CER | `cell_content_exact_match` | `cell_cer` | Observação |
 |---|---|---|---|---|
 | V9 p20 | 0.069 → **0.001** | 0.042 → **0.950** | 1.294 → 0.008 | grade correta |
 | V9 p71 | 0.068 → **0.000** | 0.000 → **1.000** | 1.372 → 0.000 | recall 0.991 → 1.000 |
-| V9 p55 | 0.179 → 0.177 | 0.657 → 0.794 | 0.319 → 0.180 | ver abaixo |
+| V9 p55 (tentativa 2) | 0.179 → 0.177 | 0.657 → 0.794 | 0.319 → 0.180 | `numeric` 0.974 → 0.919 |
+| **V9 p55 (tentativa 4)** | 0.179 → 0.177 | 0.657 → **0.841** | 0.319 → **0.168** | `numeric` 0.974 → **1.000**; recall 0.977 → 0.982; precisão 0.986 → 0.995 |
 | V9 p3 (controle girado) | 0.026 | 1.000 | 0.000 | idêntica |
 | Escopo V9 (15 págs.) | 0.149 → 0.139 | 0.350 → 0.479 | 0.747 → 0.592 | `numeric` 0.906 → 0.906 |
 
-- **Resíduo e risco (p55)**: a tabela girada passa a sair orientada (Ação × Prazo nas linhas certas), mas a coluna "Situação" fica fora da grade como parágrafos soltos, e dois números da coluna "Ação" ("02", "03") saem como "=" / "pm" (antes eram lidos, mas em células transpostas). `numeric` da página 0.974 → 0.919. É uma perda pontual de dado numérico, reproduzível, que fica registrada para a 007.
+- **p55 após a tentativa 4**: tabela "Ação | Prazo" orientada, com os identificadores 01–04 nas linhas dos respectivos prazos. As palavras da coluna "Situação" são preservadas, mas fora da grade, como parágrafos (como na 005/006): a grade visual detectada tem 2 das 3 colunas (detector compartilhado, fora do escopo). `paragraph_detection_f1` da página 0.889 → 0.615 por esses parágrafos soltos (efeito estrutural, sem perda de conteúdo).
+- **Validação ampla da tentativa 4** (mesmos subconjuntos das medições anteriores, mesmo contexto): 54 páginas do conjunto principal (V3, V4, V6, V8, V9, V10) e 44 de controle (V4, V5, V6, V7, V8, V9, V10) — **só a V9 p55 muda** em relação ao código de `f03710a`; todas as demais, incluindo V8 p4/p58, V3 p96–p99/p116, V4 p109–p114/p164 e V9 p20/p71, saem idênticas byte a byte. As diferenças de V4 p110–p114/p164 e V10 p5/p13/p48 em relação à 006 no subconjunto da tentativa 3 vêm do contexto do subconjunto (provado: com a troca de texto desligada a saída é idêntica).
 - **Não resolvido**: p36 (tabela girada dentro de página raster inclinada; nenhuma leitura de região da tabela é feita) e p92 (tabela girada não detectada). Exigem detectar a região da tabela antes de relê-la.
-- **Testes**: `tests/test_tesseract_run006_regressions.py` — medida das palavras verticais, gatilho em recorte confiante vertical, recorte horizontal não relido, números curtos não disparam, leitura vertical de baixa confiança continua aceitando o candidato vertical (comportamento T3-P02), preferência pela leitura horizontal, retry por palavras não troca vertical por vertical.
+- **Testes**: `tests/test_tesseract_run006_regressions.py` — (tentativas 3–4) texto melhor da leitura vertical no referencial escolhido, ganho mínimo exigido, posições diferentes não usadas, retry completo mantém a orientação horizontal com o texto melhor, segmentação da leitura horizontal preservada, palavras sem par mantidas e nenhuma acrescentada; (tentativas 1–2) medida das palavras verticais, gatilho em recorte confiante vertical, recorte horizontal não relido, números curtos não disparam, leitura vertical de baixa confiança continua aceitando o candidato vertical (comportamento T3-P02), preferência pela leitura horizontal, retry por palavras não troca vertical por vertical.
 
 ### T3-P33 | MÉDIO | Exceção `Invalid BBox` na estrutura de tabela por trilhas OCR (V9 p36) — PENDENTE
 
@@ -881,7 +887,7 @@ V5–V8: dentro de ±0.003, exceto V8 `numeric` 0.988 → 0.991 e `cell_content_
 
 A alteração local `num_threads=8` em `scripts/run_tesseract_batch_wsl.py` não é desta etapa e foi mantida como está.
 
-### Pós-005 (2026-11-13, não commitadas)
+### Pós-005 (2026-11-13, commit `dfbf5e9`)
 
 | Item | Arquivo | Mudança | Escopo |
 |---|---|---|---|
@@ -893,9 +899,9 @@ A alteração local `num_threads=8` em `scripts/run_tesseract_batch_wsl.py` não
 | T3-P30 | `scripts/run_tesseract_batch_wsl.py` | `tesseract_thread_limit`, `round_settings`; threads da config no manifesto e no resumo | executor |
 | testes | `tests/test_tesseract_run005_regressions.py` (novo, 12 testes); `tests/test_tesseract_batch_runner_config.py` (+2, expectativa de threads = 8) | — | — |
 
-As alterações pós-005 entraram no commit `dfbf5e9` (avaliadas na RUN 006).
+Avaliadas na RUN 006.
 
-### Pós-006 (2026-11-16, não commitadas)
+### Pós-006 (2026-11-16, commit `f03710a`)
 
 | Item | Arquivo | Mudança | Escopo |
 |---|---|---|---|
@@ -903,6 +909,13 @@ As alterações pós-005 entraram no commit `dfbf5e9` (avaliadas na RUN 006).
 | T3-P12 | `src/structured_pdf_text/ocr/backends/tesseract.py` | `_TEMP_PNG_COMPRESS_LEVEL = 1` / `_save_temp_png` para o PNG temporário (TSV e OSD) | só Tesseract; sem perdas |
 | testes | `tests/test_tesseract_run006_regressions.py` (novo, 9 testes); `tests/test_tesseract_effective.py` (+1) | — | — |
 | T3-P31 | `layout/ocr_aware.py`, `text/reading_order.py` | 5 tentativas, **todas revertidas** (arquivos idênticos a `dfbf5e9`) | — |
+
+### Pós-006, T3-P32 tentativas 3–4 (2026-11-16, não commitadas)
+
+| Item | Arquivo | Mudança | Escopo |
+|---|---|---|---|
+| T3-P32 | `src/structured_pdf_text/ocr/backends/tesseract.py` | `_vertical_reading_in_frame` + `_adopt_better_word_texts`: quando o retry aceita uma leitura girada horizontal, palavras pareadas com uma leitura vertical do mesmo recorte ≥ 5 pontos mais confiante recebem o texto mais confiante; segmentação inalterada | só Tesseract |
+| testes | `tests/test_tesseract_run006_regressions.py` (+6) | — | — |
 
 ## §4 Testes executados
 
@@ -933,7 +946,7 @@ As alterações pós-005 entraram no commit `dfbf5e9` (avaliadas na RUN 006).
 | 2026-11-13 | testes direcionados: `test_tesseract_run005_regressions.py`, `test_tesseract_run003_regressions.py`, `test_tesseract_effective.py`, `test_tesseract_batch_runner_config.py`, `test_tesseract_postprocess.py`, `test_ocr_parser_regressions.py`, `test_furniture_body_protection.py` | todos passaram |
 | 2026-11-13 | suíte completa | **não executada** nesta etapa (interrompida a pedido) |
 
-**Não executado**: nenhuma rodada completa após as correções pós-005; `output/tesseract/006` não existe; suíte completa não executada.
+**Não executado (situação em 2026-11-13, antes da 006)**: nenhuma rodada completa após as correções pós-005; suíte completa não executada.
 
 | 2026-11-16 | RUN 006 completa (manual) | 8/8 com métricas; V9 `needs_review` (T3-P33) |
 | 2026-11-16 | benchmarks pontuais de threads/concorrência/PNG (scratchpad, §1.10) | 8 ≡ 4 threads; TSV idêntico; PNG nível 1 sem perdas |
@@ -941,6 +954,9 @@ As alterações pós-005 entraram no commit `dfbf5e9` (avaliadas na RUN 006).
 | 2026-11-16 | T3-P32 tentativas 1 e 2; T3-P31 tentativas 1–5 (mesmas 54 páginas; a 5ª só no V10) | §2 T3-P32 e T3-P31 |
 | 2026-11-16 | validação final: 39 páginas de controle extras + alvos do T3-P32 (V4, V5, V6, V7, V8, V9, V10) | só V9 p20/p55/p71 mudam por efeito do código; diferenças em V4 p25/86/140/150/190, V6 p3/p33, V10 p59 são de contexto de documento (rastreamento: nenhuma decisão de retry diferente da regra antiga) |
 | 2026-11-16 | `pytest` direcionado (`test_tesseract_*`, `test_easyocr_pipeline_integrations.py`, ordem de leitura) | todos passaram |
+| 2026-11-16 | T3-P32 tentativas 3 e 4 (V3 96–99/116, V4 109–114/164, V6 31, V8 4/22/58, V9 3/4/20/23/36/55/58/71/92, V10 5/13/48) | §2 T3-P32 |
+| 2026-11-16 | validação ampla da tentativa 4: conjunto principal (54) e controles (44) repetidos | só V9 p55 muda (melhora); demais idênticas ao código de `f03710a` |
+| 2026-11-16 | `pytest tests` (código com T3-P32 tentativa 4) | **13 falhas = exatamente as de T3-P14**; nenhuma falha nova |
 | 2026-11-16 | `pytest tests` (código final pós-006) | **13 falhas = exatamente as de T3-P14** (`test_line_detector.py` 8 `test_reconciliation_*`, `test_rapidocr_improvement_005/006/008.py` 3, `test_no_timeouts.py` 1, `test_evaluation_exact_optimizations.py[V3]` 1); nenhuma falha nova |
 
 **Páginas processadas nos testes pontuais pós-006** (extração real apenas dessas páginas, via `page_indices`; resultados em diretórios experimentais no scratchpad, nada gravado em `output/`):
@@ -967,7 +983,7 @@ Comparar 007 × 006.
 | Verificação | Critério |
 |---|---|
 | T3-P32 | V9 p20 e p71 com a tabela na orientação de leitura (`cell_content_exact_match` ≥ 0.9 nas páginas); V9 `cell_content_exact_match` documental > 0.527 e `cell_cer` < 0.579; V9 `numeric` ≥ 0.950 e `currency` ≥ 0.962 |
-| T3-P32 (risco) | V9 p55: conferir a coluna "Situação" e os números "01–04" da tabela girada; V3 p96–p99/p116 e V4 p109–p114 (rotação de página) sem mudança de CER > 0.01 |
+| T3-P32 (p55) | V9 p55 com os identificadores 01–04 nas linhas dos prazos e `numeric` da página ≥ 0.97; palavras da coluna "Situação" presentes (ainda fora da grade); V3 p96–p99/p116 e V4 p109–p114 (rotação de página) sem mudança de CER > 0.01 |
 | PNG temporário | saídas de V3–V10 idênticas à 006 em todas as páginas sem tabela girada (a mudança é sem perdas) |
 | Controle | V3, V4, V5, V6, V7, V8 e V10 idênticos byte a byte à 006, exceto páginas com recortes lidos como texto vertical (esperado: nenhuma fora do V9); métricas de texto de V9/V10 sem piora > 0.005 |
 | T3-P31 | sem mudança (não corrigido): V10 `list_group_detection_precision` = 0.354 |

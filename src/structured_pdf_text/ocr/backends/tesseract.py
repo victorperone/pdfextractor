@@ -557,6 +557,168 @@ def _tsv_reads_vertically(tsv_text: str) -> bool:
     return shaped >= _ROTATION_RETRY_MIN_WORDS and ratio >= _VERTICAL_LINES_MIN_RATIO
 
 
+# Reading orientation and recognised text can come from different reads of the
+# same crop (T3-P32). Tesseract reads a turned table both as horizontal words
+# in the right orientation and as vertical words in another one, sometimes
+# recognising short cells better in the vertical read (V9 p55: "01"/"02"/"03"
+# at 92 vertical vs "oi"/"="/"pm" at 84 horizontal). The vertical read replaces
+# the text of the horizontal one only when it is clearly more confident and
+# its words sit on the same page positions.
+_VERTICAL_TEXT_MIN_GAIN = 5.0
+_SAME_WORD_MIN_IOU = 0.3
+_SAME_WORDS_MIN_RATIO = 0.6
+
+
+def _quarter_turn_point(x: float, y: float, rotation: int, width: int, height: int,
+                        *, to_original: bool) -> tuple[float, float]:
+    """Map a point between an upright image of ``width`` × ``height`` and its
+    copy turned clockwise by ``rotation`` (``PIL.Image.rotate(-rotation, expand=True)``).
+
+    Same convention as ``_map_rotated_tokens_to_original``.
+    """
+    rotation %= 360
+    if to_original:
+        if rotation == 90:
+            return y, height - x
+        if rotation == 180:
+            return width - x, height - y
+        if rotation == 270:
+            return width - y, x
+        return x, y
+    if rotation == 90:
+        return height - y, x
+    if rotation == 180:
+        return width - x, height - y
+    if rotation == 270:
+        return y, width - x
+    return x, y
+
+
+def _retarget_tsv(tsv_text: str, source: int, target: int, size: tuple[int, int]) -> str:
+    """Move TSV boxes read on the image turned by ``source`` to the one turned by ``target``."""
+    width, height = size
+    lines = tsv_text.split("\n")
+    header = lines[0].split("\t") if lines else []
+    try:
+        columns = [header.index(name) for name in ("left", "top", "width", "height")]
+    except ValueError:
+        return tsv_text
+    output = [lines[0]]
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) < len(header):
+            output.append(line)
+            continue
+        try:
+            left, top, box_width, box_height = (float(fields[index]) for index in columns)
+        except ValueError:
+            output.append(line)
+            continue
+        corners = []
+        for x, y in ((left, top), (left + box_width, top + box_height)):
+            x, y = _quarter_turn_point(x, y, source, width, height, to_original=True)
+            corners.append(_quarter_turn_point(x, y, target, width, height, to_original=False))
+        x0, y0 = min(x for x, _ in corners), min(y for _, y in corners)
+        x1, y1 = max(x for x, _ in corners), max(y for _, y in corners)
+        for index, value in zip(columns, (x0, y0, x1 - x0, y1 - y0)):
+            fields[index] = f"{value:.2f}"
+        output.append("\t".join(fields))
+    return "\n".join(output)
+
+
+def _tsv_word_boxes(tsv_text: str) -> list[BBox]:
+    boxes = []
+    for row in _parse_tsv(tsv_text):
+        parsed = _valid_word_row(row)
+        if parsed is not None:
+            boxes.append(BBox(*parsed[2]))
+    return boxes
+
+
+def _same_word_ratio(first: list[BBox], second: list[BBox]) -> float:
+    """Share of *first* words overlapping a word of *second* (IoU ≥ ``_SAME_WORD_MIN_IOU``)."""
+    if not first:
+        return 0.0
+    return sum(any(box.iou(other) >= _SAME_WORD_MIN_IOU for other in second) for box in first) / len(first)
+
+
+def _vertical_reading_in_frame(reads: dict[int, str], rotation: int, chosen: str,
+                               size: tuple[int, int]) -> str:
+    """*chosen* with word texts recognised better by a vertical read of the crop.
+
+    *chosen* is the horizontal read accepted at *rotation*; it fixes the
+    reading orientation and keeps its own segmentation (boxes, lines,
+    blocks). Another read whose words are vertical qualifies when its mean
+    confidence is at least ``_VERTICAL_TEXT_MIN_GAIN`` higher and both reads
+    hold the same words on the same positions (each way,
+    ``_SAME_WORDS_MIN_RATIO`` of the words overlap). Its boxes are moved to
+    the frame of *rotation*; each chosen word then takes the text and
+    confidence of the vertical word it pairs with (mutual best overlap) when
+    that one is more confident. Unpaired words stay as read, and no word is
+    added: a vertical read groups a turned table by rows, which would pull
+    cells outside a partial grid into it and lose them.
+    """
+    _, chosen_confidence = _tsv_word_confidence(chosen)
+    chosen_boxes = _tsv_word_boxes(chosen)
+    best: tuple[float, str] | None = None
+    for source, tsv_text in reads.items():
+        if source == rotation or not _tsv_reads_vertically(tsv_text):
+            continue
+        count, confidence = _tsv_word_confidence(tsv_text)
+        if count < _ROTATION_RETRY_MIN_WORDS or confidence < chosen_confidence + _VERTICAL_TEXT_MIN_GAIN:
+            continue
+        moved = _retarget_tsv(tsv_text, source, rotation, size)
+        boxes = _tsv_word_boxes(moved)
+        if (_same_word_ratio(boxes, chosen_boxes) < _SAME_WORDS_MIN_RATIO
+                or _same_word_ratio(chosen_boxes, boxes) < _SAME_WORDS_MIN_RATIO):
+            continue
+        if best is None or confidence > best[0]:
+            best = (confidence, moved)
+    return _adopt_better_word_texts(chosen, best[1]) if best is not None else chosen
+
+
+def _adopt_better_word_texts(chosen: str, other: str) -> str:
+    """Rows of *chosen* whose word pairs with a more confident word of *other*.
+
+    Pairs are mutual best overlaps (IoU ≥ ``_SAME_WORD_MIN_IOU``) between
+    word boxes of the two TSVs, both in the same frame. Only ``text`` and
+    ``conf`` change; geometry and line identities stay those of *chosen*.
+    """
+    def words(tsv_text: str) -> list[tuple[int, BBox, float, str]]:
+        rows = tsv_text.split("\n")
+        names = rows[0].split("\t")
+        found = []
+        for index, line in enumerate(rows[1:], start=1):
+            parsed = _valid_word_row(dict(zip(names, line.split("\t"))))
+            if parsed is not None:
+                found.append((index, BBox(*parsed[2]), parsed[1], parsed[0]))
+        return found
+
+    mine, theirs = words(chosen), words(other)
+    if not mine or not theirs:
+        return chosen
+
+    def best_match(box: BBox, pool):
+        scored = [(box.iou(item[1]), position) for position, item in enumerate(pool)]
+        score, position = max(scored)
+        return position if score >= _SAME_WORD_MIN_IOU else None
+
+    lines = chosen.split("\n")
+    header = lines[0].split("\t")
+    text_column, conf_column = header.index("text"), header.index("conf")
+    for position, (index, box, confidence, _text) in enumerate(mine):
+        partner = best_match(box, theirs)
+        if partner is None or best_match(theirs[partner][1], mine) != position:
+            continue
+        _, _, other_confidence, other_text = theirs[partner]
+        if other_confidence <= confidence:
+            continue
+        fields = lines[index].split("\t")
+        fields[text_column], fields[conf_column] = other_text, f"{other_confidence:g}"
+        lines[index] = "\t".join(fields)
+    return "\n".join(lines)
+
+
 def _tsv_word_confidence(tsv_text: str) -> tuple[int, float]:
     """Number of recognized words and their mean confidence (0–100)."""
     confidences = []
@@ -802,9 +964,11 @@ class TesseractBackend:
         vertical = _tsv_reads_vertically(tsv)
         if words < _ROTATION_RETRY_MIN_WORDS or (upright >= _ROTATION_RETRY_MAX_MEAN_CONF and not vertical):
             return tsv, 0
+        reads: dict[int, str] = {0: tsv}
         best: tuple[bool, float, int, str] | None = None
         for rotation in (90, 180, 270):
             candidate = self._read_tsv(pil.rotate(-rotation, expand=True), dpi)
+            reads[rotation] = candidate
             count, confidence = _tsv_word_confidence(candidate)
             if count < _ROTATION_RETRY_MIN_WORDS or _tsv_vertical_line_ratio(candidate) >= _VERTICAL_LINES_MIN_RATIO:
                 continue
@@ -821,6 +985,8 @@ class TesseractBackend:
             # vertical again carries no orientation evidence.
             return tsv, 0
         if vertical or confidence - upright >= _ROTATION_ACCEPT_MIN_GAIN:
+            if horizontal:
+                candidate = _vertical_reading_in_frame(reads, rotation, candidate, pil.size)
             return candidate, rotation
         return tsv, 0
 
