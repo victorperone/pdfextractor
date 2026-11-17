@@ -595,7 +595,7 @@ def _place_visual_tables_between_prose(blocks, tables):
     for block in blocks:
         if block.table_id not in visual or block.kind != ContentKind.TABLE:
             continue
-        coordinates = reading_coordinates(visual[block.table_id].cells)
+        coordinates = _quarter_turn_frame(reading_coordinates(visual[block.table_id].cells))
 
         def projected(box):
             if coordinates is None:
@@ -621,6 +621,24 @@ def _place_visual_tables_between_prose(blocks, tables):
             remaining.insert(min(after), block)
             result = remaining
     return result
+
+
+def _quarter_turn_frame(coordinates):
+    """Keep only the reading direction of a table frame (T3-P34).
+
+    A quarter turn changes how the page around a raster table is read; the
+    small skew of a scanned table does not, and projecting level prose through
+    it tilts a wide line into the table's band.
+    """
+    if coordinates is None:
+        return None
+    ox, oy = coordinates(0.0, 0.0)
+    columns = [coordinates(1.0, 0.0), coordinates(0.0, 1.0)]
+    a, c = (round(columns[0][0] - ox), round(columns[0][1] - oy))
+    b, d = (round(columns[1][0] - ox), round(columns[1][1] - oy))
+    if abs(a*d - b*c) != 1:
+        return coordinates
+    return lambda x, y: (a*x + b*y, c*x + d*y)
 
 
 def _table_intersects_region(

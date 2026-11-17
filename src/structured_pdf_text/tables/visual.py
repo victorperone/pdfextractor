@@ -126,9 +126,22 @@ def detect_visual_table(
         # of the strict/relaxed native detectors.
         return None
     tolerance = max(3.0, min(page.bbox.width, page.bbox.height) * 0.01)
-    if not any(
-        _contains_with_tolerance(box, grid_bbox, tolerance) for box in image_boxes
-    ):
+    container = next(
+        (box for box in image_boxes if _contains_with_tolerance(box, grid_bbox, tolerance)), None
+    )
+    if container is None and grid.source_transform is not None:
+        # A tilted scan cropped to its frame cuts the table's corners: the
+        # rectified grid's extrapolated corners leave the image while every
+        # observed rule stays inside it (T3-P34). The whole ruling network
+        # must still belong to one image object. The fragment keeps the
+        # grid's extent so that it still contains every cell.
+        rules_bbox = _observed_rules_bbox(grid, to_page)
+        container = next(
+            (box for box in image_boxes
+             if rules_bbox is not None and _contains_with_tolerance(box, rules_bbox, tolerance)),
+            None,
+        )
+    if container is None:
         # A partial overlap is insufficient: chart axes combined with nearby
         # captions or page rules can form a convincing synthetic grid. A
         # raster table's detected grid should remain inside one image object.
@@ -229,6 +242,14 @@ def _mapped_rectangle(x0, y0, x1, y1, transform):
     points = [transform(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
     return BBox(min(p[0] for p in points), min(p[1] for p in points),
                 max(p[0] for p in points), max(p[1] for p in points))
+
+
+def _observed_rules_bbox(grid, transform):
+    """Page-space extent of the ruling segments actually seen in the raster."""
+    rules = tuple(grid.horizontal_lines) + tuple(grid.vertical_lines)
+    if not rules:
+        return None
+    return BBox.union_all([_mapped_rectangle(x, y, x + w, y + h, transform) for x, y, w, h in rules])
 
 
 def _ruling_boxes(lines, raster_bbox=None, width=1, height=1):

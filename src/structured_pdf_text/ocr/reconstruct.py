@@ -1024,6 +1024,11 @@ def dehyphenate_ocr_lines(lines: list[TextLine]) -> list[TextLine]:
 # §29 — Paragraph segmentation post-OCR
 # ---------------------------------------------------------------------------
 
+# Glyph-box variation between lines of one paragraph (about a descender's
+# depth), as a fraction of the median line height (T3-P20).
+_GAP_JITTER_RATIO = 0.2
+
+
 def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
     """Group OCR ``TextLine`` objects into logical paragraphs (§29).
 
@@ -1075,8 +1080,13 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
             gaps.append(gap)
     median_gap = median(gaps) if gaps else 0.0
     line_heights = [line.bbox.height for line in lines if line.bbox.height > 0]
-    absolute_gap = (median(line_heights) if line_heights else 10.0) * 0.75
-    gap_threshold = max(min(median_gap * 1.4, absolute_gap), 1.0)
+    typical_height = median(line_heights) if line_heights else 10.0
+    absolute_gap = typical_height * 0.75
+    # OCR boxes follow the glyphs: a line without ascenders or descenders is
+    # shorter, so the gap between lines of one paragraph varies by about a
+    # descender's depth. A larger gap must exceed that jitter (T3-P20).
+    relative_gap = max(median_gap * 1.4, median_gap + typical_height * _GAP_JITTER_RATIO)
+    gap_threshold = max(min(relative_gap, absolute_gap), 1.0)
 
     # Compute line widths for ragged-right detection.
     widths = [line.bbox.width for line in lines if line.bbox.width > 0]
