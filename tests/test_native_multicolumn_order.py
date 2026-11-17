@@ -49,9 +49,9 @@ def _three_ragged_columns() -> list[TextLine]:
     lines = []
     for row, middle in enumerate(_RAGGED_MIDDLE):
         y = row * 12.0
-        lines.append(_line(f"A{row}", 0.0, y, 145.0 + (row % 2) * 5.0))
-        lines.append(_line(f"B{row}", 170.0, y, middle))
-        lines.append(_line(f"C{row}", 340.0, y, 150.0))
+        lines.append(_line(f"A{row} texto corrido da coluna", 0.0, y, 145.0 + (row % 2) * 5.0))
+        lines.append(_line(f"B{row} texto corrido da coluna", 170.0, y, middle))
+        lines.append(_line(f"C{row} texto corrido da coluna", 340.0, y, 150.0))
     return lines
 
 
@@ -67,7 +67,7 @@ def test_gutter_beside_a_ragged_right_column_is_detected():
 def test_three_ragged_columns_are_read_column_by_column():
     ordered, _ = order_lines_in_region(_region(_three_ragged_columns()))
 
-    assert [line.text for line in ordered] == (
+    assert [line.text.split()[0] for line in ordered] == (
         [f"A{row}" for row in range(8)] + [f"B{row}" for row in range(8)] + [f"C{row}" for row in range(8)]
     )
 
@@ -168,3 +168,44 @@ def test_one_multi_column_slab_is_not_enough_evidence():
         lines += [_line(f"Chave {row}", 0.0, y, 40.0), _line(f"Valor {row}", 60.0, y, 40.0)]
 
     assert _order_horizontal_slabs(sorted(lines, key=lambda l: (l.bbox.y0, l.bbox.x0))) is None
+
+
+def test_ragged_gap_between_short_table_cells_is_not_a_gutter():
+    """Cells of an undetected table (values, statuses) must keep their rows together (V10 p54)."""
+    lines = []
+    values = ("R$ 850,16", "R$ 2.215,68", "R$ 1.840,92", "R$ 5.954,70", "R$ 636,11", "R$ 10.645,60")
+    statuses = ("Em análise", "Aguardando", "Aguardando", "Aguardando", "Revisão", "Em análise")
+    for row, (value, status) in enumerate(zip(values, statuses)):
+        y = row * 30.0
+        lines.append(_line(f"00{row + 1}", 0.0, y, 15.0))
+        lines.append(_line(value, 380.0, y, (30.0, 60.0, 45.0, 58.0, 35.0, 60.0)[row]))
+        lines.append(_line(status, 460.0, y, 45.0))
+    ordered = sorted(lines, key=lambda l: (l.bbox.y0, l.bbox.x0))
+
+    gutters = _detect_persistent_gutters(ordered, _bbox(lines))
+
+    assert not any(380.0 < left < 460.0 for left, _ in gutters)
+    # Same geometry with prose lines ending there is a ragged column gutter.
+    prose = [_line(line.text + " texto corrido da coluna", line.bbox.x0, line.bbox.y0, line.bbox.width) if line.bbox.x0 == 380.0 else line
+             for line in ordered]
+    assert any(380.0 < left < 460.0 for left, _ in _detect_persistent_gutters(prose, _bbox(prose)))
+
+
+def test_stretch_of_a_text_column_is_not_a_status_stamp():
+    """Body lines between bold-led lines of a narrow column (T3-P22: V4 p25/p26/p28)."""
+    from test_final_review_blockers import _line as styled_line
+    from structured_pdf_text.layout.decorative import DecorativeRole, cluster_decorative_lines
+
+    dark = (20, 20, 20, 255)
+    stretch = [styled_line("inventada, removida, duplicada ou", 396.0, 383.0 + row * 12.0, fill=dark) for row in range(4)]
+    # The column continues right below, at the same left edge and width, but
+    # the proximity chain broke there (here: a much smaller font starts a new
+    # group), as it does in the narrow columns of V4.
+    continuation = styled_line("Parágrafo 028.62: Configuração e", 396.0, 383.0 + 4 * 12.0 + 2.0, size=5.0, fill=dark)
+    page = BBox(0, 0, 595, 842)
+
+    isolated = cluster_decorative_lines(stretch, page)
+    in_column = cluster_decorative_lines([*stretch, continuation], page)
+
+    assert any(cluster.role == DecorativeRole.SEMANTIC_STATUS for cluster in isolated)
+    assert not any(cluster.role == DecorativeRole.SEMANTIC_STATUS and stretch[0] in cluster.lines for cluster in in_column)

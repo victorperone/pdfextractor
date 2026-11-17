@@ -451,8 +451,8 @@ def _group_engine_lines(
     put in separate blocks. A row is split only at a validated column gutter
     (see ``_validated_gutters``).
     """
-    rows, centers, spans, body, _ = _engine_rows(tokens, boxes)
-    gutters = _validated_gutters(rows, centers, spans, body, page_width)
+    rows, centers, spans, body, slope = _engine_rows(tokens, boxes)
+    gutters = _validated_gutters(rows, centers, spans, body, page_width, slope)
     bands = text_column_bands(gutters)
     # (row index, band index or None, column index, tokens) per visual line.
     entries: list[tuple[int, int | None, int, list[OcrToken]]] = []
@@ -547,7 +547,7 @@ def ocr_text_column_layout(
     shift_x = origin_x + slope * origin_y
     shift_y = origin_y - slope * origin_x
     gutters = [(mid + shift_x, top + shift_y, bottom + shift_y)
-               for mid, top, bottom in _validated_gutters(rows, centers, spans, body, page_width)]
+               for mid, top, bottom in _validated_gutters(rows, centers, spans, body, page_width, slope)]
     return gutters, slope
 
 
@@ -624,6 +624,7 @@ def _validated_gutters(
     spans: dict[int, tuple[float, float]],
     body: float,
     page_width: float,
+    slope: float = 0.0,
 ) -> list[tuple[float, float, float]]:
     """Return ``(x_mid, y_top, y_bottom)`` of column gutters between text flows.
 
@@ -670,7 +671,57 @@ def _validated_gutters(
         gutter_mid = (band_low + band_high) / 2.0
         top, bottom = _extend_gutter(rows, centers, spans, gutter_mid, run[0][0], run[-1][0], body)
         gutters.append((gutter_mid, top - 2.0 * body, bottom + 2.0 * body))
-    return gutters
+    if abs(slope) > _MERGE_GUTTERS_MAX_SLOPE:
+        return gutters
+    return _merge_collinear_gutters(gutters, rows, centers, spans, body)
+
+
+# Gutter pieces are joined only on level text (|tilt| below ~0.3°). On a
+# deskewed scan the estimated tilt leaves a residue and the region layout is
+# fragile (title-sized lines from tilted boxes, T3-P31); joining there changed
+# region boundaries and lost one occurrence of a repeated paragraph (V10 p25).
+_MERGE_GUTTERS_MAX_SLOPE = 0.005
+
+
+def _merge_collinear_gutters(
+    gutters: list[tuple[float, float, float]],
+    rows: list[list[list[OcrToken]]],
+    centers: list[float],
+    spans: dict[int, tuple[float, float]],
+    body: float,
+) -> list[tuple[float, float, float]]:
+    """Join pieces of one column gutter validated separately (T3-P35).
+
+    Supporting rows are grouped by vertical contiguity, so a paragraph break
+    or a row of column headings splits one gutter into pieces at almost the
+    same x (V10 p52: x 211 at y 162–304 and 291–391). As separate gutters
+    they form separate column bands, or two nearly equal gutters in one band
+    (V10 p24: x 209 and 212), and lines of different columns end up in one
+    region. Two pieces whose x differ by at most two text heights are joined
+    when they overlap vertically, or when no engine line runs across the
+    gutter in the gap between them (a full-width line there marks a change of
+    layout and keeps them apart). The joined gutter keeps the x of the
+    longer piece.
+    """
+    def crossed(mid: float, top: float, bottom: float) -> bool:
+        return any(
+            top < center < bottom and any(spans[id(unit)][0] < mid < spans[id(unit)][1] for unit in row)
+            for row, center in zip(rows, centers)
+        )
+
+    merged: list[tuple[float, float, float]] = []
+    for mid, top, bottom in sorted(gutters, key=lambda item: (item[1], item[0])):
+        for index, (other_mid, other_top, other_bottom) in enumerate(merged):
+            if abs(mid - other_mid) > 2.0 * body:
+                continue
+            gap_top, gap_bottom = min(bottom, other_bottom), max(top, other_top)
+            keep = other_mid if other_bottom - other_top >= bottom - top else mid
+            if gap_top >= gap_bottom or not crossed(keep, gap_top, gap_bottom):
+                merged[index] = (keep, min(top, other_top), max(bottom, other_bottom))
+                break
+        else:
+            merged.append((mid, top, bottom))
+    return merged
 
 
 def _extend_gutter(

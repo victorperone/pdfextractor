@@ -1101,24 +1101,27 @@ def _detect_persistent_gutters(
         return []
     band_count = max(4, min(12, max(1, round(math.sqrt(len(lines)) * 2))))
     occupied_by_band: list[list[tuple[float, float]]] = [[] for _ in range(band_count)]
+    lines_by_band: list[list[TextLine]] = [[] for _ in range(band_count)]
     for line in lines:
         start = int((line.bbox.cy - region_bbox.y0) / region_bbox.height * band_count)
         start = max(0, min(band_count - 1, start))
         occupied_by_band[start].append((line.bbox.x0, line.bbox.x1))
+        lines_by_band[start].append(line)
     candidate_gaps: list[tuple[float, float]] = []
-    gaps_by_band: list[list[tuple[float, float]]] = []
+    prose_gaps_by_band: list[list[tuple[float, float]]] = []
     minimum_gap = max(6.0, region_bbox.width * 0.012)
     inner_left = region_bbox.x0 + region_bbox.width * 0.04
     inner_right = region_bbox.x1 - region_bbox.width * 0.04
-    for intervals in occupied_by_band:
+    for intervals, band_lines in zip(occupied_by_band, lines_by_band):
         merged = _merge_intervals(intervals)
-        band_gaps = []
+        prose_gaps = []
         for first, second in zip(merged, merged[1:]):
             gap = (first[1], second[0])
             if gap[1] - gap[0] >= minimum_gap and gap[0] >= inner_left and gap[1] <= inner_right:
                 candidate_gaps.append(gap)
-                band_gaps.append(gap)
-        gaps_by_band.append(band_gaps)
+                if _ends_with_prose_line(band_lines, gap[0]):
+                    prose_gaps.append(gap)
+        prose_gaps_by_band.append(prose_gaps)
     if not candidate_gaps:
         return []
     clusters: list[list[tuple[float, float]]] = []
@@ -1140,9 +1143,26 @@ def _detect_persistent_gutters(
         if len(cluster) / band_count >= persistence
     ]
     gutters.extend(_ragged_column_gutters(
-        gaps_by_band, gutters, minimum_gap, region_bbox.width, persistence,
+        prose_gaps_by_band, gutters, minimum_gap, region_bbox.width, persistence,
     ))
     return sorted(gutters)
+
+
+# A line of running text in a column holds at least this many visible
+# characters; table cells (values, statuses, codes) are shorter.
+_RAGGED_PROSE_MIN_CHARS = 20
+
+
+def _ends_with_prose_line(band_lines: list[TextLine], left_edge: float) -> bool:
+    """Whether the text ending at *left_edge* in a band is a line of prose.
+
+    The ragged-right premise of ``_ragged_column_gutters`` holds for running
+    text, whose line ends vary with the words. Short table cells also end at
+    varying x (V10 p54: "R$ 850,16" / "R$ 10.645,60") but belong to rows that
+    must stay together, so their gaps are not ragged-column evidence.
+    """
+    ending = [line for line in band_lines if abs(line.bbox.x1 - left_edge) <= 0.5]
+    return any(len("".join(line.text.split())) >= _RAGGED_PROSE_MIN_CHARS for line in ending)
 
 
 def _ragged_column_gutters(
@@ -1161,8 +1181,9 @@ def _ragged_column_gutters(
     same gutter are grouped by overlap: the group keeps the x range empty in
     all of them (at least ``minimum_gap`` wide), and a band supports it when
     one of its gaps covers that range. Gaps wider than a third of the region
-    (a column absent from the band) only count as support. Gutters already
-    found by the centre clustering are kept as they are.
+    (a column absent from the band) only count as support. Only gaps that a
+    line of prose ends at are considered (``_ends_with_prose_line``). Gutters
+    already found by the centre clustering are kept as they are.
     """
     cores: list[tuple[float, float]] = []
     for gap in sorted(gap for band in gaps_by_band for gap in band if gap[1] - gap[0] <= region_width / 3.0):

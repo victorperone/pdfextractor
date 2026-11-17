@@ -140,6 +140,9 @@ def cluster_decorative_lines(
         ):
             role = DecorativeRole.SEMANTIC_STATUS
             confidence = 0.72
+            if _continues_text_column(group, candidates, typical_height):
+                role = DecorativeRole.UNKNOWN
+                confidence = 0.25
         else:
             role = DecorativeRole.UNKNOWN
             confidence = 0.25
@@ -157,6 +160,35 @@ def cluster_decorative_lines(
                 )
             )
     return tuple(clusters)
+
+
+def _continues_text_column(group: list[TextLine], candidates: list[TextLine], typical_height: float) -> bool:
+    """Whether *group* is a stretch of a body text column (T3-P22).
+
+    The proximity chain can break inside a narrow column (V4 p25/p26/p28: at
+    lines opening with a bold label), leaving a few body lines that pass the
+    status-stamp signals. Such a stretch continues the column: another line
+    of about the same width starts at the same left edge right above or below
+    it. A stamp or an isolated block (a paragraph beside a table, a checklist)
+    has no such neighbour and keeps its role.
+    """
+    members = {id(line) for line in group}
+    left = min(line.bbox.x0 for line in group)
+    width = max(line.bbox.x1 for line in group) - left
+    top = min(line.bbox.y0 for line in group)
+    bottom = max(line.bbox.y1 for line in group)
+    reach = 1.6 * typical_height
+    tolerance = max(3.0, 0.3 * typical_height)
+    for line in candidates:
+        if id(line) in members or abs(line.bbox.x0 - left) > tolerance:
+            continue
+        if line.bbox.width > 1.3 * max(width, 1.0):
+            continue
+        if top - reach <= line.bbox.y1 <= top + 0.5 * typical_height:
+            return True
+        if bottom - 0.5 * typical_height <= line.bbox.y0 <= bottom + reach:
+            return True
+    return False
 
 
 def _line_angle(line: TextLine) -> float:
