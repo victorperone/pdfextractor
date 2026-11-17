@@ -308,6 +308,36 @@ def _detect_rectangular_grid(paths: list[BBox], limit: BBox) -> _Grid | None:
     if len(cells) < 4 or occupancy < 0.55:
         return None
 
+    # Page header/footer rules snap to edges but are wider than the table and
+    # enclose no cell. Kept, they stretch the grid over the prose between them
+    # and the table. An outer edge stays only when a path lying across the
+    # cells uses it and it is contiguous with them, which keeps body rows drawn
+    # as thin separators below rectangular header cells.
+    first_col, last_col = min(cell[1] for cell in cells), max(cell[3] for cell in cells)
+    x_low, x_high = x_edges[first_col] - tolerance, x_edges[last_col] + tolerance
+    across = [path for path in paths if path.x0 >= x_low and path.x1 <= x_high]
+    first_row, last_row = _contiguous_span(
+        y_edges, min(cell[0] for cell in cells), max(cell[2] for cell in cells),
+        {_nearest_edge(value, y_edges, tolerance) for path in across for value in (path.y0, path.y1)},
+    )
+    y_low, y_high = y_edges[first_row] - tolerance, y_edges[last_row] + tolerance
+    along = [path for path in paths if path.y0 >= y_low and path.y1 <= y_high]
+    first_col, last_col = _contiguous_span(
+        x_edges, first_col, last_col,
+        {_nearest_edge(value, x_edges, tolerance) for path in along for value in (path.x0, path.x1)},
+    )
+    x_low, x_high = x_edges[first_col] - tolerance, x_edges[last_col] + tolerance
+    x_edges = x_edges[first_col:last_col + 1]
+    y_edges = y_edges[first_row:last_row + 1]
+    cells = {
+        (top - first_row, left - first_col, bottom - first_row, right - first_col)
+        for top, left, bottom, right in cells
+    }
+    paths = [
+        path for path in paths
+        if path.x0 >= x_low and path.x1 <= x_high and path.y0 >= y_low and path.y1 <= y_high
+    ]
+
     x0 = min(path.x0 for path in paths)
     y0 = min(path.y0 for path in paths)
     x1 = max(path.x1 for path in paths)
@@ -328,6 +358,16 @@ def _detect_rectangular_grid(paths: list[BBox], limit: BBox) -> _Grid | None:
 def _nearest_edge(value: float, edges: list[float], tolerance: float) -> int | None:
     index = min(range(len(edges)), key=lambda item: abs(edges[item] - value))
     return index if abs(edges[index] - value) <= tolerance else None
+
+
+def _contiguous_span(edges: list[float], first: int, last: int, used: set[int | None]) -> tuple[int, int]:
+    """Widen ``edges[first:last + 1]`` over *used* neighbours no farther than 1.5 grid steps."""
+    step = max(edges[index + 1] - edges[index] for index in range(first, last))
+    while first > 0 and first - 1 in used and edges[first] - edges[first - 1] <= 1.5 * step:
+        first -= 1
+    while last < len(edges) - 1 and last + 1 in used and edges[last + 1] - edges[last] <= 1.5 * step:
+        last += 1
+    return first, last
 
 
 def _table_from_grid(

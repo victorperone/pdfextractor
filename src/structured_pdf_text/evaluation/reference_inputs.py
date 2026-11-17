@@ -38,7 +38,7 @@ def manifest_pages(manifest: dict[str, Any]) -> dict[int, str]:
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("Reference manifesto pages must be objects")
-        number = page_number(entry.get("page", entry.get("page_num")))
+        number = page_number(entry.get("page", entry.get("page_num", entry.get("page_number"))))
         if "page_num" in entry and page_number(entry["page_num"]) != number:
             raise ValueError(f"Conflicting page IDs for manifesto page {number}")
         if number in pages:

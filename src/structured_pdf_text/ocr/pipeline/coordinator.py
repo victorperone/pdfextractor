@@ -620,6 +620,12 @@ class OCRPageFacade:
 
         return getattr(self.coordinator.pipeline, "figure_segmentation_policy", LEGACY_FIGURE_SEGMENTATION_POLICY)
 
+    @property
+    def text_column_policy(self):
+        from .text_columns import LEGACY_TEXT_COLUMN_POLICY
+
+        return getattr(self.coordinator.pipeline, "text_column_policy", LEGACY_TEXT_COLUMN_POLICY)
+
     def refine_footnote(self, target, *, base_scale, quality_policy):
         from .token_refinement import refine_footnote
 

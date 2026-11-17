@@ -438,6 +438,23 @@ class PaddleOcrEngine:
             provenance="baseline",
             page_rotation=page_rotation,
         )
+        # PP-LCNet's document-orientation classifier turns the whole page. A
+        # quarter turn claims the text runs vertically on the page; when most
+        # boxes it read are wider than tall in page coordinates, the text is
+        # horizontal and the turn is wrong (lateral scan shadow, V4 p152/p160,
+        # 001-P0-03). Read the page as given instead; half turns keep the
+        # classifier's decision, which box shapes cannot check.
+        if tokens and _document_preprocessor_frame(raw)[0] in (90, 270) and _quarter_turn_contradicted(tokens):
+            self._dbg_stage = "baseline_document_upright"
+            raw = self._predict_counted(ocr, page_image, use_doc_orientation_classify=False)
+            tokens = _tokens_from_result(
+                raw,
+                page_index,
+                page_image,
+                page_bbox,
+                provenance="baseline",
+                page_rotation=page_rotation,
+            )
         # F25: when the first pass returns nothing, try all four orientations
         # before giving up. A sideways or upside-down scan would otherwise
         # produce an empty result with no rotation fallback.
@@ -677,7 +694,7 @@ class PaddleOcrEngine:
         # Compatibility alias for callers using the historical name.
         self.last_fusion_duplicate_clusters = 0
 
-    def _predict_counted(self, ocr: Any, page_image: object) -> Any:
+    def _predict_counted(self, ocr: Any, page_image: object, **options: Any) -> Any:
         """Run one OCR inference call, incrementing pass/batch counters and writing debug log entries.
 
         Captures process RSS, VMS, system-available memory, GC object count and
@@ -696,7 +713,7 @@ class PaddleOcrEngine:
             f" {_image_meta(page_image)} {mem_before}"
         )
         t0 = time.perf_counter()
-        result = self._predict(ocr, page_image)
+        result = self._predict(ocr, page_image, **options)
         elapsed = time.perf_counter() - t0
         mem_after = _ocr_proc_mem()
         _ocr_debug(
@@ -1038,7 +1055,7 @@ class PaddleOcrEngine:
         return self._ocr
 
     @staticmethod
-    def _predict(ocr: Any, page_image: object) -> Any:
+    def _predict(ocr: Any, page_image: object, **options: Any) -> Any:
         # Paddle's C++ inference runtime crashes (access violation / STATUS_ACCESS_VIOLATION)
         # when fed an image whose width or height is below the model's minimum stride.
         # _records(None) already returns [] so callers handle this gracefully.
@@ -1075,7 +1092,7 @@ class PaddleOcrEngine:
             except ImportError:
                 pass
         if hasattr(ocr, "predict"):
-            return ocr.predict(input=input_image)
+            return ocr.predict(input=input_image, **options)
         return ocr.ocr(input_image, cls=True)
 
 
@@ -1168,6 +1185,20 @@ def _tokens_from_result(
             )
         )
     return tokens
+
+
+# Share of multi-character boxes lying horizontally on the page that refutes a
+# quarter turn of the document-orientation classifier.
+_QUARTER_TURN_HORIZONTAL_SHARE = 0.6
+
+
+def _quarter_turn_contradicted(tokens: list[OcrToken]) -> bool:
+    """Whether boxes read after a quarter turn lie mostly horizontally on the page."""
+    shaped = [token for token in tokens if len("".join(token.text.split())) >= 3]
+    if len(shaped) < 3:
+        return False
+    horizontal = sum(token.bbox.width > token.bbox.height for token in shaped)
+    return horizontal >= _QUARTER_TURN_HORIZONTAL_SHARE * len(shaped)
 
 
 def _rotation_candidates(

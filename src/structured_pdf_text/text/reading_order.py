@@ -197,6 +197,9 @@ def order_lines_in_region(
         RegionKind.CAPTION,
         RegionKind.UNKNOWN,
     }
+    if region.ocr_flow is not None and not region.native_lines and region.ocr_lines:
+        # An engine's text-column policy already ordered this column flow.
+        return list(region.ocr_lines), 0
     if (
         region.kind not in {RegionKind.TABLE, RegionKind.FIGURE}
         and
@@ -556,6 +559,10 @@ def _region_pair_score(
         return 100.0
     if second.kind == RegionKind.HEADER or first.kind == RegionKind.FOOTER:
         return -100.0
+    if (first.ocr_flow is not None and second.ocr_flow is not None
+            and first.ocr_flow[0] == second.ocr_flow[0] and first.ocr_flow[1] != second.ocr_flow[1]):
+        # An engine policy already read these OCR columns in order.
+        return 50.0 if first.ocr_flow[1] < second.ocr_flow[1] else -50.0
 
     score = 0.0
     horizontal_overlap = _axis_overlap(

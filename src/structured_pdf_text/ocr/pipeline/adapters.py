@@ -243,6 +243,7 @@ No other engine or readiness probe is loaded by the execution adapter.
                             services.check_cancelled()
                             attempt_tokens = []
                             rejected_groups = {}
+                            validated = []
                             for number, token in enumerate(observed):
                                 try:
                                     if not isinstance(token, OcrToken):
@@ -273,22 +274,29 @@ No other engine or readiness probe is loaded by the execution adapter.
                                                            authorization_id=auth.authorization_id, attempt_id=attempt_id)
                                     services.validate_token(request, evidence)
                                     tokens.append(evidence)
-                                    reason = self.admission_policy.rejection_reason(evidence, request)
-                                    if reason is None:
-                                        attempt_tokens.append(evidence.token_id)
-                                        admitted_ids.add(evidence.token_id)
-                                    else:
-                                        rejected_groups.setdefault(reason, []).append(evidence.token_id)
-                                        admission_decisions.append({
-                                            "token_id": evidence.token_id,
-                                            "attempt_id": attempt_id,
-                                            "authorization_id": evidence.authorization_id,
-                                            "text": evidence.text, "confidence": evidence.confidence_normalized,
-                                            "bbox": {name: getattr(evidence.bbox, name) for name in ("x0", "y0", "x1", "y1")},
-                                            "selected": False, "reason": reason,
-                                        })
+                                    validated.append(evidence)
                                 except ValueError as exc:
                                     failures.append(LocalFailure(WorkStatus.INVALID_REGION, str(exc), attempt_id, request.mandatory))
+                            # Engine policies may judge one observation against
+                            # the others of the same call (isolated glyphs).
+                            context = getattr(self.admission_policy, "attempt_rejections", None)
+                            context_reasons = context(validated, request) if context is not None else {}
+                            for evidence in validated:
+                                reason = (self.admission_policy.rejection_reason(evidence, request)
+                                          or context_reasons.get(evidence.token_id))
+                                if reason is None:
+                                    attempt_tokens.append(evidence.token_id)
+                                    admitted_ids.add(evidence.token_id)
+                                else:
+                                    rejected_groups.setdefault(reason, []).append(evidence.token_id)
+                                    admission_decisions.append({
+                                        "token_id": evidence.token_id,
+                                        "attempt_id": attempt_id,
+                                        "authorization_id": evidence.authorization_id,
+                                        "text": evidence.text, "confidence": evidence.confidence_normalized,
+                                        "bbox": {name: getattr(evidence.bbox, name) for name in ("x0", "y0", "x1", "y1")},
+                                        "selected": False, "reason": reason,
+                                    })
                             if attempt_tokens or not rejected_groups:
                                 candidates.append(CandidateEvidence(attempt_id, attempt_id, tuple(attempt_tokens), True, "legacy_result"))
                             for index, (reason, ids) in enumerate(rejected_groups.items()):

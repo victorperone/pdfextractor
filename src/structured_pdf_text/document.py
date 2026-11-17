@@ -392,6 +392,10 @@ class LayoutRegion:
     ocr_lines: list[TextLine] = field(default_factory=list)
     semantic_role: str | None = None
     edge_role: str | None = None
+    # ``(source region id, position)`` when an engine's text-column policy
+    # ordered the OCR lines of a source region (``ocr.pipeline.text_columns``);
+    # regions of one source keep that order.
+    ocr_flow: tuple[str, int] | None = None
 
 
 @dataclass(slots=True)

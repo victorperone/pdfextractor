@@ -395,6 +395,10 @@ def _can_merge_heading_fragments(first: LayoutRegion, second: LayoutRegion) -> b
     """
     if first.kind != RegionKind.TITLE or second.kind != RegionKind.TITLE:
         return False
+    if first.ocr_flow is not None and second.ocr_flow is not None and first.ocr_flow != second.ocr_flow:
+        # Separate text flows of an engine's column policy (a column heading
+        # never continues the page title or another column's heading).
+        return False
     if not _region_has_alphanumeric_text(first) or not _region_has_alphanumeric_text(second):
         return False
     vertical_gap = second.bbox.y0 - first.bbox.y1

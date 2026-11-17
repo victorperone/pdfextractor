@@ -2,17 +2,20 @@
 from dataclasses import replace
 
 from structured_pdf_text.document import RegionKind, TableMethod
+from structured_pdf_text.ocr.pipeline.text_columns import crosses_gutter
 from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
 from .headers import infer_visual_header_rows
 from .text_tracks import detect_borderless_tables
 
 
-def detect_ocr_track_tables(page, regions, image, claimed_tables):
+def detect_ocr_track_tables(page, regions, image, claimed_tables, text_columns=None):
     """Reuse recurrent-track classification within a composed raster scope.
 
     The native detector normally sees only native lines. This adapter admits
     already integrated regional OCR to the same classifier; geometry and text
     remain the original evidence. Ruled/merged candidates take precedence.
+    An engine's ``text_columns`` policy (``ocr.pipeline.text_columns``) vetoes
+    candidates crossed by a gutter between columns of running text.
     """
     from structured_pdf_text.ocr.image_views import canonicalize_page_image
 
@@ -30,8 +33,13 @@ def detect_ocr_track_tables(page, regions, image, claimed_tables):
             lines = reconstruct_ocr_lines(region.ocr_tokens, page.page_index, page.bbox,
                                           dehyphenate=False, page_rotation=page.objects.rotation)
             view = replace(region, native_lines=lines)
+            gutters, slope = text_columns.layout(region.ocr_tokens, page.bbox) if text_columns is not None else ([], 0.0)
             for table in detect_borderless_tables(page, view, f"{region.region_id}:ocr-tracks"):
                 box = table.page_fragments[0].bbox
+                if crosses_gutter(box, gutters, slope):
+                    # Prose columns recur on the same x tracks as a borderless
+                    # table; the engine's line observations show text flows.
+                    continue
                 if not any(image_box.x0-3 <= box.x0 and image_box.y0-3 <= box.y0
                            and box.x1 <= image_box.x1+3 and box.y1 <= image_box.y1+3
                            for image_box in image_boxes):

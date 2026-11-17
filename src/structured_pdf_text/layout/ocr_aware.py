@@ -207,14 +207,17 @@ def reclassify_ocr_regions(
 
 
 def reconstruct_ocr_layout(
-    regions: list[LayoutRegion], page_bbox: BBox
+    regions: list[LayoutRegion], page_bbox: BBox, *, page_index: int = 0, text_columns=None,
 ) -> list[LayoutRegion]:
     """Split OCR-only text areas into semantic regions before page assembly.
 
     Layout detectors based on native PDF text cannot classify a scanned page.
     This pass uses normalized OCR line geometry to recover headings, lists,
     footnotes, and edge furniture while leaving table and figure anchors intact.
-    Each input OCR line is assigned to exactly one output region.
+    Each input OCR line is assigned to exactly one output region. An engine's
+    ``text_columns`` policy (``ocr.pipeline.text_columns``) may rebuild and
+    order the lines of running-text columns; otherwise lines are ordered by
+    their stable left edges.
     """
     if not regions:
         return regions
@@ -227,7 +230,16 @@ def reconstruct_ocr_layout(
             output.append(_reclassify_one(region, _body_ocr_height_median(regions), page_bbox.height))
             continue
 
-        lines = _order_ocr_lines_by_columns(region.ocr_lines, page_bbox)
+        arranged = (text_columns.arrange(region.ocr_lines, region.ocr_tokens, page_index, page_bbox)
+                    if text_columns is not None else None)
+        if arranged is not None:
+            lines = [line for flow in arranged for line in flow]
+            flow_starts = {id(flow[0]) for flow in arranged}
+            column_headings = {id(line) for flow in arranged for line in text_columns.column_heading(flow, page_bbox)}
+        else:
+            lines = _order_ocr_lines_by_columns(region.ocr_lines, page_bbox)
+            flow_starts = set()
+            column_headings = set()
         heights = [line.bbox.height for line in lines if line.bbox.height > 0]
         body_height = statistics.median(heights) if heights else 1.0
         assigned: list[tuple[TextLine, RegionKind]] = []
@@ -253,7 +265,9 @@ def reconstruct_ocr_layout(
             short_heading = 2 <= len(text) <= 120 and not text.endswith(('.', ',', ';'))
             centered = abs(line.bbox.cx - page_bbox.width / 2) <= page_bbox.width * 0.18
             numbered = bool(re.match(r"^(?:\d+(?:\.\d+)*\.?|cap[ií]tulo|se[cç][aã]o|anexo|ap[eê]ndice)\b", text, re.I))
-            if marker:
+            if id(line) in column_headings:
+                kind = RegionKind.TITLE
+            elif marker:
                 kind = RegionKind.LIST
             elif _CAPTION_RE.match(text) and len(text) <= _CAPTION_MAX_CHARS:
                 kind = RegionKind.CAPTION
@@ -270,6 +284,13 @@ def reconstruct_ocr_layout(
             # A line in another flow lying wholly above its predecessor starts
             # the next column: one region must never bridge the gutter.
             new_column = bool(previous and not same_flow and line.bbox.y1 <= previous.bbox.y0)
+            new_column = new_column or id(line) in flow_starts
+            # The last lines of a text column near the page bottom continue
+            # its paragraph; they are not page furniture.
+            if (flow_starts and not new_column and assigned and assigned[-1][1] == RegionKind.TEXT
+                    and kind in {RegionKind.FOOTER, RegionKind.FOOTNOTE}
+                    and line.bbox.y0 - previous.bbox.y1 <= body_height * 1.5):
+                kind = RegionKind.TEXT
             assigned.append((line, kind, new_column))
 
         groups: list[tuple[RegionKind, list[TextLine]]] = []
@@ -294,6 +315,7 @@ def reconstruct_ocr_layout(
                 ocr_lines=list(group_lines),
                 ocr_tokens=tokens,
                 heading_level=None,
+                ocr_flow=(region.region_id, group_index) if arranged is not None else None,
             ))
     return reclassify_ocr_regions(output, page_height=page_bbox.height)
 

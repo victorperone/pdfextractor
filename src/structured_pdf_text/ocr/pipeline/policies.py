@@ -181,6 +181,79 @@ class FigureShapeAdmissionPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class IsolatedGlyphAdmissionPolicy:
+    """Abstain on page-OCR glyphs that stand alone with no text around them.
+
+    A full-page OCR call over a scanned emblem, seal or chart reads its shapes
+    as one or a few glyphs ("O", "Q", "9", "典", "新场督局"). An observation is
+    rejected when it holds at most ``maximum_glyphs`` characters in a box no
+    wider than ``glyph_width_heights`` heights per character (plus one), no other
+    observation of the same call lies within ``neighbour_heights`` of its
+    height (``minimum_neighbour_gap`` points at least), and its appearance is
+    not that of text: a CJK glyph, an underline/caret mark, a glyph taller
+    than ``oversized_body_ratio`` body heights (``oversized_height`` points
+    when the call read no body text) or a confidence below
+    ``minimum_confidence``. Page numbers, check marks and labels next to text
+    are untouched. Per-token decisions are delegated to ``base``.
+    """
+
+    policy_id: str
+    reason_prefix: str
+    base: object = None
+    goals: tuple[WorkGoal, ...] = (WorkGoal.PAGE,)
+    maximum_glyphs: int = 4
+    neighbour_heights: float = 1.0
+    minimum_neighbour_gap: float = 12.0
+    oversized_body_ratio: float = 3.0
+    oversized_height: float = 30.0
+    minimum_confidence: float = .70
+    mark_glyphs: str = "_~^`|"
+    glyph_width_heights: float = 1.6
+
+    def rejection_reason(self, token, request):
+        return self.base.rejection_reason(token, request) if self.base is not None else None
+
+    def attempt_rejections(self, tokens, request) -> dict[str, str]:
+        if request.goal not in self.goals:
+            return {}
+        bodies = [token.bbox.height for token in tokens if len("".join(token.text.split())) > self.maximum_glyphs]
+        body = sorted(bodies)[len(bodies) // 2] if bodies else None
+        tall = max(self.oversized_height, self.oversized_body_ratio * body) if body else self.oversized_height
+        reasons = {}
+        for token in tokens:
+            glyphs = "".join(token.text.split())
+            if not glyphs or len(glyphs) > self.maximum_glyphs:
+                continue
+            if token.bbox.width > (self.glyph_width_heights * len(glyphs) + 1.0) * token.bbox.height:
+                # A wide box holds a misread line of text, not a lone shape.
+                continue
+            reach = max(self.minimum_neighbour_gap, self.neighbour_heights * token.bbox.height)
+            if any(other is not token and "".join(other.text.split())
+                   and _box_gap(token.bbox, other.bbox) <= reach for other in tokens):
+                continue
+            confidence = token.confidence_normalized
+            if any(_is_cjk(char) for char in glyphs):
+                reasons[token.token_id] = f"{self.reason_prefix}_isolated_cjk_glyph"
+            elif all(char in self.mark_glyphs for char in glyphs):
+                reasons[token.token_id] = f"{self.reason_prefix}_isolated_mark"
+            elif token.bbox.height > tall:
+                reasons[token.token_id] = f"{self.reason_prefix}_isolated_oversized_glyph"
+            elif confidence is not None and confidence < self.minimum_confidence:
+                reasons[token.token_id] = f"{self.reason_prefix}_isolated_uncertain_glyph"
+        return reasons
+
+
+def _box_gap(first: BBox, second: BBox) -> float:
+    return max(second.x0 - first.x1, first.x0 - second.x1, second.y0 - first.y1, first.y0 - second.y1, 0.0)
+
+
+def _is_cjk(char: str) -> bool:
+    code = ord(char)
+    return (0x2E80 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF
+            or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFFEF or 0x20000 <= code <= 0x2FA1F)
+
+
+@dataclass(frozen=True, slots=True)
 class CellRecoveryPolicy:
     """Candidate selection values owned independently by each engine pipeline."""
 
