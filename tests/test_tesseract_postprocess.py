@@ -69,7 +69,7 @@ from structured_pdf_text.ocr.tesseract.postprocess import (
     _suppress_dollar_letter_garble,
     _suppress_ocr_corpus_markers,
     _suppress_pagina_separator_blocks,
-    _suppress_rotated_table_garble,
+    _flag_rotated_table_garble,
     _suppress_tesseract_coordinate_dump,
     _suppress_v6_irinf_artifacts,
     _table_has_q_without_u,
@@ -1679,7 +1679,7 @@ def test_suppress_corpus_markers_split_omitir_lowercase():
 
 
 # ---------------------------------------------------------------------------
-# 11. Fix-O: _table_has_q_without_u and _suppress_rotated_table_garble
+# 11. Fix-O: _table_has_q_without_u and _flag_rotated_table_garble (T3-P36: flag, never suppress)
 # ---------------------------------------------------------------------------
 
 
@@ -1718,8 +1718,12 @@ def test_q_without_u_at_word_end():
     assert _table_has_q_without_u("LONGTEXTQ") is True  # 9 chars, Q at end
 
 
-def test_suppress_rotated_table_garble_triggers_on_table_block():
-    """TABLE block with Q-not-U long word is suppressed (Fix-O)."""
+def test_flag_rotated_table_garble_keeps_table_block_and_warns():
+    """TABLE block with Q-not-U long word is kept and reported (Fix-O, T3-P36).
+
+    The rule used to suppress the block; that deleted the whole V4 p167/p168
+    table for one misread Greek word, silently. Detection stays, deletion goes.
+    """
     # Simulate page 99 TABLE block.text (rows joined with \n, cells with \t)
     garbled_table = (
         "NVOS\tbhap\n"
@@ -1728,20 +1732,22 @@ def test_suppress_rotated_table_garble_triggers_on_table_block():
         "SAdHOD eulbed ajosuo\tIJVAOU"
     )
     doc = _make_doc([garbled_table], kind="table")
-    _suppress_rotated_table_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_rotated_table_garble"
+    doc.pages[0].diagnostics = SimpleNamespace(warnings=[], facts={})
+    _flag_rotated_table_garble(doc)
+    assert doc.pages[0].content_blocks[0].suppressed is False
+    assert doc.pages[0].content_blocks[0].text == garbled_table
+    assert any(w.startswith("suspected_ocr_garble") for w in doc.pages[0].diagnostics.warnings)
 
 
-def test_suppress_rotated_table_garble_skips_text_block():
+def test_flag_rotated_table_garble_skips_text_block():
     """TEXT blocks with Q-not-U are NOT suppressed (fix targets TABLE only)."""
     garbled_text = "ORIQLVHOIVT 490 opesio"
     doc = _make_doc([garbled_text], kind="text")
-    _suppress_rotated_table_garble(doc)
+    _flag_rotated_table_garble(doc)
     assert doc.pages[0].content_blocks[0].suppressed is False
 
 
-def test_suppress_rotated_table_garble_normal_table_not_suppressed():
+def test_flag_rotated_table_garble_normal_table_not_suppressed():
     """Normal financial table with no Q-not-U is NOT suppressed."""
     normal_table = (
         "Centro\tOrçado\tRealizado\tDiferença\n"
@@ -1750,25 +1756,25 @@ def test_suppress_rotated_table_garble_normal_table_not_suppressed():
         "TOTAL\tR$ 19.750,00\tR$ 19.900,00\tR$ +150,00"
     )
     doc = _make_doc([normal_table], kind="table")
-    _suppress_rotated_table_garble(doc)
+    _flag_rotated_table_garble(doc)
     assert doc.pages[0].content_blocks[0].suppressed is False
 
 
-def test_suppress_rotated_table_garble_qualidade_not_suppressed():
+def test_flag_rotated_table_garble_qualidade_not_suppressed():
     """Table with 'QUALIDADE' (Q followed by U) is not suppressed."""
     table = "QUALIDADE\tPONTUAÇÃO\nExcelente\t10\nBom\t7"
     doc = _make_doc([table], kind="table")
-    _suppress_rotated_table_garble(doc)
+    _flag_rotated_table_garble(doc)
     assert doc.pages[0].content_blocks[0].suppressed is False
 
 
-def test_suppress_rotated_table_garble_skips_already_suppressed():
+def test_flag_rotated_table_garble_skips_already_suppressed():
     """Already-suppressed TABLE blocks are not double-processed."""
     garbled = "ORIQLVHOIVT\tgarbled"
     doc = _make_doc([garbled], kind="table")
     doc.pages[0].content_blocks[0].suppressed = True
     doc.pages[0].content_blocks[0].suppression_reason = "prior_reason"
-    _suppress_rotated_table_garble(doc)
+    _flag_rotated_table_garble(doc)
     assert doc.pages[0].content_blocks[0].suppression_reason == "prior_reason"
     assert doc.pages[0].content_blocks[0].suppressed is True
 

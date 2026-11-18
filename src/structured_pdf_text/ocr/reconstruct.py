@@ -399,6 +399,14 @@ _PROSE_MIN_PAGE_WIDTH = 0.15
 # table cell) produce boxes that almost coincide; joined into one line they
 # read "€ 98,4096,40" (V8 p4/p58, T3-P28).
 _REREAD_MIN_IOU = 0.6
+# A crop that cuts a word, or a noisy pass over a well-read word, gives a
+# second reading whose box lies inside the other's without matching it
+# (V9 p58: "333,92" at 0.672 inside "2.333,52" at 0.966, IoU 0.57; "R$" at
+# 0.959 inside "R$E" at 0.315). Joined, the cell reads "R$ 2.333,52333,92"
+# (T3-P39).
+_REREAD_CONTAINED_MIN = 0.8
+# Below this confidence an enclosing reading is noise rather than a word.
+_REREAD_NOISE_MAX_CONFIDENCE = 0.5
 
 
 def _drop_conflicting_rereads(tokens: list[OcrToken], boxes: dict[int, BBox]) -> list[OcrToken]:
@@ -408,8 +416,16 @@ def _drop_conflicting_rereads(tokens: list[OcrToken], boxes: dict[int, BBox]) ->
     identifies the recognition call (Tesseract). Two tokens from different
     calls whose boxes overlap with IoU >= ``_REREAD_MIN_IOU`` are two readings
     of the same word: the higher-confidence one is kept (V8 p4: "98,40" at
-    0.925 over "96,40" at 0.632). Partial overlaps at crop borders, tokens of
-    one call and tokens of other engines are left untouched.
+    0.925 over "96,40" at 0.632).
+
+    A reading whose box lies almost wholly inside a reading of another call
+    (``_REREAD_CONTAINED_MIN`` of its area) is the same spot read again: a
+    less confident inner reading is a partial re-read and is dropped ("333,92"
+    inside "2.333,52"); a noisy enclosing reading (below
+    ``_REREAD_NOISE_MAX_CONFIDENCE``) over a more confident inner one is
+    dropped instead ("R$E" around "R$", T3-P39). Two confident readings are
+    both kept. Partial overlaps at crop borders, tokens of one call and
+    tokens of other engines are left untouched.
     """
     scoped = [token for token in tokens if token.layout_line_id]
     if len({token.layout_line_id.split(":", 1)[0] for token in scoped}) < 2:
@@ -432,7 +448,39 @@ def _drop_conflicting_rereads(tokens: list[OcrToken], boxes: dict[int, BBox]) ->
             dropped.add(id(loser))
             if loser is first:
                 break
+    remaining = [token for token in ordered if id(token) not in dropped]
+    for index, first in enumerate(remaining):
+        if id(first) in dropped:
+            continue
+        first_box = boxes[id(first)]
+        for second in remaining[index + 1:]:
+            second_box = boxes[id(second)]
+            if second_box.x0 >= first_box.x1:
+                break
+            if (id(second) in dropped
+                    or first.layout_line_id.split(":", 1)[0] == second.layout_line_id.split(":", 1)[0]):
+                continue
+            inner, outer = (first, second) if first_box.area <= second_box.area else (second, first)
+            if boxes[id(inner)].overlap_ratio(boxes[id(outer)]) < _REREAD_CONTAINED_MIN:
+                continue
+            loser = _contained_reread_loser(inner, outer)
+            if loser is None:
+                continue
+            dropped.add(id(loser))
+            if loser is first:
+                break
     return [token for token in tokens if id(token) not in dropped]
+
+
+def _contained_reread_loser(inner: OcrToken, outer: OcrToken) -> OcrToken | None:
+    """The reading to drop when ``inner`` lies inside ``outer`` (T3-P39)."""
+    inner_confidence = inner.confidence or 0.0
+    outer_confidence = outer.confidence or 0.0
+    if inner_confidence < outer_confidence:
+        return inner
+    if outer_confidence < _REREAD_NOISE_MAX_CONFIDENCE and outer_confidence < inner_confidence:
+        return outer
+    return None
 
 
 def _group_engine_lines(
@@ -1027,6 +1075,9 @@ def dehyphenate_ocr_lines(lines: list[TextLine]) -> list[TextLine]:
 # Glyph-box variation between lines of one paragraph (about a descender's
 # depth), as a fraction of the median line height (T3-P20).
 _GAP_JITTER_RATIO = 0.2
+# Line box height over estimated type size beyond which boxes are inflated
+# by skew rather than by ascenders and descenders (T3-P20).
+_LEVEL_BOX_MAX_RATIO = 1.5
 
 
 def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
@@ -1091,6 +1142,11 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
     # Compute line widths for ragged-right detection.
     widths = [line.bbox.width for line in lines if line.bbox.width > 0]
     median_width = median(widths) if widths else 1.0
+    # Skewed boxes are much taller than their type size, estimated from the
+    # advance per character (about half an em).
+    advances = [line.bbox.width / len(line.text.strip()) for line in lines if len(line.text.strip()) >= 10]
+    type_size = 2.0 * median(advances) if advances else typical_height
+    level_text = typical_height <= _LEVEL_BOX_MAX_RATIO * type_size
     # Indent threshold: a step of >= 1 standard character width to the right.
     heights = [line.bbox.height for line in lines if line.bbox.height > 0]
     char_width_estimate = (median(heights) if heights else 10.0) * 0.6
@@ -1114,8 +1170,15 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
             current_left = curr.bbox.x0
             continue
 
-        # Rule 1: large vertical gap.
-        gap = curr.bbox.y0 - prev.bbox.y1
+        # Rule 1: large vertical gap. On level text a box shorter than the
+        # typical line lacks descenders and ends above its text line; count
+        # the gap from where its descenders would end (at most a descender's
+        # depth). On a skewed scan box heights follow line widths instead.
+        missing_descender = 0.0
+        if level_text:
+            missing_descender = min(max(typical_height - prev.bbox.height, 0.0),
+                                    typical_height * _GAP_JITTER_RATIO)
+        gap = curr.bbox.y0 - prev.bbox.y1 - missing_descender
         if gap > gap_threshold:
             paragraphs.append(current_group)
             current_group = [curr]

@@ -137,14 +137,30 @@ def _prefix_depth(num_str: str) -> int:
     return len([p for p in num_str.split(".") if p])
 
 
+# Suppressions of recognised page furniture: running headers, "Página NNN"
+# separators, corpus markers and IRINF header/footer artifacts. Any other
+# suppression made here removes content after the assembly ledger has
+# accounted for every line, so it is reported in the page diagnostics
+# (T3-P36).
+_FURNITURE_SUPPRESSION_REASONS = frozenset({
+    "tesseract_running_header",
+    "tesseract_pagina_separator",
+    "tesseract_ocr_corpus_marker",
+    "tesseract_v6_irinf_artifact",
+})
+
+
 def apply_tesseract_postprocessors(document: "StructuredDocument") -> None:
     """Run all Tesseract post-processors on *document* in order."""
+    visible_before = {
+        id(block) for page in document.pages for block in page.content_blocks if not block.suppressed
+    }
     suppress_tesseract_running_headers(document)
     _suppress_pagina_separator_blocks(document)
     _suppress_ocr_corpus_markers(document)
     _suppress_v6_irinf_artifacts(document)
     _suppress_tesseract_coordinate_dump(document)
-    _suppress_rotated_table_garble(document)
+    _flag_rotated_table_garble(document)
     _suppress_dollar_letter_garble(document)   # Fix-P — NEW
     _normalize_brl_currency_spacing(document)
     _promote_numbered_bold_headings(document)
@@ -155,6 +171,39 @@ def apply_tesseract_postprocessors(document: "StructuredDocument") -> None:
     _promote_seção_subseção_headings(document)
     _promote_post_table_checklist_items(document)   # Fix-F05 v1-v3
     _promote_ocr_checkbox_o_prefix(document)         # Fix-F05 v4 — NEW
+    _report_postprocess_suppressions(document, visible_before)
+
+
+def _report_postprocess_suppressions(document: "StructuredDocument", visible_before: set[int]) -> None:
+    """Record the content these post-processors removed (T3-P36).
+
+    They run after assembly, whose ledger has already accounted for every
+    line; a block suppressed here would otherwise vanish while the page is
+    reported valid and clean (V4 p167/p168 lost a whole table that way).
+    Every suppression is counted in the page facts; any suppression that is
+    not recognised page furniture also becomes a page warning.
+    """
+    for page in document.pages:
+        removed: dict[str, int] = {}
+        for block in page.content_blocks:
+            if id(block) in visible_before and block.suppressed:
+                reason = block.suppression_reason or "unspecified"
+                removed[reason] = removed.get(reason, 0) + len((block.text or "").strip())
+        diagnostics = getattr(page, "diagnostics", None)
+        if not removed or diagnostics is None:
+            continue
+        diagnostics.facts["tesseract_postprocess_suppressed_chars"] = removed
+        for reason, chars in sorted(removed.items()):
+            if reason not in _FURNITURE_SUPPRESSION_REASONS:
+                _add_page_warning(document, page, f"content_suppressed_by_postprocess: {reason} ({chars} chars)")
+
+
+def _add_page_warning(document: "StructuredDocument", page, message: str) -> None:
+    """Append a warning to the page and, prefixed, to the document."""
+    page.diagnostics.warnings.append(message)
+    document_diagnostics = getattr(document, "diagnostics", None)
+    if document_diagnostics is not None:
+        document_diagnostics.warnings.append(f"page {page.page_index + 1}: {message}")
 
 
 def suppress_tesseract_running_headers(
@@ -991,46 +1040,45 @@ def _table_has_q_without_u(text: str) -> bool:
     return False
 
 
-def _suppress_rotated_table_garble(document: "StructuredDocument") -> None:
-    """Suppress TABLE blocks whose content contains phonotactically-impossible tokens.
+def _flag_rotated_table_garble(document: "StructuredDocument") -> None:
+    """Report TABLE blocks containing letter sequences impossible in Latin script.
 
-    When a table image is physically rotated 90° or 270° inside a PDF page,
-    Tesseract reads the columns as horizontal lines and produces completely
-    garbled cell text.  One reliable cross-language symptom is a long alphabetic
-    token containing Q not followed by U — impossible in Portuguese, Spanish,
-    French, Italian, and all other Latin-script European languages.
-
-    Detection: any unsuppressed TABLE block whose plain-text representation
-    contains at least one ≥7-character alphabetic token with Q not followed by U
-    is marked suppressed.  Short abbreviations (SQL, QR) are excluded by the
-    7-character minimum, ensuring no false positives from legitimate technical
-    table content.
-
-    This covers the case not handled by Fix-N (``_omitir_gabarito_split``):
-    rotated tables that do NOT carry the "OMITIR NO GABARITO" marker and
-    therefore cannot be identified by their semantic content.
+    A table image rotated 90° or 270° and read sideways produces garbled cell
+    text, often with a long alphabetic token containing Q not followed by U
+    (``ORIQLVHOIVT``). This rule used to suppress the whole block on a single
+    such token. One misread word in an otherwise legible table triggers it
+    too: V4 p167/p168 lost a complete multilingual table, reported valid and
+    clean, because the Greek row reads "aByAQnA" (T3-P36). Rotated tables
+    are oriented before recognition (quarter-turn retry, T3-P02/T3-P32), so
+    the block is kept and the suspicion becomes a page warning: recoverable
+    content is never hidden by this heuristic.
     """
     try:
         from structured_pdf_text.document import ContentKind
     except Exception:
         return
 
-    suppressed = 0
+    flagged_total = 0
     for page in document.pages:
+        flagged = 0
         for block in page.content_blocks:
             if block.suppressed:
                 continue
             if getattr(block, "kind", None) != ContentKind.TABLE:
                 continue
-            text = block.text or ""
-            if _table_has_q_without_u(text):
-                block.suppressed = True
-                block.suppression_reason = "tesseract_rotated_table_garble"
-                suppressed += 1
+            if _table_has_q_without_u(block.text or ""):
+                flagged += 1
+        if flagged and getattr(page, "diagnostics", None) is not None:
+            _add_page_warning(
+                document, page,
+                f"suspected_ocr_garble: {flagged} table block(s) kept with letter sequences "
+                "impossible in Latin script",
+            )
+        flagged_total += flagged
 
-    if suppressed:
+    if flagged_total:
         print(
-            f"[tesseract_post] suppressed {suppressed} rotated-table garble block(s)",
+            f"[tesseract_post] flagged {flagged_total} table block(s) with suspected garble (kept)",
             flush=True,
         )
 

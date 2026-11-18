@@ -172,3 +172,30 @@ def test_tight_paragraph_gap_still_separates_paragraphs():
     paragraphs = segment_ocr_paragraphs(lines)
 
     assert [len(paragraph) for paragraph in paragraphs] == [10, 10]
+
+
+def test_line_without_descenders_does_not_open_a_paragraph():
+    """T3-P20 attempt 3 (V10 p32): a 4.7 pt box among 6.0 pt lines ends 1.3 pt early."""
+    from structured_pdf_text.ocr.reconstruct import segment_ocr_paragraphs
+
+    lines, y = [], 100.0
+    for index in range(8):
+        height = 4.7 if index == 3 else 6.0
+        lines.append(_ocr_line(y, y + height, f"linha {index} do mesmo parágrafo"))
+        y += height + (3.7 if index == 3 else 2.2)
+
+    assert [len(paragraph) for paragraph in segment_ocr_paragraphs(lines)] == [8]
+
+
+def test_skewed_boxes_do_not_borrow_a_descender_across_a_real_gap():
+    """T3-P20 attempt 5 (V9 p17): on a skewed scan a narrower line has a shorter box; it is not a missing descender."""
+    from structured_pdf_text.ocr.reconstruct import segment_ocr_paragraphs
+
+    header = _ocr_line(124.4, 138.7, "Processo: V9-2026-001452 Competência: 15/10/2026 Unidade: Núcleo de Patrimônio",
+                       x1=57.0 + 309.0)
+    body_text = "O levantamento considerou a competência de 15/10/2026, os registros do processo e a documentação"
+    body = [_ocr_line(156.5 + 11.5 * index, 176.2 + 11.5 * index, body_text, x1=57.0 + 480.0) for index in range(3)]
+
+    paragraphs = segment_ocr_paragraphs([header, *body])
+
+    assert [len(paragraph) for paragraph in paragraphs] == [1, 3]
