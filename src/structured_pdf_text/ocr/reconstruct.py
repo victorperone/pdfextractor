@@ -1134,9 +1134,12 @@ def segment_ocr_paragraphs(lines: list[TextLine]) -> list[list[TextLine]]:
     typical_height = median(line_heights) if line_heights else 10.0
     absolute_gap = typical_height * 0.75
     # OCR boxes follow the glyphs: a line without ascenders or descenders is
-    # shorter, so the gap between lines of one paragraph varies by about a
-    # descender's depth. A larger gap must exceed that jitter (T3-P20).
-    relative_gap = max(median_gap * 1.4, median_gap + typical_height * _GAP_JITTER_RATIO)
+    # shorter, so the gap below it looks larger. That jitter is compensated
+    # per line on level text (missing descender, rule 1). Widening the
+    # threshold itself by a descender's depth merged real paragraphs of
+    # dense single-column scans, whose breaks are only ~1.5 pt wider than
+    # the line gap (V4 p129/p138, T3-P38).
+    relative_gap = median_gap * 1.4
     gap_threshold = max(min(relative_gap, absolute_gap), 1.0)
 
     # Compute line widths for ragged-right detection.
