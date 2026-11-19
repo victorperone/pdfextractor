@@ -37,10 +37,18 @@ from typing import TYPE_CHECKING
 
 from structured_pdf_text.document import LayoutRegion, RegionKind, TextLine
 from structured_pdf_text.geometry import BBox
-from structured_pdf_text.ocr.reconstruct import ocr_text_column_layout, text_column_bands
+from structured_pdf_text.ocr.reconstruct import LEVEL_TEXT_MAX_SLOPE, ocr_text_column_layout, text_column_bands
 
 if TYPE_CHECKING:
     pass
+
+
+# An OCR line at least this many times the body line height is title-sized.
+OCR_TITLE_LINE_RATIO = 1.28
+# T3-P06, level text only: a title-sized line whose gaps to the previous and
+# next lines of the same flow are within this fraction of the body line height
+# is a body line with a tall box, embedded in its paragraph.
+_EMBEDDED_LINE_GAP_RATIO = 0.35
 
 
 # ---------------------------------------------------------------------------
@@ -258,13 +266,17 @@ def reconstruct_ocr_layout(
             short_heading = 2 <= len(text) <= 120 and not text.endswith(('.', ',', ';'))
             centered = abs(line.bbox.cx - page_bbox.width / 2) <= page_bbox.width * 0.18
             numbered = bool(re.match(r"^(?:\d+(?:\.\d+)*\.?|cap[ií]tulo|se[cç][aã]o|anexo|ap[eê]ndice)\b", text, re.I))
+            level_text = abs(slope) <= LEVEL_TEXT_MAX_SLOPE
             if marker:
                 kind = RegionKind.LIST
-            elif _CAPTION_RE.match(text) and len(text) <= _CAPTION_MAX_CHARS:
+            elif (_CAPTION_RE.match(text) and len(text) <= _CAPTION_MAX_CHARS
+                  and not (level_text and ratio >= OCR_TITLE_LINE_RATIO)):
+                # A title-sized line is a heading even if it opens with a
+                # caption word ("Quadro de acompanhamento | ...").
                 kind = RegionKind.CAPTION
             elif bottom and ratio < 0.88:
                 kind = RegionKind.FOOTNOTE
-            elif short_heading and (ratio >= 1.28 or (gap_above > body_height * 2.5 and (centered or numbered or uppercase_ratio >= 0.65))):
+            elif short_heading and (ratio >= OCR_TITLE_LINE_RATIO or (gap_above > body_height * 2.5 and (centered or numbered or uppercase_ratio >= 0.65))):
                 kind = RegionKind.TITLE
             elif top and (centered or uppercase_ratio >= 0.75):
                 kind = RegionKind.HEADER
@@ -272,11 +284,18 @@ def reconstruct_ocr_layout(
                 kind = RegionKind.FOOTER
             else:
                 kind = RegionKind.TEXT
+            if kind == RegionKind.TITLE and level_text and _is_embedded_in_paragraph(
+                lines, index, assigned, page_bbox, body_height,
+            ):
+                kind = RegionKind.TEXT
             assigned.append((line, kind))
 
         groups: list[tuple[RegionKind, list[TextLine]]] = []
+        level_region = abs(slope) <= LEVEL_TEXT_MAX_SLOPE
         for line, kind in assigned:
-            if groups and groups[-1][0] == kind:
+            if groups and groups[-1][0] == kind and not (
+                level_region and kind == RegionKind.TITLE and _starts_new_heading(groups[-1][1][-1], line)
+            ):
                 groups[-1][1].append(line)
             else:
                 groups.append((kind, [line]))
@@ -298,6 +317,44 @@ def reconstruct_ocr_layout(
                 heading_level=None,
             ))
     return reclassify_ocr_regions(output, page_height=page_bbox.height)
+
+
+def _is_embedded_in_paragraph(
+    lines: list[TextLine],
+    index: int,
+    assigned: list[tuple[TextLine, RegionKind]],
+    page_bbox: BBox,
+    body_height: float,
+) -> bool:
+    """Return True when ``lines[index]`` sits inside a paragraph (T3-P06).
+
+    The previous line of the same flow is body text and the gaps above and
+    below are within the paragraph's own line spacing: a box made tall by
+    accents or descenders, not a heading. Such a line split out as a region
+    also broke the paragraph and interleaved columns in the assembly.
+    """
+    line = lines[index]
+    limit = body_height * _EMBEDDED_LINE_GAP_RATIO
+
+    def same_flow(other: TextLine) -> bool:
+        return abs(other.bbox.x0 - line.bbox.x0) <= page_bbox.width * 0.12
+
+    if not index or not assigned or assigned[-1][1] != RegionKind.TEXT:
+        return False
+    previous = lines[index - 1]
+    if not same_flow(previous) or line.bbox.y0 - previous.bbox.y1 > limit:
+        return False
+    if index + 1 >= len(lines):
+        return False
+    following = lines[index + 1]
+    return same_flow(following) and following.bbox.y0 - line.bbox.y1 <= limit
+
+
+def _starts_new_heading(previous: TextLine, line: TextLine) -> bool:
+    """Heading lines are set tight: a title line separated from the previous
+    title line by more than a line height is another heading (T3-P06), e.g. a
+    page header, the page title and a metadata line one under the other."""
+    return line.bbox.y0 - previous.bbox.y1 > max(previous.bbox.height, line.bbox.height)
 
 
 _DASH_START_RE = re.compile(r"^[–—]\s+")

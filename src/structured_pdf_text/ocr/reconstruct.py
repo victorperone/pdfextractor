@@ -728,7 +728,10 @@ def _validated_gutters(
 # deskewed scan the estimated tilt leaves a residue and the region layout is
 # fragile (title-sized lines from tilted boxes, T3-P31); joining there changed
 # region boundaries and lost one occurrence of a repeated paragraph (V10 p25).
-_MERGE_GUTTERS_MAX_SLOPE = 0.005
+# The same bound defines "level text" for OCR title decisions (T3-P06): on
+# skewed OCR text, axis-aligned boxes are inflated by the tilt (T3-P35).
+LEVEL_TEXT_MAX_SLOPE = 0.005
+_MERGE_GUTTERS_MAX_SLOPE = LEVEL_TEXT_MAX_SLOPE
 
 
 def _merge_collinear_gutters(

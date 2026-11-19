@@ -25,6 +25,12 @@ The public entry point :func:`assign_heading_levels` operates in two passes:
 
    The OCR path produces a level assignment consistent with the native path:
    clusters of size ratios are mapped to H1/H2/H3 identically.
+
+   The path is chosen per region from its own provenance (T3-P06): a TITLE
+   region recognized only by OCR (OCR lines, no native font size) is judged by
+   :func:`_assign_ocr_title_levels` against the OCR body of its page, whatever
+   the rest of the document contains.  Every other region keeps the typography
+   pass unchanged.
 """
 from __future__ import annotations
 
@@ -34,12 +40,29 @@ import statistics
 
 from structured_pdf_text.document import LayoutRegion, RegionKind, StructuredPage
 from structured_pdf_text.geometry import BBox
+from structured_pdf_text.layout.ocr_aware import OCR_TITLE_LINE_RATIO
+from structured_pdf_text.ocr.reconstruct import LEVEL_TEXT_MAX_SLOPE, ocr_text_column_layout
 
 
 # A title prediction needs more than positional/short-text heuristics.  The
 # contextual style check below keeps body-sized labels from becoming H1 while
 # retaining clear typography.
 HEADING_ACCEPTANCE_THRESHOLD = 1.0
+
+# T3-P06: OCR-only titles.  A page needs this many OCR body lines to be its own
+# height reference; otherwise the document OCR body median is used.
+_OCR_PAGE_REFERENCE_MIN_LINES = 5
+# A section number counts only when the text after it is mostly alphabetic: a
+# record such as "001 V10-83617-00 21/09/2026 ..." is a table row, not a section.
+_SECTION_PREFIX_MAX_DIGIT_SHARE = 0.2
+# A lone capital letter is a section label only with "." or ")" ("A." but not
+# the Portuguese articles "A"/"O"/"E" opening a sentence).
+_SECTION_PREFIX_RE = re.compile(r"^(?:\d+(?:\.\d+)*[.)]?|[A-Z](?:\.\d+)*[.)])\s+")
+_LOOSE_SECTION_PREFIX_RE = re.compile(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[.)]?\s+")
+_NUMBERED_PREFIX_SCORE = 0.45   # bonus given by _heading_candidate_score_ocr
+_OCR_BODY_EXCLUDED_KINDS = frozenset({
+    RegionKind.TITLE, RegionKind.HEADER, RegionKind.FOOTER, RegionKind.TABLE, RegionKind.DECORATIVE,
+})
 
 
 def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
@@ -49,8 +72,118 @@ def assign_heading_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
     OCR fallback (§28): when native font metrics are absent, derives heading
     evidence from OCR line box heights, numbered prefixes, and page geometry.
     Both paths produce the same H1/H2/H3 clustering output.
+
+    TITLE regions recognized only by OCR are judged first, from their own
+    provenance (:func:`_assign_ocr_title_levels`); the typography pass then
+    runs on the other regions exactly as before.
     """
     pages = [_merge_heading_fragments(page) for page in pages]
+    ocr_levels = _assign_ocr_title_levels(pages)
+    # Hide every OCR-only title from the typography pass: accepted ones are
+    # restored below with their OCR level, rejected ones stay ordinary text.
+    hidden = [
+        dataclasses.replace(page, regions=[
+            dataclasses.replace(region, kind=RegionKind.TEXT, heading_level=None)
+            if region.kind == RegionKind.TITLE and _is_ocr_only(region) else region
+            for region in page.regions
+        ])
+        for page in pages
+    ]
+    assigned = _assign_typography_levels(hidden)
+    return [
+        dataclasses.replace(page, regions=[
+            dataclasses.replace(region, kind=RegionKind.TITLE, heading_level=ocr_levels[region.region_id])
+            if region.region_id in ocr_levels else region
+            for region in page.regions
+        ])
+        for page in assigned
+    ]
+
+
+def _has_native_font_evidence(region: LayoutRegion) -> bool:
+    return any(
+        token.font_size is not None and token.font_size > 0
+        for line in region.native_lines for token in line.tokens
+    )
+
+
+def _is_ocr_only(region: LayoutRegion) -> bool:
+    """Region text comes from OCR only: OCR lines and no native typography."""
+    return bool(region.ocr_lines) and not _has_native_font_evidence(region)
+
+
+def _assign_ocr_title_levels(pages: list[StructuredPage]) -> dict[str, int]:
+    """Accept OCR-only TITLE regions on level text and cluster their levels (T3-P06).
+
+    The reference is the OCR body line height of the region's own page (OCR
+    heights depend on the page's scan and font, and are not comparable with
+    native font sizes).  Skewed OCR text keeps the previous behaviour (no OCR
+    title): its axis-aligned boxes are inflated by the tilt (T3-P35).
+    """
+    doc_heights = [
+        height for page in pages for region in page.regions
+        if region.kind not in _OCR_BODY_EXCLUDED_KINDS and _is_ocr_only(region)
+        for height in _region_ocr_heights(region)
+    ]
+    doc_median = statistics.median(doc_heights) if doc_heights else None
+    ratios: dict[str, float] = {}
+    for page in pages:
+        candidates = [
+            region for region in page.regions
+            if region.kind == RegionKind.TITLE and _is_ocr_only(region)
+            and _region_has_alphanumeric_text(region)
+        ]
+        if not candidates:
+            continue
+        heights = [
+            height for region in page.regions
+            if region.kind not in _OCR_BODY_EXCLUDED_KINDS and _is_ocr_only(region)
+            for height in _region_ocr_heights(region)
+        ]
+        reference = statistics.median(heights) if len(heights) >= _OCR_PAGE_REFERENCE_MIN_LINES else doc_median
+        if not reference:
+            continue
+        tokens = [token for region in page.regions if _is_ocr_only(region) for token in region.ocr_tokens]
+        slope = ocr_text_column_layout(tokens, page.bbox)[1] if tokens else 0.0
+        if abs(slope) > LEVEL_TEXT_MAX_SLOPE:
+            continue
+        for region in candidates:
+            score = _heading_candidate_score_ocr(region, body_ocr_height_median=reference, page_bbox=page.bbox)
+            text = _ocr_region_text(region)
+            if _LOOSE_SECTION_PREFIX_RE.match(text) and not _has_section_prefix(text):
+                score = max(0.0, score - _NUMBERED_PREFIX_SCORE)
+            if score < HEADING_ACCEPTANCE_THRESHOLD:
+                continue
+            ratio = _ocr_region_height(region) / reference
+            if ratio >= OCR_TITLE_LINE_RATIO or _has_section_prefix(text) or score >= 2.0:
+                ratios[region.region_id] = ratio
+    clusters: list[float] = []
+    for value in sorted({round(ratio, 6) for ratio in ratios.values()}, reverse=True):
+        if not clusters or clusters[-1] - value > 0.12:
+            clusters.append(value)
+    clusters = clusters[:6]
+    return {
+        region_id: min(6, min(range(len(clusters)), key=lambda index: abs(clusters[index] - ratio)) + 1)
+        for region_id, ratio in ratios.items()
+    }
+
+
+def _ocr_region_text(region: LayoutRegion) -> str:
+    return " ".join(line.text for line in region.ocr_lines).strip()
+
+
+def _has_section_prefix(text: str) -> bool:
+    """A section number followed by mostly alphabetic text."""
+    match = _SECTION_PREFIX_RE.match(text)
+    if not match:
+        return False
+    rest = [character for character in text[match.end():] if not character.isspace()]
+    return bool(rest) and sum(character.isdigit() for character in rest) / len(rest) < _SECTION_PREFIX_MAX_DIGIT_SHARE
+
+
+def _assign_typography_levels(pages: list[StructuredPage]) -> list[StructuredPage]:
+    """Typography pass (native font metrics, or the §28 OCR fallback when the
+    document has no native font size at all) over already merged pages."""
     # Collect native and OCR sizes separately so the clustering always uses
     # consistent units.  Native font_size values are in PDF points; OCR bbox
     # heights come from rendered pixels back-converted to page coordinates and
@@ -372,6 +505,9 @@ def _merge_heading_fragments(page: StructuredPage) -> StructuredPage:
                 bbox=BBox.union_all([previous.bbox, region.bbox]),
                 native_lines=[*previous.native_lines, *region.native_lines],
                 ocr_tokens=[*previous.ocr_tokens, *region.ocr_tokens],
+                # The assembly renders OCR regions from ``ocr_lines``: merging
+                # OCR title fragments must keep the second fragment's lines.
+                ocr_lines=[*previous.ocr_lines, *region.ocr_lines],
             )
         else:
             merged.append(region)
