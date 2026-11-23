@@ -31,6 +31,7 @@ CORPORA = [
     ("V8", "corpus/V8/Document_AI_V8.pdf"),
     ("V9", "corpus/V9/Document_AI_V9.pdf"),
     ("V10", "corpus/V10/Document_AI_V10.pdf"),
+    ("V11", "corpus/V11/Document_AI_V11.pdf"),
 ]
 
 
