@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import defaultdict
+from statistics import median
 
 from structured_pdf_text.document import RegionKind, StructuredPage, TextLine
 
@@ -50,7 +51,163 @@ def detect_repeated_headers_footers(pages: list[StructuredPage]) -> dict[str, li
             continue
         confirmed[key] = sorted(by_page)
     _confirm_ocr_variants(observations, confirmed)
+    _confirm_page_counters(observations, confirmed)
     return confirmed
+
+
+# T3-P43: running furniture often carries the page number without a
+# "Página/Page" label ("Folha 12", "Coleção · 012", "Relatório | 03/84").
+# The number makes every page's signature unique, so the exact repetition test
+# never confirms the line. A number is accepted as a page counter only when
+# several independent pieces of evidence agree; a value equal to the page
+# index is never enough on its own:
+#   * the line is an edge candidate (same edge-band test as any furniture) and
+#     is not vetoed as a semantic identifier (``_SEMANTIC_CONTROL_RE``);
+#   * apart from the numbers, every occurrence has the same text form;
+#   * each varying number follows the pagination with one constant offset on
+#     every occurrence (a counter that restarts, skips or repeats is rejected
+#     as a whole, so its lines are preserved);
+#   * the occurrences include a run of consecutive pages, as running furniture
+#     does: a line repeated only on scattered pages (a table continuation
+#     label, an annex sheet) is content placed where the content needs it;
+#   * position on the page and typography are stable across occurrences;
+#   * the line is not more prominent than the body text: furniture is set at or
+#     below body size, while numbered section titles are larger (checked when
+#     native font sizes exist; OCR lines carry none).
+# Only the exact signatures of the accepted lines are added to ``confirmed``,
+# so suppression and block splitting work unchanged on per-line keys.
+_COUNTER_NUMBER_RE = re.compile(r"(?<![\w.,%-])\d{1,4}(?![\w%-]|[.,]\d)")
+_COUNTER_MIN_CONSECUTIVE_PAGES = 3
+_COUNTER_MAX_SIZE_TO_BODY = 1.1
+
+
+def _counter_form(key: str) -> tuple[tuple[str, str, tuple[str, ...], int], tuple[int, ...]] | None:
+    """(group form, numbers) of a signature whose stand-alone numbers may be counters.
+
+    Stand-alone numbers are digit runs not glued to letters, hyphens, decimal
+    separators or a percent sign: "Folha 12", "· 012" and "03/84" qualify;
+    "V11-R1", "TOKEN-035", "1.245,90" and "12%" do not. The form keeps the
+    role, the letters and every other digit, so lines that differ only by
+    punctuation (OCR reads "·" as "-" or ":") share a form.
+    """
+    role, _, text = key.partition(":")
+    numbers = tuple(int(match) for match in _COUNTER_NUMBER_RE.findall(text))
+    if not numbers:
+        return None
+    rest = _COUNTER_NUMBER_RE.sub(" ", text)
+    letters = "".join(c for c in unicodedata.normalize("NFKD", rest).casefold() if c.isalpha())
+    return (role, letters, tuple(re.findall(r"\d+", rest)), len(numbers)), numbers
+
+
+def _counter_slots(numbers_by_page: dict[int, tuple[int, ...]]) -> bool:
+    """True when every number slot is constant or a pagination counter, with at least one counter."""
+    has_counter = False
+    for slot in zip(*numbers_by_page.values()):
+        if len(set(slot)) == 1:
+            continue
+        offsets = {value - page_index for page_index, value in zip(numbers_by_page, slot)}
+        if len(offsets) != 1:
+            return False
+        has_counter = True
+    return has_counter
+
+
+def _has_consecutive_run(page_indices: list[int], length: int) -> bool:
+    run = 1
+    for previous, current in zip(page_indices, page_indices[1:]):
+        run = run + 1 if current == previous + 1 else 1
+        if run >= length:
+            return True
+    return length <= 1 and bool(page_indices)
+
+
+def _confirm_page_counters(
+    observations: dict[str, list[tuple[int, str, TextLine, StructuredPage]]],
+    confirmed: dict[str, list[int]],
+) -> None:
+    """Confirm running furniture whose only variation is a page counter (T3-P43)."""
+    groups: dict[tuple, list[tuple[str, int, str, TextLine, StructuredPage, tuple[int, ...]]]] = defaultdict(list)
+    for key, values in sorted(observations.items()):
+        parsed = _counter_form(key)
+        if parsed is None:
+            continue
+        form, numbers = parsed
+        for page_index, kind, line, page in values:
+            if page_index in confirmed.get(key, ()):
+                continue
+            groups[form].append((key, page_index, kind, line, page, numbers))
+
+    for members in groups.values():
+        by_page: dict[int, list[tuple[str, int, str, TextLine, StructuredPage, tuple[int, ...]]]] = defaultdict(list)
+        for member in members:
+            by_page[member[1]].append(member)
+        # Two same-form lines on one page leave the counter ambiguous: preserve the group.
+        if any(len(items) > 1 for items in by_page.values()):
+            continue
+        # Evidence is required of the occurrences that share one vertical
+        # position; an occurrence displaced from it (e.g. the inflated box of
+        # a tilted scan line) is not confirmed and is preserved.
+        members = _stable_position_core(members)
+        page_indices = sorted(page_index for _, page_index, *_ in members)
+        if not _has_consecutive_run(page_indices, _COUNTER_MIN_CONSECUTIVE_PAGES):
+            continue
+        if not _counter_slots({page_index: by_page[page_index][0][5] for page_index in page_indices}):
+            continue
+        selected = [(kind, line, page) for _, _, kind, line, page, _ in members]
+        native_selected = [
+            (k, l, p) for k, l, p in selected
+            if l.line_id is not None and l.line_id.startswith("native:")
+        ]
+        check_selected = native_selected if len(native_selected) >= 2 else selected
+        if not _stable_edge_position(check_selected) or not _stable_style(check_selected):
+            continue
+        if not _not_more_prominent_than_body(selected, observations):
+            continue
+        for key, page_index, *_ in members:
+            confirmed[key] = sorted(set(confirmed.get(key, ())) | {page_index})
+
+
+_POSITION_SPREAD = 0.035  # same tolerance as ``_stable_edge_position``
+
+
+def _stable_position_core(members: list) -> list:
+    """Members whose visual vertical centre lies within half the tolerance of the median."""
+    centres = []
+    for member in members:
+        box, page_height = _visual_box(member[3], member[4])
+        centres.append(box.cy / page_height)
+    middle = median(centres)
+    return [member for member, centre in zip(members, centres)
+            if abs(centre - middle) <= _POSITION_SPREAD / 2]
+
+
+def _token_sizes(lines) -> list[float]:
+    return [token.font_size for line in lines for token in line.tokens
+            if token.text.strip() and token.font_size and token.font_size > 0]
+
+
+def _not_more_prominent_than_body(
+    selected: list[tuple[str, TextLine, StructuredPage]],
+    observations: dict[str, list[tuple[int, str, TextLine, StructuredPage]]],
+) -> bool:
+    """Furniture is not set larger than the body text of its pages.
+
+    The body reference is the median native font size of the lines that are
+    not edge candidates on the same pages. Without font sizes (OCR) the check
+    gives no evidence either way and passes.
+    """
+    sizes = _token_sizes(line for _, line, _ in selected)
+    if not sizes:
+        return True
+    candidate_ids = {id(line) for values in observations.values() for _, _, line, _ in values}
+    pages = {id(page): page for _, _, page in selected}.values()
+    body = _token_sizes(
+        line for page in pages for region in page.regions for line in region.native_lines
+        if id(line) not in candidate_ids
+    )
+    if not body:
+        return True
+    return median(sizes) <= _COUNTER_MAX_SIZE_TO_BODY * median(body)
 
 
 # OCR furniture recurs with recognition noise ("GABARITO" read "CABAR O",
