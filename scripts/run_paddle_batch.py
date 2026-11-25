@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executa OCR PaddleOCR (GPU/CUDA) + métricas canônicas para V3..V10 em WSL.
+"""Executa OCR PaddleOCR (GPU/CUDA) + métricas canônicas para V3..V11 em WSL.
 
 Deve ser executado com o interpretador do ambiente Paddle GPU
 (``.ocr-envs/gpu-ready-20261022/paddle``); cada corpus é extraído num
@@ -31,7 +31,7 @@ PADDLE_PYTHON = REPO / ".ocr-envs" / "gpu-ready-20261022" / "paddle" / "bin" / "
 
 # (versão, PDF, referência Markdown explícita). Sem referência explícita vale
 # ``<nome>_REFERENCIA.md``; o V3 deste corpus traz o gabarito em ``Document_AI_V3.md``.
-# O V9 entrou a partir da rodada 004.
+# O V9 entrou a partir da rodada 004; o V11, a partir da 005.
 CORPORA = [
     ("V3", "corpus/V3/Document_AI_V3.pdf", "corpus/V3/Document_AI_V3.md"),
     ("V4", "corpus/V4/Corpus_Stress_OCR_Markdown_V4.pdf", None),
@@ -41,6 +41,7 @@ CORPORA = [
     ("V8", "corpus/V8/Document_AI_V8.pdf", None),
     ("V9", "corpus/V9/Document_AI_V9.pdf", None),
     ("V10", "corpus/V10/Document_AI_V10.pdf", None),
+    ("V11", "corpus/V11/Document_AI_V11.pdf", None),
 ]
 
 # Ambiente das campanhas Paddle anteriores (scripts/env_paddle_wsl.sh e

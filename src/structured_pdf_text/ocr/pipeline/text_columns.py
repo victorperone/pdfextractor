@@ -9,6 +9,7 @@ of columns column by column. It is disabled unless an engine opts in.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from statistics import median
 
@@ -48,36 +49,57 @@ class TextColumnPolicy:
 
         A flow is one column of a band (read top to bottom) or one line
         outside every band. ``None`` keeps the caller's ordering: the policy
-        is disabled, the page is rotated, no gutter validates, or the tokens
-        do not account for exactly the given lines.
+        is disabled, no gutter validates, or the observations of the lines
+        cannot be recovered from ``tokens``.
+
+        A line some of whose observations are not among ``tokens`` (a table
+        cell claimed by a table) is kept whole, as a line of its own at its
+        position, unless it runs across a gutter. A page read rotated (every
+        observation with the same quarter-turn ``rotation``, V4 p110/p112) is
+        analysed in its reading frame; its lines are rebuilt from the page
+        observations.
         """
         if not self.enabled or len(lines) < self.minimum_rows:
             return None
         from structured_pdf_text.ocr.reconstruct import _dominant_slope
 
-        observed = _tokens_of_lines(lines, tokens)
-        if observed is None or any(token.rotation % 360 for token in observed):
+        observed, loose = _recover_tokens(lines, tokens)
+        rotations = {token.rotation % 360 for token in observed}
+        if not observed or len(rotations) != 1:
             return None
-        slope = _dominant_slope(observed) or self._box_tilt(observed, page_bbox)
-        frame = _RectifiedFrame(observed, page_bbox, slope)
-        gutters = self._gutters(frame, page_bbox.width)
+        rotation = rotations.pop()
+        if rotation and (rotation not in (90, 180, 270) or loose):
+            return None
+        view = _ReadingView(observed, page_bbox, rotation)
+        slope = _dominant_slope(view.tokens) or self._box_tilt(view.tokens, view.page)
+        frame = _RectifiedFrame(view.tokens, view.page, slope)
+        gutters = self._gutters(frame, view.page.width)
         if not gutters:
             return None
         bands = text_column_bands(gutters)
+        if any(frame.crosses(line.bbox, bands) for line in loose):
+            return None
         partitions: dict[tuple[int, int] | None, list[OcrToken]] = {}
-        for token in observed:
+        for token in view.tokens:
             partitions.setdefault(frame.cell(token, bands), []).append(token)
+
+        def flow(members: list[OcrToken], join: bool = True) -> list[tuple[float, TextLine]]:
+            if not rotation:
+                return [(frame.top(line), line) for line in _flow_lines(frame, members, page_index, page_bbox, join=join)]
+            return _reading_flow_lines(frame, view, members, page_index, page_bbox, join=join)
+
         # Lines outside every band keep their top-to-bottom position; a band is
         # read column by column where its first line appears in that order.
         entries: list[tuple[float, int, list[list[TextLine]]]] = [
-            (frame.top(line), 0, [[line]])
-            for line in _flow_lines(frame, partitions.pop(None, []), page_index, page_bbox, join=False)
+            (top, 0, [[line]]) for top, line in flow(partitions.pop(None, []), join=False)
         ]
-        flows_by_band: dict[int, list[list[TextLine]]] = {}
+        entries.extend((frame.top(line), 0, [[line]]) for line in loose)
+        flows_by_band: dict[int, list[list[tuple[float, TextLine]]]] = {}
         for (band, _column), members in sorted(partitions.items()):
-            flows_by_band.setdefault(band, []).append(_flow_lines(frame, members, page_index, page_bbox))
+            flows_by_band.setdefault(band, []).append(flow(members))
         for flows in flows_by_band.values():
-            entries.append((min(frame.top(line) for flow in flows for line in flow), 1, flows))
+            entries.append((min(top for column in flows for top, _ in column), 1,
+                            [[line for _, line in column] for column in flows]))
         return [flow for _, _, flows in sorted(entries, key=lambda entry: (entry[0], entry[1])) for flow in flows if flow]
 
     def confine_to_boxes(self, lines: list[TextLine], tokens: list[OcrToken], boxes: list[BBox],
@@ -114,6 +136,31 @@ class TextColumnPolicy:
             for members in sorted(groups.values(), key=lambda group: min(token.bbox.x0 for token in group)):
                 output.extend(reconstruct_ocr_lines(members, page_index, page_bbox))
         return output
+
+    def release_unowned(self, line: TextLine, tokens: list[OcrToken], owned: Callable[[OcrToken], bool],
+                        page_index: int, page_bbox: BBox) -> list[TextLine]:
+        """Lines rebuilt from the observations of ``line`` that ``owned`` rejects.
+
+        A table claims a whole reconstructed line when most of its observations
+        lie in the table's cells. On a raster page a prose line beside a table
+        is joined with the cell row at the same height (V9 p36, a table turned
+        90° beside a paragraph), and the prose went away with the row. The
+        caller passes the claimed line and the table's ownership test; the
+        prose observations come back as their own lines. Nothing comes back
+        when the policy is disabled, the page is rotated or the observations
+        of the line cannot be recovered.
+        """
+        if not self.enabled:
+            return []
+        observed = _tokens_of_lines([line], tokens)
+        if not observed or any(token.rotation % 360 for token in observed):
+            return []
+        released = [token for token in observed if token.text.strip() and not owned(token)]
+        if not released:
+            return []
+        from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+
+        return reconstruct_ocr_lines(released, page_index, page_bbox)
 
     def column_heading(self, flow: list[TextLine], page_bbox: BBox) -> list[TextLine]:
         """Leading lines of a column flow that title the column.
@@ -345,6 +392,13 @@ class _RectifiedFrame:
                 centers[best] = median(self.level(item) for item in rows[best])
         return [sorted(row, key=lambda item: self.span(item)[0]) for row in rows], centers
 
+    def crosses(self, box: BBox, bands) -> bool:
+        """Whether *box* lies at the level of a band and runs across one of its gutters."""
+        local = self._local(box)
+        level = local.cy - self.slope * local.cx
+        start, end = local.x0 + self.slope * local.cy, local.x1 + self.slope * local.cy
+        return any(top <= level <= bottom and any(start < mid < end for mid in mids) for top, bottom, mids in bands)
+
     def cell(self, token: OcrToken, bands) -> tuple[int, int] | None:
         """``(band, column)`` of a token lying inside a band without crossing a gutter."""
         level = self.level(token)
@@ -388,6 +442,88 @@ def _flow_lines(frame: _RectifiedFrame, tokens: list[OcrToken], page_index: int,
     if join:
         lines = merge_ocr_bullet_markers(dehyphenate_ocr_lines(lines), page_index=page_index)
     return lines
+
+
+class _ReadingView:
+    """Observations of a page read at a quarter turn, mapped to the reading frame.
+
+    Each observation of a rotated read keeps page coordinates and its
+    ``rotation``; the view holds an upright copy (``_virtual_bbox``) on a page
+    of the reading size, and maps each copy back to its observation. With no
+    rotation the view is the page itself.
+    """
+
+    def __init__(self, tokens: list[OcrToken], page_bbox: BBox, rotation: int):
+        self._originals: dict[int, OcrToken] = {}
+        if not rotation:
+            self.tokens, self.page = tokens, page_bbox
+            return
+        from dataclasses import replace
+
+        from structured_pdf_text.ocr.reconstruct import _virtual_bbox
+
+        width, height = page_bbox.width, page_bbox.height
+        self.page = BBox(0.0, 0.0, height, width) if rotation in (90, 270) else BBox(0.0, 0.0, width, height)
+        self.tokens = []
+        for token in tokens:
+            upright = replace(token, bbox=_virtual_bbox(token, page_bbox, width, height), rotation=0, polygon=None)
+            self._originals[id(upright)] = token
+            self.tokens.append(upright)
+
+    def original(self, token: OcrToken) -> OcrToken:
+        return self._originals.get(id(token), token)
+
+
+def _reading_flow_lines(frame: _RectifiedFrame, view: _ReadingView, tokens: list[OcrToken], page_index: int,
+                        page_bbox: BBox, *, join: bool = True) -> list[tuple[float, TextLine]]:
+    """``_flow_lines`` of a rotated read: rows measured in the reading frame,
+    lines rebuilt from the page observations, each with its reading-frame top."""
+    from structured_pdf_text.ocr.reconstruct import dehyphenate_ocr_lines, merge_ocr_bullet_markers, reconstruct_ocr_lines
+
+    rows, centers = frame.rows(tokens)
+    tops: list[float] = []
+    lines: list[TextLine] = []
+    for _, row in sorted(zip(centers, rows), key=lambda item: item[0]):
+        top = min(frame.top(token) for token in row)
+        for line in reconstruct_ocr_lines([view.original(token) for token in row], page_index, page_bbox,
+                                          dehyphenate=False):
+            tops.append(top)
+            lines.append(line)
+    if join:
+        joined = merge_ocr_bullet_markers(dehyphenate_ocr_lines(lines), page_index=page_index)
+        if len(joined) != len(lines):
+            # A join merged lines; keep each surviving line at its first top.
+            top_of = {id(line): top for top, line in zip(tops, lines)}
+            tops = [top_of.get(id(line), tops[min(index, len(tops) - 1)]) for index, line in enumerate(joined)]
+        lines = joined
+    return list(zip(tops, lines))
+
+
+def _recover_tokens(lines: list[TextLine], tokens: list[OcrToken]) -> tuple[list[OcrToken], list[TextLine]]:
+    """The observations of the lines whose every observation is in ``tokens``,
+    and the lines (``loose``) with an observation missing from it."""
+    by_key: dict[tuple, list[OcrToken]] = {}
+    for token in tokens:
+        if token.text and token.bbox.width >= 0 and token.bbox.height >= 0:
+            by_key.setdefault((token.bbox.x0, token.bbox.y0, token.bbox.x1, token.bbox.y1), []).append(token)
+    observed: list[OcrToken] = []
+    loose: list[TextLine] = []
+    for line in lines:
+        taken: list[tuple[tuple, OcrToken]] = []
+        for text_token in line.tokens:
+            if TokenFlag.WHITESPACE_INFERRED in text_token.flags and not text_token.text.strip():
+                continue
+            key = (text_token.bbox.x0, text_token.bbox.y0, text_token.bbox.x1, text_token.bbox.y1)
+            candidates = by_key.get(key)
+            if not candidates:
+                for back_key, token in reversed(taken):
+                    by_key[back_key].insert(0, token)
+                loose.append(line)
+                break
+            taken.append((key, candidates.pop(0)))
+        else:
+            observed.extend(token for _, token in taken)
+    return observed, loose
 
 
 def _tokens_of_lines(lines: list[TextLine], tokens: list[OcrToken]) -> list[OcrToken] | None:

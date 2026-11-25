@@ -485,6 +485,9 @@ class PdfTextExtractor:
                 fusion = None
                 local_fusion_decisions: list[dict[str, Any]] = []
                 ocr_image = None
+                # Angle by which the engine straightened the page it read; the
+                # page OCR observations are in that frame (005-P1-02).
+                page_raster_angle = 0.0
                 ocr_passes_total = None
                 ocr_batches_total = None
                 ocr_table_tokens = 0
@@ -630,6 +633,7 @@ class PdfTextExtractor:
                                         **page_kwargs,
                                     )
                                     page_ocr_abstained = not ocr_tokens and _engine_rejected_all_evidence(self.ocr_engine)
+                                    page_raster_angle = _page_raster_alignment(self.ocr_engine).page_angle(self.ocr_engine)
                                     if self.config.ocr_tiling and _backend_supports(self.ocr_engine, "recognition"):
                                         ocr_tokens, ocr_tile_stats = recognize_page_with_tiles(
                                             self.ocr_engine,
@@ -1010,6 +1014,11 @@ class PdfTextExtractor:
                 # Reuse the OCR raster already rendered for authorized work;
                 # this neither schedules OCR nor renders a native-only page.
                 table_structure_image = ocr_image if ocr_image is not None else rendered_page
+                if page_raster_angle and table_structure_image is not None:
+                    # Find grids in the frame of the page OCR observations.
+                    table_structure_image = _page_raster_alignment(self.ocr_engine).align(
+                        table_structure_image, page_raster_angle,
+                    )
                 _should_run_visual = (
                     self.config.enable_tables
                     and table_structure_image is not None
@@ -1132,7 +1141,10 @@ class PdfTextExtractor:
                     if not keep:
                         continue
                     try:
-                        refined = _refine_visual_table_ocr(
+                        # The refinement re-reads the table from the source
+                        # raster, whose frame the aligned grid no longer
+                        # shares; the cells keep the page OCR (005-P1-02).
+                        refined = None if page_raster_angle else _refine_visual_table_ocr(
                             engine=self.ocr_engine,
                             page_image=table_structure_image,
                             page=native_page,
@@ -2650,6 +2662,13 @@ def _safe_complexity_scale(
     return low
 
 
+def _page_raster_alignment(engine: Any) -> Any:
+    """The engine's page raster alignment policy (legacy: never aligns)."""
+    from .ocr.pipeline.raster_alignment import LEGACY_PAGE_RASTER_ALIGNMENT_POLICY
+
+    return getattr(engine, "page_raster_alignment_policy", None) or LEGACY_PAGE_RASTER_ALIGNMENT_POLICY
+
+
 def _engine_rejected_all_evidence(engine: Any) -> bool:
     """Whether the engine's last call observed evidence and admitted none of it.
 
@@ -2846,8 +2865,20 @@ def _append_hybrid_ocr_regions(
         table_region.layout_confidence = table.confidence
         table_region.ocr_tokens = table_tokens
         regions.append(table_region)
-        remaining = [line for line in remaining
-                     if not (_line_in_box(line, table_bbox) and _line_in_table_cells(line, table))]
+        claimed = [line for line in remaining
+                   if _line_in_box(line, table_bbox) and _line_in_table_cells(line, table)]
+        claimed_ids = {id(line) for line in claimed}
+        remaining = [line for line in remaining if id(line) not in claimed_ids]
+        if text_columns is not None:
+            # A prose line joined with the cell row beside it leaves with the
+            # row; the engine's policy returns the prose observations clear of
+            # the table box (006-P0-01).
+            def owned(token: Any, table: Any = table, table_bbox: BBox = table_bbox) -> bool:
+                return _line_in_box(token, table_bbox) or _point_in_cells(table, token.bbox.cx, token.bbox.cy)
+
+            for line in claimed:
+                remaining.extend(text_columns.release_unowned(line, list(unmatched_tokens), owned,
+                                                              page_index, page_bbox))
 
     # OCR from a region already classified as a figure must never fall through
     # into the page's body-text supplement. A figure refinement can be rejected

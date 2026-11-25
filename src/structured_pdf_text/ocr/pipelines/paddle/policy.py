@@ -4,6 +4,7 @@ from structured_pdf_text.ocr.pipeline.candidate_policy import CandidateFusionPol
 from structured_pdf_text.ocr.pipeline.policies import FigureSegmentationPolicy
 from structured_pdf_text.ocr.pipeline.policies import FigureShapeAdmissionPolicy, IsolatedGlyphAdmissionPolicy, RasterBoundaryPolicy
 from structured_pdf_text.ocr.pipeline.text_columns import TextColumnPolicy
+from structured_pdf_text.ocr.pipeline.raster_alignment import PageRasterAlignmentPolicy
 from .raster import LEGACY_RASTER_PREPARATION
 
 # Paddle can evolve this profile independently after its own equivalence gate.
@@ -45,3 +46,8 @@ ADMISSION_POLICY = IsolatedGlyphAdmissionPolicy("paddle-admission-v2", "paddle",
 # PP-OCR detects one box per column line; the shared row grouping joined the
 # rows of neighbouring columns on raster multi-column pages (V10, 001-P1-01).
 TEXT_COLUMN_POLICY = TextColumnPolicy("paddle-text-columns-v1", enabled=True)
+
+# Paddle reads a skewed page straightened (003-P0-01), so its observations are
+# in the straightened frame; table grids are found on the raster turned alike
+# (005-P1-02).
+PAGE_RASTER_ALIGNMENT_POLICY = PageRasterAlignmentPolicy("paddle-page-deskew-v1", enabled=True, engine_name="paddle")

@@ -626,6 +626,12 @@ class OCRPageFacade:
 
         return getattr(self.coordinator.pipeline, "text_column_policy", LEGACY_TEXT_COLUMN_POLICY)
 
+    @property
+    def page_raster_alignment_policy(self):
+        from .raster_alignment import LEGACY_PAGE_RASTER_ALIGNMENT_POLICY
+
+        return getattr(self.coordinator.pipeline, "page_raster_alignment_policy", LEGACY_PAGE_RASTER_ALIGNMENT_POLICY)
+
     def refine_footnote(self, target, *, base_scale, quality_policy):
         from .token_refinement import refine_footnote
 
