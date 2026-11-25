@@ -31,6 +31,8 @@ _SNAPSHOT_FIELDS = {
     "enhancement_orientation": "last_enhancement_orientation",
     "early_stop": "last_early_stop",
     "deskew_angle": "last_deskew_angle",
+    "textline_flips_seen": "last_textline_flips_seen",
+    "textline_flips_restored": "last_textline_flips_restored",
 }
 
 

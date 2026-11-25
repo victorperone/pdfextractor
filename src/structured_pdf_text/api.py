@@ -11,7 +11,7 @@ import math
 import re
 import time
 from uuid import uuid4
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -477,6 +477,7 @@ class PdfTextExtractor:
 
                 ocr_tokens: list[OcrToken] = []
                 page_ocr_failed = False
+                page_ocr_abstained = False
                 blank_page_ocr = False
                 ocr_lines: list[TextLine] = []
                 unmatched_ocr_lines: list[TextLine] = []
@@ -628,6 +629,7 @@ class PdfTextExtractor:
                                         native_page.bbox,
                                         **page_kwargs,
                                     )
+                                    page_ocr_abstained = not ocr_tokens and _engine_rejected_all_evidence(self.ocr_engine)
                                     if self.config.ocr_tiling and _backend_supports(self.ocr_engine, "recognition"):
                                         ocr_tokens, ocr_tile_stats = recognize_page_with_tiles(
                                             self.ocr_engine,
@@ -786,9 +788,14 @@ class PdfTextExtractor:
                     warnings.append(
                         "OCR produced no tokens for a visually blank page"
                         if blank_page_ocr else
+                        "OCR engine admission policy rejected every page observation as non-text"
+                        if page_ocr_abstained else
                         "OCR completed successfully but produced no usable tokens for an OCR-primary page"
                     )
-                    if not blank_page_ocr:
+                    # An engine that read the page and judged all it saw to be
+                    # shapes, not text, answered the request: the empty page
+                    # is its result, not a missing one.
+                    if not blank_page_ocr and not page_ocr_abstained:
                         partial_reasons.append("ocr_no_text")
 
                 if region_ocr_requested and not isinstance(self.ocr_engine, OCRPageFacade):
@@ -1257,6 +1264,7 @@ class PdfTextExtractor:
                             complexity=complexity,
                             table_ocr_overrides=table_ocr_overrides,
                             figure_ocr_bindings=figure_ocr_bindings,
+                            text_columns=getattr(self.ocr_engine, "text_column_policy", None),
                         )
                     elif not use_ocr_as_primary and (unmatched_ocr_lines or figure_ocr_bindings):
                         _append_hybrid_ocr_regions(
@@ -1270,6 +1278,7 @@ class PdfTextExtractor:
                             table_ocr_overrides=table_ocr_overrides,
                             figure_ocr_bindings=figure_ocr_bindings,
                             page_raster_primary=raster_primary and page_ocr_requested,
+                            text_columns=getattr(self.ocr_engine, "text_column_policy", None),
                         )
                     if ocr_tokens:
                         regions = reconstruct_ocr_layout(
@@ -1354,6 +1363,13 @@ class PdfTextExtractor:
                         ocr_outcome = "success"
                         ocr_degraded = False
                         ocr_degraded_reasons = []
+                elif page_ocr_requested and page_ocr_abstained:
+                    # The engine read the page and its admission policy judged
+                    # every observation a shape, not text (V10 seals, charts):
+                    # an empty page is the answer, not a degraded read.
+                    ocr_outcome = "no_text"
+                    ocr_degraded = False
+                    ocr_degraded_reasons = []
                 else:
                     ocr_outcome = "degraded"
                     ocr_degraded = True
@@ -2634,6 +2650,20 @@ def _safe_complexity_scale(
     return low
 
 
+def _engine_rejected_all_evidence(engine: Any) -> bool:
+    """Whether the engine's last call observed evidence and admitted none of it.
+
+    The engine-owned admission policy (``ocr.pipeline.policies``) rejects
+    observations that are shapes rather than text, with a recorded reason per
+    token. A call that failed, or that observed nothing, is not an abstention.
+    """
+    result = getattr(engine, "last_result", None)
+    counters = getattr(result, "counters", None)
+    if not isinstance(counters, Mapping) or getattr(result, "failures", None):
+        return False
+    return bool(counters.get("observed_tokens")) and not counters.get("admitted_tokens")
+
+
 def _is_visually_blank(image: Any) -> bool:
     """Conservatively identify an almost uniform white raster page."""
     try:
@@ -2772,6 +2802,7 @@ def _append_hybrid_ocr_regions(
     table_ocr_overrides: dict[str, tuple[list[Any], list[OcrToken]]] | None = None,
     figure_ocr_bindings: list[tuple[BBox, list[TextLine], list[OcrToken]]] | None = None,
     page_raster_primary: bool = False,
+    text_columns: Any = None,
 ) -> None:
     """Attach unmatched OCR to tables/remaining body without duplicating regions.
 
@@ -2780,6 +2811,9 @@ def _append_hybrid_ocr_regions(
     almost the whole page then stands for the page image itself, so it must
     not swallow the page OCR (T3-P01 in the Tesseract branch); smaller figures
     keep their ownership.
+
+    An engine's ``text_columns`` policy (``ocr.pipeline.text_columns``) may
+    split a line that runs across several figures before figure ownership.
     """
     remaining = list(unmatched_lines)
     for table in tables:
@@ -2843,6 +2877,13 @@ def _append_hybrid_ocr_regions(
         existing.ocr_lines = list(figure_lines)
         existing.ocr_tokens = list(figure_tokens)
         remaining = [line for line in remaining if not _line_in_box(line, figure_bbox)]
+
+    # A row reconstructed across several figures (one image per column) is
+    # split per figure first, so each figure owns its own column lines.
+    if text_columns is not None and remaining and len(figure_boxes) >= 2:
+        remaining = text_columns.confine_to_boxes(
+            remaining, list(unmatched_tokens), figure_boxes, page_index, page_bbox,
+        )
 
     # Page OCR over a figure that the region policy flagged as text-bearing
     # (OCR_REGION / MERGE_OCR) belongs to that figure. Without this, the

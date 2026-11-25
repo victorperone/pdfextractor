@@ -80,6 +80,41 @@ class TextColumnPolicy:
             entries.append((min(frame.top(line) for flow in flows for line in flow), 1, flows))
         return [flow for _, _, flows in sorted(entries, key=lambda entry: (entry[0], entry[1])) for flow in flows if flow]
 
+    def confine_to_boxes(self, lines: list[TextLine], tokens: list[OcrToken], boxes: list[BBox],
+                         page_index: int, page_bbox: BBox) -> list[TextLine]:
+        """Split each line whose observations lie in two or more of ``boxes``.
+
+        A page whose columns are separate images (V9 mixed pages) is read one
+        image at a time, but the shared line reconstruction joins the column
+        lines at the same height into one row across the images; the row then
+        belongs to whichever image it overlaps first. Such a line is rebuilt
+        once per box from the observations centred in it (observations outside
+        every box form their own line). Other lines, and every line when the
+        policy is disabled, the page is rotated or the observations of a line
+        cannot be recovered, are returned unchanged and in place.
+        """
+        if not self.enabled or len(boxes) < 2 or not lines:
+            return lines
+        from structured_pdf_text.ocr.reconstruct import reconstruct_ocr_lines
+
+        output: list[TextLine] = []
+        for line in lines:
+            observed = _tokens_of_lines([line], tokens)
+            if not observed or any(token.rotation % 360 for token in observed):
+                output.append(line)
+                continue
+            groups: dict[int | None, list[OcrToken]] = {}
+            for token in observed:
+                owner = next((index for index, box in enumerate(boxes)
+                              if box.x0 <= token.bbox.cx <= box.x1 and box.y0 <= token.bbox.cy <= box.y1), None)
+                groups.setdefault(owner, []).append(token)
+            if sum(owner is not None for owner in groups) < 2:
+                output.append(line)
+                continue
+            for members in sorted(groups.values(), key=lambda group: min(token.bbox.x0 for token in group)):
+                output.extend(reconstruct_ocr_lines(members, page_index, page_bbox))
+        return output
+
     def column_heading(self, flow: list[TextLine], page_bbox: BBox) -> list[TextLine]:
         """Leading lines of a column flow that title the column.
 

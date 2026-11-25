@@ -31,7 +31,7 @@ PADDLE_PYTHON = REPO / ".ocr-envs" / "gpu-ready-20261022" / "paddle" / "bin" / "
 
 # (versão, PDF, referência Markdown explícita). Sem referência explícita vale
 # ``<nome>_REFERENCIA.md``; o V3 deste corpus traz o gabarito em ``Document_AI_V3.md``.
-# Não há V9 neste corpus.
+# O V9 entrou a partir da rodada 004.
 CORPORA = [
     ("V3", "corpus/V3/Document_AI_V3.pdf", "corpus/V3/Document_AI_V3.md"),
     ("V4", "corpus/V4/Corpus_Stress_OCR_Markdown_V4.pdf", None),
@@ -39,6 +39,7 @@ CORPORA = [
     ("V6", "corpus/V6/Document_AI_V6.pdf", None),
     ("V7", "corpus/V7/Document_AI_V7.pdf", None),
     ("V8", "corpus/V8/Document_AI_V8.pdf", None),
+    ("V9", "corpus/V9/Document_AI_V9.pdf", None),
     ("V10", "corpus/V10/Document_AI_V10.pdf", None),
 ]
 

@@ -334,6 +334,8 @@ class PaddleOcrEngine:
         self.last_batch_count = 0
         self.last_attempt_errors: list[str] = []
         self.last_deskew_angle: float = 0.0
+        self.last_textline_flips_seen = 0
+        self.last_textline_flips_restored = 0
         self.last_quality: OcrQualityAssessment | None = None
         self.last_image_profile: Any | None = None
         self.last_baseline_quality: OcrQualityAssessment | None = None
@@ -429,7 +431,7 @@ class PaddleOcrEngine:
         self._dbg_stage = "baseline"
         self._dbg_policy = str(quality_policy or self.quality_policy or "default")
         self._dbg_variant = "none"
-        raw = self._predict_counted(ocr, page_image)
+        raw = self._restore_misturned_lines(ocr, page_image, self._predict_counted(ocr, page_image))
         tokens = _tokens_from_result(
             raw,
             page_index,
@@ -446,7 +448,11 @@ class PaddleOcrEngine:
         # classifier's decision, which box shapes cannot check.
         if tokens and _document_preprocessor_frame(raw)[0] in (90, 270) and _quarter_turn_contradicted(tokens):
             self._dbg_stage = "baseline_document_upright"
-            raw = self._predict_counted(ocr, page_image, use_doc_orientation_classify=False)
+            raw = self._restore_misturned_lines(
+                ocr, page_image,
+                self._predict_counted(ocr, page_image, use_doc_orientation_classify=False),
+                use_doc_orientation_classify=False,
+            )
             tokens = _tokens_from_result(
                 raw,
                 page_index,
@@ -499,7 +505,7 @@ class PaddleOcrEngine:
                 continue
             self._dbg_stage = f"orientation_rot{angle}"
             self._dbg_variant = "none"
-            rotated_raw = self._predict_counted(ocr, rotated)
+            rotated_raw = self._restore_misturned_lines(ocr, rotated, self._predict_counted(ocr, rotated))
             rotated_tokens = _tokens_from_result(
                 rotated_raw,
                 page_index,
@@ -598,6 +604,7 @@ class PaddleOcrEngine:
                     if raw_variant is None:
                         continue
                     self.last_variants_succeeded.append(variant.name)
+                    raw_variant = self._restore_misturned_lines(ocr, variant.image, raw_variant)
                     variant_tokens = _tokens_from_result(
                         raw_variant,
                         page_index,
@@ -669,6 +676,8 @@ class PaddleOcrEngine:
         self.last_batch_count = 0
         self.last_attempt_errors = []
         self.last_deskew_angle = 0.0
+        self.last_textline_flips_seen = 0
+        self.last_textline_flips_restored = 0
         self.last_quality = None
         self.last_image_profile = None
         self.last_baseline_quality = None
@@ -723,6 +732,56 @@ class PaddleOcrEngine:
             f" {mem_after}{_mem_delta(mem_before, mem_after)}"
         )
         return result
+
+    def _restore_misturned_lines(self, ocr: Any, image: object, raw: Any, **options: Any) -> Any:
+        """Re-read text lines the line-orientation classifier turned by mistake.
+
+        PP-LCNet's text-line classifier flips some upright lines of noisy,
+        blurred or low-resolution scans; the recognizer then returns an empty
+        or garbage reading for the whole line (V4 p93: 16 of 52 lines,
+        003-P0-02). When a minority of the lines of one call is marked 180°,
+        the image is read once more without the classifier (same detection
+        boxes) and each marked line takes the upright reading when the turned
+        one has no letter or digit, or when the recognizer is more confident
+        about the upright one (``_prefer_upright_line``). A truly upside-down
+        line keeps its turned reading; calls whose lines are mostly 180° are
+        left to the page-level rotation handling.
+        """
+        item = _single_result(raw)
+        if item is None:
+            return raw
+        texts, scores = item.get("rec_texts"), item.get("rec_scores")
+        angles = item.get("textline_orientation_angles")
+        if not (isinstance(texts, list) and isinstance(scores, list) and isinstance(angles, list)
+                and len(texts) == len(scores) == len(angles)):
+            return raw
+        turned = [index for index, angle in enumerate(angles) if _as_rotation(angle) == 180]
+        if not turned or len(turned) >= _UPSIDE_DOWN_LINE_SHARE * len(angles):
+            return raw
+        self.last_textline_flips_seen += len(turned)
+        stage = self._dbg_stage
+        self._dbg_stage = f"{stage}_lines_upright"
+        try:
+            upright = _single_result(
+                self._predict_counted(ocr, image, **{**options, "use_textline_orientation": False})
+            )
+        finally:
+            self._dbg_stage = stage
+        if upright is None:
+            return raw
+        upright_texts, upright_scores = upright.get("rec_texts"), upright.get("rec_scores")
+        if not (isinstance(upright_texts, list) and isinstance(upright_scores, list)
+                and len(upright_texts) == len(upright_scores) == len(texts)
+                and _same_boxes(_field(item, "rec_boxes", "rec_polys"), _field(upright, "rec_boxes", "rec_polys"))):
+            return raw
+        restored = 0
+        for index in turned:
+            if _prefer_upright_line(texts[index], scores[index], upright_texts[index], upright_scores[index]):
+                texts[index], scores[index], angles[index] = upright_texts[index], upright_scores[index], 0
+                restored += 1
+        self.last_textline_flips_restored += restored
+        _ocr_debug(f"LINES_UPRIGHT stage={stage} turned={len(turned)} restored={restored} lines={len(texts)}")
+        return raw
 
     def _predict_many_counted(self, ocr: Any, images: list[object]) -> list[Any]:
         """Predict quality variants in bounded batches while preserving order."""
@@ -1185,6 +1244,42 @@ def _tokens_from_result(
             )
         )
     return tokens
+
+
+# Share of lines marked 180° above which the whole call is an upside-down page
+# (same share as ``_dominant_record_rotation``), not a few mis-turned lines.
+_UPSIDE_DOWN_LINE_SHARE = 0.60
+
+
+def _single_result(raw: Any) -> dict[str, Any] | None:
+    """The one PaddleOCR 3.x result dict of a single-image call, else ``None``."""
+    if isinstance(raw, (list, tuple)) and len(raw) == 1:
+        raw = raw[0]
+    return raw if isinstance(raw, dict) and "rec_texts" in raw else None
+
+
+def _prefer_upright_line(turned_text: Any, turned_score: Any, upright_text: Any, upright_score: Any) -> bool:
+    """Whether a line marked 180° should take its reading without the turn.
+
+    An upright reading without any letter or digit never wins. A turned
+    reading without any (empty, or punctuation read from upside-down glyphs)
+    always loses; otherwise the recognizer's confidence decides.
+    """
+    if not any(ch.isalnum() for ch in str(upright_text or "")):
+        return False
+    if not any(ch.isalnum() for ch in str(turned_text or "")):
+        return True
+    return (_as_float(upright_score) or 0.0) > (_as_float(turned_score) or 0.0)
+
+
+def _same_boxes(first: Any, second: Any) -> bool:
+    """Whether two calls detected the same boxes in the same order."""
+    try:
+        if first is None or second is None or len(first) != len(second):
+            return False
+        return all(_box_coordinates(a) == _box_coordinates(b) for a, b in zip(first, second))
+    except (TypeError, ValueError, IndexError):
+        return False
 
 
 # Share of multi-character boxes lying horizontally on the page that refutes a
@@ -2096,6 +2191,52 @@ def _normalize_deskew_angle(angle: float) -> float:
     return angle
 
 
+# A deskew is kept only when it sharpens the horizontal projection profile of
+# the ink by this factor. Real skews of 0.7–5° gain 2.1–3.5×; estimates taken
+# from scan noise or from the outline of non-text ink (V4 p121 speckle, V10
+# straight pages read at −0.99°, V5 figures) gain less than 1.
+_DESKEW_MIN_PROFILE_GAIN = 1.2
+
+
+def _row_profile_sharpness(gray: Any) -> float:
+    """Normalized variance of the ink per pixel row: high when lines are level."""
+    import cv2
+    import numpy as np
+
+    _, binary = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    rows = binary.sum(axis=1).astype(np.float64)
+    mean = float(rows.mean())
+    return float(rows.var()) / (mean * mean) if mean > 0 else 0.0
+
+
+def _estimate_skew_deg(gray: Any) -> float | None:
+    """Skew of the ink mass in image coordinates, in (-45°, 45°].
+
+    Positive means text lines descend to the right (y grows downwards), i.e.
+    the content is turned clockwise on screen. The angle is measured from the
+    vertices of ``cv2.minAreaRect`` rather than from its returned angle, whose
+    sign convention changed in OpenCV 4.5.1 and made the correction double the
+    skew instead of removing it (003-P0-01).
+    """
+    import math
+
+    import cv2
+    import numpy as np
+
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 3))
+    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    coords = np.column_stack(np.where(closed > 0))
+    if len(coords) < 50:
+        return None
+    corners = cv2.boxPoints(cv2.minAreaRect(coords[:, ::-1].astype(np.float32)))
+    (x0, y0), (x1, y1) = corners[0], corners[1]
+    angle = math.degrees(math.atan2(float(y1 - y0), float(x1 - x0)))
+    # Either side of the rectangle measures the skew modulo a quarter turn.
+    angle = (angle + 45.0) % 90.0 - 45.0
+    return 45.0 if angle == -45.0 else angle
+
+
 def _deskew_image(
     image: object,
     min_angle_deg: float = 0.5,
@@ -2105,11 +2246,18 @@ def _deskew_image(
 ) -> tuple[object, float]:
     """Detect and correct small skew in page images (scan or photo).
 
-    Covers all 4 base orientations (0/90/180/270°) because cv2.minAreaRect
-    detects deviation relative to the nearest axis, not only to horizontal.
+    Covers all 4 base orientations (0/90/180/270°) because the skew is
+    measured relative to the nearest axis, not only to horizontal.
 
-    Returns (corrected_image, applied_angle).
-    applied_angle == 0.0 means no correction was applied.
+    The correction verifies itself with independent evidence: text lines that
+    become level sharpen the horizontal projection profile of the ink, so a
+    rotation that does not sharpen it (``_DESKEW_MIN_PROFILE_GAIN``) is
+    discarded. A wrong estimate, or a future change in OpenCV's angle
+    convention, therefore leaves the page as it was instead of skewing it.
+
+    Returns (corrected_image, applied_angle), the angle in the convention of
+    ``_estimate_skew_deg``. applied_angle == 0.0 means no correction was
+    applied.
     """
     try:
         import cv2
@@ -2119,28 +2267,14 @@ def _deskew_image(
         pil = image if hasattr(image, "mode") else Image.fromarray(image)
         gray = np.asarray(ImageOps.grayscale(pil))
 
-        _, binary = cv2.threshold(
-            gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        )
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 3))
-        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-        coords = np.column_stack(np.where(closed > 0))
-        if len(coords) < 50:
-            return image, 0.0
-
-        coords_xy = coords[:, ::-1].astype(np.float32)
-
-        angle = _normalize_deskew_angle(cv2.minAreaRect(coords_xy)[-1])
-
-        if abs(angle) < min_angle_deg:
-            return image, 0.0
-        if abs(angle) > max_angle_deg:
+        angle = _estimate_skew_deg(gray)
+        if angle is None or abs(angle) < min_angle_deg or abs(angle) > max_angle_deg:
             return image, 0.0
 
         h, w = gray.shape
-        M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -angle, 1.0)
+        # cv2 turns counter-clockwise for positive angles: this undoes a
+        # clockwise (positive) skew.
+        M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
         rgb_array = np.asarray(pil.convert("RGB"))
         corrected = cv2.warpAffine(
             rgb_array,
@@ -2149,6 +2283,14 @@ def _deskew_image(
             flags=cv2.INTER_CUBIC,
             borderMode=cv2.BORDER_REPLICATE,
         )
+        before = _row_profile_sharpness(gray)
+        after = _row_profile_sharpness(cv2.cvtColor(corrected, cv2.COLOR_RGB2GRAY))
+        if after < _DESKEW_MIN_PROFILE_GAIN * before:
+            _ocr_debug(
+                f"DESKEW_REJECTED page={page_index} angle={angle:.2f}"
+                f" profile_gain={after / before if before else 0.0:.3f}"
+            )
+            return image, 0.0
         return Image.fromarray(corrected), round(angle, 2)
 
     except FatalExtractionError:
