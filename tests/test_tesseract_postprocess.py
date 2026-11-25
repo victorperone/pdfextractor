@@ -62,8 +62,6 @@ from structured_pdf_text.ocr.tesseract.postprocess import (
     _promote_bold_pipe_title,
     _promote_bold_pre_table_heading,
     _promote_numbered_bold_headings,
-    _promote_ocr_checkbox_o_prefix,
-    _promote_post_table_checklist_items,
     _promote_seção_subseção_headings,
     _promote_short_bold_column_headers,
     _suppress_dollar_letter_garble,
@@ -2135,202 +2133,216 @@ def test_promote_bold_pre_table_heading_ignores_titles_after_table():
 
 
 # ---------------------------------------------------------------------------
-# Fix-F05: _promote_post_table_checklist_items
+# T3-P51: no check box state without evidence of the box
+#
+# These tests replace the Fix-F05 tests (_promote_post_table_checklist_items and
+# _promote_ocr_checkbox_o_prefix, both removed). The old contract turned short
+# lines after a table into "☐" items and runs with a leading "O " into "☑"/"☐"
+# items, removing the "O". Neither rule looked at a box: in RUN 015 that made
+# 25 wrong or invented states (V3, V6, V9, V10) and removed letters from the
+# text. The new contract: the Tesseract post-processing never creates, removes
+# or changes a check box state; explicit ☐/☑/☒ glyphs and [x]/[ ] markers that
+# are already in the text survive unchanged; every other line keeps its text.
 # ---------------------------------------------------------------------------
 
-def test_promote_post_table_checklist_basic():
-    """Two short TEXT blocks after a TABLE are promoted to list items — V3 p88 pattern."""
-    table = _Block(order_index=0, text="| Campo | Valor |", kind="table")
-    b1 = _Block(order_index=1, text="Aprovado", kind="text")
-    b2 = _Block(order_index=2, text="Pendente", kind="text")
-    doc = _Doc([_Page([table, b1, b2])])
-    _promote_post_table_checklist_items(doc)
-    assert b1.kind == "list"
-    assert len(b1.list_items) == 1
-    assert b1.list_items[0].text == "Aprovado"
-    assert b1.list_items[0].marker == "☐"
-    assert b2.kind == "list"
-    assert b2.list_items[0].text == "Pendente"
+import re as _re
+
+import pytest
+
+_STATE_GLYPHS = _re.compile(r"[☐☑☒]")
 
 
-def test_promote_post_table_checklist_with_label():
-    """TABLE → colon-label → short blocks: V6 p3/p33 pattern."""
-    table = _Block(order_index=0, text="| Medição | Valor |", kind="table")
-    label = _Block(order_index=1, text="Encaminhamento:", kind="text")
-    b1 = _Block(order_index=2, text="Conferir", kind="text")
-    b2 = _Block(order_index=3, text="Reabrir", kind="text")
-    b3 = _Block(order_index=4, text="Registrar ciência", kind="text")
-    doc = _Doc([_Page([table, label, b1, b2, b3])])
-    _promote_post_table_checklist_items(doc)
-    assert label.kind == "text"  # label itself stays TEXT
-    assert b1.kind == "list" and b1.list_items[0].text == "Conferir"
-    assert b2.kind == "list" and b2.list_items[0].text == "Reabrir"
-    assert b3.kind == "list" and b3.list_items[0].text == "Registrar ciência"
-    assert b1.list_items[0].marker == "☐"
+def _snapshot(doc: _Doc) -> list:
+    """What T3-P51 governs: the text, list conversion and markers of every block."""
+    return [
+        [(b.text, b.kind == "list", [(i.marker, i.text) for i in b.list_items]) for b in page.content_blocks]
+        for page in doc.pages
+    ]
 
 
-def test_promote_post_table_checklist_noop_single_block():
-    """Only 1 short block after TABLE — threshold not met, no promotion."""
+def _after_table(*lines: str, kind: str = "text") -> _Doc:
+    table = _Block(order_index=0, text="| Campo | Valor |\n| --- | --- |\n| Solicitante | Ana |", kind="table")
+    blocks = [_Block(order_index=index + 1, text=text, kind=kind) for index, text in enumerate(lines)]
+    return _Doc([_Page([table, *blocks])])
+
+
+def test_short_lines_after_table_keep_their_text_and_get_no_state():
+    """Short option lines after a table are text: no "☐" is invented (V3 p88 shape)."""
+    doc = _after_table("Aprovado", "Pendente")
+    before = _snapshot(doc)
+    apply_tesseract_postprocessors(doc)
+    assert _snapshot(doc) == before
+
+
+def test_label_and_options_after_table_are_never_marked_unchecked():
+    """Options whose boxes were checked in the source must not become "☐" (V6 p3 shape)."""
+    doc = _after_table("Encaminhamento:", "Conferir", "Reabrir", "Registrar ciência")
+    before = _snapshot(doc)
+    apply_tesseract_postprocessors(doc)
+    assert _snapshot(doc) == before
+    assert all(not b.list_items for b in doc.pages[0].content_blocks)
+
+
+def test_caption_lines_after_table_keep_their_kind():
+    doc = _after_table("Aprovado", "Pendente", kind="caption")
+    before = _snapshot(doc)
+    apply_tesseract_postprocessors(doc)
+    assert _snapshot(doc) == before
+
+
+def test_cell_fragments_after_table_are_not_check_items():
+    """Second lines of table cells left outside the grid are not options (V9 p82, V10 p15 shape)."""
+    doc = _after_table("software", "manutenção", "laboratoriais", "armazenamen")
+    before = _snapshot(doc)
+    apply_tesseract_postprocessors(doc)
+    assert _snapshot(doc) == before
+
+
+@pytest.mark.parametrize("lines", [
+    ("Aprovado",),
+    ("Item um.", "Item dois"),
+    ("CONFERIDO", "Pendente"),
+    ("Observação: texto muito longo que não é item de lista.", "Pendente"),
+    ("Consultar autenticidade do re", "https://exemplo.invalid/V8-070"),
+    ("Responsável: Marina Teixeira", "O Vistoria complementar pendente"),
+    ("O código 0011/2026 foi verificado.", "O Vistoria complementar pendente"),
+    ("Entrega prevista", "Pagamento mensal", "Prazo de vigência"),
+])
+def test_runs_of_short_lines_never_get_a_state(lines):
+    """Former no-op cases of the removed rules, with and without a preceding table."""
+    for doc in (_after_table(*lines), _Doc([_Page([_Block(order_index=i, text=t) for i, t in enumerate(lines)])])):
+        before = _snapshot(doc)
+        apply_tesseract_postprocessors(doc)
+        assert _snapshot(doc) == before
+
+
+@pytest.mark.parametrize("kind", ["text", "figure", "caption"])
+@pytest.mark.parametrize("lines", [
+    ("O contrato vigente", "Pagamento mensal"),
+    ("Conferência documental executada", "O Vistoria complementar pendente"),
+    ("U Reabrir", "Conferir"),
+    ("O setor responsável", "O prazo final"),
+])
+def test_leading_o_and_u_are_kept_as_letters(kind, lines):
+    """A leading "O" or "U" is text (article, initial, OCR reading) unless a box is evidenced."""
+    blocks = [_Block(order_index=index, text=text, kind=kind) for index, text in enumerate(lines)]
+    doc = _Doc([_Page(blocks)])
+    apply_tesseract_postprocessors(doc)
+    assert [b.text for b in blocks] == list(lines)
+    assert all(b.kind != "list" and not b.list_items for b in blocks)
+
+
+def test_explicit_state_glyphs_in_text_are_kept_unchanged():
+    """Explicitly recognised states (checked, crossed, unchecked, task markers) are preserved."""
+    lines = ("☒ Aprovado", "☐ Pendente", "☑ Conferir", "[x] Revisado", "[ ] A revisar")
+    doc = _after_table(*lines)
+    apply_tesseract_postprocessors(doc)
+    blocks = doc.pages[0].content_blocks[1:]
+    assert [b.text for b in blocks] == list(lines)
+    assert all(not b.list_items for b in blocks)  # no second, contradicting marker
+
+
+def test_explicit_check_list_items_are_kept_unchanged():
+    from structured_pdf_text.document import StructuredListItem
+    from structured_pdf_text.geometry import BBox
+
+    def item(marker: str, text: str, index: int) -> StructuredListItem:
+        return StructuredListItem(marker=marker, text=text, level=0, bbox=BBox(0.0, 0.0, 1.0, 1.0), order_index=index)
+
+    checked = _Block(order_index=1, text="☑ Conferir", kind="list", list_items=[item("☑", "Conferir", 1)])
+    unchecked = _Block(order_index=2, text="☐ Reabrir", kind="list", list_items=[item("☐", "Reabrir", 2)])
+    crossed = _Block(order_index=3, text="☒ Registrar ciência", kind="list", list_items=[item("☒", "Registrar ciência", 3)])
     table = _Block(order_index=0, text="| A | B |", kind="table")
-    b1 = _Block(order_index=1, text="Aprovado", kind="text")
-    doc = _Doc([_Page([table, b1])])
-    _promote_post_table_checklist_items(doc)
-    assert b1.kind == "text"
+    doc = _Doc([_Page([table, checked, unchecked, crossed])])
+    before = _snapshot(doc)
+    apply_tesseract_postprocessors(doc)
+    assert _snapshot(doc) == before
 
 
-def test_promote_post_table_checklist_noop_sentence_ending():
-    """Block ending with '.' stops candidate collection — no promotion."""
+def test_common_list_after_table_is_kept_unchanged():
+    from structured_pdf_text.document import StructuredListItem
+    from structured_pdf_text.geometry import BBox
+
+    items = [StructuredListItem(marker="-", text=text, level=0, bbox=BBox(0.0, 0.0, 1.0, 1.0), order_index=index)
+             for index, text in enumerate(("Primeiro item", "Segundo item"), start=1)]
     table = _Block(order_index=0, text="| A | B |", kind="table")
-    b1 = _Block(order_index=1, text="Item um.", kind="text")
-    b2 = _Block(order_index=2, text="Item dois", kind="text")
-    doc = _Doc([_Page([table, b1, b2])])
-    _promote_post_table_checklist_items(doc)
-    assert b1.kind == "text"
-    assert b2.kind == "text"
+    bullets = _Block(order_index=1, text="- Primeiro item\n- Segundo item", kind="list", list_items=items)
+    doc = _Doc([_Page([table, bullets])])
+    before = _snapshot(doc)
+    apply_tesseract_postprocessors(doc)
+    assert _snapshot(doc) == before
 
 
-def test_promote_post_table_checklist_noop_allcaps():
-    """ALL-CAPS block stops candidate collection before threshold."""
-    table = _Block(order_index=0, text="| A | B |", kind="table")
-    b1 = _Block(order_index=1, text="CONFERIDO", kind="text")
-    b2 = _Block(order_index=2, text="Pendente", kind="text")
-    doc = _Doc([_Page([table, b1, b2])])
-    _promote_post_table_checklist_items(doc)
-    assert b1.kind == "text"
-    assert b2.kind == "text"
+# --- full pipeline: assembly → Tesseract post-processing → Markdown ----------
+
+def _pipeline_markdown(pages_spec: list[list[tuple[str, bool]]]) -> str:
+    """Render pages whose lines are (text, is_ocr); each line is its own region."""
+    from structured_pdf_text.assemble.document import assemble_document
+    from structured_pdf_text.document import (
+        Baseline, DocumentMetadata, EvidenceRef, LayoutRegion, PageDiagnostics, PageStrategy,
+        RegionDecision, RegionKind, RegionQuality, SourceKind, StructuredPage, TextLine, TextToken,
+        WritingDirection,
+    )
+    from structured_pdf_text.geometry import BBox
+    from structured_pdf_text.renderers.markdown import render_markdown
+
+    pages = []
+    for page_index, lines in enumerate(pages_spec):
+        regions = []
+        for line_index, (text, ocr) in enumerate(lines):
+            line_id = f"{'ocr' if ocr else 'native'}:{page_index}:{line_index}"
+            y = 100.0 + 40.0 * line_index
+            bbox = BBox(72.0, y, 72.0 + 6.0 * len(text), y + 10.0)
+            token = TextToken(
+                text=text, bbox=bbox,
+                sources=[EvidenceRef(SourceKind.OCR_PAGE if ocr else SourceKind.NATIVE_PDF, 0, line_id)],
+                confidence=0.95 if ocr else 1.0, normalized_text=text,
+                font_name=None if ocr else "DejaVuSans", font_size=None if ocr else 10.0,
+            )
+            line = TextLine(tokens=[token], bbox=bbox, baseline=Baseline(y=bbox.y1),
+                            direction=WritingDirection.LEFT_TO_RIGHT, native_order_min=None,
+                            native_order_max=None, line_id=line_id)
+            regions.append(LayoutRegion(
+                region_id=f"r{page_index}-{line_index}", kind=RegionKind.TEXT, bbox=bbox, layout_confidence=1.0,
+                native_lines=[] if ocr else [line], ocr_lines=[line] if ocr else [], ocr_tokens=[],
+                quality=RegionQuality(RegionDecision.OCR_REGION if ocr else RegionDecision.KEEP_NATIVE),
+            ))
+        pages.append(StructuredPage(
+            page_index=page_index, bbox=BBox(0.0, 0.0, 595.0, 842.0), regions=regions, tables=[],
+            raw_text="", reading_text="",
+            diagnostics=PageDiagnostics(page_index=page_index, strategy=PageStrategy.NATIVE, reasons=[],
+                                        native_chars=0, native_text_length=0),
+        ))
+    document = assemble_document(
+        pages=pages, metadata=DocumentMetadata(source_path="t3p51.pdf", page_count=len(pages), pdfium_version=None),
+        merge_cross_page_tables=False, preserve_headers_footers=True, document_warnings=[],
+    )
+    apply_tesseract_postprocessors(document)
+    return render_markdown(document, diagnostic=True)
 
 
-def test_promote_post_table_checklist_noop_no_table():
-    """Without a TABLE trigger, short blocks are not promoted."""
-    b1 = _Block(order_index=0, text="Aprovado", kind="text")
-    b2 = _Block(order_index=1, text="Pendente", kind="text")
-    doc = _Doc([_Page([b1, b2])])
-    _promote_post_table_checklist_items(doc)
-    assert b1.kind == "text"
-    assert b2.kind == "text"
+def _body_lines(markdown: str) -> list[str]:
+    return [line for line in markdown.splitlines() if line.strip() and not line.startswith("## Página")]
 
 
-def test_promote_post_table_checklist_stops_at_long_block():
-    """Block exceeding 40 chars stops candidate collection."""
-    table = _Block(order_index=0, text="| A | B |", kind="table")
-    b1 = _Block(order_index=1, text="Observação: texto muito longo que não é item de lista.", kind="text")
-    b2 = _Block(order_index=2, text="Pendente", kind="text")
-    doc = _Doc([_Page([table, b1, b2])])
-    _promote_post_table_checklist_items(doc)
-    assert b1.kind == "text"
-    assert b2.kind == "text"
+def test_native_page_explicit_states_survive_the_pipeline():
+    lines = ["Encaminhamento:", "☑ Conferir", "☐ Reabrir", "☒ Registrar ciência"]
+    markdown = _pipeline_markdown([[(text, False) for text in lines]])
+    assert _body_lines(markdown) == lines
+    assert len(_STATE_GLYPHS.findall(markdown)) == 3
 
 
-def test_promote_post_table_checklist_caption_kind_promoted():
-    """CAPTION blocks (not just TEXT) qualify as candidates."""
-    table = _Block(order_index=0, text="| A | B |", kind="table")
-    b1 = _Block(order_index=1, text="Aprovado", kind="caption")
-    b2 = _Block(order_index=2, text="Pendente", kind="caption")
-    doc = _Doc([_Page([table, b1, b2])])
-    _promote_post_table_checklist_items(doc)
-    assert b1.kind == "list"
-    assert len(b1.list_items) == 1
-    assert b1.list_items[0].text == "Aprovado"
-    assert b2.kind == "list"
+def test_ocr_page_without_glyphs_gets_no_state_and_keeps_letters():
+    lines = ["Conferência documental executada", "O Vistoria complementar pendente", "U Reabrir", "Pagamento mensal"]
+    markdown = _pipeline_markdown([[(text, True) for text in lines]])
+    assert _body_lines(markdown) == lines
+    assert not _STATE_GLYPHS.search(markdown)
 
 
-def test_promote_post_table_checklist_noop_url_candidate():
-    """A URL block (containing '://') is not a valid checklist candidate."""
-    table = _Block(order_index=0, text="| A | B |", kind="table")
-    b1 = _Block(order_index=1, text="Consultar autenticidade do re", kind="text")
-    b2 = _Block(order_index=2, text="https://exemplo.invalid/V8-070", kind="text")
-    doc = _Doc([_Page([table, b1, b2])])
-    _promote_post_table_checklist_items(doc)
-    # b1 alone (before URL broke the scan) is < 2 candidates — no promotion
-    assert b1.kind == "text"
-    assert b2.kind == "text"
-
-
-
-# ---------------------------------------------------------------------------
-# Fix-F05 v4 — _promote_ocr_checkbox_o_prefix
-# ---------------------------------------------------------------------------
-
-def test_promote_o_prefix_basic_pair():
-    """'O Vistoria...' + 'Conferência...' → ☐ + ☑ pair promoted."""
-    b1 = _Block(order_index=0, text="Conferência documental executada", kind="text")
-    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
-    doc = _Doc([_Page([b1, b2])])
-    _promote_ocr_checkbox_o_prefix(doc)
-    assert b1.kind == "list"
-    assert len(b1.list_items) == 1
-    assert b1.list_items[0].marker == "☑"
-    assert b1.list_items[0].text == "Conferência documental executada"
-    assert b2.kind == "list"
-    assert len(b2.list_items) == 1
-    assert b2.list_items[0].marker == "☐"
-    assert b2.list_items[0].text == "Vistoria complementar pendente"
-
-
-def test_promote_o_prefix_noop_single_block():
-    """Single 'O ' block alone is not promoted (needs ≥2 in the run)."""
-    b1 = _Block(order_index=0, text="Outro item qualquer longa sentença.", kind="text")
-    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
-    b3 = _Block(order_index=2, text="Texto longo que vai além de 40 caracteres e não entra.", kind="text")
-    doc = _Doc([_Page([b1, b2, b3])])
-    _promote_ocr_checkbox_o_prefix(doc)
-    # b1 ends with '.' → not a candidate; b3 > 40 chars → not a candidate
-    # b2 alone (single O-prefix block) → no promotion
-    assert b2.kind == "text"
-
-
-def test_promote_o_prefix_noop_field_value():
-    """'Responsável: Marina Teixeira' is a field-value block, excluded from promotion."""
-    b1 = _Block(order_index=0, text="Responsável: Marina Teixeira", kind="text")
-    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
-    doc = _Doc([_Page([b1, b2])])
-    _promote_ocr_checkbox_o_prefix(doc)
-    # b1 matches _FIELD_VALUE_RE → excluded; b2 alone is single block → no promotion
-    assert b1.kind == "text"
-    assert b2.kind == "text"
-
-
-def test_promote_o_prefix_noop_ending_punct():
-    """Block ending with '.' is excluded; isolated 'O ' block not promoted."""
-    b1 = _Block(order_index=0, text="O código 0011/2026 foi verificado.", kind="text")
-    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="text")
-    doc = _Doc([_Page([b1, b2])])
-    _promote_ocr_checkbox_o_prefix(doc)
-    # b1 ends with '.' → excluded. b2 alone → no promotion.
-    assert b1.kind == "text"
-    assert b2.kind == "text"
-
-
-def test_promote_o_prefix_noop_url():
-    """URL block excluded (contains '://')."""
-    b1 = _Block(order_index=0, text="O Vistoria complementar pendente", kind="text")
-    b2 = _Block(order_index=1, text="https://exemplo.invalid/form", kind="text")
-    doc = _Doc([_Page([b1, b2])])
-    _promote_ocr_checkbox_o_prefix(doc)
-    # b2 has '://' → excluded. b1 alone → no promotion.
-    assert b1.kind == "text"
-    assert b2.kind == "text"
-
-
-def test_promote_o_prefix_figure_kind():
-    """FIGURE kind blocks qualify (Fix-F05 v5: scanned forms use FIGURE).
-
-    Root cause for V6 pages 22/43/87: Tesseract layout engine classifies
-    form field content as ContentKind.FIGURE on scanned_form pages.
-    Fix-F05 v4 missed these because it only accepted TEXT/CAPTION.
-    """
-    b1 = _Block(order_index=0, text="Conferência documental executada", kind="figure")
-    b2 = _Block(order_index=1, text="O Vistoria complementar pendente", kind="figure")
-    doc = _Doc([_Page([b1, b2])])
-    _promote_ocr_checkbox_o_prefix(doc)
-    assert b1.kind == "list"
-    assert b2.kind == "list"
-    assert len(b1.list_items) == 1
-    assert b1.list_items[0].marker == "☑"
-    assert b1.list_items[0].text == "Conferência documental executada"
-    assert len(b2.list_items) == 1
-    assert b2.list_items[0].marker == "☐"
-    assert b2.list_items[0].text == "Vistoria complementar pendente"
+def test_hybrid_page_keeps_the_explicit_state_once_and_the_ocr_text():
+    markdown = _pipeline_markdown([[("☑ Aprovado", False), ("O contrato vigente", True), ("Entrega prevista", True)]])
+    assert _body_lines(markdown) == ["☑ Aprovado", "O contrato vigente", "Entrega prevista"]
+    assert len(_STATE_GLYPHS.findall(markdown)) == 1
 
 
 # ---------------------------------------------------------------------------

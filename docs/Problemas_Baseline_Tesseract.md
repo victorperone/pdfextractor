@@ -4,10 +4,688 @@
 > A versão anterior deste documento (Série 2, runs 001–008 via `run_loop.py`) está preservada no git (`git show 5cc81d6:docs/Problemas_Baseline_Tesseract.md`); um resumo está em §7.
 > **Protocolo**: atualizar após cada rodada. Um problema só é marcado como RESOLVIDO quando o critério mensurável dele for atendido numa rodada completa, sem regressão relevante nos demais corpora.
 > **Classificação usada a partir da 003**: RESOLVIDO (critério atendido em rodada completa) · CORRIGIDO — VALIDADO PONTUALMENTE (testes por página, aguarda rodada completa) · PARCIAL · PENDENTE · INFO.
+> **Classificação usada a partir da auditoria pós-015 (§0)**: RESOLVIDO — confirmado · CORRIGIDO — com resíduos · PARCIAL · PENDENTE · REGRESSÃO · NÃO REPRODUZIDO · NÃO VERIFICÁVEL · LIMITAÇÃO DA ENGINE · LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO · RECURSO AINDA NÃO IMPLEMENTADO. Ausência de evidência não comprova resolução; estabilidade nos corpora conhecidos não comprova generalização.
 
 ---
 
 ## Quadro principal de problemas
+
+Situação após a **auditoria integral pós-RUN 015** (2026-11-25, commit `1717bd5`; §0 e §1.40) e do confronto com a auditoria independente (§0.9); prioridades e T3-P51 atualizados pelo ciclo T3-P51 (§0.10). Ordenado por severidade (CRÍTICO > ALTO > MÉDIO > BAIXO > INFO); dentro de cada severidade, os ativos vêm primeiro, por prioridade. Diagnósticos, tentativas e histórico completos em §2; o quadro anterior (pós-014) está preservado na §0-h.
+
+- **Severidade**: perda de conteúdo ou corrupção de dados > leitura/estrutura > problemas menores. **Prioridade**: ordem de trabalho recomendada (P0 primeiro), independente da severidade; a escolha é do responsável.
+- **Tentativas**: usadas / limite (5 por problema desde o ciclo pós-006; "—" = correção anterior à regra).
+- **Status**: classificação da §0 (RESOLVIDO — confirmado · CORRIGIDO — com resíduos · PARCIAL · PENDENTE · REGRESSÃO · NÃO REPRODUZIDO · NÃO VERIFICÁVEL · LIMITAÇÃO DA ENGINE · LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO · RECURSO AINDA NÃO IMPLEMENTADO).
+- **Última RUN**: última rodada completa em que o problema foi observado ou confirmado. Na 015, V3–V10 são idênticos byte a byte à 014 e no V11 só a p71 mudou, então todo problema observado na 014 fora da V11 p71 continua presente na 015.
+
+| ID | Descrição | Severidade | Prioridade | Documento / páginas | Impacto mensurado | Tentativas | Status | Última RUN | Próxima ação |
+|---|---|---|---|---|---|---|---|---|---|
+| T3-P51 | Estados de caixa de seleção fabricados ou invertidos; fragmentos de célula convertidos em itens "☐" (pós-processamento Tesseract, Fix-F05; também em páginas nativas, T3-P54) | CRÍTICO | **P0 (ação 1; passo A implementado)** | V3 p88; V6 p3, p22, p33, p43, p87, p89; V9 p18, p82, p90; V10 p15, p30, p54 | **015**: 25 estados errados ou inventados (`checkbox_states` fp: V3 1, V6 6, V9 10, V10 8); V3 p88 "☒ Aprovado" → "☐ Aprovado"; invisível na rubrica. **Passo A, offline (§0.10)**: fp 25 → 0; 136 estados explícitos preservados; 10 estados legítimos deixam de ser representados (limitação aceita); nenhuma palavra ou número perdido; V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08; demais idênticos | 1 / 5 | **CORRIGIDO — VALIDADO OFFLINE** (passo A, §0.10; não commitado) | 015 (offline: `1717bd5` + passo A) | RUN 016 (§5); passo B = ação 9 |
+| T3-P44 | Releitura endireitada mais completa descartada pela confiança média (perda silenciosa) | CRÍTICO | P1 (ação 5) | V11 p71 | **015**: recall da p71 0.323 → 0.935, CER 0.666 → 0.557, penalidade −1.0 eliminada, V11 70.4 → **71.7**. Resíduos: WER da p71 0.681 → 0.712; o parágrafo R200, certo na 014, sai invertido; "FG-711" perdido; tabela com lixo do carimbo (`cell_cer` 1.26, 0 células exatas) inserida no meio do 1º parágrafo; nenhum aviso ao consumidor; a salvaguarda de "preservação" da regra é geométrica, não textual (AI-05, §0.9) | 1 / 5 | **CORRIGIDO — com resíduos** (recuperação confirmada na RUN 015, §1.40) | 015 | Resíduos em T3-P49 (ordem), T3-P53 (aviso) e §0.2 (fusão por região) |
+| T3-P27 | Bloco com conteúdo suprimido como marcador de corpus | CRÍTICO | P1 (ação 2) | Resíduo: V3 p116. Corrigidas: V4 p213, p214 | **015**: a V3 p116 perde "Controle de página: QA-P116" e a frase do corpo (119 caracteres; recall 0.581, volume 0.56): `_CORPUS_DOC_HEADER_RE` casa o início de um bloco de 239 caracteres que junta cabeçalho do corpus, título e corpo; sem aviso. Antes atribuído a T3-P32 | 1 / — | **CORRIGIDO — com resíduos** (resíduo achado na auditoria pós-015) | 015 | Supressão por linha e com aviso (§0.5 OF-01) |
+| T3-P36 | Tabela OCR suprimida silenciosamente pelo pós-processamento | CRÍTICO | P3 (monitorar) | V4 p167, p168 | 010 = 015: tabelas mantidas, aviso `suspected_ocr_garble` presente; coluna "Idioma" da p168 não lida, sem aviso | 1 / 5 | **CORRIGIDO — com resíduos** | 015 | — |
+| T3-P10 | Linhas OCR fundidas entre colunas | CRÍTICO | P2 (ação 11) | Resíduo novo: V11 p100 (3 colunas de 2 linhas). Corrigidas: V4, V9, V10 (004) | **015**: na p100 as linhas das 3 colunas saem unidas já na reconstrução ("…abaixo do O dispositivo de medição… A temperatura…"); CER 0.280 com recall 1.0 | 1 / — | **CORRIGIDO — com resíduos** (hipótese: `_GUTTER_MIN_ROWS` = 3) | 015 | Teste de componente com as linhas capturadas da p100 |
+| T3-P00 | Executor sem tabelas e sem supressão de cabeçalho/rodapé | CRÍTICO | — | V3–V9 | `table_detection_f1` 0 → 1.000 em V5–V8 | 1 / — | **RESOLVIDO — confirmado** (002; manifestos da 015 com tabelas ativas) | 015 | — |
+| T3-P01 | OCR de página descartado por figuras | CRÍTICO | — | V9 | recall 0.664 → 0.948 | 1 / — | **RESOLVIDO — confirmado** (003) | 015 | — |
+| T3-P23 | Parser TSV engolia linhas após palavra iniciada por aspas | CRÍTICO | — | V3 p96, p97; V4 p107, p150 | V4 recall 0.832 → 0.877 | 1 / — | **RESOLVIDO — confirmado** (004) | 015 | — |
+| T3-P53 | Página `valid`/`clean` sem aviso apesar de perda significativa; decisões do OCR não chegam ao consumidor | ALTO | P1 (ação 3) | 79 páginas nos 9 corpora (V3 4, V4 60, V5 10, V7 1, V8 2, V9 1, V11 1; ex.: V3 p116, V4 p104, V11 p75) | **015**: recall < 0.85 ou volume < 0.8, sem nenhum aviso; `tesseract_deskew_decisions` e `tesseract_more_complete_read_discarded` não são exportados pelo executor | 0 / 5 | **PENDENTE — novo** (§0.4) | 015 | Exportar fatos e avisos de qualidade (autorização: `api.py`/executor) |
+| T3-P54 | Pós-processamento Tesseract ignora `preserve_headers_footers` e altera páginas nativas | ALTO | P1 (§0.6, ação 2) | Todo documento com `ocr_engine="tesseract"`; medido offline em V3 e V5–V11 | Com a flag `True` (padrão do `ExtractorConfig` e da CLI) ainda suprime 427 blocos no V3, 38 no V5, 184 no V6, 79 no V7, 90 no V8, 93 no V9, 56 no V10 e 64 no V11; na configuração da 015 altera páginas sem OCR em V3 e V5–V9 (ex.: 7 dos 10 itens "☐" inventados do V9) | 0 / 5 | **PENDENTE — novo** (AI-03 confirmado, §0.9) | 015 (offline) | Passar contrato e proveniência ao pós-processamento |
+| T3-P49 | Linhas de parágrafo invertidas e colunas misturadas em páginas raster inclinadas (agrupamento FORM sobre caixas infladas) | ALTO (era MÉDIO) | P2 (ação 7) | V11 p61, p71 (mecanismo também em p62, p69, p78, p95, p96); V10 L01/L02 (12 págs.); V4 p106, p156; V9 p17 | **015**: 54 das 55 regiões em modo FORM das 61 páginas inclinadas empilham linhas da mesma coluna (22 páginas, 4 corpora); inversão só com inclinação negativa. Contrafactual offline E1 (geometria endireitada): V11 71.7 → 73.8, V10 78.3 → 79.9, recall idêntico | 0 / 5 | **PENDENTE** — causa demonstrada no código (§0.2) | 015 | Referencial retificado, junto com T3-P35; exige autorização (compartilhado) |
+| T3-P35 | Ordem de blocos em páginas raster multicoluna | ALTO | P2 (ação 7, com T3-P49) | V10 L01/L02 (12 págs.); resíduo p32 | Niveladas corrigidas (008) e mantidas; inclinadas com dois mecanismos: calhas inclinadas na reconstrução e FORM sobre caixas infladas na montagem | 2 / 5 | **PARCIAL** | 015 | Junto com T3-P49 |
+| T3-P09 | Regras de texto ajustadas aos corpora no pós-processamento Tesseract | **CRÍTICO** (era INFO; ALTO na 1ª versão desta auditoria) | P1 (§0.6, ação 2) | `ocr/tesseract/postprocess.py`: marcadores V3/V4, IRINF do V6, "Página NNN" | **015 (offline)**: suprimem em silêncio 17 blocos no V3, 20 no V4 e 6 no V6; sem elas V3 93.1 → 88.0, V6 96.7 → 96.0, V4 66.9 → 66.6; causa a perda de T3-P27. **AI-01 reproduzido**: frases de corpo ("O professor deve omitir no gabarito…", "OCR híbrido permite…"), subtítulo "VOLUME II · OUT 2025 — …" e uma tabela de 744 caracteres inteira por uma única célula | — | **PENDENTE — reaberto** (overfitting confirmado, §0.5 OF-01/OF-02) | 015 | Contrato único de supressão (§0.6, ação 2) |
+| T3-P45 | Tabela nativa emitida duas vezes, com o título absorvido em células | ALTO | P2 (ação 8) | V11 p50, p93 | 013 = 015: tabela duplicada, título partido em células; `numeric` fp 13 na p50 | 0 / 5 | **PENDENTE** | 015 | Diagnóstico por etapa (nativo, sem OCR) |
+| T3-P46 | Texto nativo em colunas e lista detectados como tabela sem borda | ALTO | P2 (ação 8) | V11 p5, p98, p86, p3, p7, p102 e **p120** (lista + parágrafo + microtabela numa só tabela, palavras cortadas entre células: "av \| aliação") | 013 = 015: p5 + p98 = 12.8% das edições do V11 | 0 / 5 | **PENDENTE** | 015 | Diagnóstico por etapa; exige autorização (detector nativo) |
+| T3-P47 | Tabelas nativas sem borda empilhadas ou de formulário desmontadas | ALTO | P2 (ação 8) | V11 p57, p9, p37, p41, p54, p110, p115; parciais p45, p60, p63 | V11 `table_detection_recall` 0.770 (015) | 0 / 5 | **PENDENTE** | 015 | Junto com T3-P37 |
+| T3-P37 | Duas tabelas nativas lado a lado: fundidas ou desmontadas | ALTO | P2 (ação 8) | V9 p62, p72, p14 | sem mudança desde a 009 | 0 / 5 | **PENDENTE** | 015 | Junto com T3-P47 |
+| T3-P43 | Mobília com contador de página sem rótulo | ALTO | P1 (ação 6) | V11: 18 linhas + 3 fundidas com o título (p61–p63, p66, p69, p70, p72, p74, p76, p78, p95, p96, p112); V10: 12 rodapés (inclinadas) | 014 = 015. Risco confirmado no componente (AI-06, §0.9): título numerado um por página na faixa de borda é suprimido em OCR e com fonte ≤ 1.1 × corpo (não observado nos corpora) | 1 / 5 | **CORRIGIDO — com resíduos** | 015 | Resíduos inclinados dependem de T3-P49; preservar casos ambíguos (§0.6, ação 2) |
+| T3-P06 | Títulos OCR ausentes ou com nível errado | ALTO | P2 (ação 10) | V4, V9, V10, V11 (raster) | 012 = 015: `heading_recall` V4 0.562, V9 0.457, V10 0.634; títulos F1 V11 0.693 | 3 / 5 | **PARCIAL** | 015 | t4 depois do referencial retificado; níveis dependem do documento inteiro (§0.5 OF-15) |
+| T3-P21 | Recall de OCR de texto limitado, inclusive em digitalização limpa | ALTO | P2 (ação 13; exige OCR) | V4 OCR (64 págs.); V11 F04 (p61, p63, p72, p75) e IDs alfanuméricos raster | V4 recall 0.894; V11: confusões O/0 em identificadores ("R075" → "RO75") em 19 páginas raster; p63 `numeric` fn 49 | 0 / 5 | **LIMITAÇÃO DA ENGINE** (configuração atual; hipótese pós-OCR H-esp não verificada) | 015 | Experimento de OCR autorizado (§1.31) |
+| T3-P34 | Tabela raster com inclinação pequena não detectada | ALTO | P3 | Pendentes V9 p66, p78, p25, p8 | p58/p44/p49 mantidas desde a 009 | 4 / 5 | **PARCIAL** | 015 | Última tentativa só com hipótese nova |
+| T3-P32 | Tabela raster girada 90°/270° | ALTO | P3 (encerrado) | V9 p36, p92. **V3 p116 sai do escopo** (tabela exata na 015; a perda da página é T3-P27) | sem mudança desde a 009 | 5 / 5 | **PARCIAL** | 015 | Nova abordagem só com aprovação |
+| T3-P22 | Ordem de leitura em páginas nativas multicoluna | ALTO | P3 (encerrado) | V9 p51, p43, p5, p12, p19 | sem mudança desde a 009 | 5 / 5 | **PARCIAL** | 015 | Novo problema se reaberto |
+| T3-P17 | Colunas de texto detectadas como tabela sem borda (OCR) | ALTO | P3 (ação 7) | Resíduo: V10 L01/L02 inclinadas | critério da 004 mantido | 1 / — | **CORRIGIDO — com resíduos** | 015 | Com T3-P49 |
+| T3-P02 | Páginas escaneadas rotacionadas | ALTO | — | V3 p96–p99, p116; V4 p109–p114 | V4 p110 CER 0.970 → 0.060; V3 p116: tabela exata (015) | 1 / — | **RESOLVIDO — confirmado** (004; resíduo da V3 p116 reatribuído a T3-P27) | 015 | — |
+| T3-P11 | V10 não avaliável pelo executor | ALTO | — | V10 | erro → ok | 2 / — | **RESOLVIDO — confirmado** (004) | 015 | — |
+| T3-P15 | Corpus V10 trocado durante a rodada | ALTO | — | V10 (RUN 003) | `metrics_error` → ok | 1 / — | **RESOLVIDO — confirmado** (004) | 015 | — |
+| T3-P18 | Inclinação não compensada em tokens Tesseract | ALTO | — | V10 L01/L02, V9, V4, V3 | V10 CER 0.264 → 0.194 | 6 / — | **RESOLVIDO — confirmado** (006); efeitos colaterais em T3-P31 e T3-P49 | 015 | — |
+| T3-P25 | Supressão do separador "Página NNN" apagava o corpo | ALTO | — | V3 p96 | recall 0 → 1.000 | 1 / — | **RESOLVIDO — confirmado** (004); regra sob revisão (§0.5 OF-03) | 015 | — |
+| T3-P26 | Títulos-separadores "Página NNN" voltaram à saída | ALTO | — | V3 | `heading_precision` 0.500 → 0.929 | 1 / — | **RESOLVIDO — confirmado** (005); regra acoplada ao avaliador (T3-P52, OF-03) | 015 | — |
+| T3-P28 | Valor monetário colado em célula | ALTO | — | V8 p4, p58 | `€ 98,40` presente na 015 | 1 / — | **RESOLVIDO — confirmado** (006) | 015 | — |
+| T3-P39 | Valores corrompidos por duas leituras do mesmo ponto | ALTO | — | V9 p58, p66; V6 p11; V8 p49, p67 | V9 p58 `R$ 2.333,52`, `R$ 845,26`, `R$ 1.036,35` e V8 p67 `02/10/2026` corretos na 015 | 1 / 5 | **RESOLVIDO — confirmado** (010) | 015 | — |
+| T3-P42 | Linhas OCR descartadas na fusão de fragmentos de título | ALTO | — | V10 p5, p11, p31, p62 | +83 palavras do gabarito (012), mantidas | 1 / 5 | **RESOLVIDO — confirmado** (012) | 015 | — |
+| T3-P52 | Título "Página N …" indistinguível do delimitador do Markdown paginado; supressão acoplada ao avaliador | MÉDIO | P1 (ação 4; antes da 2 se for dependência) | Qualquer documento com títulos "Página N"; hoje V3 (141 blocos) e V4 (210) | **015 (offline)**: sem a supressão o avaliador falha ("Duplicate page number") em V3 e V4; AI-02 reproduzido: "Página 7 do contrato contém cláusula de reajuste." é suprimida sem aviso | 0 / 5 | **PENDENTE — novo** (§0.4) | 015 | Escapar no renderizador e delimitador estrito; exige autorização (renderizador/avaliador) |
+| T3-P55 | Texto literal com sintaxe Markdown serializado sem escape (política escolhida para reduzir o CER bruto) | MÉDIO | P1 (ação 4) | Renderizador (todos os motores e o caminho nativo); nos corpora: "### " literal em 16 blocos do V5 vira título; "<limite>" da V6 p29 fica como HTML bruto | AI-07 reproduzido: `**literal**`, `[descrição](url)`, `### Texto literal`, `<b>literal</b>` passam sem escape; `_detect_code_lang` rotula "{nota fiscal}" como JSON | 0 / 5 | **PENDENTE — novo** (AI-07, §0.9) | 015 | Contrato de ida e volta texto → Markdown → AST, junto com T3-P52 |
+| T3-P41 | Parágrafos de texto nativo denso fundidos num bloco | MÉDIO | P2 (ação 12) | V4 p9–p40 | 227 das 417 fusões do V4; estimativa não oficial +1.6 na nota do V4 | 0 / 5 | **PENDENTE** — causa identificada (§1.31) | 015 | Exige autorização (nativo) |
+| T3-P33 | Exceção `Invalid BBox` na tabela por trilhas OCR | MÉDIO | P2 (ação 8) | V9 p36 | única causa do `partial` do V9: −1.0 na nota | 0 / 5 | **PENDENTE** | 015 | Rejeitar candidato sem sequência vertical válida (compartilhado; baixo risco) |
+| T3-P07 | Tabelas sem borda e ordem embaralhada (híbridas) | MÉDIO | P2 | V5 p3, p30 | V5 CER 0.109 | 0 / 5 | **PENDENTE** | 015 | Diagnóstico por etapa |
+| T3-P38 | Fusão de parágrafos independentes em OCR denso | MÉDIO | P3 | V4 p137 | V4 fusões no nível da 008 | 3 / 5 | **CORRIGIDO — com resíduos** (011) | 015 | — |
+| T3-P20 | Parágrafos OCR quebrados no meio da frase | MÉDIO | — (encerrado) | V4, V9, V10 | ganhos da 009 mantidos | 5 / 5 | **PARCIAL** | 015 | Encerrado |
+| T3-P31 | Títulos de coluna com travessão viram itens de lista em páginas endireitadas | MÉDIO | P2 (ação 7) | V10 L01/L02 | V10 `list_item_detection_f1` 0.795 | 10 / 5 (encerrado) | **PENDENTE** | 015 | Reavaliar depois do referencial retificado |
+| T3-P29 | Página nativa com `/Rotate 90` montada como bloco único | MÉDIO | P3 | V4 p213, p214 | `paragraph_detection_f1` 0 nas páginas | 0 / 5 | **PENDENTE** | 015 | Layout de página nativa rotacionada |
+| T3-P05 | Títulos nativos com espaçamento entre letras | MÉDIO | P3 | V8 p46, p47; V7 p1; V6 p69 | V8 p46/p47 recall 0.786; V7 p1 0.697 | 0 / 5 | **PENDENTE** (fora do escopo Tesseract) | 015 | Exige autorização (montagem nativa) |
+| T3-P48 | Estado de caixas de seleção vetoriais não representado | MÉDIO | P2 (ação 9) | V11 p54; V8 p49, p61 (4 estados ausentes) | `checkbox_states` fn: V11 15, V8 4 | 0 / 5 | **RECURSO AINDA NÃO IMPLEMENTADO** | 015 | Detecção visual genérica de caixas (ação 9; passo B de T3-P51) |
+| T3-P12 | Extração lenta (detecção visual de tabelas) | MÉDIO | P3 (ação 14) | Todos (ex.: V4 2493 s na 015) | `HoughLinesP` ≈ 66% do tempo nas páginas pesadas | 0 / 5 | **PENDENTE** | 015 | Reduzir chamadas de `align_ruling_lines` com tabelas idênticas |
+| T3-P08 | Dados críticos do V9 (guarda-chuva) | MÉDIO | P3 | V9 p36, p58, p66, p92 | `numeric` 0.954 (015) | 0 / 5 | **PENDENTE** (causas em T3-P32, T3-P34, T3-P21) | 015 | Acompanhar pelas causas |
+| T3-P03 | V8 `partial` por região menor que um glifo | MÉDIO | — | V8 p22, p25 | `partial` → `success` | 1 / — | **RESOLVIDO — confirmado** (003) | 015 | — |
+| T3-P16 | V10 `partial_success` falso por página sem texto | MÉDIO | — | V10 (19 páginas de imagem) | `success`; avisos corretos de página sem tinta textual | 1 / — | **RESOLVIDO — confirmado** (004) | 015 | — |
+| T3-P13 | Regressões pontuais 001 → 002 | BAIXO | — | V3–V9 | sem piora desde a 003 | 0 / 5 | **NÃO REPRODUZIDO** (encerrado) | 015 | — |
+| T3-P24 | Título quebrado com travessão virava item de lista | BAIXO | — | V10 L03–L06 | precisão de itens 0.641 → 0.771 | 1 / — | **RESOLVIDO — confirmado** (004) | 015 | — |
+| T3-P04 | Métricas do V4 lentas | INFO | P3 | V4 (avaliador) | 96 s na 015 | 0 / 5 | **PENDENTE** | 015 | Perfilar `compute_metrics.py` |
+| T3-P14 | Falhas pré-existentes na suíte de testes | INFO | P3 | 13 testes | 13 falhas em 2026-11-24 | 0 / 5 | **NÃO VERIFICÁVEL** nesta auditoria (suíte não executada) | 2026-11-24 | Tratar fora da Série 3 |
+| T3-P19 | `duplicate_excess_rate` não mede só duplicação | INFO | — | Avaliador | interpretação documentada (§1.15) | — | **LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO** (métrica do avaliador) | 015 | — |
+| T3-P40 | Título/subtítulo do gabarito V5 ausentes do PDF | INFO | — | V5 (12 págs.) | ≈ 5% dos caracteres do gabarito V5 | — | **LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO** | 015 | Decisão do responsável sobre o corpus |
+| T3-P50 | Convenção de nível de título do gabarito V11 | INFO | — | V11 (100 títulos) | ≈ −1.9 na nota | — | **LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO** | 015 | Não ajustar o extrator ao gabarito |
+| T3-P30 | Executor gravava `threads` fixo no manifesto | INFO | — | Manifestos 001–005 | `threads` efetivo registrado | 1 / — | **RESOLVIDO — confirmado** (006) | 015 | — |
+
+---
+
+## §0 Estado atual e diagnóstico consolidado (auditoria integral pós-RUN 015, 2026-11-25)
+
+Referência consolidada do projeto. Auditoria **sem alteração** de código, testes, PDFs, gabaritos, manifestos, avaliador, rubrica, configuração ou executor, e **sem OCR novo**. Fontes: `output/tesseract/014` e `015`; capturas de `output/tesseract/_captures/` (validade verificada contra a RUN 015, §1.40); código no commit `1717bd5`; histórico Git. O avaliador oficial e o pós-processamento foram chamados **em memória** sobre as capturas (contrafactuais); nada foi gravado em `output/` nem no repositório. O detalhamento da rodada está na §1.40; o histórico anterior (estado pós-014) está na §0-h.
+
+**Convenções desta seção**: **[F]** = fato verificado nesta auditoria, com a evidência citada; **[H]** = hipótese ainda não demonstrada; **[E]** = estimativa (não é previsão de rodada). Ganhos de nota marcados [E] vêm de contrafactuais offline e não substituem uma RUN.
+
+### §0.1 Estado atual
+
+| Campo | Valor |
+|---|---|
+| **Última atualização** | 2026-11-25 — auditoria integral da RUN 015, revisão de todos os T3-Pxx e auditoria de overfitting do repositório; confronto com a auditoria independente AI-01 a AI-07 (§0.9); ciclo T3-P51, passo A implementado e validado offline (§0.10; não commitado) |
+| **Commit auditado** | `1717bd5` (T3-P44), branch `feat/tesseract-optimization`; árvore limpa; `implementation_commit 1717bd5` nos 9 JSONs de métricas |
+| **Configuração** | balanced · pt-BR · adaptive · Tesseract 5.5.0 (`por`, `--oem 1`, `--psm 3`) · 8 threads (OMP 8, equivalente a 4, §1.10) · Markdown paginado · tabelas e mesclagem entre páginas ativas · `preserve_headers_footers: false` · auditoria suplementar; `settings` e `extractor_flags` idênticos aos da 014 |
+| **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0; políticas idênticas às da 014 (só `implementation_commit` e `created_at_utc` mudam) |
+| **Rodada atual** | `output/tesseract/015/` (2026-11-25 10:15:18 → 11:55:40 UTC): 9/9 com extração e métricas `exit 0`, `rank_eligible`; V9 `partial` (T3-P33, sem mudança) |
+| **Baseline de comparação** | `output/tesseract/014/` (`7df5285`) |
+| **Corpus** | 9 documentos, 975 páginas de referência (V3 144, V4 224, V5 42, V6 95, V7 80, V8 90, V9 96, V10 84, V11 120); hashes de PDF, gabarito efetivo e manifesto iguais aos da 014 e ao SHA-256 recalculado dos PDFs em disco |
+| **Resultado da RUN 015** | **V3–V10 idênticos byte a byte à 014**; no V11 **só a p71 mudou**. T3-P44 recupera o conteúdo da p71 como previsto (V11 70.4 → **71.7**), com resíduos de ordem, identificador e tabela (§1.40) |
+| **Capturas válidas** | `assemble_input_b541246/` reproduz byte a byte a RUN 015 em V3–V10 e a 014 no V11 (só a p71 difere); `geometry_1717bd5/` reproduz a 015 nas 61 páginas inclinadas (V3, V4, V6, V8, V9, V10, V11) |
+
+**Notas da rubrica §1.16 (inalterada), recalculadas por uma implementação independente e conferidas com a ferramenta anterior (diferença 0)**:
+
+| # | Corpus | **Nota 015** | Δ 014 | Distância a 85 | Texto | Cobertura | Títulos | Parágrafos | Listas | Tab. estr. | Tab. cél. | Dados | Ordem | Penalidade |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | V7 | **99.4** | 0.0 | +14.4 | 99.4 | 99.5 | 98.8 | 97.6 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 0 |
+| 2 | V8 | **98.8** | 0.0 | +13.8 | 98.2 | 98.6 | 99.4 | 96.2 | 100.0 | 100.0 | 99.9 | 98.5 | 100.0 | 0 |
+| 3 | V6 | **96.7** | 0.0 | +11.7 | 96.7 | 96.5 | 99.0 | 96.3 | 100.0 | 100.0 | 96.3 | 91.6 | 100.0 | 0 |
+| 4 | V3 | **93.1** | 0.0 | +8.1 | 94.9 | 95.2 | 68.0 | 92.0 | 97.3 | 99.9 | 99.1 | 98.0 | 98.3 | −0.5 |
+| 5 | V5 | **86.5** | 0.0 | +1.5 | 67.3 | 83.5 | 83.8 | 83.8 | 92.1 | 100.0 | 100.0 | 98.5 | 87.1 | 0 |
+| 6 | V10 | **78.3** | 0.0 | −6.7 | 61.1 | 97.6 | 64.0 | 57.9 | 72.7 | 96.5 | 91.2 | 95.4 | 51.3 | 0 |
+| 7 | V9 | **75.6** | 0.0 | −9.4 | 77.8 | 96.8 | 54.5 | 65.8 | 84.7 | 79.9 | 63.9 | 86.3 | 58.4 | −1.0 |
+| 8 | **V11** | **71.7** | **+1.3** | −13.3 | 70.8 | 89.7 | 53.1 | 67.1 | 43.4 | 80.2 | 76.0 | 71.4 | 71.0 | 0 (era −1.0) |
+| 9 | V4 | **66.9** | 0.0 | −18.1 | 77.3 | 68.1 | 52.3 | 54.0 | 79.1 | 86.8 | 70.4 | 69.2 | 100.0 | −4.5 |
+
+- **Meta de 85**: atingida por V7, V8, V6, V3 e V5; **não** por V11 (71.7), V4 (66.9), V9 (75.6) e V10 (78.3).
+- **Leitura honesta das notas altas [F]**: ≈ 5.1 pontos do V3 dependem de regras de texto específicas do corpus (sem elas, 88.0); V6 depende de 0.7 (96.0) e V4 de 0.3 (contrafactual offline, §0.5 OF-01/OF-02). V5 está 1.5 acima da meta com a perda de T3-P40 (gabarito). Nenhuma nota mede estados de caixa de seleção: V3, V6, V9 e V10 têm 25 estados errados ou inventados (T3-P51) que a rubrica não vê.
+
+**Problemas por situação (56 identificadores; atualizado pelo confronto, §0.9)**:
+
+| Situação | CRÍTICO | ALTO | MÉDIO | BAIXO | INFO | Total |
+|---|---|---|---|---|---|---|
+| **Ativos** (PENDENTE, PARCIAL, CORRIGIDO com resíduos, LIMITAÇÃO DA ENGINE, RECURSO NÃO IMPLEMENTADO) | 6 (T3-P51, T3-P09, T3-P44, T3-P27, T3-P36, T3-P10) | 15 (T3-P53, T3-P54, T3-P49, T3-P35, T3-P45, T3-P46, T3-P47, T3-P37, T3-P43, T3-P06, T3-P21, T3-P34, T3-P32, T3-P22, T3-P17) | 13 (T3-P52, T3-P55, T3-P41, T3-P33, T3-P07, T3-P38, T3-P20, T3-P31, T3-P29, T3-P05, T3-P48, T3-P12, T3-P08) | 0 | 1 (T3-P04) | **35** |
+| RESOLVIDO — confirmado | 3 | 9 | 2 | 1 | 1 | **16** |
+| NÃO REPRODUZIDO | — | — | — | 1 (T3-P13) | — | 1 |
+| LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO | — | — | — | — | 3 (T3-P19, T3-P40, T3-P50) | 3 |
+| NÃO VERIFICÁVEL | — | — | — | — | 1 (T3-P14) | 1 |
+
+- **Novos nesta auditoria**: 3 (T3-P51, T3-P52, T3-P53). **Reabertos ou com resíduo novo**: T3-P09 (INFO → ALTO), T3-P27 (V3 p116), T3-P10 (V11 p100). **Reclassificados**: T3-P49 (MÉDIO → ALTO), T3-P02 (V3 p116 reatribuída), T3-P46 (+ V11 p120, antes listada em T3-P47). **Confronto com a auditoria independente (§0.9)**: +2 novos (T3-P54, T3-P55); T3-P09 ALTO → CRÍTICO; riscos confirmados no componente em T3-P43 (AI-06) e T3-P44 (AI-05).
+- **Ciclo T3-P51 (§0.10)**: passo A implementado e validado offline — 25 estados errados ou inventados → 0; 136 explícitos preservados; 10 legítimos não representados; notas offline V3 92.88, V6 96.29, V9 76.16, V10 78.40, demais iguais. T3-P51 continua contado entre os ativos até a confirmação na RUN 016 (§5).
+- **Nenhum problema foi declarado resolvido nesta auditoria** sem confirmação em rodada completa; T3-P44 passa a CORRIGIDO — com resíduos, não a RESOLVIDO.
+
+### §0.2 Problemas ativos
+
+Caminho de resolução de cada problema ativo. **Esforço** e **validação**: B = horas, M = 1–2 dias, A = vários dias. "Capturas" indica se a validação pode reaproveitar `output/tesseract/_captures/` sem OCR.
+
+| ID | Causa ([F] demonstrada / [H] hipótese) | Componente | Abordagem recomendada (alternativas descartadas) | Impacto V11 / demais [E] | Esforço · validação · OCR · capturas | Aceitação mensurável | Autorização |
+|---|---|---|---|---|---|---|---|
+| **T3-P51** | [F] `_promote_post_table_checklist_items` cria "☐" para ≥ 2 linhas curtas depois de uma tabela; `_promote_ocr_checkbox_o_prefix` marca "☑" por padrão as linhas sem "O " e apaga o "O " (artigo) do texto; nenhuma das duas observa caixa | `ocr/tesseract/postprocess.py` (só Tesseract, mas age também em páginas nativas, T3-P54) | **Proposta definitiva (§0.8)**: passo A — nenhum estado sem evidência; passo B — evidência visual (raster) ou nativa (vetor, glifo) de caixas, estado indeterminado sem glifo. Descartado: ajustar limiares de tamanho ou de posição (continua fabricando); "☐" para estado desconhecido | V11 0 (T3-P48 à parte); A: V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08 [E]; A + B: 17/17 estados corretos na sonda | A: B · B · não · sim; B: A · M · não (renderização sem OCR) · sim | `checkbox_states` fp = 0; com B, 17 estados corretos; texto inalterado salvo a leitura da própria caixa | A: pós-processamento e testes; B: componentes compartilhados |
+| **T3-P44** (resíduos) | [F] escolha binária por página; [F] salvaguarda de preservação **geométrica**: "FG-711" (confiança 93) fica sem par (IoU 0.11 com "em", 49) e conta como preservado (AI-05); [F] ordem: T3-P49; [H] o lixo do carimbo nas células vem da releitura | `ocr/backends/tesseract.py`; montagem | (1) T3-P53 (aviso, sem mudar a saída); (2) **contrato de evidência** (§0.9): cobertura geométrica, concordância nas palavras confiáveis da leitura direta e conflitos críticos tratados em separado; onde uma palavra confiável some ou muda, manter a direta ou marcar incerteza. Descartado: adotar palavra a palavra a mais confiante (§1.39: corrompe "4D8AA6A3"); limiar de concordância textual sozinho (rejeitaria V4 p164, V11 p63 e V10 p25, que eram melhores) | V11 p71: "FG-711" de volta [H]; ordem depende de T3-P49 | B · B · não · sim (`ocr_deskew_7df5285`: 96 pares) | contraexemplo AI-05 rejeitado; 95 decisões idênticas; p71 com os 3 parágrafos e "FG-711" | Backend Tesseract |
+| **T3-P27** (resíduo) | [F] supressão do bloco inteiro quando o início casa um marcador de corpus; o OCR uniu cabeçalho, título e corpo num bloco de 239 caracteres (< 400) | `ocr/tesseract/postprocess.py::_suppress_ocr_corpus_markers` | Ver OF-01: suprimir só a linha que é mobília e avisar quando um bloco de várias frases for afetado. Descartado: baixar o limite de 400 caracteres (ajuste ao exemplo) | V3 p116 recall 0.581 → 1.0 [F: contrafactual]; nota do V3 cai se as regras saírem (até −5.1) | B · B · não · sim | nenhuma linha do gabarito suprimida por regra de texto (lista por página) | Pós-processamento e testes |
+| **T3-P36** (resíduo) | [F] coluna "Idioma" da p168 não lida pelo Tesseract | reconhecimento | Monitorar; entra no experimento de OCR de T3-P21 | V4 marginal | — | — | — |
+| **T3-P10** (resíduo) | [H] `_GUTTER_MIN_ROWS = 3`: colunas com 2 linhas não formam calha e a reconstrução junta as 3 colunas (V11 p100) | `ocr/reconstruct.py::_validated_gutters` | Teste de componente com as linhas capturadas da p100; se confirmado, exigir evidência de calha por linha do texto e não por número fixo de linhas (ex.: alinhamento das margens esquerdas em ≥ 2 linhas e vão ≥ 1.5 altura). Descartado: baixar para 2 sem controle (risco de cortar tabelas e listas) | V11 p100 (CER 0.280) | B · B · não · sim | p100 com as 3 colunas separadas; páginas multicoluna niveladas de V4/V9/V10 idênticas | `ocr/reconstruct.py` (Tesseract/OCR) |
+| **T3-P53** | [F] o executor exporta só `ocr_outcome`, status e avisos; os fatos de qualidade (decisões de releitura, supressões do pós-processamento, confiança) ficam fora do manifesto; nenhum aviso de baixa confiança existe | `api.py` (avisos), `scripts/run_tesseract_batch_wsl.py` (manifesto) | Exportar por página: decisões de releitura, `tesseract_postprocess_suppressed_chars`, fração de palavras com confiança < 60 e média; aviso `ocr_low_confidence` com limiar documentado. Descartado: mudar `content_status` (altera contratos) | nenhum na nota; torna visíveis 79 páginas | M · B · não · sim (fatos nas capturas) | Markdown idêntico byte a byte; manifesto com os campos novos nas 975 páginas | `api.py` e executor |
+| **T3-P49** + **T3-P35** (inclinadas) | [F] caixas OCR desrotacionadas são envoltórias alinhadas aos eixos (altura da linha ≈ 2.5–3.2 × a das palavras); `_group_form_rows` usa 0.75 × essa altura (> passo entre linhas) e ordena por x0; [F] a ordem depende do sinal da inclinação; [H] na reconstrução, calhas inclinadas misturam colunas (V10) | `text/reading_order.py` (compartilhado), `ocr/reconstruct.py`, `api.py` | **Referencial retificado**: expressar a geometria das regiões só-OCR das páginas endireitadas no referencial da releitura (rotação inversa do ângulo medido pelo próprio motor) antes do layout e da montagem, devolvendo ao referencial da página só para a saída. Alternativa: altura das palavras no lugar da altura da linha (corrige só o FORM). Descartado: ajustar o 0.75 (continua dependente do ângulo) | V11 +2.1, V10 +1.6, V9 +0.4, V4 +0.35, V3 +0.1 [E: E1 offline, recall idêntico] | A · M · não · sim (`geometry_1717bd5`) | invariância: a mesma página a +θ e −θ com a mesma ordem; nenhuma página com recall menor; níveis de título fora das páginas inclinadas inalterados | `api.py`, ordem de leitura e layout compartilhados |
+| **T3-P09** (CRÍTICO) | [F] regras literais de V3/V4/V6 no caminho de produção (OF-01, OF-02, OF-03); suprimem frases de corpo e tabelas inteiras (AI-01, §0.9) | `ocr/tesseract/postprocess.py` | Substituir por evidência genérica (repetição entre páginas, posição de borda, contador) e supressão por linha com aviso; manter as regras só como medida de custo | V3 até −5.1, V6 −0.7, V4 −0.3 [E] | M · M · não · sim | nenhum literal de corpus em `src/` fora de `evaluation/`; nenhuma linha do gabarito removida | Pós-processamento, testes e decisão sobre a queda de nota |
+| **T3-P45** | [H] dois candidatos de tabela sobrepostos sem deduplicação | detecção/fusão de tabelas nativas (compartilhado) | Diagnóstico por etapa (páginas nativas, sem OCR); deduplicar por sobreposição de células e conteúdo | V11 p50/p93; `numeric` fp −13 [E] | M · B · não · sim | 1 tabela por região; título preservado | Detector nativo |
+| **T3-P46** | [H] detector sem borda aceita colunas de texto corrido e listas; a fronteira de coluna corta palavras (p120) | detector nativo sem borda (compartilhado) | Rejeitar candidato cujas "células" têm palavras cortadas ou frases contínuas entre colunas; exigir alinhamento de células em várias linhas | V11 p5/p98/p120 (12.8% das edições) [E: ≈ +2 a +3, não medido] | A · M · não · sim | p5/p98 como parágrafos; tabelas de V5–V9 idênticas | Detector nativo |
+| **T3-P47** + **T3-P37** | [H] segmentação de tabelas sem borda empilhadas ou lado a lado | detector nativo (compartilhado) | Diagnóstico conjunto; separar por faixas de cabeçalho e por calhas verticais com conteúdo | V11 p57 e outras; V9 p62/p72/p14 | A · M · não · sim | células associadas à linha certa (`cell_alignment_accuracy`) | Detector nativo |
+| **T3-P43** (resíduos) | [F] mobília fora do núcleo de posição em páginas inclinadas; [F] variantes OCR ("V1I-A1", "STITUTO"); [H] cabeçalho e título fundidos numa linha pelas caixas infladas (p69, p95, p96, todas com ≥ 4°) | `assemble/repeated_regions.py`; reconstrução | Depois do referencial retificado; variantes OCR só com evidência de forma (não por texto); [F] AI-06: sem evidência que distinga mobília de título numerado (fonte menor, separação do corpo, repetição na maioria das páginas), preservar e registrar | V11 ≈ +0.6 [E, §1.38] | M · B · não · sim | ≤ 18 linhas e nenhuma do gabarito removida | Compartilhado |
+| **T3-P06** | [F] hierarquia OCR agrupada no documento inteiro: mudar títulos de uma página muda níveis de outras (E1: V11 p31, p40, p64, p100); [H] em páginas inclinadas a razão de altura título/corpo usa alturas infladas | `layout/heading.py`, `layout/ocr_aware.py` | Níveis por página ou por seção, com o documento só como desempate; razão de altura sobre a altura das palavras | V11 títulos 53.1; V4/V9/V10 | A · M · não · sim | nenhum nível alterado em páginas fora do alcance | `layout/heading.py` |
+| **T3-P21** | [F] limite de reconhecimento na configuração atual (IDs com O/0, I/1, S/5, B/8; moiré; −8°) | reconhecimento | Experimento autorizado: perfil de pré-processamento por condição e segunda passada só em regiões de baixa confiança; correção de identificadores **só** com evidência de formato declarada pelo usuário (nunca por padrão do gabarito) | V4 (grupos D = 85% das edições do V4, §1.31); V11 F04 | A · A · **sim** · parcial (TSV cache) | ganho em páginas de G sem perda em S | Experimento de OCR |
+| **T3-P34 / T3-P32 / T3-P22 / T3-P20** | [F] causas registradas na §2; limites de tentativa atingidos (exceto T3-P34, 4/5) | vários | Só com hipótese nova e aprovação | V9 principalmente | — | — | caso a caso |
+| **T3-P17** (resíduo), **T3-P31** | [H] mesma geometria inflada das inclinadas | reconstrução/listas | Reavaliar depois do referencial retificado (sem nova regra antes disso) | V10 listas 72.7 | — | — | — |
+| **T3-P52** | [F] o renderizador e o avaliador usam a mesma sintaxe para delimitador de página e para um título "Página N …" | `renderers/markdown.py`, avaliador | Escapar títulos de conteúdo que colidem com o delimitador; delimitador estrito no avaliador ("## Página N" exato) | 0 na nota [E]; remove a dependência de OF-03 | B · B · não · sim | V3/V4 avaliáveis sem a supressão "Página NNN" | Renderizador e **avaliador** |
+| **T3-P54** | [F] `api.py:1618–1620` aplica o pós-processamento sem a flag `preserve_headers_footers` e sem a proveniência dos blocos | `api.py`, `ocr/tesseract/postprocess.py` | Contrato único de supressão: flag e proveniência passadas ao pós-processamento; mobília só pelo detector genérico; regras de OCR só em blocos OCR (proposta do relatório, adotada) | sem efeito na 015 (flag `False`); quem usa o padrão deixa de perder cabeçalhos | M · B · não · sim | com a flag `True`, 0 supressões de mobília pelo pós-processamento; páginas nativas idênticas entre motores | `api.py` e pós-processamento |
+| **T3-P55** | [F] `_escape_inline_text` não escapa sintaxe literal para casar os gabaritos (`b407b8c`) | `renderers/markdown.py` (compartilhado) | Contrato de ida e volta texto → Markdown → AST; escapar o literal no contexto; testes de sintaxe literal | CER bruto pode subir contra os gabaritos atuais (limitação do gabarito); V5 e V6 afetados [E não medido] | M · B · não · sim | texto literal preservado depois da análise do Markdown | Renderizador (compartilhado) |
+| **T3-P41** | [F] piso de 0.75 × altura da linha impede a quebra no vão real (§1.31) | `assemble/content.py::_native_paragraphs` | Limiar relativo ao vão entre linhas do próprio bloco | V4 +1.6 [E, §1.31] | M · M · não · sim | fusões do V4 −227 [E]; V5–V8 idênticos | Nativo compartilhado |
+| **T3-P33** | [F] `text_tracks._build_table` gera borda de linha invertida | detector sem borda (compartilhado) | Rejeitar candidato sem sequência vertical válida | **V9 +1.0** (penalidade `partial`) [E] | B · B · não · sim | V9 `valid`; nenhuma tabela nova | Compartilhado |
+| **T3-P07, T3-P29, T3-P05, T3-P38, T3-P48, T3-P12, T3-P08, T3-P04** | registradas na §2 | vários | Sem mudança de diagnóstico nesta auditoria; T3-P48 junto com a evidência visual de caixas de T3-P51 | V5, V4, V8/V7 | — | — | caso a caso |
+
+**Experimento E1 (origem e validade)**: offline, de 2026-11-25, em `output/tesseract/_captures/geometry_1717bd5/e1/` (anterior a esta auditoria). Variante `region_gate`: as regiões só-OCR das páginas com releitura endireitada passam ao referencial endireitado (rotação inversa do ângulo registrado pelo motor, largura e altura reais recuperadas da envoltória) antes da montagem, e os títulos dessas regiões seguem a regra anterior. A base do experimento é idêntica byte a byte à RUN 015 nos 7 corpora com páginas inclinadas; os resultados de V11 e V10 foram reavaliados nesta auditoria (avaliador em memória): mesmas notas, recall idêntico, nenhuma página com recall menor ou CER pior em mais de 0.01. É contrafactual de montagem, não implementação: o layout continua calculado sobre as caixas infladas.
+
+**Família da geometria inflada (T3-P35 inclinadas, T3-P49, resíduos de T3-P06, T3-P43, T3-P17 e T3-P31)** — relação analisada sem presumir causa única:
+
+| Sintoma | Mecanismo | Situação da evidência |
+|---|---|---|
+| T3-P49 (linhas invertidas na V11 p61/p71) | `_group_form_rows`/`_order_form_rows` (`text/reading_order.py:1370–1385, 1556–1572`): tolerância `max(3.0, 0.75 × mediana da altura das linhas)`; na p71 a altura mediana das linhas é 21.8 pt para palavras de 6.8 pt e passo de 9.1–10.8 pt (tolerância 16.3 pt), logo cada parágrafo vira uma "linha de formulário"; a ordenação por x0 (que decresce de 0 a 0.8 pt por linha a −2°: 63.5, 63.0, 62.3 … 56.5) inverte as linhas | **[F]** mecanismo medido nas 61 páginas: 55 regiões FORM, 54 com linhas empilhadas (22 páginas); E1 restaura a ordem na p71 |
+| T3-P35 inclinadas (V10 L01/L02) | (1) o mesmo FORM empilhado (todas as 12 páginas L01/L02); (2) na reconstrução, 14–18 de ≈ 45 pares de linhas fora de ordem já antes do layout (calhas inclinadas) | (1) **[F]**; (2) **[H]**, medido em `geometry_1717bd5/stage_summary.txt`, sem isolar a função |
+| Fusão de parágrafos em página inclinada (V11 p77, −1.7°, datilografia) | caixas infladas encobrem os vãos entre parágrafos na segmentação OCR | **[H]** apoiada: com a geometria endireitada (E1) a p77 volta a ter os parágrafos separados |
+| Tabela no meio do parágrafo (V11 p71) | a caixa inflada da tabela (y1 235.3) invade a 1ª linha do parágrafo (228.9–251.3), que vira região separada | **[H]** apoiada: E1 coloca a tabela antes do parágrafo, como no gabarito |
+| Resíduos de T3-P43 | posição fora do núcleo (rotação em torno do centro da página) e linhas de cabeçalho e título fundidas | posição **[F]** (§1.37); fusão **[H]**; variantes OCR ("V1I-A1") são outra causa **[F]** |
+| Resíduos de T3-P06 em inclinadas | razão título/corpo sobre alturas infladas e porta de nivelamento (`LEVEL_TEXT_MAX_SLOPE`) | **[H]**; títulos raster ausentes também em páginas niveladas, logo **não** é causa única |
+
+**T3-P44 — análise pedida (detalhe na §1.40)**: (a) recuperação de texto **confirmada** [F]; (b) ordem das linhas **piorou localmente** [F]: o parágrafo R200, em ordem correta na 014, sai invertido na 015; (c) "FG-711" **perdido** [F] (confiança 93 na leitura direta; na releitura a região tem só "em", confiança 49, sem par por sobreposição, e a regra conta "FG-711" como preservado pela cobertura geométrica — AI-05, §0.9); (d) tabela contaminada pelo carimbo [F] (`cell_cer` 1.0 → 1.26, 0 células exatas, células "==.em o ss CC", "\|\| FG713 ———— O ee ee O A"); (e) política de seleção: binária por página, sem fusão; (f) nenhum aviso visível [F]: o relatório da p71 no manifesto é igual ao da 014 (`warnings: []`) e os fatos novos não são exportados; (g) limiares: 0.25 / 20 / 1.0 / 0.9 / 70 / 0.5 fixados depois de observar os 96 pares, com **um** caso positivo real; a RUN 015 só confirma estabilidade (mesmas 96 decisões), não generalização.
+
+### §0.3 Problemas resolvidos
+
+Só os confirmados em rodada completa e verificados na 015 (saídas idênticas à rodada de confirmação, ou o valor conferido na saída). Diagnósticos e tentativas ficam na §2.
+
+| ID | Descrição curta | Status | Confirmação | Evidência objetiva |
+|---|---|---|---|---|
+| T3-P00 | Executor sem tabelas e sem supressão de mobília | RESOLVIDO — confirmado | 002 | manifestos da 015: `enable_tables: true`, `preserve_headers_footers: false` |
+| T3-P01 | OCR descartado por figuras | RESOLVIDO — confirmado | 003 | V9 recall 0.991 na 015 |
+| T3-P02 | Páginas escaneadas rotacionadas | RESOLVIDO — confirmado | 004 | V3 p96–p99 e V4 p109–p114 iguais à 004; V3 p116 com a tabela 4 × 4 exata (a perda restante é T3-P27) |
+| T3-P03 | `partial` por região menor que um glifo | RESOLVIDO — confirmado | 003 | V8 `success`/`valid` |
+| T3-P11 | V10 não avaliável | RESOLVIDO — confirmado | 004 | métricas `ok` desde a 004 |
+| T3-P15 | Corpus V10 trocado durante a rodada | RESOLVIDO — confirmado | 004 | hashes do V10 iguais aos da 014 |
+| T3-P16 | `partial_success` falso em página sem texto | RESOLVIDO — confirmado | 004 | V10 `success`; avisos de página sem tinta textual corretos (19 páginas) |
+| T3-P18 | Inclinação não compensada | RESOLVIDO — confirmado | 006 | 61 páginas inclinadas releem endireitadas (96 decisões, §1.40) |
+| T3-P23 | Parser TSV e aspas | RESOLVIDO — confirmado | 004 | saídas de V3/V4 iguais |
+| T3-P24 | Título com travessão como item de lista | RESOLVIDO — confirmado | 004 | V10 L03–L06 iguais |
+| T3-P25 | Separador "Página NNN" apagava o corpo | RESOLVIDO — confirmado | 004 | V3 p96 recall 1.0; a regra que o resolve está sob revisão (§0.5 OF-03) |
+| T3-P26 | Separadores "Página NNN" de volta | RESOLVIDO — confirmado | 005 | idem; acoplamento com o avaliador em T3-P52 |
+| T3-P28 | Valor monetário colado em célula | RESOLVIDO — confirmado | 006 | `€ 98,40` na V8 p4 e p58; nenhum `98,4096` |
+| T3-P30 | `threads` fixo no manifesto | RESOLVIDO — confirmado | 006 | `threads: 8`, `tesseract_omp_thread_limit: 8` na 015 |
+| T3-P39 | Duas leituras do mesmo ponto | RESOLVIDO — confirmado | 010 | V9 p58 `R$ 2.333,52`, `R$ 845,26`, `R$ 1.036,35`; V8 p67 `02/10/2026` |
+| T3-P42 | Linhas OCR descartadas na fusão de títulos | RESOLVIDO — confirmado | 012 | V10 idêntico à 014 (recall das p5/p11/p31/p62 mantido) |
+| T3-P13 | Regressões pontuais 001 → 002 | NÃO REPRODUZIDO | 003 | sem piora desde a 003; encerrado |
+
+### §0.4 Novos problemas (auditoria pós-015)
+
+#### T3-P51 | CRÍTICO | Estados de caixa de seleção fabricados ou invertidos e fragmentos de célula convertidos em itens "☐"
+
+- **Corpora/páginas [F]**: V3 p88 ("☒ Aprovado" → "☐ Aprovado"); V6 p3, p33, p89 ("☑ Conferir" e "☑ Registrar ciência" → "☐"; na p89, "☐ U Reabrir"); V9 p18, p82, p90 e V10 p15, p30, p54 (a 2ª linha de células de tabela, como "software", "manutenção", "laboratoriais", "armazenamen", sai fora da grade e vira item "☐").
+- **Evidência [F]**: auditoria suplementar oficial da 015, `checkbox_states` fp: V3 1, V6 6, V9 10, V10 8 (25); censo offline do pós-processamento (capturas que reproduzem a 015 byte a byte) atribui todos às duas funções. Nenhuma categoria da rubrica mede estados de caixa: as notas não mudam por esse erro.
+- **Mecanismo [F]**: `ocr/tesseract/postprocess.py::_promote_post_table_checklist_items` (linhas 1184–1290) converte ≥ 2 blocos curtos de uma linha depois de uma tabela numa lista com marcador "☐" (linha 1269), sem nenhuma evidência visual de caixa; `_promote_ocr_checkbox_o_prefix` (1292–1411) trata "O " inicial como "☐" e marca **"☑" por padrão** os demais blocos da sequência (linhas 1384–1387). Origem: `483573b` (2026-10-28, "V1.0 Tesseract"), anterior à Série 3. A §1.28 já tinha visto "☐" inventados na V4 p157, e a §1.15 dois "☐" falsos na V9 p90, sem registrar um problema.
+- **Risco em documentos reais**: alto. Qualquer formulário Tesseract com linhas curtas depois de uma tabela (assinaturas, cargos, observações) ganha caixas inexistentes; em português "O " inicial é artigo. Um estado "aprovado/não aprovado" invertido é corrupção de dado crítico.
+- **Contrafactual [E]** (desligar as duas funções, offline): fabricados 25 → 0; estados corretos perdidos 10 (V3 1, V6 9, que hoje coincidem com o gabarito por suposição de layout); notas V3 93.14 → 92.88, V6 96.73 → 96.29, V9 75.60 → 76.16, V10 78.32 → 78.40; texto inalterado salvo os marcadores.
+- **Relação**: T3-P48 (estados vetoriais ausentes; recurso inexistente), T3-P22/T3-P37 (2ª linha de célula fora da grade, V9 p90).
+- **Status**: PENDENTE — novo. Candidato do próximo ciclo (§0.8).
+
+#### T3-P52 | MÉDIO | Título "Página N …" indistinguível do delimitador do Markdown paginado (supressão acoplada ao avaliador)
+
+- **Evidência [F]**: o Markdown paginado usa `## Página N` como delimitador e o avaliador aceita também `## Página 001 | …` como delimitador (`evaluation/markdown_parser.py`, docstring). O pós-processamento suprime todo bloco de uma linha (≤ 160 caracteres) ou TITLE de até 2 linhas que comece com "Página N" (`_suppress_pagina_separator_blocks`, linhas 291–330): 141 blocos no V3 e 210 no V4 na 015. **Sem essa supressão, a avaliação de V3 e V4 falha** com `ValueError: Duplicate page number` (contrafactual offline).
+- **Risco em documentos reais**: um título ou linha curta legítima que comece com "Página N" ("Página 12 | Resultados", "Página 3: ver anexo") é removido em silêncio (motivo classificado como mobília, sem aviso); se fosse mantido, o próprio formato de saída ficaria ambíguo.
+- **Proposta**: escapar no renderizador o texto de conteúdo que colide com a sintaxe do delimitador; delimitador estrito no avaliador; o separador real de página passa a ser tratado pela detecção genérica de mobília (contador, repetição e posição, como em T3-P43). Exige autorização para renderizador e **avaliador**.
+- **Status**: PENDENTE — novo.
+
+#### T3-P53 | ALTO | Página `valid`/`clean` sem aviso apesar de perda significativa; decisões do OCR não chegam ao consumidor
+
+- **Evidência [F]**: 79 páginas com recall < 0.85 ou volume < 0.8 do gabarito estão `valid`/`clean` e sem nenhum aviso nos manifestos da 015 (V3 4: p86, p99, p103, p116; V4 60; V5 10; V7 1; V8 2; V9 1; V11 1: p75). O executor (`scripts/run_tesseract_batch_wsl.py:248–275`) exporta por página só `ocr_outcome`, status, motivos e `warnings`; os fatos `tesseract_deskew_decisions`, `tesseract_more_complete_read_discarded` (T3-P44) e `tesseract_postprocess_suppressed_chars` ficam só em memória. As supressões classificadas como mobília (`tesseract_running_header`, `tesseract_pagina_separator`, `tesseract_ocr_corpus_marker`, `tesseract_v6_irinf_artifact`) nunca geram aviso (`postprocess.py:145–150`), o que inclui a perda da V3 p116.
+- **Sinal disponível sem gabarito [F]**: nas páginas OCR de V3, V4, V9, V10 e V11 com ≥ 20 tokens, as de recall < 0.85 (73) têm confiança média mediana 88.8 e 7.9% de palavras com confiança < 60; as de recall ≥ 0.95 (146), 95.8 e 0%. O sinal separa grupos, mas **não** pega as tabelas OCR do V4 (p163–p166: confiança ≈ 90 com recall < 0.30). Um aviso de baixa confiança é útil, não suficiente.
+- **Proposta**: exportar os fatos de qualidade no manifesto e emitir avisos (`ocr_low_confidence`, `ocr_more_complete_read_discarded`, `content_suppressed_by_postprocess` também para regras de texto); sem mudar o Markdown nem o status. Exige autorização (`api.py` e executor).
+- **Status**: PENDENTE — novo.
+
+#### T3-P54 | ALTO | Pós-processamento Tesseract ignora `preserve_headers_footers` e altera páginas nativas (AI-03; confronto, §0.9)
+
+- **Evidência [F]**: `api.py:1611–1620` aplica `apply_tesseract_postprocessors` sem consultar `preserve_headers_footers`, cujo padrão é `True` (`config.py:206`; CLI `cli.py:450`). Reprodução offline com a flag `True`: o pós-processamento ainda suprime 427 blocos no V3, 38 no V5, 184 no V6, 79 no V7, 90 no V8, 93 no V9, 56 no V10 e 64 no V11 (cabeçalhos correntes, separadores "Página NNN", marcadores), muitos em páginas sem OCR. Na configuração da RUN 015 (`False`), as regras "Tesseract" alteram páginas **sem OCR** em V3 (88 separadores e 6 marcadores), V5 (1), V6 (16), V7 (9), V8 (10) e V9 (7 dos 10 itens "☐" inventados).
+- **Risco em documentos reais**: com a configuração padrão (preservar) e Tesseract, cabeçalhos, rodapés, linhas "Página N" e linhas que casam marcadores somem; um PDF nativo processado com Tesseract recebe promoções de título, listas de caixas e supressões que não recebe com outros motores.
+- **Proposta**: passar o contrato e a proveniência ao pós-processamento; nenhuma supressão de mobília quando a preservação é pedida; supressão de mobília só pelo detector genérico (`assemble/repeated_regions.py`), que já respeita a flag; regras específicas de OCR só em blocos de origem OCR; testes do caminho nativo com Tesseract selecionado e flag `True`/`False`.
+- **Relação**: T3-P09, T3-P51, T3-P52, OF-01 a OF-04 e OF-09 a OF-11.
+- **Status**: PENDENTE — novo.
+
+#### T3-P55 | MÉDIO | Texto literal com sintaxe Markdown serializado sem escape (AI-07; confronto, §0.9)
+
+- **Evidência [F]**: `renderers/markdown.py::_escape_inline_text` (542–583) só escapa "\" (e "\|" em tabelas) e os marcadores de início de linha "- ", "+ ", "* " e ">"; deixa `**…**`, `*…*`, `[…](…)`, `<tag>`, `` `…` `` e, por exceção explícita, "### Título" em texto de parágrafo. O comentário justifica: os gabaritos nunca escapam esses caracteres e o escape "inflates cer_markdown_raw" (`b407b8c`, 2026-10-29; exceção de título em `1fb70b7`). `_detect_code_lang` (510–533) rotula como JSON todo bloco de código iniciado por "{" ou "[" ("Only makes high-confidence detections matching the reference corpus format").
+- **Nos corpora [F]**: os PDFs contêm literalmente "### " em 16 blocos do V5 (ex.: p4 "### Engenharia", que o gabarito trata como título) e "<limite>" na V6 p29 (o gabarito tem a mesma ambiguidade). A saída casa o gabarito, mas não é Markdown fiel ao texto.
+- **Risco em documentos reais**: sintaxe literal vira estrutura ao ser interpretada (falso título, ênfase, link, HTML que desaparece); afeta todos os motores e o caminho nativo.
+- **Proposta**: contrato de ida e volta texto → Markdown → AST: escapar o que é literal no contexto; emitir como sintaxe só a estrutura observada (estilos, títulos detectados); testes com sintaxe literal, caminhos, código, HTML e tabelas. O CER bruto contra os gabaritos atuais pode subir; isso é limitação do gabarito (como T3-P50), não motivo para manter o defeito.
+- **Relação**: T3-P52 (mesmo componente e mesmo teste de aceitação), OF-21.
+- **Status**: PENDENTE — novo.
+
+#### Resíduos novos e reclassificações de problemas existentes
+
+- **T3-P27 → CORRIGIDO — com resíduos [F]**: a V3 p116 perde "**Controle de página:** QA-P116" e "Mesmo conjunto de células do cenário de controle pareado; variar apenas a condição visual." (119 caracteres; recall 0.581, volume 0.56), desde pelo menos a 009. O OCR uniu "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO OCR TABELAS * SCAN Página 116 | … Controle de página: QA-P116 Mesmo conjunto de cél…" num bloco de 239 caracteres, e `_CORPUS_DOC_HEADER_RE` suprime o bloco inteiro (limite de 400 caracteres de T3-P27). Sem as regras de corpus, a p116 tem recall 1.0. Antes atribuído a T3-P32 (tabela girada), que está correta.
+- **T3-P10 → CORRIGIDO — com resíduos**: V11 p100 (raster nivelada, paisagem, 3 colunas de 2 linhas): as linhas das 3 colunas saem unidas já na reconstrução OCR [F]; causa provável `_GUTTER_MIN_ROWS = 3` [H].
+- **T3-P46 (+ V11 p120) [F]**: a lista "Grupos de evidência", o parágrafo e a microtabela viram uma única tabela HTML com palavras cortadas entre células ("av | aliação", "fa | mília", "t | exto"); a §1.34 listava a p120 em T3-P47 (não detectada).
+- **T3-P49 → ALTO e escopo ampliado [F]**: mecanismo demonstrado e presente em 22 páginas de 4 corpora (§0.2); a V11 p77 (parágrafos fundidos em página inclinada) e a tabela no meio do parágrafo da p71 entram na mesma família como [H] apoiadas pelo experimento E1.
+- **T3-P09 → ALTO, reaberto [F]**: as regras de texto de corpus continuam no caminho de produção e causam perda (T3-P27); §0.5.
+- **T3-P02 [F]**: a V3 p116 sai do escopo restante; a tabela girada está exata.
+
+### §0.5 Auditoria de overfitting
+
+**Método**: (1) busca no código de produção (`src/structured_pdf_text/`, fora de `evaluation/` e `diagnostics/`) por nomes de corpus, identificadores V3–V11, nomes de arquivo, marcadores sintéticos e literais dos gabaritos; (2) leitura das regras de texto, supressão e promoção do pós-processamento Tesseract e das constantes criadas na Série 3 (`git diff db2ecb8..1717bd5`, 15 arquivos, +2072 linhas); (3) origem de cada regra por `git log -S`; (4) **censo offline** das ações do pós-processamento na 015 (capturas que reproduzem a 015 byte a byte) e **contrafactuais** com as regras desligadas, avaliados em memória pela rubrica; (5) teste do mecanismo geométrico nas 61 páginas inclinadas sem gabarito. Linhas citadas são do commit `1717bd5`.
+
+**Dependência do extrator em relação a gabaritos, manifestos ou avaliador [F]**: **nenhuma** no caminho de extração. Nenhum módulo fora de `evaluation/` importa o avaliador; `build_config()` do executor não recebe gabarito; `ocr/readiness.py` usa um texto sintético de autoteste do motor; `diagnostics/report.py` lê `expected_markdown` só no relatório da CLI. Citações de páginas V3–V11 em comentários documentam a origem das regras e não são, por si, overfitting.
+
+**Resumo da classificação (21 achados; atualizado pelo confronto, §0.9)**:
+
+| Classificação | Quantidade | Achados |
+|---|---|---|
+| OVERFIT CONFIRMADO | 3 | OF-01, OF-02, OF-05 |
+| RISCO ALTO DE OVERFIT | 5 | OF-03, OF-04, OF-06, OF-09, OF-21 |
+| RISCO MODERADO | 10 | OF-07, OF-08, OF-10, OF-11, OF-13, OF-15, OF-16, OF-17, OF-18, OF-20 |
+| HEURÍSTICA JUSTIFICADA | 2 | OF-12, OF-14 |
+| EVIDÊNCIA INSUFICIENTE | 1 | OF-19 |
+
+**Assimetria entre motores [F]**: `apply_tesseract_postprocessors` só roda com `ocr_engine == "tesseract"` (`api.py:1618–1620`). As supressões de marcadores de corpus e as promoções de título (OF-01 a OF-04, OF-09 a OF-12) existem só no caminho Tesseract: nos mesmos documentos, RapidOCR e EasyOCR mostram esses marcadores e outra estrutura. Comparações entre motores nos corpora V3/V4/V6 favorecem o Tesseract por motivo alheio ao reconhecimento. Além disso, o pós-processamento age em páginas **nativas** e ignora `preserve_headers_footers` (T3-P54, §0.9): a saída de um PDF nativo depende do motor de OCR configurado.
+
+#### OF-01 | OVERFIT CONFIRMADO | CRÍTICO (era ALTO; AI-01) | Marcadores literais dos corpora V3/V4 suprimidos no pós-processamento
+
+- **Onde**: `ocr/tesseract/postprocess.py::_suppress_ocr_corpus_markers` (350–407), com `_OCR_CORPUS_HEADER_RE` (42), `_OMITIR_GABARITO_RE` (46), `_OMITIR_NO_RE`/`_GABARITO_RE` (54–55), `_CORPUS_DOC_HEADER_RE` (63), `_MARKER_BLOCK_MAX_CHARS = 400` (77), `_FAMILY_SUFFIX_RE` (79). Trecho: `re.compile(r"(?i)^corpus\s+integrado\s+v\d+\s*/\s*laborat")`; `re.compile(r"(?i)\bomitir\s+n[ao]\s+gabarito\b")`. **Origem**: `9314f55` (2026-10-28), aprovada por ganho de métrica ("V3 dup_excess 0.332→0.079"); limite de 400 caracteres em T3-P27 (`fff2a4b`).
+- **Motivação e evidência**: cabeçalhos e rodapés dos geradores V3/V4 ("CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO", "OCR PURO * SCAN", "ADVERSARIAL • WATERMARK") e a **instrução ao gerador do gabarito** "OMITIR NO GABARITO". Censo da 015: 17 blocos no V3 (11 páginas) e 20 no V4, todos sem aviso (motivo classificado como mobília, `postprocess.py:145–150`). Contrafactual sem a regra (com OF-02 também desligada): V3 93.14 → **88.01**, V4 66.86 → 66.56; a V3 p116 recupera o conteúdo perdido (recall 0.581 → 1.0; T3-P27).
+- **Contraexemplos (AI-01, reproduzidos na §0.9)**: frases de corpo com o marcador em qualquer posição ("O professor deve omitir no gabarito apenas o exemplo.") ou no início ("OCR híbrido permite recuperar texto de documentos mistos.") e uma tabela de 744 caracteres, inteira, por uma única célula "Omitir no gabarito | não": todos suprimidos sem aviso.
+- **Risco em documentos reais · motores**: casamento raro, mas quando ocorre o bloco inteiro (até 400 caracteres, ou qualquer tamanho se for tabela) desaparece em silêncio; o efeito principal é mascarar as falhas do detector genérico de mobília e inflar a nota do V3. Só Tesseract.
+- **Proposta · validação · custo**: remover os literais; tratar mobília pelo detector genérico (`assemble/repeated_regions.py`: repetição, borda, contador) depois de corrigir a orientação; quando um bloco misturar mobília e corpo, separar por linha e avisar. Validação offline nas capturas de V3/V4 (custo já medido); aceitação: nenhum literal de corpus em `src/` fora de `evaluation/`, nenhuma linha do gabarito removida, a queda do V3 registrada e aceita pelo responsável. Custo M; risco: queda de nota do V3 até −5.1 [E].
+- **Relação**: T3-P09, T3-P25, T3-P26, T3-P27, T3-P53.
+
+#### OF-02 | OVERFIT CONFIRMADO | MÉDIO | Artefatos "IRINF" do V6 suprimidos por texto
+
+- **Onde**: `postprocess.py::_suppress_v6_irinf_artifacts` (410–456), `_IRINF_DOSSI_RE` (89), `_VOLUME_SUBTITLE_RE` (95), `_PROCESSO_IRINF_MATERIAL_RE` (100–102). Trecho: `r"(?i)^Processo\s+IRINF-\d{4}-\d{4}\s*\|\s*Material\s+institucional\s+simulado"`. **Origem**: `9314f55`.
+- **Motivação e evidência**: cabeçalho e rodapé do V6 nas páginas de rotação (p31, p47, p75). A docstring afirma: "All patterns are absent from V3/V5/V7 corpora, so the regexes carry no false-positive risk across document families" — validação nos mesmos corpora conhecidos. Censo da 015: 6 blocos de 2 linhas nas 3 páginas; contrafactual: V6 96.73 → 95.99.
+- **Risco em documentos reais · motores**: um subtítulo legítimo "VOLUME II · OUT 2025" no início de um bloco é removido em silêncio. Só Tesseract.
+- **Proposta · validação · custo**: remover; o cabeçalho corrente das páginas giradas deve ser confirmado pelo detector genérico depois da orientação. Validação offline no V6. Custo B; risco: −0.7 no V6 [E].
+- **Relação**: T3-P09.
+
+#### OF-03 | RISCO ALTO DE OVERFIT (otimização para a convenção do avaliador) | MÉDIO | Supressão de toda linha "Página N …"
+
+- **Onde**: `postprocess.py::_suppress_pagina_separator_blocks` (291–330), `_PAGINA_SEP_RE` (28), `_PAGINA_SEP_MAX_CHARS = 160` (34). **Origem**: `9314f55` ("V3 dup_excess 0.332→0.079"); restrições de T3-P25/T3-P26.
+- **Motivação e evidência**: o gabarito de V3/V4 usa "## Página 001 | Título" como delimitador, e o avaliador o trata como metadado. Censo da 015: 141 supressões no V3 e 210 no V4. Sem a regra, a avaliação de V3 e V4 falha (`Duplicate page number`, T3-P52): a regra existe para casar a sintaxe do avaliador, não uma propriedade do documento.
+- **Risco em documentos reais · motores**: título ou linha curta que comece com "Página N" é removido sem aviso. Só Tesseract.
+- **Proposta · validação · custo**: T3-P52 (escape no renderizador, delimitador estrito no avaliador) e detecção genérica de contador de página (T3-P43). Custo B–M; exige autorização para o avaliador.
+- **Relação**: T3-P25, T3-P26, T3-P52.
+
+#### OF-04 | RISCO ALTO DE OVERFIT (fabricação de dados para casar o gabarito) | CRÍTICO | Estados de caixa de seleção sem evidência (Fix-F05)
+
+- **Onde**: `postprocess.py::_promote_post_table_checklist_items` (1184–1290; "☐" na linha 1269) e `_promote_ocr_checkbox_o_prefix` (1292–1411; "☑" por padrão nas linhas 1384–1387). **Origem**: `483573b` (2026-10-28).
+- **Motivação e evidência**: formulários do V6 em que o OCR perde as caixas. A regra "O " → "☐" e demais → "☑" reproduz exatamente o layout do V6 (p22, p43, p87 corretas) e a regra pós-tabela fabrica estados nos demais casos: 25 errados ou inventados na 015 (T3-P51).
+- **Risco em documentos reais · motores**: alto (corrupção de dado crítico; artigo "O" do português). Só Tesseract.
+- **Proposta · validação · custo**: §0.8. Custo B; risco: −0.44 no V6 e −0.26 no V3, +0.56 no V9 [E].
+- **Relação**: T3-P51, T3-P48.
+
+#### OF-05 | OVERFIT CONFIRMADO (efeito conservador) | BAIXO | Veto de supressão por rótulo e identificador dos corpora
+
+- **Onde**: `assemble/repeated_regions.py::_SEMANTIC_CONTROL_RE` (356–366), usado em `_signature_key` (369–377). Trecho: `r"controle\s+de\s+p[áa]gina"` e `r"|v\d+-p\d+"  # corpus-style identifier (V5-P009)`. **Origem**: `f2a14f1` (2026-10-09, VQ-25).
+- **Motivação e evidência**: o rótulo "Controle de página" de V3/V4/V5 e o identificador "V5-P009" estão no gabarito e não podem ser suprimidos. O veto inclui datas.
+- **Risco em documentos reais · motores**: só impede supressão (não perde conteúdo); rodapés correntes com data ou "Controle de página" nunca são suprimidos (mobília vaza). Compartilhado: nativo e todos os motores.
+- **Proposta · validação · custo**: retirar os dois literais e confiar nas evidências estruturais (repetição exata, contador, posição); documentar o veto por data como regra conservadora genérica. Validação offline nas capturas dos 9 corpora. Custo B.
+- **Relação**: T3-P43.
+
+#### OF-06 | RISCO ALTO DE OVERFIT (limiares com um único caso positivo) | ALTO | Seleção da releitura endireitada (T3-P44)
+
+- **Onde**: `ocr/backends/tesseract.py::_deskewed_read_is_more_complete` (526–540), constantes `_DESKEW_MIN_COVERAGE_GAIN = 0.25`, `_DESKEW_MIN_SHARED_WORDS = 20`, `_DESKEW_MAX_NUMBER_DISAGREEMENT = 0.5`, `_DESKEW_MIN_COVERED_FRACTION = 0.5` (419–422), mais `_DESKEW_MAX_CONFIDENCE_LOSS = 1.0`, `_DESKEW_MIN_CHAR_RATIO = 0.9` (399–400) e `_ROTATION_ACCEPT_MIN_MEAN_CONF = 70` (368). **Origem**: `1717bd5`.
+- **Motivação e evidência**: V11 p71. O **princípio** (comparar confiança nas mesmas palavras, no mesmo referencial) é tecnicamente sólido e corrige um defeito geral (média sobre conjuntos diferentes). Os **valores** foram fixados depois de observar os 96 pares, a grade de sensibilidade usou os mesmos pares e há um único positivo real; a 015 só confirma estabilidade (mesmas 96 decisões), não generalização.
+- **Risco em documentos reais · motores**: perda < 25% do texto da página, ou páginas com < 20 palavras comuns (formulários, tabelas, páginas curtas), continuam descartando a leitura mais completa em silêncio (o fato não é exportado); aceitar a releitura inteira descarta palavras melhores da leitura direta ("FG-711"). Só Tesseract.
+- **Confronto (AI-05, §0.9)**: o contraexemplo do relatório (todas as palavras da leitura direta trocadas na mesma posição) é aceito pela regra; nos 96 pares reais, 7.4% dos pares por sobreposição têm texto diferente e "FG-711" (p71) é contado como preservado sem ter par. A salvaguarda descrita como preservação do texto é cobertura geométrica.
+- **Proposta · validação · custo**: (1) alarme exportado com limiar menor que o de aceitação (T3-P53); (2) experimento de fusão por região sobre os 96 pares (offline); (3) conjunto positivo sintético por degradação controlada (carimbo, baixo contraste, inclinação ±1–8°, várias resoluções) e documentos reais reservados (§0.7). Custo M; risco baixo para a saída enquanto só se observa.
+- **Relação**: T3-P44, T3-P53.
+
+#### OF-07 a OF-19 (resumo)
+
+| ID | Classificação | Sev. | Onde (`1717bd5`) · origem | Motivação · evidência | Risco em documentos reais · motores | Proposta · validação · custo | Relação |
+|---|---|---|---|---|---|---|---|
+| OF-07 | RISCO MODERADO (invariância geométrica violada) | ALTO | `text/reading_order.py::_group_form_rows` (1370–1385), `_order_form_rows` (1556–1572), escolha FORM (862–883); tolerância `max(3.0, 0.75 × mediana da altura das linhas)` · `e05f498` | formulários nativos; [F] nas 61 páginas inclinadas, 54 de 55 regiões FORM empilham linhas e a ordem depende do sinal do ângulo | qualquer motor que devolva caixas alinhadas aos eixos de texto inclinado; compartilhado com o caminho nativo | referencial retificado ou altura das palavras; ordenar dentro da linha pela direção da linha; testes de invariância (rotação sintética ±θ da geometria capturada, offline) · M | T3-P49, T3-P35 |
+| OF-08 | RISCO MODERADO (geometria absoluta) | BAIXO | `reading_order.py::_order_stamp_fragments` (965–1023): 35, 110 e 75 pt fixos, ≤ 10 caracteres maiúsculos · `cb799ac` | fragmentos de carimbo em linha inclinada | escala de página e de fonte muda o agrupamento; afeta só fragmentos curtos em maiúsculas; todos os motores | escalar pela altura mediana das linhas; teste em 2 escalas · B | — |
+| OF-09 | **RISCO ALTO** (era MODERADO; supressão por bloco, silenciosa, demonstrada) | MÉDIO | `postprocess.py::suppress_tesseract_running_headers` (209–288): 1ª linha do 1º bloco repetida em ≥ 40% das páginas → bloco inteiro suprimido · `9314f55` | compensar o detector geométrico; 0 ações na 015 (flag `False`); **AI-02 reproduzido**: 5/5 blocos de 2 linhas suprimidos pela 1ª linha repetida; com a flag padrão `True`, suprime cabeçalhos em 8 corpora (T3-P54) | cabeçalho fundido com corpo → corpo apagado sem aviso; 1ª linha legítima recorrente removida; só Tesseract | remover (há detector genérico que respeita a flag) ou restringir a linha + borda + aviso · B | T3-P53, T3-P54 |
+| OF-10 | RISCO MODERADO (premissa linguística) | BAIXO | `postprocess.py::_suppress_dollar_letter_garble` (1086–1130): ≥ 2 "$[A-Z]" → bloco suprimido · `9314f55` ("V3 −7.1% CER") | docstring: "orthographically impossible in any real document"; 0 ações na 015 | falso em texto técnico (`$PATH`, `$A$1`); gera aviso; só Tesseract | exigir evidência de rotação ou remover · B | T3-P36 |
+| OF-11 | RISCO MODERADO (promoção de títulos guiada por métrica) | BAIXO | `postprocess.py`: `_promote_numbered_bold_headings` (519), `_promote_allcaps_section_headers` (672), `_promote_short_bold_column_headers` (772), `_promote_bold_pre_table_heading` (848), `_promote_bold_pipe_title` (958), `_promote_seção_subseção_headings` (1133) · `9314f55` ("V6 +3.18pp", "V7 +1.69pp", "V5 +1.00pp h_f1") | 015: 68 ações em V5–V11 | só estrutura; estrutura diferente entre motores para o mesmo documento | levar à camada comum de títulos com evidência geométrica (T3-P06) ou retirar; manter só a convenção pt-BR "Seção/Subseção" documentada · M | T3-P06 |
+| OF-15 | RISCO MODERADO (agregado documental; alturas infladas) | MÉDIO | `layout/heading.py` (`_OCR_PAGE_REFERENCE_MIN_LINES` 54, agrupamento de níveis), `layout/ocr_aware.py` (`OCR_TITLE_LINE_RATIO = 1.28`, 47; usos 273, 279) · `18ccfb0` e anteriores | [F] o E1 muda níveis de títulos em páginas não inclinadas do V11 (p31, p40, p51, p64, p65, p68, p73, p83, p100); §1.28: V10 `heading_level_match_rate` 0.977 → 0.519 | nível de um título depende de páginas distantes; compartilhado (níveis) | níveis por página/seção; altura das palavras · M | T3-P06 |
+| OF-16 | RISCO MODERADO (limiar de contagem) | MÉDIO | `ocr/reconstruct.py`: `_GUTTER_MIN_ROWS = 3` (386), `_GUTTER_MIN_GAP_HEIGHTS = 1.5` (384), `_GUTTER_MAX_ROW_GAP_HEIGHTS = 6.0` (388) · `976f7f0`/`ad43cb1` | colunas longas de V4/V9/V10; [H] V11 p100 com colunas de 2 linhas fundidas | colunas curtas (fichas, cabeçalhos em colunas) misturadas; OCR | teste de componente com a p100 e com tabelas/listas como negativos · B | T3-P10 |
+| OF-17 | RISCO MODERADO (limiar de 7 páginas do V9) | MÉDIO | `tables/detector.py::_detect_rectangular_grid`: `if y1 - y0 > limit.height * 0.85: return None` (391), comentário "observed in V9 form documents (p042, p047, …)" · `1115ba1` ("Tesseract correcting document V9") | molduras de formulário do V9 | tabela legítima de página inteira desenhada com retângulos perde a estrutura (o texto sobrevive); detector nativo, todos os motores | distinguir moldura por conteúdo (células rótulo/valor, células vazias) e não pela altura; teste negativo com tabela de página inteira · M | T3-P47 |
+| OF-18 | RISCO MODERADO (contaminação metodológica) | MÉDIO | segmentação de parágrafos OCR (`ocr/reconstruct.py::segment_ocr_paragraphs`, 1086–1240; T3-P20/T3-P38) | desenvolvida e validada em V4/V9/V10; no ciclo de T3-P38 os 43 controles eram só de estabilidade e não havia página nova no alcance (§5.0g, "lição da RUN 011") | espaçamentos e tamanhos de fonte fora dos corpora; inclinadas (V11 p77) | testes metamórficos (escala do entrelinha e da fonte) sobre linhas capturadas, offline · B | T3-P20, T3-P38, T3-P49 |
+| OF-12 | HEURÍSTICA JUSTIFICADA (com ressalva) | — | `postprocess.py::_normalize_brl_currency_spacing` (459–490): "R$9" → "R$ 9" · `9314f55` | normalização ortográfica pt-BR; motivada por métrica (V4 377 ações na 015) | neutra semanticamente; altera a grafia da fonte | documentar como normalização; manter | — |
+| OF-13 | **RISCO MODERADO** (era HEURÍSTICA JUSTIFICADA; AI-06) | MÉDIO | `assemble/repeated_regions.py` (T3-P43: 3 páginas consecutivas, tamanho ≤ 1.1 × corpo, espalhamento 0.035) · `7df5285` | evidências convergentes e negativos discriminantes, mas a proeminência é neutra sem tamanhos: **AI-06 reproduzido** — "Seção N" um por página na faixa de borda suprimido em OCR (6/6) e com fonte 6.5, 10 e 11 (corpo 10); 11.5 e 12 preservados | título numerado por página ("Questão N", "Seção N") apagado sem aviso; compartilhado (nativo e todos os motores) | sem evidência discriminante, preservar e registrar; positivos reais reservados · B | T3-P43 |
+| OF-14 | HEURÍSTICA JUSTIFICADA | — | `api.py::_has_text_like_ink` (2683–2741) · T3-P16 | unidades físicas (pt), conservadora, margem 0 × 139 × > 1000 glifos alinhados; só muda aviso/status | `_GLYPH_MIN_AREA_PX = 6` em pixels (depende da resolução; efeito pequeno) | manter; converter o piso de área para pt² | T3-P16 |
+| OF-19 | EVIDÊNCIA INSUFICIENTE | — | `tesseract.py::_retry_quarter_turns` e `_ROTATION_RETRY_MAX_MEAN_CONF = 60`, `_ROTATION_ACCEPT_MIN_MEAN_CONF = 70`, `_ROTATION_ACCEPT_MIN_GAIN = 25` (367–370) | compara médias de confiança sobre conjuntos diferentes de palavras (o defeito de T3-P44); nenhum caso medido | leitura girada mais completa descartada | experimento mínimo offline: cobertura das duas leituras nos recortes com retry, a partir do cache de TSV | T3-P02, T3-P32, T3-P44 |
+| OF-20 | RISCO MODERADO (supressão de bloco por formato) | BAIXO | `postprocess.py::_suppress_tesseract_coordinate_dump` (614–648), `_TESSERACT_COORD_RE` (111–114) · `9314f55` | dump TSV do Tesseract impresso como texto; **executado nesta consolidação**: o bloco "Exemplo de saída TSV:" + uma linha TSV é suprimido inteiro (com aviso) | documentação técnica com linhas TSV; só Tesseract | suprimir só a linha de dump e só em bloco de origem OCR; o defeito original era do parser (T3-P23) · B | T3-P23 |
+| OF-21 | RISCO ALTO DE OVERFIT (otimização ao formato do gabarito) | MÉDIO | `renderers/markdown.py::_escape_inline_text` (542–583), `_detect_code_lang` (510–533) · `1fb70b7`, `b407b8c` | comentários: não escapar porque os gabaritos não escapam e o escape "inflates cer_markdown_raw"; detecção de linguagem "matching the reference corpus format"; PDFs com "### " literal (V5) e "<limite>" (V6 p29) | sintaxe literal vira estrutura; todos os motores e o caminho nativo | contrato de ida e volta (T3-P55) · M | T3-P55, T3-P52 |
+
+**Regras já removidas ou neutralizadas (sem risco atual relevante)**: `_flag_rotated_table_garble` deixou de suprimir e passou a avisar (T3-P36, `95a6f72`); os limites de 160 e 400 caracteres (T3-P25, T3-P27) **mitigaram, mas não removeram** o risco de OF-01/OF-03 (a V3 p116 cabe no limite).
+
+**Contaminação dos testes [F]**: `tests/test_tesseract_postprocess.py` exige, como comportamento correto, a supressão de "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO", "OMITIR NO GABARITO", "ADVERSARIAL • WATERMARK", "OCR PURO * SCAN" e a criação das listas de caixas (≈ linhas 518–690 e testes de Fix-F05): **os testes especificam o overfitting**, e removê-lo exige alterá-los (aprovação). `tests/test_tesseract_deskew_selection.py` (14) cobre T3-P44 só com positivos sintéticos. Os `test_tesseract_runNNN_regressions.py` reproduzem páginas específicas com poucos negativos; a exceção são os 21 testes de T3-P43, cujos negativos foram verificados como discriminantes.
+
+**Contaminação da metodologia [F]**: (1) a Série 2 aprovou as 16 correções de `9314f55` por ganho nos mesmos corpora (mensagem do commit); (2) a Série 3 usou a bateria completa como conjunto de desenvolvimento em todas as rodadas (001–015); (3) os conjuntos G só existem desde o pós-011 e foram vazios ou só negativos em vários ciclos (T3-P38: controles só de estabilidade, §5.0g; T3-P44: generalização apenas negativa, §1.39); (4) em T3-P44 os limiares foram fixados depois de observar os 96 pares; (5) controles "idênticos byte a byte" medem **estabilidade**, não generalização. **V3–V11 deixaram de ser um conjunto independente de validação.**
+
+### §0.6 Plano de correções
+
+**Critérios de ordem** (definidos pelo responsável): (1) perda silenciosa de conteúdo; (2) corrupção de dados; (3) duplicação e associação incorreta; (4) falhas arquiteturais que afetam várias classes de documentos; (5) ordem de leitura; (6) estrutura; (7) limites do OCR; (8) desempenho. A meta de 85 é considerada depois da integridade; o V11 desempata.
+
+**Correção geral com efeito em vários corpora [E]**: o **referencial retificado** das páginas endireitadas (família T3-P49/T3-P35) é a única mudança medida que melhora cinco corpora ao mesmo tempo sem perda de texto (E1: V11 +2.1, V10 +1.6, V9 +0.4, V4 +0.35, V3 +0.1; recall idêntico). A **remoção de fabricações e supressões por texto** (T3-P51, OF-01/OF-02) melhora a integridade em V3, V6, V9 e V10, com efeito de nota misto.
+
+**Sequência (ordem definida pelo responsável em 2026-11-25; revisável com novas evidências ou dependências técnicas)**:
+
+| Ordem | Ação | Problemas | Classe | Depende de | Ganho esperado [E] | Risco | Validação (sem OCR?) | Aceitação |
+|---|---|---|---|---|---|---|---|---|
+| **1** | **T3-P51 — eliminar estados inventados** | T3-P51 (OF-04) | corrupção de dados | — | **passo A implementado e validado offline (§0.10)**: 25 estados errados ou inventados → 0; 136 explícitos preservados; 10 legítimos não representados; V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08 | baixo | capturas, sem OCR | RUN 016 (§5) |
+| **2** | **Supressões específicas dos corpora → evidência genérica**; proteger conteúdo legítimo; respeitar `preserve_headers_footers`; supressão por linha e com aviso; ablação regra a regra | T3-P09, T3-P27 (V3 p116), T3-P54; OF-01, OF-02, OF-05, OF-09, OF-10, OF-20 | perda silenciosa | T3-P52, se for dependência (sem a supressão "Página NNN" o avaliador falha) | V3 p116 recall 1.0; V3 até −5.1, V6 −0.7, V4 −0.3 (queda das notas **infladas**); cabeçalhos preservados quando pedido | médio (nota; decisão do responsável) | capturas | nenhum literal de corpus em `src/`; nenhuma linha do gabarito removida; com a flag `True`, 0 supressões de mobília pelo pós-processamento |
+| **3** | **Observabilidade** das perdas e das decisões de qualidade (fatos e avisos no manifesto) | T3-P53, T3-P44 (aviso), OF-06 | perda silenciosa (tornar visível) | — (pode acompanhar 2) | 0 na nota; 79 páginas hoje silenciosas passam a ter sinal | baixo (Markdown idêntico) | capturas e 1 extração de controle | Markdown idêntico byte a byte; campos novos nas 975 páginas |
+| **4** | **Fidelidade do Markdown desacoplada das convenções do avaliador** (ida e volta texto → Markdown → AST) | T3-P52, T3-P55; OF-03, OF-21 (T3-P52 é antecipado se for dependência da ação 2) | estrutura / integridade | — | 0 [E]; o CER bruto pode subir contra os gabaritos atuais | baixo; exige mudar renderizador e avaliador | capturas | literal preservado; V3/V4 avaliáveis sem a supressão "Página NNN" |
+| **5** | **T3-P44 residual — garantia de preservação textual** na escolha da releitura (contrato de evidência, AI-05) | T3-P44, OF-06, OF-19 | perda silenciosa / corrupção | 3 | p71 com "FG-711" [H]; nenhuma troca silenciosa de palavra confiável | baixo | 96 pares capturados, sem OCR | contraexemplo AI-05 rejeitado; 95 decisões idênticas |
+| 6 | **T3-P43 residual — proteger títulos legítimos** contra supressão (AI-06) | T3-P43, OF-13 | perda silenciosa | 2 | não observado nos corpora; protege documentos reais | baixo | capturas | contraexemplo AI-06 preservado; grupos confirmados de V10/V11 mantidos |
+| 7 | **Geometria das páginas inclinadas** (referencial retificado) | T3-P49, T3-P35, T3-P31, T3-P17 (resíduo), parte de T3-P06 e T3-P43; OF-07, OF-18 | arquitetural / ordem | 3 (ângulo exportado) | V11 +2.1, V10 +1.6, V9 +0.4, V4 +0.35 (E1) | médio-alto (compartilhado; níveis de título) | `geometry_1717bd5` + capturas completas | invariância ±θ; nenhuma página com recall menor; níveis fora das inclinadas inalterados |
+| 8 | **Família das tabelas nativas** | T3-P45, T3-P46, T3-P47, T3-P37, T3-P33; OF-17 | duplicação / associação | — | V9 +1.0 com T3-P33; V11 [E ≈ +2 a +3, não medido] | alto (detector compartilhado por V5–V9) | capturas (nativo, sem OCR) | V5–V8 idênticos; células na linha certa |
+| 9 | **Detecção visual genérica de caixas de seleção** (passo B de T3-P51), independente do motor, em páginas nativas, raster e híbridas | T3-P51 (resíduo), T3-P48 | representação de dados | 1 | 10 estados de V3/V6 e 19 vetoriais de V8/V11 representáveis [E; sonda 17/17 sem valor de generalização] | médio (recurso novo, compartilhado) | renderização sem OCR + G sintético + H real | 0 estados sem evidência; indeterminado sem glifo |
+| 10 | Hierarquia de títulos por página/seção | T3-P06; OF-15, OF-11 | estrutura | 7 | títulos de V9/V10/V11 [E não medido] | médio | capturas | nenhum nível alterado fora do alcance |
+| 11 | Colunas curtas na reconstrução OCR | T3-P10 (V11 p100); OF-16 | ordem | — | V11 p100 | baixo | capturas | p100 separada; multicoluna nivelada idêntica |
+| 12 | Parágrafos nativos densos | T3-P41 | estrutura | — | V4 +1.6 (§1.31) | médio (nativo compartilhado) | capturas | V5–V8 idênticos |
+| 13 | Experimento de reconhecimento | T3-P21, T3-P36 (resíduo), T3-P34 | limite do OCR | 3 | V4 e V11 F04 (maior massa de erro, não estimada) | alto (tempo e variantes) | **exige OCR** (cache por hash reaproveita o que não muda) | ganho em G sem perda em S |
+| 14 | Desempenho | T3-P12, T3-P04 | desempenho | — | tempo | baixo | 1 corpus | tabelas idênticas |
+
+**As cinco ações de maior prioridade** (ordem definida pelo responsável em 2026-11-25; revisável com novas evidências ou dependências técnicas): (1) T3-P51 — passo A implementado e validado offline (§0.10), aguarda a RUN 016; (2) T3-P09, T3-P27 e T3-P54 — eliminar supressões específicas dos corpora, proteger conteúdo legítimo e respeitar `preserve_headers_footers`; (3) T3-P53 — observabilidade das perdas e decisões de qualidade; (4) T3-P52 e T3-P55 — Markdown fiel e desacoplado das convenções do avaliador (T3-P52 antecipado se for dependência da ação 2); (5) T3-P44 residual — garantia de preservação textual. Seguem T3-P43 residual (6), geometria das inclinadas (7), tabelas nativas (8) e detecção visual genérica de caixas com T3-P48 (9). O V11 continua sendo a prioridade documental, mas defeitos gerais de integridade e de overfitting têm precedência.
+
+**V4, V9 e V10 (abaixo da meta)**:
+- **V4 (66.9; −18.1)**: o grosso é reconhecimento (T3-P21: recall 0.894, 1 642 `numeric` fp, penalidade −4.5 por páginas ilegíveis). Sem experimento de OCR, as ações estruturais somam poucos pontos (T3-P41 +1.6, referencial +0.35 [E]); o teto estimado na §1.31 (≈ 80.7 com o Tesseract atual) continua sendo a melhor estimativa. Atingir 85 no V4 **não** é plausível sem mudar o reconhecimento.
+- **V9 (75.6; −9.4)**: T3-P33 (+1.0, penalidade), T3-P51 (+0.56), referencial (+0.4–0.6), T3-P37 e T3-P22 (ordem e tabelas nativas), títulos (54.5). Mesmo somadas [E ≈ +2 a +3], não chegam a 85.
+- **V10 (78.3; −6.7)**: referencial (+1.6), listas falsas (T3-P31, depois do referencial), hierarquia de títulos (nível 0.519) e Ordem (51.3, L01/L02). Chegar a 85 exige o referencial e os títulos.
+- **V11 (71.7; −13.3)**: referencial (+2.1), T3-P46 (12.8% das edições), T3-P45/T3-P47, títulos e T3-P21 (F04 = 44% das edições na 013). T3-P50 (−1.9) é convenção do gabarito e **não** deve ser perseguida.
+
+### §0.7 Protocolo de generalização
+
+**O que preservar** (funcionou e deve continuar): Nível 0 com causa no código antes de mudar; teste de componente com entradas reais capturadas; separação D/S/G registrada antes da implementação (pós-011); estabilidade medida por identidade byte a byte; validação offline com capturas (a 014 e a 015 reproduziram exatamente as validações offline); limite de 5 tentativas; um processo OCR por vez; critérios da rodada escritos antes da execução; negativos discriminantes (T3-P43).
+
+**O que mudar**:
+
+1. **Reconhecer que V3–V11 são conjunto de desenvolvimento.** Eles medem estabilidade e regressão, não generalização. Toda afirmação de generalização precisa de dados que não participaram do ajuste.
+2. **Conjunto reservado H (documentos reais)**: o responsável define um conjunto de documentos reais ou de corpora novos (com permissão de uso), guardado fora do repositório de desenvolvimento, com gabarito próprio. Regras: (a) só é medido em marcos (antes de declarar RESOLVIDO um problema com regra nova e a cada 3–5 ciclos); (b) **nunca** é usado para escolher limiares; (c) se um resultado de H motivar mudança de código, os documentos usados passam a D e o registro do ciclo diz isso; H é reposto com documentos novos; (d) H cobre formatos (A4, Carta, paisagem, A3), resoluções (150–400 dpi), idiomas e escritas, inclinações dos dois sinais, formulários com caixas, tabelas sem borda, colunas e páginas híbridas.
+3. **Testes metamórficos e de invariância (offline, sem OCR)**, sobre a geometria e o texto capturados: girar a geometria de uma página por ±θ (1°–8°) e exigir a mesma ordem e os mesmos parágrafos; escalar coordenadas e fontes (×0.5, ×2) e deslocar margens; trocar o tamanho da página; espaçar ou apertar o entrelinha; inverter a ordem de emissão das linhas. Regra que muda de comportamento com o sinal do ângulo (OF-07) ou com a escala (OF-08) é reprovada. A ferramenta `tools/invariance_synthetic.py` das capturas é um ponto de partida.
+4. **Positivos e negativos por regra**: toda regra nova tem pelo menos um negativo discriminante (falha quando a evidência é desligada) e positivos de **fontes distintas**; uma regra com um único positivo real é registrada como tal no código e no documento, com alarme exportado e sem promessa de generalização.
+5. **Controle de limiares**: registro de constantes (nome, valor, unidade relativa ou absoluta, origem `commit`, evidência, curva de sensibilidade, conjunto em que foi escolhida). Mudança de limiar exige nova entrada e não pode usar G ou H para escolher o valor. Constantes absolutas em pt ou px devem ser justificadas ou trocadas por relações (altura de linha, largura da página).
+6. **Proibição de literais de corpus no caminho de produção**: verificação automática (grep) em `src/` fora de `evaluation/` e `diagnostics/` por nomes de corpus, `V\d+-P\d+`, marcadores dos geradores e instruções ao gabarito. Os testes de produção não podem exigir comportamento específico de um corpus.
+7. **Critérios de integridade por página e por região, independentes da nota**: nenhuma linha do gabarito suprimida por regra de texto; nenhuma supressão de bloco com mais de uma frase sem aviso; nenhum estado de caixa sem evidência; nenhuma página com perda de volume sem aviso; tuplas (número, linha, célula) preservadas — verificar a associação número ↔ linha ↔ célula pelas métricas `table_cell_entities` e `cell_alignment_accuracy` da auditoria suplementar, página a página; duplicação de tabela verificada por sobreposição de células.
+8. **Métricas de integridade publicadas junto com a rubrica** (sem mudar a rubrica): por corpus, `checkbox_states` fp/fn, `critical_entities` fp, `table_cell_entities` fp/fn e páginas `clean` com perda. A nota sozinha não aprova uma correção.
+9. **Rastreabilidade**: cada regra no código cita o problema T3-Pxx, o commit e o conjunto D usado; cada ciclo registra D, S, G, H, a direção esperada de cada página de G e o resultado.
+10. **Capturas**: manter `assemble_input_<commit>`, `ocr_deskew_<commit>` e `geometry_<commit>`; depois de cada RUN, reproduzir uma captura e registrar a validade; invalidar quando o código anterior à etapa capturada mudar. Exportar no manifesto os fatos necessários para auditar sem nova captura (T3-P53).
+
+**Uso de documentos reais futuros**: (1) registrar a origem e a permissão; (2) gerar o gabarito sem olhar a saída do extrator; (3) colocar no H; (4) medir uma vez por marco; (5) quando uma falha for encontrada, abrir um T3-Pxx, mover os documentos que a revelaram para D e repor H; (6) registrar no documento a data em que cada documento deixou de ser independente.
+
+### §0.8 Proposta definitiva de T3-P51 (passo A implementado no ciclo de 2026-11-25, §0.10)
+
+**Situação (2026-11-25, ciclo T3-P51)**: o **passo A foi implementado e validado offline** (§0.10). O **passo B não foi autorizado** neste ciclo: passa a ser a ação 9 da §0.6 (detecção visual genérica de caixas, independente do motor, em páginas nativas, raster e híbridas, incluindo T3-P48). A sonda abaixo (17/17) é demonstração de viabilidade, não validação de generalização; o material está em `output/tesseract/_captures/checkbox_probe_1717bd5/`. O texto abaixo é a proposta como aprovada, preservada.
+
+**Correção recomendada (única): T3-P51 — estado de caixa de seleção somente com evidência.** Substitui a versão anterior desta seção (que, sem evidência visual, previa só retirar o "☑" por padrão e não converter "O "); motivo e confronto na §0.9.
+
+**Princípios (decisão do responsável, 2026-11-25)**: não inventar estados; estado desconhecido **não** vira caixa desmarcada; o texto da linha não muda sem evidência (o artigo "O" não é removido); toda marca emitida carrega a sua proveniência.
+
+**Situação de partida [F]** (RUN 015 e censo da §0.4): as duas regras Fix-F05 convertem 35 linhas em 13 páginas.
+
+| Grupo | Itens | Situação atual | Se as regras forem só desligadas | Com evidência visual (sonda, abaixo) |
+|---|---|---|---|---|
+| Caixa real, estado certo por suposição de layout ou por coincidência: V3 p88 "Pendente"; V6 p3/p33/p89 "Reabrir"; V6 p22/p43/p87 "Conferência…" e "Vistoria…" | 10 | correto | **não representado** (fn) | correto |
+| Caixa real, estado errado: V3 p88 "Aprovado" (☒ → ☐); V6 p3/p33/p89 "Conferir" e "Registrar ciência" (☑ → ☐) | 7 | **invertido** | não representado (fn) | correto |
+| Sem caixa (2ª linha de células de tabela): V9 p18, p82, p90; V10 p15, p30, p54 | 18 | **inventado** ("☐") | nada (correto) | nada (correto) |
+
+Os 17 itens com caixa real vêm de regiões OCR (páginas com OCR); 7 dos 18 inventados do V9 estão em páginas nativas (T3-P54).
+
+**Passo A — integridade (local ao pós-processamento Tesseract; obrigatório)**:
+1. `_promote_post_table_checklist_items` deixa de criar estados: as linhas depois de uma tabela continuam como foram lidas (a posição depois de uma tabela não é evidência de caixa).
+2. `_promote_ocr_checkbox_o_prefix` deixa de ser fonte de estado: não remove "O " nem atribui "☑"/"☐" (contraexemplo AI-04: "O contrato vigente" + "Pagamento mensal" viram hoje "☐ contrato vigente" + "☑ Pagamento mensal").
+3. Nenhuma regra acrescenta marcador a uma linha que já tem glifo de estado (controle desta auditoria: "☒ Aprovado" depois de tabela recebe hoje "☐" na frente).
+- Efeito medido (contrafactual de desligar as regras): 25 estados errados ou inventados → 0; os 10 estados certos deixam de ser representados; notas V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08. **Cumpre os princípios sozinho**, ao custo dos 10 estados.
+
+**Passo B — evidência de caixas, independente do motor (recurso novo; recupera os 10 estados e corrige os 7)**:
+1. **Detecção por página**: na imagem renderizada da página (a mesma usada pelo OCR nas páginas raster; renderização da região nas nativas) e, nas páginas nativas, também nos objetos vetoriais e nos glifos de caixa da camada de texto. Candidato = quadrado: contorno de 4 vértices convexo, retangularidade alta (área do contorno / área do retângulo envolvente), proporção próxima de 1, lado proporcional à altura da linha vizinha e componente de tinta isolado (não pertence a grade de tabela nem a régua).
+2. **Estado**: fração de tinta no interior, descontada a borda: baixa → desmarcada; alta → marcada; intermediária, caixa incompleta, rasurada ou ocluída → **indeterminada**.
+3. **Associação**: a caixa pertence à linha cujo início está imediatamente à sua direita (mesma faixa vertical, distância de até cerca de uma altura de linha) ou à célula de tabela que a contém. Tokens OCR de um caractere sobrepostos à caixa ("O", "U", "0", "□") são a própria caixa lida como letra e saem do texto **somente** nesse caso.
+4. **Representação**: marcada → "☑"; desmarcada → "☐"; indeterminada → **nenhum glifo**, texto preservado, fato `checkbox_evidence` (caixa, medida, motivo) e aviso `checkbox_state_undetermined`; sem caixa → nada muda. A lista de verificação nasce das caixas associadas, nunca da posição depois de uma tabela.
+5. **Proveniência**: cada estado emitido registra a fonte (`raster`, `vector`, `glyph`) e a medida; nenhum estado tem fonte "inferida".
+
+**Viabilidade medida (sonda offline; páginas renderizadas pelo pdfium a 288 dpi; sem OCR; §0.9)**:
+- **17/17** itens com caixa real: caixa encontrada à esquerda da linha e estado igual ao gabarito, inclusive os 7 que as heurísticas invertem. Tinta interna: vazias 0.000; marcadas 0.225–0.428.
+- **18/18** fragmentos de célula do V9/V10: nenhuma caixa, nenhum estado.
+- Separação geométrica observada: caixas com retangularidade 0.877–0.930, lado 24–31 px e proporção ≈ 1; candidatos falsos (glifos de texto na V9 p18) com 0.646–0.735 e proporção ≈ 0.73; sem o teste de isolamento, um canto de grade de tabela da V10 p30 passava.
+- A mesma medida na página inteira conta as caixas **vetoriais** de T3-P48: V11 p54 15 (8 marcadas e 7 vazias, como o gabarito), V8 p49 e p61 2 cada (1 e 1). A associação dessas caixas às células **não** foi verificada.
+- **Limite honesto**: os parâmetros da sonda (retangularidade ≥ 0.85, proporção 0.85–1.18, lado 0.45–1.7 × altura da linha, tinta ≤ 0.06 vazia e ≥ 0.12 marcada, isolamento 1.3×) foram observados nessas 16 páginas (D). São valores iniciais, não limiares validados: exigem curva de sensibilidade, G sintético e H real antes de virar regra (controles abaixo).
+
+**Ambiguidades residuais e decisões**: marcador de lista quadrado vazio é visualmente igual a uma caixa vazia — emitir "☐" reproduz o que está impresso e não inventa estado; marca fora da caixa, caixa riscada ou parcialmente apagada → indeterminada; ✓, ✗ e preenchimento são "marcada" (o glifo de saída é "☑"; o fato registra a forma da marca).
+
+**Escopo e componentes**:
+- **A**: `src/structured_pdf_text/ocr/tesseract/postprocess.py` e os testes existentes de `tests/test_tesseract_postprocess.py` que hoje exigem a fabricação.
+- **B (recomendado, B1)**: módulo novo e independente do motor (ex.: `layout/checkboxes.py`), chamado em `api.py` por página; evidência nos fatos da página (ou campo próprio de `StructuredPage`); associação na montagem (`assemble/content.py`); emissão pelo renderizador, que já conhece os glifos de caixa. Atende também T3-P48 e qualquer motor.
+- **B2 (alternativa de menor alcance, só se B1 não for autorizado)**: no backend Tesseract, emitir a partir da imagem do OCR tokens de caixa com proveniência e retirar a leitura errada ("O", "U") sobre a caixa. Cobre os 17 casos atuais (todos em regiões OCR); não cobre caixas vetoriais (T3-P48), páginas nativas nem outros motores, e mistura evidência visual com texto reconhecido.
+- Se B não for autorizado neste ciclo: entregar **A sozinho** e registrar os 10 estados como não representados (fn), nunca como "☐".
+
+**Controles**:
+- **Alcance de A**: fechado — as 35 conversões das 13 páginas. D = essas 13 páginas (todas inspecionadas) e, por isso, **G de corpus = vazio (alcance coberto por D)**, como manda a §5.0g.
+- **Alcance de B**: qualquer página com caixa. D = as 13 páginas + V11 p54 + V8 p49/p61 (usadas na sonda). S = todas as demais páginas dos 9 corpora: devem ficar idênticas, e cada caixa nova encontrada fora de D é listada e explicada (verificação offline pela renderização das 975 páginas, sem OCR). G = sintético, escrito **antes** da implementação: caixas de vários estilos (glifo ☐☑☒ em fontes diferentes, quadrado desenhado, ✓, ✗, preenchida), 6–14 pt, 150–400 dpi, ruído e inclinação de digitalização, caixas dentro de tabelas, marcadores de lista quadrados. H = formulários reais com caixas, de fontes diferentes; sem H, a generalização de B fica declarada como **não medida**.
+- **Testes obrigatórios (negativos discriminantes)**: os contraexemplos de AI-04; letras redondas isoladas ("o", "O", "a", "0"); célula de grade de tabela; régua; glifo de estado já presente no texto; e positivos: caixa vazia, com ✓, com ✗, preenchida, parcialmente apagada (indeterminada).
+
+**Validação (sem OCR)**: Nível 1 com as funções e as imagens renderizadas das 16 páginas; Níveis 2–4 reproduzindo a montagem a partir de `assemble_input_b541246` com a evidência injetada (as capturas reproduzem a 015 em V3–V10); avaliador em memória e auditoria suplementar. Custo estimado [E]: A < 1 h de execução; B algumas horas de execução, mais o tempo de implementação (vários dias).
+
+**Critérios de aceitação**:
+- `checkbox_states` fp = 0 em todos os corpora (hoje 25 em V3/V6/V9/V10).
+- Com B: os 17 itens com caixa real com estado igual ao gabarito (fp = 0 e fn = 0 em V3 p88 e V6); se o ciclo incluir células e vetores, V11 p54 e V8 p49/p61 com estados corretos ou indeterminados, nunca invertidos.
+- Nenhum estado sem proveniência; nenhum estado "inferido".
+- Texto: sequência de palavras idêntica, salvo tokens de um caractere removidos por sobreposição com caixa detectada (lista por página).
+- Nenhuma página com recall menor; S idêntica byte a byte fora das páginas com caixa.
+- Variação de nota listada por corpus. Esperado [E]: A sozinho V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08; A + B: V3 e V6 sem perda de estados. O efeito de B na nota não foi medido de ponta a ponta.
+
+**Autorizações necessárias**: (a) alterar `ocr/tesseract/postprocess.py` (A); (b) alterar os testes existentes que exigem a fabricação (regra do projeto: não apagar nem enfraquecer testes sem aprovação); (c) para B1: `api.py`, modelo de página, montagem e renderizador (componentes compartilhados); (d) renderizar páginas nativas para a detecção visual (medir o custo por página). A RUN 016 continua sendo executada pelo responsável.
+
+**Em paralelo e sem mudar a saída (se autorizado)**: T3-P53 (exportar fatos e avisos), que também permite medir na RUN 016 o alcance real de T3-P44 nas 975 páginas.
+
+### §0.9 Confronto com a auditoria independente (AI-01 a AI-07, 2026-11-25)
+
+**Fonte**: `corpus/Auditoria_Independente_PDFExtractor_RUN015.md`, auditoria independente feita por outro modelo sobre um ZIP do commit `1717bd5` (sem PDFs, sem saídas da 015, sem capturas e sem histórico Git), lida integralmente. Os IDs AI-xx não substituem os T3-Pxx.
+
+**Método**: os contraexemplos do relatório foram executados como publicados (funções reais do repositório, entradas sintéticas, `PYTHONPATH=src:tests`, sem OCR), com variantes de controle; AI-03, AI-05 e AI-06 foram medidos também sobre dados reais (capturas que reproduzem a 015 e os 96 pares de leitura capturados); para T3-P51, uma sonda de evidência visual de caixas foi executada sobre 16 páginas renderizadas pelo pdfium (sem OCR). Nenhum código, teste, gabarito ou avaliador foi alterado; scripts e resultados ficaram fora do repositório.
+
+**Resultado**: os 7 achados foram reproduzidos e nenhum foi refutado. AI-01, AI-02 e AI-04 já estavam registrados (com evidência nova); AI-05 e AI-06 ampliam T3-P44 e T3-P43; AI-03 e AI-07 são novos (T3-P54 e T3-P55). Os números da seção 3 do relatório (F1 de entidades por corpus; V11 p5, p98, p57, p77; p71) conferem com os artefatos oficiais da 015.
+
+| AI | Tese | Reprodução nesta consolidação | Mapeamento | Evidência adicional | Divergência | Mudança |
+|---|---|---|---|---|---|---|
+| AI-01 | Marcadores literais dos corpora suprimem blocos inteiros, sem aviso | **5/5 suprimidos**: "O professor deve omitir no gabarito apenas o exemplo." (o marcador casa em qualquer posição); "OCR híbrido permite recuperar texto…" (início do bloco); "VOLUME II · OUT 2025 — Relatório de auditoria" (TITLE); tabela de 744 caracteres inteira por uma célula "Omitir no gabarito \| não" (tabelas não têm limite de tamanho). Controle: "o OCR puro" no meio da frase não casa | T3-P09, T3-P27; OF-01, OF-02 | censo e contrafactuais da §0.5 (V3 −5.1, V6 −0.7, V4 −0.3; perda da V3 p116) | nenhuma | **T3-P09: ALTO → CRÍTICO** ("gabarito" é a folha de respostas em pt-BR; "OCR híbrido" é vocabulário técnico comum) |
+| AI-02 | Supressões de bloco inteiro com evidência insuficiente | "Página 7 do contrato contém cláusula de reajuste." suprimida (o mesmo texto com uma 2ª linha, não); **5/5** blocos "Procedimento padrão" + linha exclusiva suprimidos; "Variáveis $HOME e $PATH…" suprimido (com aviso); dump de coordenadas **executado aqui**: bloco "Exemplo de saída TSV:" + uma linha TSV suprimido inteiro (com aviso) | T3-P52 (OF-03), OF-09, OF-10, **novo OF-20** | com o contrato padrão (AI-03), o supressor por frequência age em 8 corpora | o relatório deixou o dump como risco estático | **OF-09: RISCO MODERADO → RISCO ALTO**; OF-20 novo |
+| AI-03 | `preserve_headers_footers` ignorado no pós-processamento; páginas nativas alteradas | confirmado no código e offline (detalhe abaixo) | **novo T3-P54** | supressões com a flag `True` em 8 corpora; ações em páginas sem OCR na configuração da 015 | nenhuma (ampliado) | T3-P54 ALTO, P1; entra na ação 2 da §0.6 |
+| AI-04 | Estados de caixa inventados | **2/2**: "O contrato vigente" → "☐ contrato vigente" (o artigo some do texto) + "☑ Pagamento mensal"; "Entrega prevista" e "Pagamento mensal" depois de tabela → dois "☐". Controle novo: "☒ Aprovado" depois de tabela recebe "☐" na frente | T3-P51 (OF-04) | **atribuição causal**: desligar as duas regras zera os fp de V3, V6, V9 e V10 (25 → 0); 7 dos 10 do V9 estão em páginas nativas; sonda visual 17/17 e 0/18 (§0.8) | o relatório pedia rastreamento antes de atribuir os fp do V9/V10; o contrafactual faz essa atribuição | proposta definitiva na §0.8 |
+| AI-05 | Em T3-P44, preservação geométrica não é preservação textual | **aceito**: 32 palavras "original" trocadas por "alterado" na mesma posição + 40 palavras novas → `deskewed_more_complete`, 0 "original" restantes; variante desta auditoria: 16 de 32 identificadores divergentes também aceita (o limite é a metade) | T3-P44 (OF-06) | dados reais (abaixo) | a §1.39 descreve a salvaguarda como "≥ 90% do texto da leitura direta preservado no lugar"; o código mede cobertura **geométrica** | defeito semântico confirmado; contrato de evidência sobe para a ação 4 da §0.6 |
+| AI-06 | Títulos numerados legítimos suprimíveis por T3-P43 | OCR: **6/6** suprimidos; nativo com fonte 6.5, 10 e 11 (corpo 10): 6/6; com 11.5 e 12: 0; controle fora da faixa de borda: 0 | T3-P43 (OF-13) | não observado nos 9 corpora (triagem da §1.37) | o caso nativo de 6.5 pt (menor que o corpo, na borda) é compatível com mobília; os casos fortes são OCR e fonte igual ao corpo | **OF-13: HEURÍSTICA JUSTIFICADA → RISCO MODERADO**; risco residual em T3-P43 |
+| AI-07 | Serialização Markdown orientada ao formato dos gabaritos | `**literal**`, `[descrição](https://example.com)`, `### Texto literal`, `<b>literal</b>`, `` `código` `` e `*ênfase*` passam sem escape (`- item` e `> citação` são escapados); `_detect_code_lang("{nota fiscal}")` e `("[1] Referência…")` = `json` | **novo T3-P55**, **novo OF-21** | comentário do código: "matches the reference documents which never escape … over-escaping inflates cer_markdown_raw" (`b407b8c`, 2026-10-29, "melhor resultado histórico (run 0086)"); nos corpora, os PDFs contêm literalmente "### " em 16 blocos do V5 (ex.: p4 "### Engenharia") e "<limite>" na V6 p29, e o gabarito trata o 1º como título | nenhuma | T3-P55 MÉDIO; OF-21 RISCO ALTO DE OVERFIT |
+
+#### AI-03 — contrato de preservação ignorado (T3-P54)
+
+- **Código [F]**: `api.py:1611–1620` chama `assemble_document(..., preserve_headers_footers=self.config.preserve_headers_footers)` e, se `ocr_engine == "tesseract"`, `apply_tesseract_postprocessors(document)` sem a flag; `ExtractorConfig.preserve_headers_footers = True` por padrão (`config.py:206`) e a CLI só omite com `--omit-repeated-headers-footers` (`cli.py:450`). Nenhuma função do pós-processamento verifica a proveniência do bloco.
+- **Reprodução offline [F]** (capturas, montagem com a flag forçada a `True`, sem OCR): blocos ainda suprimidos pelo pós-processamento — V3 427 (96 cabeçalhos por frequência, 141 "Página NNN", 190 marcadores), V5 38, V6 184 (92 + 92 IRINF), V7 79, V8 90, V9 93, V10 56, V11 64; em páginas sem OCR: V3 88 em cada regra, V5 20, V6 49 em cada, V7 73, V8 56, V9 22, V10 8, V11 47. São os próprios cabeçalhos correntes (ex.: "AGÊNCIA DE INFRAESTRUTURA E OBRAS \| AIO / MONITORAMENTO 2026 / REGIONAL NORTE"): a violação é do contrato pedido, sem perda de corpo nesses corpora.
+- **Páginas nativas na configuração da 015 [F]**: o pós-processamento "Tesseract" age em páginas sem OCR — V3 88 "Página NNN" e 6 marcadores; V5 1 promoção de título; V6 16; V7 9; V8 10; V9 7 dos 10 itens "☐" inventados. A saída de uma página nativa depende do motor de OCR configurado.
+- **Proposta (do relatório, adotada)**: o pós-processamento recebe o contrato e a proveniência; nenhuma supressão de mobília quando a preservação é pedida; regras de OCR só em blocos de origem OCR; testes do caminho nativo com Tesseract selecionado e flag `True`/`False`.
+
+#### AI-05 — evidência em dados reais (T3-P44)
+
+- **Mecanismo [F]**: `_compare_reads` pareia palavras por sobreposição (IoU ≥ 0.3, melhor par mútuo) e só compara texto nos pares com dígitos; `upright_kept_ratio` soma os caracteres das palavras da leitura direta cuja caixa é ≥ 50% coberta por **qualquer** palavra da releitura.
+- **Nos 96 pares capturados [F]**: 21 070 pares por sobreposição, 1 556 com texto diferente (7.4%). Na V11 p71: 103 pares, 5 divergentes; cobertura geométrica 0.997 contra **0.931 textual**. "FG-711" (confiança 93) **não tem par** (IoU 0.11 com "em", confiança 49) e conta como preservado porque a caixa de "em" cobre a sua: é o caso real do contraexemplo. As outras divergências da p71 trocam ruído de baixa confiança da leitura direta ("ET" 8 → "em" 49; "FETIZ" 8 → "FG-712" 92; "FG7I3" 9 → "FG713" 51) ou corrigem um identificador com confiança menor ("4D8AAGA3" 87 → "4D8AA6A3" 70, duas vezes).
+- **Concordância textual sozinha também não serve [F]**: entre as releituras aceitas pela regra antiga, V4 p164 (concordância 0.33), V11 p63 (0.57) e V10 p25 (0.79) eram **melhores** que a leitura direta (cobertura do gabarito 0.03 → 0.19, 0.13 → 0.86 e 0.83 → 1.00, medida só para avaliação): a leitura direta era ruído de baixa confiança.
+- **Contrato proposto (não implementado)**: separar (i) cobertura geométrica, (ii) concordância nas palavras **confiáveis** da leitura direta e (iii) conflitos críticos (identificadores e números, inclusive sem par). A releitura entra onde acrescenta texto; onde uma palavra confiável da leitura direta some ou muda, mantém-se a palavra direta ou marca-se incerteza, nunca troca silenciosa. Aceitação: o contraexemplo AI-05 é rejeitado; a p71 mantém os 3 parágrafos e recupera "FG-711". Experimento offline nos 96 pares (custo B).
+
+#### AI-06 — títulos numerados um por página (T3-P43)
+
+- **Mecanismo [F]**: a evidência de proeminência só protege títulos maiores que 1.1 × o corpo; sem tamanhos (OCR) ela é neutra. As demais evidências (borda, contador sequencial com deslocamento único, ≥ 3 páginas consecutivas, posição e estilo estáveis) são satisfeitas por um título numerado por página no topo ("Questão N", "Seção N", "Ficha N"), e a supressão é silenciosa (motivo de mobília).
+- **Corpora**: nenhum caso nos 9 (a triagem da §1.37 não confirmou grupos em V3–V9; os títulos "Página 037 | … parte N" do V4, nativos e maiores, foram protegidos pela proeminência).
+- **Proposta**: sem evidência que distinga mobília de título (fonte menor que o corpo, separação vertical do corpo maior que a de um título, repetição na maioria das páginas do documento), **preservar** e registrar a ambiguidade; verificar offline que os grupos confirmados de V10 e V11 continuam confirmados. Entra na ação 2 da §0.6.
+
+#### Sonda de evidência visual de caixas (T3-P51)
+
+Script fora do repositório; para cada linha convertida pelas regras Fix-F05 nas 13 páginas, a página foi renderizada pelo pdfium a 288 dpi e procurou-se um quadrado na faixa à esquerda do início da linha (contorno de 4 vértices convexo, retangularidade, proporção, lado relativo à altura da linha, componente isolado); a tinta interior decide o estado. O gabarito foi usado só para conferir. Resultados e limites na §0.8: 17/17 estados corretos nos itens com caixa real, 0/18 nos fragmentos sem caixa; contagem exata das caixas vetoriais de V11 p54 e V8 p49/p61.
+
+#### Divergências registradas
+
+1. **Atribuição dos falsos positivos de caixas (AI-04)**: o relatório recomenda não atribuir sem rastreamento; o contrafactual desta auditoria (desligar as duas regras) faz a atribuição: os 18 fp do V9/V10 e os 7 estados invertidos do V3/V6 vêm delas.
+2. **AI-06, caso nativo de 6.5 pt**: compatível com mobília; o risco forte está no OCR e em títulos com fonte igual ao corpo.
+3. **Ordem dos ciclos**: o relatório recomenda corrigir primeiro a integridade da supressão (AI-01 a AI-03) e depois os estados (AI-04). Esta consolidação mantém T3-P51 como próximo ciclo — corrupção medida em 4 corpora, passo A pequeno e local, pedido explícito do responsável — e põe o contrato de supressão (AI-01 a AI-03 e AI-06) imediatamente depois. A divergência fica registrada para decisão do responsável.
+4. **AI-05**: além do contraexemplo, os dados reais mostram que um limiar de concordância textual sozinho rejeitaria releituras boas; o contrato precisa pesar a confiança das palavras da leitura direta.
+5. **AI-02 (dump de coordenadas)**: deixou de ser só risco estático; o contraexemplo foi executado.
+
+#### Mudanças aplicadas a este documento
+
+- **Severidade e classificação**: T3-P09 ALTO → **CRÍTICO**; OF-09 RISCO MODERADO → **RISCO ALTO**; OF-13 HEURÍSTICA JUSTIFICADA → **RISCO MODERADO**.
+- **Novos**: T3-P54 (ALTO, AI-03), T3-P55 (MÉDIO, AI-07), OF-20 (RISCO MODERADO), OF-21 (RISCO ALTO DE OVERFIT).
+- **Correções de texto**: a salvaguarda de T3-P44 é cobertura geométrica, não preservação textual (a §1.39 fica como registro histórico); "FG-711" não é "lido como 'em'": fica sem par e é contado como preservado pela cobertura.
+- **Plano (§0.6) reordenado**: 1 T3-P51 (proposta definitiva); 2 contrato único de supressão (T3-P09, T3-P54, T3-P27, T3-P52 na parte de supressão, T3-P43 ambíguo); 3 observabilidade (T3-P53); 4 contrato de evidência da releitura (T3-P44, AI-05); 5 referencial retificado. A família de tabelas nativas passa a 6.
+- **§0.8** substituída pela proposta definitiva de T3-P51.
+
+### §0.10 Ciclo T3-P51 — passo A implementado e validado offline (2026-11-25; não commitado)
+
+**Autorização (responsável, 2026-11-25)**: implementar só o passo A; alterar `src/structured_pdf_text/ocr/tesseract/postprocess.py` e os testes diretamente relacionados de `tests/test_tesseract_postprocess.py`; aceitar as reduções de nota que vêm exclusivamente da eliminação de estados inventados; passo B **não** autorizado (vira a ação 9 da §0.6). Nenhuma extração OCR, nenhuma RUN, avaliador, rubrica, gabaritos, PDFs e manifestos inalterados.
+
+#### Decisão: remover as duas funções, sem regra substituta
+
+- **Evidência de entrada [F]**: nenhuma das 35 linhas convertidas na RUN 015 tem evidência explícita de estado no texto de entrada do pós-processamento (nenhum ☐/☑/☒, □/■, ✓/✔/✗, `[x]`, `[ ]` ou `(x)`); os tokens OCR confirmam: as caixas não foram reconhecidas como glifos, e nas caixas vazias da V6 p22/p43/p87 e p89 o Tesseract leu "O" e "U" com confiança 57 (palavras vizinhas 92–97). Nenhum dos 10 estados certos tinha, portanto, evidência a preservar: todos vinham de inferência (`marker_source="inferred"`).
+- **O que já preserva estados explícitos [F]**: a detecção compartilhada de listas (`text/lists.py`, marcadores `☑|☒|☐`) e o renderizador (`_CHECKBOX_MARKERS`). As duas funções não usavam evidência nenhuma; mantê-las com novas condições seria trocar uma heurística por outra sem necessidade demonstrada.
+- **Alteração**: `_promote_post_table_checklist_items` e `_promote_ocr_checkbox_o_prefix` removidas, com as chamadas em `apply_tesseract_postprocessors` (substituídas por um comentário que registra o contrato); `_FIELD_VALUE_RE`, usada só pela segunda, removida. Diff: 3 inserções, 236 remoções. Nenhuma outra função, assinatura ou módulo alterado.
+- **Outras fontes de estado no código [F]**: `text/lists.py` infere só marcadores "•" de subitens (não estados); o caminho RapidOCR tem um detector visual próprio de caixas com estado e "ambíguo → sem estado" (`ocr/pipelines/rapidocr/policy.py`, `_box_candidates`/`_state`, commit `a12ee3f`), baseado em evidência da imagem e fora do escopo deste ciclo (registrado para o passo B).
+
+#### Testes: contratos alterados
+
+15 testes removidos (todos exercitavam funções removidas) e 12 funções de teste novas (30 casos) em `tests/test_tesseract_postprocess.py`, pelo ponto de entrada público `apply_tesseract_postprocessors` e pelo pipeline real (montagem → pós-processamento → Markdown). **Discriminância verificada**: o arquivo novo rodado contra o `src/` de `1717bd5` (exportado com `git archive`) tem **18 dos 30 casos falhando**; os outros 12 passam nas duas versões e protegem contra novos caminhos de fabricação.
+
+| Teste anterior | Contrato anterior | Por que estava incorreto | Novo contrato (teste) | Evidência |
+|---|---|---|---|---|
+| `test_promote_post_table_checklist_basic` | "Aprovado"/"Pendente" depois de tabela viram itens "☐" | estado inventado; na V3 p88 a caixa "Aprovado" estava marcada (☒) | linhas curtas depois de tabela mantêm texto e não ganham estado (`test_short_lines_after_table_keep_their_text_and_get_no_state`) | falha com `1717bd5` |
+| `test_promote_post_table_checklist_with_label` | "Conferir", "Reabrir", "Registrar ciência" depois de "Encaminhamento:" viram "☐" | duas caixas marcadas no original viravam desmarcadas (V6 p3/p33/p89) | nenhuma opção é marcada como desmarcada sem evidência (`test_label_and_options_after_table_are_never_marked_unchecked`) | falha com `1717bd5` |
+| `test_promote_post_table_checklist_caption_kind_promoted` | blocos CAPTION depois de tabela viram "☐" | idem | CAPTION mantém tipo e texto (`test_caption_lines_after_table_keep_their_kind`) | falha com `1717bd5` |
+| `…_noop_single_block`, `…_noop_sentence_ending`, `…_noop_allcaps`, `…_noop_no_table`, `…_stops_at_long_block`, `…_noop_url` | não converter nessas condições | correto em parte, mas preso à função removida e cego para os demais casos | as mesmas entradas, com e sem tabela antes, nunca ganham estado (`test_runs_of_short_lines_never_get_a_state`, 8 casos) | os casos novos "Responsável: Marina Teixeira"/"O Vistoria…" e "Entrega prevista"/"Pagamento mensal"/"Prazo de vigência" depois de tabela falham com `1717bd5` (a regra antiga inventava "☐" neles) |
+| `test_promote_o_prefix_basic_pair`, `test_promote_o_prefix_figure_kind` | "O " inicial → "☐" e o "O" removido do texto; as demais linhas da sequência → "☑" | estado marcado inventado; letra legítima apagada (artigo "O") | "O" e "U" iniciais são texto; nenhuma lista, nenhum estado, texto intacto, em TEXT, FIGURE e CAPTION (`test_leading_o_and_u_are_kept_as_letters`, 12 casos) | 9 dos 12 falham com `1717bd5`; os 3 de "U Reabrir"/"Conferir" passam nas duas (a regra antiga só agia com "O") |
+| `test_promote_o_prefix_noop_single_block`, `…_noop_field_value`, `…_noop_ending_punct`, `…_noop_url` | não converter nessas condições | idem aos *noop* acima | incorporados em `test_runs_of_short_lines_never_get_a_state` | — |
+| — (novo) | — | não havia teste de estados explícitos | glifos explícitos e marcadores de tarefa no texto ("☒ Aprovado", "☐ Pendente", "☑ Conferir", "[x] Revisado", "[ ] A revisar") ficam intactos, sem segundo marcador (`test_explicit_state_glyphs_in_text_are_kept_unchanged`) | falha com `1717bd5` (prefixava "☐" em "☒ Aprovado") |
+| — (novo) | — | — | itens de lista com marcador explícito (☑, ☐, ☒) e listas comuns depois de tabela ficam intactos (`test_explicit_check_list_items_are_kept_unchanged`, `test_common_list_after_table_is_kept_unchanged`) | proteção (passa nas duas) |
+| — (novo, pipeline real) | — | — | página **nativa** com "☑ Conferir", "☐ Reabrir", "☒ Registrar ciência": os 3 estados saem uma vez cada (`test_native_page_explicit_states_survive_the_pipeline`) | proteção (passa nas duas) |
+| — (novo, pipeline real) | — | — | página **OCR** sem glifos ("Conferência documental executada", "O Vistoria complementar pendente", "U Reabrir", "Pagamento mensal"): nenhum estado, letras mantidas (`test_ocr_page_without_glyphs_gets_no_state_and_keeps_letters`) | falha com `1717bd5` (saíam "☑ U Reabrir" e "☑ Pagamento mensal") |
+| — (novo, pipeline real) | — | — | página **híbrida** (nativo "☑ Aprovado" + OCR "O contrato vigente", "Entrega prevista"): o estado explícito sai uma vez e o texto OCR intacto (`test_hybrid_page_keeps_the_explicit_state_once_and_the_ocr_text`) | falha com `1717bd5` (saíam "☑ ☑ Aprovado", "☐ contrato vigente" e "☑ Entrega prevista") |
+
+#### Validação offline integral (9 corpora, sem OCR)
+
+- **Baseline reproduzida [F]**: com o `src/` de `1717bd5`, a reprodução das capturas é **idêntica byte a byte à RUN 015 nos 9 corpora**. Para o V11 foi criada a captura `output/tesseract/_captures/assemble_input_1717bd5/V11/` (captura completa `b541246` com as 16 páginas inclinadas rastreadas em `1717bd5`), que reproduz a 015 **inclusive a p71 recuperada** (hash `b0771828cf0c`); V3–V10 usam `assemble_input_b541246/`.
+- **Candidata [F]**: V4, V5, V7, V8 e V11 **idênticos byte a byte** à 015; mudam só V3, V6, V9 e V10, em 13 páginas.
+
+| Corpus | Nota (rubrica §1.16) | Categorias que mudam | `checkbox_states` tp/fp/fn | Outras métricas oficiais que mudam |
+|---|---|---|---|---|
+| V3 | 93.14 → **92.88** (−0.26) | Texto 94.9 → 94.8; Parágrafos 92.0 → 91.7; Listas 97.3 → 93.0 | 11/1/1 → 10/0/2 | itens de lista F1 1.000 → 0.967; grupos 0.933 → 0.857; recall 0.98279 → 0.98259 |
+| V6 | 96.73 → **96.29** (−0.44) | Texto 96.7 → 96.6; Cobertura 96.5 → 96.4; Parágrafos 96.3 → 94.7; Listas 100.0 → 95.2 | 27/6/6 → 18/0/15 | itens 1.000 → 0.940; grupos 1.000 → 0.939; recall 0.98807 → 0.98731 |
+| V9 | 75.60 → **76.16** (+0.56) | Texto 77.8 → 77.9; Cobertura 96.8 → 96.9; Parágrafos 65.8 → 65.3; Listas 84.7 → 96.4 | 21/10/0 → 21/0/0 | itens 0.839 → 1.000; grupos 0.818 → 0.947; precisão 0.98973 → 0.99030 |
+| V10 | 78.32 → **78.40** (+0.08) | Cobertura 97.6 → 97.7; Parágrafos 57.9 → 57.6; Listas 72.7 → 74.6 | 3/8/0 → 3/0/0 | itens 0.795 → 0.824; grupos 0.523 → 0.541 |
+| V4, V5, V7, V8, V11 | iguais (66.86, 86.49, 99.44, 98.75, 71.68) | — | V5 8/0/0; V7 21/0/0; V8 55/0/4; V11 0/0/15; V4 sem caixas | nenhuma |
+| **Total** | — | — | **146/25/26 → 136/0/36** | — |
+
+Os valores coincidem com o contrafactual da auditoria (§0.4). Nenhuma outra categoria, página ou corpus muda.
+
+**Por página (13 páginas; tp/fp/fn de `checkbox_states`)**:
+
+| Página | Antes → depois (Markdown) | Caixas | CER | Recall | Precisão |
+|---|---|---|---|---|---|
+| V3 p88 | "- ☐ Aprovado", "- ☐ Pendente" → "Aprovado", "Pendente" | 1/1/1 → 0/0/2 | 0.0069 → 0.0278 | 0.950 → 0.900 | 0.950 → 1.000 |
+| V6 p3, p33, p89 | "- ☐ Conferir", "- ☐ Reabrir" (p89: "- ☐ U Reabrir"), "- ☐ Registrar ciência" → texto | 1/2/2 → 0/0/3 (cada) | +0.001 a +0.005 | 0.856 → 0.847 | 0.914–0.922 → 0.931–0.940 |
+| V6 p22, p43, p87 | "- ☑ Conferência documental executada", "- ☐ Vistoria complementar pendente" → "Conferência documental executada", "O Vistoria complementar pendente" | 2/0/0 → 0/0/2 (cada) | ≈ 0.003 → 0.007 | ≈ 0.989 → 0.967 | ≈ 0.989 → 0.977 |
+| V9 p18, p82, p90 | "- ☐ laboratoriais", "- ☐ manutenção", … → texto | fp 3, 5 e 2 → 0 | 0.075 → 0.069; 0.118 → 0.108; 0.097 → 0.093 | 1.000 = 1.000 | → 1.000 |
+| V10 p15, p30, p54 | "- ☐ armazenamen", "- ☐ laboratoriais", … → texto | fp 3, 3 e 2 → 0 | 0.042 → 0.039; 0.078 → 0.074; 0.058 → 0.056 | 1.000 = 1.000 | → 1.000 |
+
+- **Palavras [F]**: nas 13 páginas, nenhuma palavra sumiu; a única palavra a mais é o "O" que volta ao início de "O Vistoria complementar pendente" em V6 p22, p43 e p87 (leitura do OCR, mantida como texto). **Números [F]**: idênticos em todas as páginas alteradas. **Estrutura [F]**: as 35 linhas deixam de ser itens de lista e voltam ao tipo de origem (29 TEXT, 6 FIGURE); nenhuma outra mudança de bloco, ordem ou título.
+- **Quedas de recall por página**: só nas 7 páginas com caixa real (V3 p88; V6 p3, p22, p33, p43, p87, p89), porque o gabarito conta o glifo de estado como token e a saída não o representa mais. É a redução aceita pelo responsável.
+
+#### Estados: eliminados, preservados e ausentes
+
+- **Eliminados (25)**: 7 estados **invertidos** em caixas reais (V3 p88 "Aprovado", ☒ → ☐; V6 p3, p33, p89 "Conferir" e "Registrar ciência", ☑ → ☐) e 18 estados **inventados** em fragmentos de célula sem caixa (V9 10; V10 8).
+- **Preservados (136)**: todos os estados explícitos (glifos na camada de texto): V3 10, V5 8, V6 18, V7 21, V8 55, V9 21, V10 3.
+- **Legítimos que deixam de ser representados (10) — limitação registrada**: V3 p88 "Pendente" (☐); V6 p3, p33, p89 "Reabrir" (☐); V6 p22, p43, p87 "Conferência documental executada" (☑) e "Vistoria complementar pendente" (☐). Coincidiam com o gabarito por inferência sem evidência; agora aparecem como texto sem estado (`fn`). Não representar um estado desconhecido é preferível a apresentar um estado falso. Voltam a ser representáveis com o passo B (ação 9), que a sonda indica ser viável (17/17 na amostra, sem valor de generalização).
+- **Já ausentes antes e inalterados**: V8 p49/p61 (4) e V11 p54 (15), caixas vetoriais sem glifo (T3-P48).
+
+#### Suíte de testes
+
+`tests/test_tesseract_postprocess.py`: 233 aprovados. Suíte completa: **3541 aprovados, 13 falhas, 4 ignorados, 4 xfail** (129.6 s); as 13 falhas são exatamente as preexistentes de T3-P14 (`test_line_detector.py` ×8, `test_no_timeouts.py`, `test_evaluation_exact_optimizations.py[V3]`, `test_rapidocr_improvement_005/006/008`). Contagem coerente: 3526 − 15 removidos + 30 novos.
+
+#### Riscos residuais
+
+1. **10 estados legítimos não representados** até o passo B (V3 p88; V6 p3, p22, p33, p43, p87, p89).
+2. **Listas de verificação sem glifo** passam a sair como linhas de texto: em documentos reais, a estrutura de lista dessas opções se perde (antes saía com estado falso). Representação honesta; a estrutura volta com o passo B.
+3. **Leituras OCR da própria caixa** ("O" em V6 p22/p43/p87, "U" em V6 p89) ficam no texto como erro visível do OCR, em vez de serem removidas por suposição.
+4. **Glifos de caixa em páginas digitalizadas** dependem de o OCR reconhecê-los; o Tesseract em geral não reconhece, então os estados de páginas OCR ficam ausentes até o passo B.
+5. **O pós-processamento Tesseract continua agindo em páginas nativas** e ignorando `preserve_headers_footers` (T3-P54, ação 2); as regras de caixa removidas deixam de contribuir para isso, as demais não.
+6. **O detector visual do RapidOCR** produz estados por evidência da imagem só nesse motor; não foi revisado neste ciclo.
+
+#### Evidência de generalização e limites
+
+- A correção **remove** inferência, sem regra nova: em qualquer documento, o pós-processamento Tesseract deixa de criar, inverter ou apagar estados e letras. Essa garantia é estrutural (o código que fazia isso não existe mais) e está protegida pelos testes novos, inclusive os de pipeline real em página nativa, OCR e híbrida.
+- O que **não** está medido: quantos estados legítimos deixam de ser representados em documentos desconhecidos (depende de quantas caixas sem glifo existirem) e a qualidade do futuro passo B. A sonda de 17/17 usou as próprias páginas de desenvolvimento.
+- Os testes usam exemplos genéricos ("O contrato vigente", "O setor responsável", "[x] Revisado", listas comuns) além dos padrões reais; não há documento reservado (H) neste ciclo.
+
+#### Custos de validação (sem OCR, um processo por vez)
+
+Arquivo de testes 0.2 s; discriminância contra `1717bd5` 0.9 s; suíte completa 129.6 s; reprodução da base 52 s e da candidata 55 s (9 corpora); comparação com avaliador, rubrica e auditoria suplementar ≈ 3 min; montagem da captura V11 compatível com a 015: segundos; sonda de caixas ≈ 1 min. Extrações evitadas: as 9 completas (a RUN 015 levou ≈ 100 min).
+
+#### Preservação do material do passo B
+
+Scripts, resultados e README em `output/tesseract/_captures/checkbox_probe_1717bd5/` (sonda final independente do Fix-F05, reexecutada depois da remoção: 17/17 e 18/18; contagens vetoriais de V11 p54 e V8 p49/p61). A validação deste ciclo está em `output/tesseract/_captures/t3p51_1717bd5/` e os scripts da auditoria e do confronto em `output/tesseract/_captures/tools/audit_015/`. Nada disso é versionado (regra `output/` do `.gitignore`). **O resultado de 17/17 é demonstração de viabilidade, não validação independente de generalização.**
+
+**Status de T3-P51**: CORRIGIDO — VALIDADO OFFLINE (passo A; não commitado). Não será declarado resolvido antes da RUN 016; mesmo depois, permanece o resíduo dos 10 estados não representados (passo B).
+
+---
+
+## §0-h (histórico) Estado em 2026-11-24 (pós-RUN 014) — substituído pela §0 de 2026-11-25
+
+| Campo | Valor |
+|---|---|
+| **Última atualização** | 2026-11-24 — **auditoria da RUN 014 e ciclo T3-P44** (§1.38–§1.39): RUN 014 (`7df5285`) **reproduz byte a byte a validação offline** nos 9 corpora; **T3-P43 confirmado** pelos critérios revisados aprovados (V11 70.4, V10 78.3, V3–V9 idênticos), resíduos registrados; **T3-P44 corrigido em `ocr/backends/tesseract.py::_deskew_page`** (seleção por evidência comparável + decisão nos fatos da página), validado pontualmente em 61 páginas inclinadas de 7 corpora (só a V11 p71 muda; contrafactual documental V11 70.4 → 71.7); não commitado. Capturas offline preservadas em `output/tesseract/_captures/`. Antes: 2026-11-24 — **ciclo pós-013** (§1.36–§1.37): **T3-P44 diagnosticado** (causa localizada: a releitura endireitada com o texto completo é descartada por comparação de confiança média em `ocr/backends/tesseract.py::_deskew_page`; correção proposta, não implementada) e **T3-P43 implementado** (`assemble/repeated_regions.py`, contador de página confirmado por evidências convergentes; validado offline sobre capturas completas dos 9 corpora: V11 65.9 → 70.4, V10 75.5 → 78.3, nenhuma linha do gabarito removida; não commitado). Antes: 2026-11-24 — **auditoria da RUN 013 e inclusão do corpus V11** (§1.32–§1.35: V3–V10 idênticos byte a byte à 012; V11 = **65.9** na rubrica; 8 problemas novos, T3-P43 a T3-P50; prioridade passa ao V11; candidato único do próximo ciclo: **T3-P43**, mobília com contador de página não suprimida). Antes: 2026-11-19 — **meta interna de 85/100 por corpus e diagnóstico quantitativo do V4** (§1.31: decomposição de 66.9; 82% dos tokens ausentes do OCR de texto em segmentos adversariais; teto realista do V4 ≈ 80.7 com o Tesseract atual; candidato do próximo ciclo: T3-P41). Antes: **auditoria da RUN 012** (§1.28: T3-P06 **parcial — confirmado na RUN 012**, sem perda de conteúdo e com o caminho nativo idêntico; precisão do V4 e categorias de falso título não atendidas; novo T3-P42, perda antiga de conteúdo corrigida; §1.29: rubrica; §1.30: priorização). Antes: **T3-P06 t3 implementada** com autorização (§1.27; CORRIGIDO — VALIDADO PONTUALMENTE; alterações **não commitadas** em `layout/heading.py`, `layout/ocr_aware.py`, `ocr/reconstruct.py` e no teste novo). Antes: **ciclo pós-011** (§1.25: T3-P06; §1.26: diagnóstico de T3-P35). Antes: **auditoria da RUN 011** (§1.22: T3-P38 confirmado, sem regressão; §1.23: rubrica; §1.24: priorização; §5: controles de estabilidade × generalização; novo T3-P41). Antes: auditoria da RUN 010 (§1.20) e ciclo pós-010 (§1.21) |
+| **Branch** | `feat/tesseract-optimization` — pós-005 `dfbf5e9`; pós-006 `f03710a` e `4a732c6`; T3-P22 tentativas 1–2 `bec686a`; pós-007 (T3-P22 tentativas 3–5, T3-P35) `ad43cb1`; pós-008 (T3-P34 t4, T3-P20 t2) `b1202ee`; pós-009 (T3-P20 t5, T3-P36, T3-P39) `95a6f72`; pós-010 (T3-P38 t3) `2fdad33`; pós-011 (T3-P06 t3) `18ccfb0`; pós-013 (T3-P43) `7df5285` |
+| **Baseline imutável** | `output/tesseract/001/` |
+| **Baseline corrigida** | `output/tesseract/002/` (T3-P00) |
+| **Baseline atual** | `output/tesseract/014/` (commit `7df5285`, T3-P43); antes `013/` (`b541246`, primeira referência do V11) |
+| **Última rodada** | `output/tesseract/014/` (2026-11-24 13:30–15:14 UTC; commit `7df5285`) — 9 corpora; V3–V9 idênticos à 013; V10/V11 iguais à reprodução offline (§1.38) |
+| **Próxima rodada** | RUN 015 (manual, pelo responsável) — para confirmar T3-P44 (implementado, não commitado); critérios na §5 (pós-014) |
+| **Configuração** | balanced · pt-BR · adaptive · tesseract · Markdown paginado · supplemental-audit. **Threads**: 6 até a 003; 8 desde a 005 (a 006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`). O Tesseract 5.5.0 usa no máximo 4 threads OpenMP por chamada (`num_threads(4)` fixo no LSTM), então 6 e 8 equivalem a 4 (§1.10) |
+| **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0 — **não alterado** |
+| **Corpus/gabaritos/manifestos** | **não alterados por nós**. **V11** (`corpus/V11/`, edição V11-R1C, 120 págs.) adicionado pelo responsável antes da RUN 013 e incluído em `scripts/run_tesseract_batch_wsl.py` (`b541246`). O diretório `corpus/V10/` foi substituído externamente em 2026-11-12, entre 07:56 e 07:59, durante a RUN 003 (ver T3-P15) |
+
+### Registro de status em 2026-11-24 (histórico; status atual no quadro principal e na §0)
+
+| ID | Gravidade | Prioridade | Componente | Status |
+|---|---|---|---|---|
+| T3-P00 | CRÍTICO | — | executor | **RESOLVIDO** (002) |
+| T3-P01 | CRÍTICO | — | `api.py` | **RESOLVIDO** (003) |
+| T3-P02 | ALTO | — | backend Tesseract | **RESOLVIDO** (004; V3 p116 restante) |
+| T3-P03 | MÉDIO | — | `api.py` | **RESOLVIDO** (003) |
+| T3-P04 | INFO | P3 | avaliador | aberta |
+| T3-P05 | MÉDIO | P3 | montagem de linhas nativas | DOCUMENTADO — fora do escopo |
+| T3-P06 | ALTO | P1 | headings (`layout/heading.py` compartilhado; `layout/ocr_aware.py`) | **PARCIAL — CONFIRMADO NA RUN 012** (t3, `18ccfb0`, §1.28; 3/5): recall V4/V9/V10 0.562/0.457/0.634, nativas idênticas, nenhuma perda de conteúdo; precisão do V4 0.929 < 0.95, 3 categorias novas de falso título, hierarquia OCR documental (V10 `heading_level_match_rate` 0.519) e regressões V4 p95/p96/p104/p145/p149; inclinadas e V9 em regiões FIGURE fora do escopo |
+| T3-P07 | MÉDIO | P2 | V5 tabelas sem borda/ordem | PENDENTE (sem mudança na 003) |
+| T3-P08 | MÉDIO | P3 | dados críticos V9 | MELHOROU na 003 — monitorar |
+| T3-P09 | INFO | — | `ocr/tesseract/postprocess.py` | RISCO MATERIALIZADO — mitigado em T3-P25, T3-P26 e T3-P27 |
+| T3-P10 | CRÍTICO | — | reconstrução de linhas OCR + ordem de leitura | **RESOLVIDO** (004) |
+| T3-P11 | ALTO | — | executor (V10) | **RESOLVIDO** (004, via T3-P15) |
+| T3-P12 | MÉDIO | P2 | detecção visual de tabelas | PENDENTE — causa medida e reconfirmada na 006 (HoughLinesP ≈ 66% do tempo nas páginas pesadas; Tesseract 26%); PNG temporário mais rápido aplicado (§1.10) |
+| T3-P13 | BAIXO | — | regressões pontuais 001→002 | sem mudança na 003 (saídas V3–V8 idênticas) |
+| T3-P14 | INFO | — | suíte de testes | 13 falhas pré-existentes (inalteradas) |
+| T3-P15 | ALTO | — | executor | **RESOLVIDO** (004) |
+| T3-P16 | MÉDIO | — | classificação de página OCR vazia (`api.py`) | **RESOLVIDO** (004) |
+| T3-P17 | ALTO | P2 | `tables/ocr_tracks.py` | **RESOLVIDO** pelo critério (V10 precisão 0.947); L01/L02 inclinadas restantes |
+| T3-P18 | ALTO | — | backend Tesseract + ordem de colunas | **RESOLVIDO** (006: critérios de CER/recall atendidos); efeitos colaterais em T3-P31 e V4 p106/p156 |
+| T3-P19 | INFO | — | avaliador (`duplicate_excess_rate`) | INTERPRETAÇÃO DOCUMENTADA — não alterar |
+| T3-P20 | MÉDIO | — | segmentação de parágrafos OCR (`ocr/reconstruct.py`) | **PARCIAL — CONFIRMADO NA RUN 009** (t2 `b1202ee` + t5 local; 5/5, encerrado): F1 de parágrafos V4/V9/V10 sobe sem mudar palavras; regressão de fusões no V4 de coluna única registrada em T3-P38 |
+| T3-P21 | ALTO | P1 | reconhecimento Tesseract (limite) + pré-processamento | ABERTA — diagnóstico §1.31: piso adversarial do corpus (limite do Tesseract na configuração atual), degradação acima do piso e hipótese pós-OCR H-esp; exige experimento de OCR autorizado |
+| T3-P22 | ALTO | — | ordem de linhas e regiões em páginas nativas multicoluna (`text/reading_order.py`, `layout/decorative.py`, compartilhados) | **CORRIGIDO — CONFIRMADO NA RUN 008** (5/5 tentativas, encerrado): V10 p9/p59/p54, V4 p20/p25/p26/p28, V9 p90; restam V9 p51, p5/p43, p12/p19/p72 |
+| T3-P23 | CRÍTICO | — | backend Tesseract (`_parse_tsv`) | **RESOLVIDO** (004) |
+| T3-P24 | BAIXO | — | `layout/ocr_aware.py` (listas) | **RESOLVIDO** (004) |
+| T3-P25 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (004), com efeito colateral corrigido em T3-P26 |
+| T3-P26 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (005) |
+| T3-P27 | CRÍTICO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (005) |
+| T3-P28 | ALTO | — | montagem de linhas Tesseract | **RESOLVIDO** (006: V8 p4/p58 `€ 98,40`, V8 `numeric` 0.991) |
+| T3-P29 | MÉDIO | P2 | layout de página nativa com `/Rotate 90` | PENDENTE — página inteira num único bloco (V4 p213/p214) |
+| T3-P30 | INFO | — | executor | **RESOLVIDO** (006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`) |
+| T3-P31 | **MÉDIO** (regressão confirmada na 006) | P0 | layout de regiões só-OCR + ordem genérica de linhas | **NÃO RESOLVIDO** — 5 tentativas pós-006; a melhor corrige as listas, mas intercala colunas (V10 p18); nenhuma mantida |
+| T3-P32 | ALTO | — | backend Tesseract (orientação e reconhecimento) | **RESOLVIDO** (007: V9 p20/p71 corretas, p55 01–04 e `numeric` 1.000); V9 p36/p92: causa distinta na integração; tentativa 5 revertida; **5/5, encerrado** |
+| T3-P33 | MÉDIO | P1 | tabela por trilhas OCR → `text_tracks._build_table` (compartilhado) | NOVO na 006 — exceção `Invalid BBox` na V9 p36 → V9 `partial_success`; PENDENTE |
+| T3-P34 | ALTO | P1 | tabela raster com inclinação pequena em página mista (`tables/visual.py`, `assemble/content.py`, compartilhados) | **PARCIAL — CONFIRMADO NA RUN 009** (4/5): V9 p58 (tabela 8×6, células exatas 0.646), p44 e p49 confirmadas; p66/p78/p25/p8 com causas distintas; valores corrompidos da p58 em T3-P39 |
+| T3-P35 | ALTO | P0 | calhas OCR fragmentadas → faixas de colunas (`ocr/reconstruct.py`, só Tesseract) | NOVO na 007 — **CORRIGIDO — CONFIRMADO NA RUN 008** para páginas raster sem inclinação (V10 L04–L06); inclinadas (L01/L02) pendentes; V10 p32 com reordenação a avaliar. **Mantido na RUN 009** (L04–L06 0.104; p32 0.311) |
+| T3-P36 | CRÍTICO | — | pós-processamento Tesseract (`ocr/tesseract/postprocess.py`) | **CORRIGIDO — CONFIRMADO NA RUN 010** (V4 p167/p168); risco residual documentado (§1.20) |
+| T3-P37 | ALTO | P1 | detector de tabelas nativo (compartilhado) | **NOVO na 009** — V9 p62/p72 desmontadas, p14 fundida |
+| T3-P38 | MÉDIO | — | segmentação de parágrafos OCR (`ocr/reconstruct.py`) | **CORRIGIDO — CONFIRMADO NA RUN 011** (t3, `2fdad33`; §1.22): fusões de volta ao nível da 008, ganhos de T3-P20 mantidos; resíduo V4 p137 |
+| T3-P39 | ALTO | — | montagem de linhas Tesseract (`ocr/reconstruct.py::_drop_conflicting_rereads`) | **CORRIGIDO — CONFIRMADO NA RUN 010** (V9 p58/p66; também V6 p11, V8 p49/p67) |
+| T3-P40 | INFO | — | corpus/gabarito V5 | **RECLASSIFICADO** (§1.19): o PDF não contém os títulos exigidos pelo gabarito; sem alteração de código nem do corpus |
+| T3-P41 | MÉDIO | P0 | segmentação de parágrafos **nativa** (compartilhada) | **PENDENTE — CAUSA RAIZ IDENTIFICADA (§1.31); adiado pela prioridade ao V11 (§1.35)** (registrado na auditoria da RUN 011; desde a 001): V4 p9–p40 com os parágrafos de cada página num só bloco; 227 das 417 fusões do V4; impacto na nota só estimado (não oficial, não validado); exige autorização |
+| T3-P42 | ALTO | — | `layout/heading.py::_merge_heading_fragments` (descartava `ocr_lines` do 2º fragmento) | **CORRIGIDO — CONFIRMADO NA RUN 012** (§1.28): V10 p5/p11/p31/p62 recuperam 83 palavras do gabarito; perda silenciosa até a 011 |
+| T3-P43 | ALTO | — | `assemble/repeated_regions.py` (assinatura de mobília; compartilhado) | **CORRIGIDO — CONFIRMADO NA RUN 014** (§1.38; critérios revisados; resíduos de mobília registrados) |
+| T3-P44 | CRÍTICO | P0 | `ocr/backends/tesseract.py::_deskew_page` (seleção entre leituras) | **CORRIGIDO — VALIDADO PONTUALMENTE** (§1.39; 61 páginas inclinadas, 7 corpora; não commitado); aguarda RUN 015 |
+| T3-P45 | ALTO | P1 | detecção/fusão de tabelas nativas (compartilhado) | **NOVO (RUN 013)** — duplicação na V11 p50/p93 |
+| T3-P46 | ALTO | P1 | detector de tabelas sem borda nativo (compartilhado) | **NOVO (RUN 013)** — colunas e lista nativas como tabela (V11 p5/p98/p86) |
+| T3-P47 | ALTO | P2 | detector de tabelas nativo (compartilhado) | **NOVO (RUN 013)** — tabelas empilhadas/formulário desmontadas (V11 p57 e outras) |
+| T3-P48 | MÉDIO | P3 | — (recurso inexistente) | **NOVO (RUN 013)** — checkboxes vetoriais (V11 p54) |
+| T3-P49 | MÉDIO | P1 | reconstrução OCR em página inclinada | **NOVO (RUN 013)** — ordem de linhas invertida (V11 p61; p71 depois de T3-P44) |
+| T3-P50 | INFO | — | gabarito V11 (convenção) | **REGISTRADO (RUN 013)** — nível `#` por página |
+
+### Quadro principal em 2026-11-24 (histórico, pós-014; o quadro atual está no início do documento)
 
 Resumo de todos os problemas (abertos e resolvidos). Ordenado por severidade (CRÍTICO > ALTO > MÉDIO > BAIXO > INFO); dentro de cada severidade, os abertos vêm primeiro, por prioridade. Diagnósticos, tentativas e histórico completos em §2.
 
@@ -69,79 +747,6 @@ Resumo de todos os problemas (abertos e resolvidos). Ordenado por severidade (CR
 | T3-P40 | Título/subtítulo exigidos pelo gabarito V5 ausentes do PDF (possível inconsistência do corpus) | INFO (limitação do gabarito) | — | V5 p4, 5, 6, 17, 18, 20, 23, 26, 28, 32, 36, 38 | Na área do bloco `heading` do manifesto não há texto, objeto nem tinta no PDF; ≈ 5.0% dos caracteres do gabarito V5; V5 idêntico na 010 | — (diagnóstico) | **Reclassificado (§1.19)**: não é defeito do extrator; corpus **não** alterado | 010 | Decisão do responsável sobre o corpus V5 |
 | T3-P19 | `duplicate_excess_rate` não mede só duplicação | INFO | — | Avaliador | Na 009 cai em V4/V9/V10 só por segmentação (0.706 → 0.675; 0.482 → 0.417; 0.555 → 0.519) | — | Interpretação documentada (não é defeito) | 009 | — |
 | T3-P30 | Executor gravava `threads` fixo no manifesto | INFO | — | Manifestos 001–005 | `threads: 6` fixo → 8 registrado | 1 / — | Resolvido — confirmado na RUN 006 | 006 | — |
-
----
-
-## §0 Estado atual
-
-| Campo | Valor |
-|---|---|
-| **Última atualização** | 2026-11-24 — **auditoria da RUN 014 e ciclo T3-P44** (§1.38–§1.39): RUN 014 (`7df5285`) **reproduz byte a byte a validação offline** nos 9 corpora; **T3-P43 confirmado** pelos critérios revisados aprovados (V11 70.4, V10 78.3, V3–V9 idênticos), resíduos registrados; **T3-P44 corrigido em `ocr/backends/tesseract.py::_deskew_page`** (seleção por evidência comparável + decisão nos fatos da página), validado pontualmente em 61 páginas inclinadas de 7 corpora (só a V11 p71 muda; contrafactual documental V11 70.4 → 71.7); não commitado. Capturas offline preservadas em `output/tesseract/_captures/`. Antes: 2026-11-24 — **ciclo pós-013** (§1.36–§1.37): **T3-P44 diagnosticado** (causa localizada: a releitura endireitada com o texto completo é descartada por comparação de confiança média em `ocr/backends/tesseract.py::_deskew_page`; correção proposta, não implementada) e **T3-P43 implementado** (`assemble/repeated_regions.py`, contador de página confirmado por evidências convergentes; validado offline sobre capturas completas dos 9 corpora: V11 65.9 → 70.4, V10 75.5 → 78.3, nenhuma linha do gabarito removida; não commitado). Antes: 2026-11-24 — **auditoria da RUN 013 e inclusão do corpus V11** (§1.32–§1.35: V3–V10 idênticos byte a byte à 012; V11 = **65.9** na rubrica; 8 problemas novos, T3-P43 a T3-P50; prioridade passa ao V11; candidato único do próximo ciclo: **T3-P43**, mobília com contador de página não suprimida). Antes: 2026-11-19 — **meta interna de 85/100 por corpus e diagnóstico quantitativo do V4** (§1.31: decomposição de 66.9; 82% dos tokens ausentes do OCR de texto em segmentos adversariais; teto realista do V4 ≈ 80.7 com o Tesseract atual; candidato do próximo ciclo: T3-P41). Antes: **auditoria da RUN 012** (§1.28: T3-P06 **parcial — confirmado na RUN 012**, sem perda de conteúdo e com o caminho nativo idêntico; precisão do V4 e categorias de falso título não atendidas; novo T3-P42, perda antiga de conteúdo corrigida; §1.29: rubrica; §1.30: priorização). Antes: **T3-P06 t3 implementada** com autorização (§1.27; CORRIGIDO — VALIDADO PONTUALMENTE; alterações **não commitadas** em `layout/heading.py`, `layout/ocr_aware.py`, `ocr/reconstruct.py` e no teste novo). Antes: **ciclo pós-011** (§1.25: T3-P06; §1.26: diagnóstico de T3-P35). Antes: **auditoria da RUN 011** (§1.22: T3-P38 confirmado, sem regressão; §1.23: rubrica; §1.24: priorização; §5: controles de estabilidade × generalização; novo T3-P41). Antes: auditoria da RUN 010 (§1.20) e ciclo pós-010 (§1.21) |
-| **Branch** | `feat/tesseract-optimization` — pós-005 `dfbf5e9`; pós-006 `f03710a` e `4a732c6`; T3-P22 tentativas 1–2 `bec686a`; pós-007 (T3-P22 tentativas 3–5, T3-P35) `ad43cb1`; pós-008 (T3-P34 t4, T3-P20 t2) `b1202ee`; pós-009 (T3-P20 t5, T3-P36, T3-P39) `95a6f72`; pós-010 (T3-P38 t3) `2fdad33`; pós-011 (T3-P06 t3) `18ccfb0`; pós-013 (T3-P43) `7df5285` |
-| **Baseline imutável** | `output/tesseract/001/` |
-| **Baseline corrigida** | `output/tesseract/002/` (T3-P00) |
-| **Baseline atual** | `output/tesseract/014/` (commit `7df5285`, T3-P43); antes `013/` (`b541246`, primeira referência do V11) |
-| **Última rodada** | `output/tesseract/014/` (2026-11-24 13:30–15:14 UTC; commit `7df5285`) — 9 corpora; V3–V9 idênticos à 013; V10/V11 iguais à reprodução offline (§1.38) |
-| **Próxima rodada** | RUN 015 (manual, pelo responsável) — para confirmar T3-P44 (implementado, não commitado); critérios na §5 (pós-014) |
-| **Configuração** | balanced · pt-BR · adaptive · tesseract · Markdown paginado · supplemental-audit. **Threads**: 6 até a 003; 8 desde a 005 (a 006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`). O Tesseract 5.5.0 usa no máximo 4 threads OpenMP por chamada (`num_threads(4)` fixo no LSTM), então 6 e 8 equivalem a 4 (§1.10) |
-| **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0 — **não alterado** |
-| **Corpus/gabaritos/manifestos** | **não alterados por nós**. **V11** (`corpus/V11/`, edição V11-R1C, 120 págs.) adicionado pelo responsável antes da RUN 013 e incluído em `scripts/run_tesseract_batch_wsl.py` (`b541246`). O diretório `corpus/V10/` foi substituído externamente em 2026-11-12, entre 07:56 e 07:59, durante a RUN 003 (ver T3-P15) |
-
-### Registro de status (todos os problemas, incluindo os resolvidos)
-
-| ID | Gravidade | Prioridade | Componente | Status |
-|---|---|---|---|---|
-| T3-P00 | CRÍTICO | — | executor | **RESOLVIDO** (002) |
-| T3-P01 | CRÍTICO | — | `api.py` | **RESOLVIDO** (003) |
-| T3-P02 | ALTO | — | backend Tesseract | **RESOLVIDO** (004; V3 p116 restante) |
-| T3-P03 | MÉDIO | — | `api.py` | **RESOLVIDO** (003) |
-| T3-P04 | INFO | P3 | avaliador | aberta |
-| T3-P05 | MÉDIO | P3 | montagem de linhas nativas | DOCUMENTADO — fora do escopo |
-| T3-P06 | ALTO | P1 | headings (`layout/heading.py` compartilhado; `layout/ocr_aware.py`) | **PARCIAL — CONFIRMADO NA RUN 012** (t3, `18ccfb0`, §1.28; 3/5): recall V4/V9/V10 0.562/0.457/0.634, nativas idênticas, nenhuma perda de conteúdo; precisão do V4 0.929 < 0.95, 3 categorias novas de falso título, hierarquia OCR documental (V10 `heading_level_match_rate` 0.519) e regressões V4 p95/p96/p104/p145/p149; inclinadas e V9 em regiões FIGURE fora do escopo |
-| T3-P07 | MÉDIO | P2 | V5 tabelas sem borda/ordem | PENDENTE (sem mudança na 003) |
-| T3-P08 | MÉDIO | P3 | dados críticos V9 | MELHOROU na 003 — monitorar |
-| T3-P09 | INFO | — | `ocr/tesseract/postprocess.py` | RISCO MATERIALIZADO — mitigado em T3-P25, T3-P26 e T3-P27 |
-| T3-P10 | CRÍTICO | — | reconstrução de linhas OCR + ordem de leitura | **RESOLVIDO** (004) |
-| T3-P11 | ALTO | — | executor (V10) | **RESOLVIDO** (004, via T3-P15) |
-| T3-P12 | MÉDIO | P2 | detecção visual de tabelas | PENDENTE — causa medida e reconfirmada na 006 (HoughLinesP ≈ 66% do tempo nas páginas pesadas; Tesseract 26%); PNG temporário mais rápido aplicado (§1.10) |
-| T3-P13 | BAIXO | — | regressões pontuais 001→002 | sem mudança na 003 (saídas V3–V8 idênticas) |
-| T3-P14 | INFO | — | suíte de testes | 13 falhas pré-existentes (inalteradas) |
-| T3-P15 | ALTO | — | executor | **RESOLVIDO** (004) |
-| T3-P16 | MÉDIO | — | classificação de página OCR vazia (`api.py`) | **RESOLVIDO** (004) |
-| T3-P17 | ALTO | P2 | `tables/ocr_tracks.py` | **RESOLVIDO** pelo critério (V10 precisão 0.947); L01/L02 inclinadas restantes |
-| T3-P18 | ALTO | — | backend Tesseract + ordem de colunas | **RESOLVIDO** (006: critérios de CER/recall atendidos); efeitos colaterais em T3-P31 e V4 p106/p156 |
-| T3-P19 | INFO | — | avaliador (`duplicate_excess_rate`) | INTERPRETAÇÃO DOCUMENTADA — não alterar |
-| T3-P20 | MÉDIO | — | segmentação de parágrafos OCR (`ocr/reconstruct.py`) | **PARCIAL — CONFIRMADO NA RUN 009** (t2 `b1202ee` + t5 local; 5/5, encerrado): F1 de parágrafos V4/V9/V10 sobe sem mudar palavras; regressão de fusões no V4 de coluna única registrada em T3-P38 |
-| T3-P21 | ALTO | P1 | reconhecimento Tesseract (limite) + pré-processamento | ABERTA — diagnóstico §1.31: piso adversarial do corpus (limite do Tesseract na configuração atual), degradação acima do piso e hipótese pós-OCR H-esp; exige experimento de OCR autorizado |
-| T3-P22 | ALTO | — | ordem de linhas e regiões em páginas nativas multicoluna (`text/reading_order.py`, `layout/decorative.py`, compartilhados) | **CORRIGIDO — CONFIRMADO NA RUN 008** (5/5 tentativas, encerrado): V10 p9/p59/p54, V4 p20/p25/p26/p28, V9 p90; restam V9 p51, p5/p43, p12/p19/p72 |
-| T3-P23 | CRÍTICO | — | backend Tesseract (`_parse_tsv`) | **RESOLVIDO** (004) |
-| T3-P24 | BAIXO | — | `layout/ocr_aware.py` (listas) | **RESOLVIDO** (004) |
-| T3-P25 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (004), com efeito colateral corrigido em T3-P26 |
-| T3-P26 | ALTO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (005) |
-| T3-P27 | CRÍTICO | — | `ocr/tesseract/postprocess.py` | **RESOLVIDO** (005) |
-| T3-P28 | ALTO | — | montagem de linhas Tesseract | **RESOLVIDO** (006: V8 p4/p58 `€ 98,40`, V8 `numeric` 0.991) |
-| T3-P29 | MÉDIO | P2 | layout de página nativa com `/Rotate 90` | PENDENTE — página inteira num único bloco (V4 p213/p214) |
-| T3-P30 | INFO | — | executor | **RESOLVIDO** (006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`) |
-| T3-P31 | **MÉDIO** (regressão confirmada na 006) | P0 | layout de regiões só-OCR + ordem genérica de linhas | **NÃO RESOLVIDO** — 5 tentativas pós-006; a melhor corrige as listas, mas intercala colunas (V10 p18); nenhuma mantida |
-| T3-P32 | ALTO | — | backend Tesseract (orientação e reconhecimento) | **RESOLVIDO** (007: V9 p20/p71 corretas, p55 01–04 e `numeric` 1.000); V9 p36/p92: causa distinta na integração; tentativa 5 revertida; **5/5, encerrado** |
-| T3-P33 | MÉDIO | P1 | tabela por trilhas OCR → `text_tracks._build_table` (compartilhado) | NOVO na 006 — exceção `Invalid BBox` na V9 p36 → V9 `partial_success`; PENDENTE |
-| T3-P34 | ALTO | P1 | tabela raster com inclinação pequena em página mista (`tables/visual.py`, `assemble/content.py`, compartilhados) | **PARCIAL — CONFIRMADO NA RUN 009** (4/5): V9 p58 (tabela 8×6, células exatas 0.646), p44 e p49 confirmadas; p66/p78/p25/p8 com causas distintas; valores corrompidos da p58 em T3-P39 |
-| T3-P35 | ALTO | P0 | calhas OCR fragmentadas → faixas de colunas (`ocr/reconstruct.py`, só Tesseract) | NOVO na 007 — **CORRIGIDO — CONFIRMADO NA RUN 008** para páginas raster sem inclinação (V10 L04–L06); inclinadas (L01/L02) pendentes; V10 p32 com reordenação a avaliar. **Mantido na RUN 009** (L04–L06 0.104; p32 0.311) |
-| T3-P36 | CRÍTICO | — | pós-processamento Tesseract (`ocr/tesseract/postprocess.py`) | **CORRIGIDO — CONFIRMADO NA RUN 010** (V4 p167/p168); risco residual documentado (§1.20) |
-| T3-P37 | ALTO | P1 | detector de tabelas nativo (compartilhado) | **NOVO na 009** — V9 p62/p72 desmontadas, p14 fundida |
-| T3-P38 | MÉDIO | — | segmentação de parágrafos OCR (`ocr/reconstruct.py`) | **CORRIGIDO — CONFIRMADO NA RUN 011** (t3, `2fdad33`; §1.22): fusões de volta ao nível da 008, ganhos de T3-P20 mantidos; resíduo V4 p137 |
-| T3-P39 | ALTO | — | montagem de linhas Tesseract (`ocr/reconstruct.py::_drop_conflicting_rereads`) | **CORRIGIDO — CONFIRMADO NA RUN 010** (V9 p58/p66; também V6 p11, V8 p49/p67) |
-| T3-P40 | INFO | — | corpus/gabarito V5 | **RECLASSIFICADO** (§1.19): o PDF não contém os títulos exigidos pelo gabarito; sem alteração de código nem do corpus |
-| T3-P41 | MÉDIO | P0 | segmentação de parágrafos **nativa** (compartilhada) | **PENDENTE — CAUSA RAIZ IDENTIFICADA (§1.31); adiado pela prioridade ao V11 (§1.35)** (registrado na auditoria da RUN 011; desde a 001): V4 p9–p40 com os parágrafos de cada página num só bloco; 227 das 417 fusões do V4; impacto na nota só estimado (não oficial, não validado); exige autorização |
-| T3-P42 | ALTO | — | `layout/heading.py::_merge_heading_fragments` (descartava `ocr_lines` do 2º fragmento) | **CORRIGIDO — CONFIRMADO NA RUN 012** (§1.28): V10 p5/p11/p31/p62 recuperam 83 palavras do gabarito; perda silenciosa até a 011 |
-| T3-P43 | ALTO | — | `assemble/repeated_regions.py` (assinatura de mobília; compartilhado) | **CORRIGIDO — CONFIRMADO NA RUN 014** (§1.38; critérios revisados; resíduos de mobília registrados) |
-| T3-P44 | CRÍTICO | P0 | `ocr/backends/tesseract.py::_deskew_page` (seleção entre leituras) | **CORRIGIDO — VALIDADO PONTUALMENTE** (§1.39; 61 páginas inclinadas, 7 corpora; não commitado); aguarda RUN 015 |
-| T3-P45 | ALTO | P1 | detecção/fusão de tabelas nativas (compartilhado) | **NOVO (RUN 013)** — duplicação na V11 p50/p93 |
-| T3-P46 | ALTO | P1 | detector de tabelas sem borda nativo (compartilhado) | **NOVO (RUN 013)** — colunas e lista nativas como tabela (V11 p5/p98/p86) |
-| T3-P47 | ALTO | P2 | detector de tabelas nativo (compartilhado) | **NOVO (RUN 013)** — tabelas empilhadas/formulário desmontadas (V11 p57 e outras) |
-| T3-P48 | MÉDIO | P3 | — (recurso inexistente) | **NOVO (RUN 013)** — checkboxes vetoriais (V11 p54) |
-| T3-P49 | MÉDIO | P1 | reconstrução OCR em página inclinada | **NOVO (RUN 013)** — ordem de linhas invertida (V11 p61; p71 depois de T3-P44) |
-| T3-P50 | INFO | — | gabarito V11 (convenção) | **REGISTRADO (RUN 013)** — nível `#` por página |
 
 ---
 
@@ -2573,6 +3178,78 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 **Status**: T3-P44 **CORRIGIDO — VALIDADO PONTUALMENTE** (1/5; não commitado). **Não** declarado resolvido antes da RUN 015.
 
+### §1.40 RUN 015: auditoria integral e confirmação de T3-P44 (análise de 2026-11-25, commit `1717bd5`)
+
+**Rodada**: `output/tesseract/015/`, 2026-11-25 10:15:18–11:55:40 UTC, executada pelo responsável. Baseline: `output/tesseract/014/` (`7df5285`). Auditoria sem extração e sem OCR: scripts novos no scratchpad, só leitura; avaliador oficial e rubrica chamados em memória. **Nenhuma análise anterior da 015 estava documentada**; as capturas e os experimentos geométricos de `output/tesseract/_captures/geometry_1717bd5/` (2026-11-25, antes desta auditoria) foram reaproveitados depois de verificar que reproduzem a 015 byte a byte, e os resultados usados aqui foram reavaliados de forma independente.
+
+**Verificações operacionais**:
+
+| Item | Resultado |
+|---|---|
+| Status | 9/9 `extract_exit_code 0` e `metrics_exit_code 0`, `rank_eligible`; V9 `partial_success`/`partial` (T3-P33, mesma exceção `Invalid BBox` na p36); demais `success`/`valid` |
+| Commit | `implementation_commit 1717bd5` nos 9 JSONs; commit de 2026-11-25 07:12 −03, rodada iniciada 07:15 −03 |
+| Avaliador | `evaluation-3.0.0`, métricas 3.1.0; todas as políticas iguais às da 014 |
+| Hashes | `input_hashes` do `run_summary.json` e `pdf_sha256`/`manifest_sha256`/`reference_effective_sha256` dos JSONs iguais aos da 014; SHA-256 dos 9 PDFs recalculado do disco e igual |
+| Configuração | `settings`, `extractor_flags`, `threads 8`, `tesseract_omp_thread_limit 8` e ambiente de execução iguais aos da 014 |
+| Cobertura | métricas aplicáveis iguais (V3 61, V4 61, V5 67, V6 63, V7 65, V8 65, V9 67, V10 61, V11 60); páginas recuperadas, degradadas, avisos de documento e relatórios por página **idênticos** aos da 014 nos 9 corpora (inclusive a V11 p71: `warnings: []`) |
+| Saídas × 014 | **V3–V10 idênticas byte a byte**; V11 difere **só na p71** |
+| Rubrica | recalculada por implementação independente da §1.16; igual à ferramenta usada nas rodadas anteriores (diferença 0) |
+| Tempo de extração (014 → 015) | V3 347 → 348 s; V4 2564 → 2493; V5 83 → 87; V6 658 → 606; V7 166 → 169; V8 410 → 391; V9 634 → 619; V10 566 → 540; V11 617 → 576. Saídas idênticas fora da V11: a variação é do ambiente; a regra nova de T3-P44 não tem custo mensurável |
+
+**Notas**: tabela da §0.1. Só o V11 muda: 70.37 → **71.68** (Texto 70.6 → 70.8, Cobertura 88.6 → 89.7, Parágrafos 66.8 → 67.1, Tab. estr. 79.6 → 80.2, Tab. cél. 75.9 → 76.0, Dados 71.3 → 71.4; Títulos, Listas e Ordem iguais; penalidade −1.0 → 0).
+
+**Métricas oficiais da 015 (documento)**:
+
+| Corpus | Págs. | CER | WER | Recall | Precisão | Títulos F1 / nível | Parágrafos F1 / fronteiras | Itens de lista F1 | Tabelas F1 | Células exatas | Alinhamento | `numeric` (fp/fn) | Ordem (pares) | `duplicate_excess_rate` | Avisos |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| V3 | 144 | 0.0128 | 0.0239 | 0.9828 | 0.9900 | 0.867 / 0.000 | 0.923 / 0.917 | 1.000 | 1.000 | 0.985 | 0.995 | 0.991 (5/8) | 1.0000 | 0.038 | 0 |
+| V4 | 224 | 0.0376 | 0.1312 | 0.8941 | 0.9196 | 0.700 / 0.000 | 0.489 / 0.591 | 0.894 | 0.908 | 0.638 | 0.741 | 0.897 (1642/254) | 1.0000 | 0.659 | 4 |
+| V5 | 42 | 0.1088 | 0.1162 | 0.9207 | 0.9951 | 0.857 / 0.961 | 0.822 / 0.855 | 1.000 | 1.000 | 1.000 | 1.000 | 0.993 (2/2) | 0.9998 | 0.055 | 2 |
+| V6 | 95 | 0.0079 | 0.0155 | 0.9881 | 0.9919 | 0.990 / 1.000 | 0.963 / 0.964 | 1.000 | 1.000 | 0.939 | 0.981 | 0.965 (33/18) | 1.0000 | 0.033 | 3 |
+| V7 | 80 | 0.0013 | 0.0030 | 0.9994 | 0.9970 | 0.989 / 1.000 | 0.968 / 0.984 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 (0/0) | 1.0000 | 0.015 | 0 |
+| V8 | 90 | 0.0057 | 0.0066 | 0.9941 | 0.9980 | 0.993 / 1.000 | 0.953 / 0.972 | 1.000 | 1.000 | 0.999 | 1.000 | 0.992 (10/6) | 1.0000 | 0.038 | 0 |
+| V9 | 96 | 0.0717 | 0.0819 | 0.9909 | 0.9897 | 0.509 / 0.768 | 0.605 / 0.711 | 0.839 | 0.860 | 0.604 | 0.632 | 0.954 (18/59) | 0.9995 | 0.416 | 5 |
+| V10 | 84 | 0.1234 | 0.1470 | 0.9937 | 0.9916 | 0.729 / 0.519 | 0.511 / 0.646 | 0.795 | 0.974 | 0.895 | 0.930 | 0.983 (31/12) | 0.9995 | 0.494 | 20 |
+| V11 | 120 | 0.0857 | 0.1194 | 0.9734 | 0.9628 | 0.693 / 0.056 | 0.663 / 0.679 | 0.311 | 0.812 | 0.750 | 0.786 | 0.964 (101/61) | 0.9998 | 0.345 | 5 |
+
+- **Avisos e exceções**: iguais aos da 014. V9: exceção `Invalid BBox` na p36 (T3-P33) e 4 `unaccounted_content`; V4: `suspected_ocr_garble` em p167/p168 (T3-P36) e `unaccounted_content` em p185/p186; V10: 19 páginas sem tinta textual (corretas) e `table_structure_uncertain` na p4; V11: 4 controles negativos vazios (corretos) e `unaccounted_content` na p118.
+- **Páginas**: 974 de 975 idênticas à 014; **nenhuma piorou em cobertura**; a V11 p71 melhorou em recall, CER e ordem de blocos, mas **piorou** em WER (0.681 → 0.712), na ordem interna do parágrafo R200 e no identificador "FG-711".
+
+**V11 (014 → 015)**: CER 0.08685 → 0.08570; WER 0.11909 → 0.11942; recall 0.967214 → **0.973445**; precisão 0.96353 → 0.96278; tabelas tp 66 → 67, fn 21 → 20 (F1 0.8049 → 0.8121); linhas de tabela F1 0.8519 → 0.8559; contagem de colunas 0.6429 → 0.6531; células F1 0.8858 → 0.8876; alinhamento 0.7839 → 0.7864; `cell_cer` 0.3513 → 0.3517; `table_content_f1` 0.8553 → 0.8540; `numeric` 0.9633 → 0.9638 (tp 2155 → 2158, fp 100 → 101, fn 64 → 61); parágrafos F1 0.6628 → 0.6633, fronteiras 0.6741 → 0.6789; `duplicate_excess_rate` 0.3414 → 0.3453. Auditoria suplementar: entidades críticas tp 3090 → 3119, fn 339 → 310, fp 287 → 289.
+
+**V11 p71 (único caso positivo de T3-P44)**, comparada com o gabarito:
+
+| Aspecto | 014 | 015 | Leitura |
+|---|---|---|---|
+| Recuperação | recall 0.323, volume 0.343 (penalidade −1.0) | recall **0.935**; R201, R202 e R075 presentes; CER 0.666 → 0.557 | **[F] confirmada** |
+| Ordem das linhas | R200 em ordem correta (leitura direta) | **os 4 parágrafos** (inclusive R200) com as linhas de baixo para cima, cada parágrafo numa linha; pares de leitura 0.818 → 0.914, blocos 0.667 → 0.929; WER 0.681 → **0.712** | **[F] piora local**: mecanismo FORM de T3-P49 (§0.2) |
+| Tabela | não detectada; "Lote", "ET TT \|", "\| FG-711", "FETIZ", "E", "FG7I3" soltos | detectada (F1 0 → 1), mas inserida **entre a 1ª e a 2ª linha do 1º parágrafo**; células "==.em o ss CC", "\|6,8kg To 4", "FG-712 o", "\|\| FG713 ———— O ee ee O A", "2,1 kgse oo o o\|"; 0 células exatas; `cell_cer` 1.0 → 1.26 | **[F]** contaminação pelo carimbo; posição **[H]** caixa inflada da tabela (E1 corrige) |
+| Identificadores | "4D8AAGA3" ×2 errados; FG-711 presente; FG-712/FG-713 ausentes | "4D8AA6A3" corretos; **"FG-711" perdido** (confiança 93 na leitura direta; na releitura a região tem só "em", confiança 49, sem par, e a regra o conta como preservado — AI-05, §0.9); "FG713" sem hífen; "V11-P071RO75" ×3 e "controleiV1T-P071RO75" | **[F]** troca local de erros; entidades críticas da página tp 9 → 38, fn 34 → 5, fp 3 → 5 |
+| `numeric` da página | tp 1 / fp 0 / fn 5 | tp 3 / fp 2 / fn 3 | 2 fp do lixo do carimbo |
+| Título e parágrafos | título não detectado; parágrafos F1 0 | título não detectado; parágrafos F1 0 (0 de 6); fronteiras 0 → 0.267 | estrutura continua ruim |
+| Aviso ao consumidor | nenhum | nenhum; relatório da página igual ao da 014; fatos não exportados | **[F]** T3-P53 |
+
+**Critérios da §5 (pós-014) para a RUN 015**:
+
+| Critério | Resultado | |
+|---|---|---|
+| V11: só a p71 difere da 014 | só a p71 | ✅ |
+| V11 nota 71.7 ± 0.1 | 71.68 | ✅ |
+| `text_coverage_recall` 0.9734 ± 0.0005 | 0.973445 | ✅ |
+| Penalidade de perda de volume 0 | 0 (era −1.0) | ✅ |
+| p71 recall ≥ 0.93 | 0.9346 | ✅ |
+| p71 com decisão `deskewed_more_complete` | sim, na reprodução com o código `1717bd5` e o cache de TSV, idêntica à 015 (os fatos não estão nos artefatos oficiais) | ✅ indireto |
+| R201, R202, R075 presentes | presentes, com linhas invertidas | ✅ (ordem esperada inversa, T3-P49) |
+| ≤ 18 linhas de mobília; 7 "Continuação…"; `numeric` fp ≤ 101 | 18 + 3 fundidas (21 ocorrências, iguais à 014); 7; 101 | ✅ |
+| V3–V10 idênticos byte a byte | sim | ✅ |
+| `tesseract_more_complete_read_discarded` falso nos 9 corpora | falso nas **61 páginas inclinadas** (reprodução de `geometry_1717bd5` com o código `1717bd5`); nas outras 914 páginas **não verificável**: o executor não exporta os fatos | ⚠️ parcial |
+| Páginas com `tesseract_deskew_decisions` = as 61 da §1.39 | as 61 têm decisões (96: 76 `deskewed`, 19 `upright`, 1 `deskewed_more_complete`); a ausência de decisões nas demais páginas **não é verificável** pelos artefatos oficiais. Fato complementar: como V3–V10 e as outras 119 páginas do V11 não mudaram, nenhuma decisão **aceita** pela regra nova ocorreu fora da p71 | ⚠️ parcial |
+| Nenhum aviso novo; nenhuma página com recall menor; tempo dentro do ruído | sim | ✅ |
+
+**Validade das capturas (verificada nesta auditoria)**: a reprodução de `assemble_input_b541246` com o código atual é idêntica byte a byte à 015 em V3–V10 (e à 014 no V11, que só difere na p71). `geometry_1717bd5/e1/*_page/base.md` é idêntico à 015 em V3, V4, V6, V8, V9, V10 e V11. As capturas valem para qualquer mudança posterior ao OCR; não valem para mudanças no reconhecimento ou na seleção de leituras (para isso, o cache de TSV de `ocr_deskew_7df5285` serve às 61 páginas inclinadas).
+
+**Conclusão**: T3-P44 **CORRIGIDO — com resíduos**, confirmado na RUN 015 quanto à recuperação de conteúdo e à estabilidade (nenhuma outra página mudou). **Não** declarado resolvido: a p71 continua com ordem invertida (agora também no parágrafo que estava certo), perde "FG-711", traz lixo do carimbo na tabela, insere a tabela no meio de um parágrafo e segue sem aviso; a regra tem um único positivo real. Novos problemas e a auditoria de overfitting estão na §0.
+
 ## §2 Problemas — detalhamento
 
 ### T3-P00 | CRÍTICO | Executor sem tabelas e sem supressão de cabeçalho/rodapé — RESOLVIDO
@@ -2599,7 +3276,7 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Efeito colateral observado**: o texto recuperado expôs T3-P10 (colunas) e T3-P20 (parágrafos fragmentados) no V9.
 - **Status**: RESOLVIDO.
 
-### T3-P02 | ALTO | Páginas escaneadas rotacionadas — RESOLVIDO (004)
+### T3-P02 | ALTO | Páginas escaneadas rotacionadas — RESOLVIDO (004); V3 p116 reatribuída a T3-P27 (auditoria pós-015)
 
 - **RUN 004**: V3 p96 0.246, p97 0.000, p98 0.000, p99 0.159; V4 p109–p114 0.031–0.060. Critério atendido. Restante: V3 p116 (tabela girada) 0.436.
 
@@ -2628,6 +3305,8 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Testes**: `tests/test_tesseract_run003_regressions.py` — releitura e aceite, sem retry em página confiante/degradada em pé, exigência de ganho, gatilho por linhas verticais, orientação inversa nos tokens, proteção da reconstrução para linhas verticais.
 - **Limitações**: V3 p98/p99 não estavam no conjunto pontual. A V3 p116 ainda tem CER 0.436 (tabela girada parcial).
 - **Critério para a 004**: CER de V3 p96–p99 e V4 p109–p114 < 0.30, sem mudança em páginas em pé.
+
+- **Auditoria pós-015 (§0.3)**: a tabela girada da V3 p116 está exata na 015. A perda restante da página (recall 0.581) vem da supressão de um bloco pelo marcador de corpus `_CORPUS_DOC_HEADER_RE` (T3-P27, §0.5 OF-01), não da rotação: a V3 p116 sai do escopo restante. **Status**: RESOLVIDO — confirmado.
 
 ### T3-P03 | MÉDIO | V8 `partial_success` por região menor que um glifo — RESOLVIDO (003)
 
@@ -2674,6 +3353,8 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
   - **Regressões novas não cobertas pela validação pontual**: V4 p95/p96 (título unido à linha "Controle de página"), p145/p149 (linhas de tabela não detectada unidas num parágrafo), p104 (CER 0.528 → 0.546). Previstas e confirmadas: p118 (parágrafos) e p100 ("R$" | "14.057,00").
   - **Status**: PARCIAL — CONFIRMADO NA RUN 012. Não reverter. Próxima tentativa (t4, 4/5) recomendada depois de T3-P35 (§1.30), com escopo em hierarquia por página e nas regressões; exige nova autorização para `layout/heading.py`.
 
+- **Auditoria pós-015 (§0.2, §0.5 OF-15)**: a 015 é igual à 012 nas páginas de título. [F] os níveis OCR dependem do documento inteiro: o experimento E1 (geometria endireitada só nas páginas inclinadas) muda níveis de títulos em páginas não inclinadas do V11 (p31, p40, p51, p64, p65, p68, p73, p83, p100). [H] nas inclinadas, a razão título/corpo usa alturas de linha infladas. Os títulos raster ausentes também ocorrem em páginas niveladas: não há causa única. **Status**: PARCIAL.
+
 ### T3-P07 | MÉDIO | V5: tabelas sem borda e ordem embaralhada — PENDENTE
 
 - **Reavaliação pós-009**:
@@ -2686,13 +3367,17 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 - 002 → 003: `numeric` 0.852 → 0.934, `currency` 0.914 → 0.936, `dates` 0.859 → 0.964, `cpf`/`cnpj` 0.909 → 1.000. Monitorar.
 
-### T3-P09 | INFO | Regras ajustadas ao corpus em `ocr/tesseract/postprocess.py` — RISCO MATERIALIZADO
+### T3-P09 | ALTO (era INFO) | Regras ajustadas ao corpus em `ocr/tesseract/postprocess.py` — PENDENTE: REABERTO NA AUDITORIA PÓS-015 (overfitting confirmado, §0.5)
 
 - O módulo tem regras ligadas a marcadores do corpus ("OMITIR NO GABARITO", cabeçalhos "OCR PURO * SCAN", "Página NNN |").
 - O risco se materializou duas vezes: a supressão de "dump de coordenadas" escondia o bug real do parser (T3-P23), e a supressão de separador "Página NNN" apagava corpo de texto (T3-P25). As duas foram tratadas.
 - **Risco remanescente**: `_suppress_ocr_corpus_markers` ainda suprime o bloco inteiro quando `_OMITIR_GABARITO_RE` casa em qualquer ponto do texto. Não foi alterada, porque também trata intencionalmente tabelas com o marcador partido.
 
-### T3-P10 | CRÍTICO | Linhas OCR fundidas entre colunas — RESOLVIDO (004)
+- **Auditoria pós-015 (§0.5, OF-01 a OF-05)**: **reaberto e elevado a ALTO**. As regras de texto dos corpora continuam no caminho de produção e são silenciosas (motivos classificados como mobília). Censo da 015: 17 blocos suprimidos no V3, 20 no V4 e 6 no V6; contrafactual sem elas: V3 93.14 → 88.01, V6 96.73 → 95.99, V4 66.86 → 66.56. Causam a perda da V3 p116 (T3-P27). A justificativa de `_suppress_v6_irinf_artifacts` ("absent from V3/V5/V7 corpora, so … no false-positive risk") usa os próprios corpora como prova de generalização. **Status**: PENDENTE — reaberto.
+
+- **Confronto com a auditoria independente (AI-01, §0.9)**: contraexemplos reproduzidos — frases de corpo e uma tabela inteira suprimidas sem aviso por um único marcador. **Severidade elevada a CRÍTICO**.
+
+### T3-P10 | CRÍTICO | Linhas OCR fundidas entre colunas — RESOLVIDO (004); CORRIGIDO — COM RESÍDUOS desde a auditoria pós-015 (V11 p100)
 
 - **RUN 004**: CER multicoluna V4 0.743 → 0.178, V9 0.518 → 0.142, V10 L03–L06 + controles 41/50 = 0.181; CER documental V4 0.080, V9 0.102, V10 0.264. Critérios atendidos. Restante: V9 p43/p51 (0.47/0.55, inalteradas desde a 003 — a investigar) e V10 L01/L02 (T3-P18).
 
@@ -2719,6 +3404,8 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Testes**: `tests/test_tesseract_run003_regressions.py` — 2 e 3 colunas, linha final curta, tabela com células em blocos, linha larga de metadados, calha fora da extensão vertical, tokens sem identidade (caminho anterior), ordem por faixas (3 + 2 colunas), títulos de coluna, transporte do campo, identidade no TSV.
 - **Critério para a 004**: CER das páginas multicoluna V4 ≤ 0.25, V9 ≤ 0.30, V10 L03–L06 ≤ 0.30; CER documental V4 ≤ 0.17, V9 ≤ 0.15, V10 ≤ 0.35; V3/V5–V8 com Δ ≤ ±0.005 nas métricas de texto e tabela.
 
+- **Auditoria pós-015 (§0.4)**: resíduo novo na V11 p100 (raster nivelada, paisagem, 3 colunas de 2 linhas): as linhas das 3 colunas já saem unidas da reconstrução OCR ("O primeiro conjunto apresentou deformação abaixo do O dispositivo …"); CER 0.280 com recall 1.0. [H] `_GUTTER_MIN_ROWS = 3` (`ocr/reconstruct.py:386`) impede a calha em colunas tão curtas. **Status**: CORRIGIDO — com resíduos.
+
 ### T3-P11 | ALTO | V10 não avaliável pelo executor — REABERTO na 003, corrigido via T3-P15
 
 - A correção da 002 (fallback `_REFERENCIA_PAGINADA.md`) funcionou na pré-verificação da 003. A falha veio da troca do corpus durante a rodada (T3-P15).
@@ -2742,11 +3429,11 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Por que não foi corrigido**: um filtro antes do Hough muda a evidência analisada no recorte, então não preserva exatamente as tabelas detectadas. A correção exige validação byte a byte das tabelas em todos os corpora.
 - **Opções**: limitar o número de componentes por área ou estrutura; reaproveitar o resultado do Hough de página para componentes contidos; paralelizar páginas. Toda opção deve manter idênticas as métricas de tabela de V3–V9.
 
-### T3-P13 | BAIXO | Regressões pontuais 001 → 002 — sem mudança
+### T3-P13 | BAIXO | Regressões pontuais 001 → 002 — NÃO REPRODUZIDO (encerrado na auditoria pós-015)
 
 - As saídas de V3–V8 da 003 são idênticas às da 002. Os itens listados (V3 `percent`, V4 `currency`, V5 recall/`paragraph_boundary_recall`, V6 `paragraph_detection_recall`, V9 headings/listas) não pioraram.
 
-### T3-P14 | INFO | Falhas pré-existentes na suíte de testes
+### T3-P14 | INFO | Falhas pré-existentes na suíte de testes — NÃO VERIFICÁVEL na auditoria pós-015 (suíte não executada; 13 falhas em 2026-11-24)
 
 - As mesmas 13 falhas: `test_line_detector.py` (8 `test_reconciliation_*`), `test_rapidocr_improvement_005/006/008.py` (3), `test_no_timeouts.py::test_production_code_has_no_timeout_keyword_argument` e `test_evaluation_exact_optimizations.py::test_full_ground_truth_self_control_is_complete_and_perfect[V3]`. Nenhuma toca o código alterado.
 
@@ -2781,7 +3468,7 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Testes**: `tests/test_tesseract_run003_regressions.py` (texto em qualquer orientação; página gráfica; entrada ilegível → conservador).
 - **Critério para a 004**: V10 `extraction_status=success`; nenhuma página com texto marcada como `blank_page`.
 
-### T3-P17 | ALTO | Colunas de texto detectadas como tabela sem borda — RESOLVIDO pelo critério (004)
+### T3-P17 | ALTO | Colunas de texto detectadas como tabela sem borda — RESOLVIDO pelo critério (004); CORRIGIDO — COM RESÍDUOS (L01/L02 inclinadas)
 
 - **RUN 004**: V10 `table_detection_precision` 0.391 → 0.947, `table_row_detection_precision` 0.191 → 0.972, `cell_cer` 7.05 → 0.18. As páginas L01/L02 seguem com CER alto por causa do OCR (T3-P18).
 
@@ -2900,11 +3587,13 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Testes** (acréscimos): linha sem descendentes não abre parágrafo (geometria da V10 p32; falha no código de `b1202ee`); caixas infladas pela inclinação não emprestam descendente através de um vão real (geometria da V9 p17; falha com a tentativa 3).
 - **Testes**: `tests/test_tesseract_run008_regressions.py` — variação de caixa não parte o parágrafo (geometria da V10 p11); vão apertado entre parágrafos continua separando (geometria da V4 p140; falha com 0.35).
 
-### T3-P21 | ALTO | V4: recall ≈ 0.85 em OCR de texto, inclusive em digitalização limpa — ABERTA (diagnóstico §1.31)
+### T3-P21 | ALTO | V4: recall ≈ 0.85 em OCR de texto, inclusive em digitalização limpa — LIMITAÇÃO DA ENGINE na configuração atual (diagnóstico §1.31; hipótese H-esp não verificada)
 
 - O bug do TSV (T3-P23) explica só uma parte (V4 p81 0.869 → 0.880; p85 0.867 → 0.875).
 - **Hipótese**: diferença entre a projeção de cobertura e o CER (por exemplo, marcação no gabarito, como `## Página …` e `**Controle de página:**`). Investigar no avaliador sem alterá-lo.
 - **Diagnóstico pós-012 (§1.31)**: a hipótese de marcação do gabarito não se confirma. O piso vem do **reconhecimento** dos segmentos adversariais do corpus (IDs `O0I1l-rnm`, caminhos com `\` e `_`, sinais `x < 7, y > 2, A & B`, lista de confundíveis): 82% dos tokens ausentes; palavras comuns perdem só 4.3%. Configuração atual: `por`, `--oem 1`, `--psm 3`, perfil `default`, 288 dpi (rasters de origem 72–300 dpi; mais DPI não acrescenta informação). Pós-OCR possível: H-esp (`_needs_space` cola tokens sobrepostos em fronteira não alfanumérica; ≈ 531 números falsos `0.1`/`1.1`), não verificada. Experimentos propostos (exigem OCR e autorização): TSV da p81; perfil `tesseract-degraded-scan-v1` (CLAHE) em sombra e ruído.
+
+- **Auditoria pós-015**: no V11, confusões O/0 em identificadores ("V11-P071R075" → "V11-P071RO75") em 19 páginas raster; p63 `numeric` fn 49; p75 recall 0.643 sem aviso (T3-P53). Correção pós-OCR de identificadores só seria aceitável com formato declarado pelo usuário, nunca derivada do gabarito. **Status**: LIMITAÇÃO DA ENGINE (configuração atual); hipótese H-esp não verificada.
 
 ### T3-P22 | ALTO | Colunas fundidas em páginas **nativas** multicoluna — CORRIGIDO — CONFIRMADO NA RUN 008 (5/5 tentativas; parcial)
 
@@ -2957,6 +3646,8 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **RUN 009**: correções mantidas (V10 p9/p54/p59, V4 p20/p25/p26/p28, V9 p90 idênticas à 008). A V9 p72 (duas tabelas nativas lado a lado) passa a ser acompanhada em **T3-P37**.
 - **Restante de T3-P22 (sem tentativas)**: V9 p51 (três colunas lidas como tabela), V9 p5/p43 (títulos de colunas fundidos, T3-P05), V9 p43/p12/p19 (blocos isolados de coluna classificados como "status" — a tentativa 4 os corrigia com efeitos colaterais).
 - **Status**: CORRIGIDO — VALIDADO PONTUALMENTE (V10 p9/p59/p54, V4 p20/p25/p26/p28, V9 p90). Pendente de validação integral na RUN 008; tentativas esgotadas.
+
+- **Auditoria pós-015**: os dois itens "☐" falsos da V9 p90 (resíduo listado aqui) são criados pelo pós-processamento Tesseract (T3-P51) a partir da 2ª linha das células que fica fora da grade. **Status**: PARCIAL (encerrado).
 
 ### T3-P23 | CRÍTICO | Parser TSV engolia linhas após palavra iniciada por aspas — RESOLVIDO (004)
 
@@ -3012,7 +3703,7 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Testes**: `tests/test_tesseract_postprocess.py::test_wrapped_pagina_title_block_is_suppressed`. `test_pagina_block_that_continues_with_body_text_is_kept` (T3-P25) continua passando.
 - **Critério para a 005**: V3 `heading_precision` ≥ 0.92 e `heading_text_cer` ≤ 0.20 (valores da 003); V3 `text_coverage_precision` ≥ 0.979.
 
-### T3-P27 | CRÍTICO | Página nativa inteira descartada como marcador do corpus (V4 p213/p214) — RESOLVIDO (005)
+### T3-P27 | CRÍTICO | Página nativa inteira descartada como marcador do corpus (V4 p213/p214) — RESOLVIDO (005); CORRIGIDO — COM RESÍDUOS desde a auditoria pós-015 (V3 p116)
 
 - **RUN 005**: p213/p214 com CER 0.041 e recall 1.000; V4 `text_coverage_recall` 0.888. Mudaram só essas duas páginas.
 
@@ -3032,6 +3723,8 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
   - A página continua num único bloco: `paragraph_detection_f1` 0 nessas páginas, e `aligned_block_text_cer` do escopo V4 0.754 → 0.884. Ver T3-P29.
 - **Testes**: `tests/test_tesseract_postprocess.py::test_marker_inside_whole_page_block_does_not_suppress_page_content`, `test_marker_sized_blocks_are_still_suppressed`. Os testes existentes de marcadores, inclusive os de tabela, continuam passando.
 - **Critério para a 005**: V4 p213/p214 com recall ≥ 0.95; V4 `text_coverage_recall` > 0.877.
+
+- **Auditoria pós-015 (§0.4)**: **resíduo encontrado**. A V3 p116 perde "**Controle de página:** QA-P116" e "Mesmo conjunto de células do cenário de controle pareado; variar apenas a condição visual." (119 caracteres; recall 0.581, volume 0.56, igual desde pelo menos a 009). O OCR uniu cabeçalho do corpus, título e corpo num bloco de 239 caracteres, abaixo do limite de 400, e `_CORPUS_DOC_HEADER_RE` suprimiu o bloco inteiro, sem aviso. Sem as regras de corpus, a página tem recall 1.0 (contrafactual offline). A perda era atribuída a T3-P32. **Status**: CORRIGIDO — com resíduos.
 
 ### T3-P28 | ALTO | Valor monetário colado em célula de tabela (V8 p4/p58) — RESOLVIDO (006)
 
@@ -3135,6 +3828,8 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
   - **Tentativa 5** (hipótese nova e fundamentada: leituras perpendiculares não são leituras do mesmo texto): grade transposta aceita como equivalente; conservação e linhas de origem ignorando leituras OCR perpendiculares à releitura. Resultado na sonda: (1) e (2) superadas na p92 (releitura aceita, 5×3), mas (3) persistiu e a p36 parou em (4). **Revertida integralmente** (código igual a `ad43cb1` nesses arquivos): seguir exigiria afrouxar em cadeia verificações de autorização e validação do núcleo de integração, sem resultado medido — não é correção segura.
   - **Situação**: 5/5 tentativas, **encerrado**. Nova abordagem só com aprovação; a direção identificada é tratar a releitura girada da região como **substituta** da leitura da página dentro da tabela (no núcleo de integração), com regras explícitas de autorização.
 
+- **Auditoria pós-015**: a V3 p116 não pertence a este problema: a tabela girada sai exata; a perda da página é T3-P27. Restantes: V9 p36, p92. **Status**: PARCIAL (encerrado, 5/5).
+
 ### T3-P33 | MÉDIO | Exceção `Invalid BBox` na estrutura de tabela por trilhas OCR (V9 p36) — PENDENTE
 
 - **Evidência**: único motivo do `partial_success` do V9 na 006: `OCR table structure unavailable: ValueError: Invalid BBox coordinates: BBox(x0=63.2, y0=526.1, x1=237.8, y1=521.3)`. Reproduzido no harness.
@@ -3200,7 +3895,9 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Diagnóstico pós-011 (§1.26, sem alteração)**: a leitura endireitada de T3-P18 é devolvida como envelope alinhado aos eixos, inflando cada linha de coluna em 10.5–12.5 pt (1.6–1.9× uma linha de corpo). Proposta nova: fazer linhas, layout OCR, parágrafos e ordem no referencial endireitado em páginas raster integrais com |θ| ≥ 1°, recuperando a geometria exata (inversão verificada, erro ≤ 0.01 px) e mantendo inalterados os componentes compartilhados de ordem. Hipótese H1 refutável no Nível 1, sem OCR. Exige autorização para o ponto de orquestração em `api.py`. Tentativas: 2 / 5 (nenhuma gasta).
 
 
-### T3-P36 | CRÍTICO | Tabela OCR suprimida silenciosamente (V4 p167/p168) — CORRIGIDO — VALIDADO PONTUALMENTE (pós-009, 1/5)
+- **Auditoria pós-015 (§0.2)**: nas 12 inclinadas L01/L02, [F] todas têm regiões em modo FORM com linhas da mesma coluna empilhadas (mecanismo de T3-P49) e [H] a reconstrução já devolve 14–18 de ≈ 45 pares de linhas fora de ordem (calhas inclinadas). Contrafactual offline E1 (geometria endireitada): V10 78.32 → 79.88, recall idêntico, nenhuma página pior. Tratar junto com T3-P49. **Status**: PARCIAL.
+
+### T3-P36 | CRÍTICO | Tabela OCR suprimida silenciosamente (V4 p167/p168) — CORRIGIDO — COM RESÍDUOS (confirmado na RUN 010; coluna "Idioma" da p168)
 
 - **Evidência**:
   - V4 p167 (`ocr_table`, `grayscale`, `table_unicode`, 120 dpi) e p168 (mesma tabela, outra degradação) devem conter uma tabela 3 × 7 multilíngue: Português, English, Español, Deutsch, Grego, Cirílico.
@@ -3235,7 +3932,7 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Componente**: detector de tabelas e layout **nativos** (compartilhados). Risco de regressão em V5–V8.
 - **Próximo passo**: diagnóstico por etapa; sem tentativa.
 
-### T3-P38 | MÉDIO | Fusão de parágrafos independentes em OCR denso de coluna única — CORRIGIDO — CONFIRMADO NA RUN 011 (t3, 3/5)
+### T3-P38 | MÉDIO | Fusão de parágrafos independentes em OCR denso de coluna única — CORRIGIDO — CONFIRMADO NA RUN 011 (t3, 3/5); com resíduo (V4 p137)
 
 - **Evidência**:
   - Nas 10 páginas abaixo, todas de OCR de texto em **coluna única** (V4, 9 parágrafos por página, cerca de 800 palavras, 110–200 dpi com ruído/blur/JPEG/listras), a 009 junta parágrafos que a 008 separava:
@@ -3340,7 +4037,7 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Efeitos colaterais**: o texto recuperado entra no bloco do primeiro fragmento (CER da p5 0.157 → 0.160 e da p31 0.277 → 0.283; 1 fusão nova em p31 e em p62); a V10 p62 passa a contar como "erro de ordem" na rubrica (recall ≥ 0.95 com CER 0.251), o que baixa a categoria Ordem do V10 sem piora real. Na p11 o fragmento fundido virou um falso título (linha de corpo).
 - **Status**: CORRIGIDO — CONFIRMADO NA RUN 012. Desde quando a perda existia não foi medido (as saídas anteriores à 011 não foram reanalisadas para isso).
 
-### T3-P43 | ALTO | Cabeçalho/rodapé corrente com contador de página sem rótulo não suprimido — NOVO (auditoria da RUN 013)
+### T3-P43 | ALTO | Cabeçalho/rodapé corrente com contador de página sem rótulo não suprimido — CORRIGIDO — COM RESÍDUOS (confirmado na RUN 014; registrado na auditoria da RUN 013)
 
 - **Corpora/páginas**: V11, 185 linhas em 94 páginas ("Coleção sintética · N" em 63 nativas/mistas; "INSTITUTO FICTÍCIO DE ENSAIOS DOCUMENTAIS / V11-R1 Coleção sintética - N" em 20 raster; "Ensaio V11-R1 · Folha N" e variantes OCR com "-" e ":"). V10, 65 páginas ("Documento sintético para teste de OCR e estrutura | Folha NN/84"; já citado na §1.25 como "rodapé decorativo", sem identificar a causa).
 - **Mecanismo (demonstrado no código)**: `assemble/repeated_regions.py::_normalize_signature` só substitui o número da página por `<page-number>` quando há o rótulo "página/pagina/page" ou quando a linha inteira é `N / M`. Em "· 103" ou "Folha 103" o número fica na assinatura, que passa a ser única por página; `detect_repeated_headers_footers` exige ≥ 2 páginas com a mesma assinatura e nunca confirma. Nas páginas nativas do V11, a parte esquerda do cabeçalho ("INSTITUTO…"), idêntica em todas, é confirmada e suprimida; sobra a parte com o contador.
@@ -3353,7 +4050,11 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 - **RUN 014 (§1.38)**: **confirmado** pelos critérios revisados aprovados pelo responsável. As 9 saídas são idênticas byte a byte às reproduções offline: V11 70.4, recall 0.967214, `numeric` fp 100, 18 linhas de mobília (mais 3 cabeçalhos fundidos com títulos nas p69/p95/p96, que a contagem da §1.37 não incluía; 21 ocorrências contra 185 na 013), "Continuação…" nas 7 páginas; V10 78.3, 12 rodapés (as inclinadas); V3–V9 idênticos. O aumento de `numeric` fn do V11 (50 → 64) é artefato do casamento documental (contadores removidos casavam números que o OCR perde em outras páginas); por página, fn 82 → 83 só na p75 ("Alfa-75" já perdido pelo OCR). **Critérios originais não atingidos** (preservados na §5.0h): V11 ≥ 70.5, ≤ 10 linhas, fp ≤ 80; V10 ≥ 78.5 e ≥ 60 de 65 rodapés removidos. **Status**: CORRIGIDO — CONFIRMADO NA RUN 014 (implementação conservadora); mobília residual **não** resolvida.
 
-### T3-P44 | CRÍTICO | Perda silenciosa de texto em página raster degradada — NOVO (auditoria da RUN 013)
+- **Auditoria pós-015**: 015 = 014 (18 linhas de mobília + 3 fundidas com o título no V11; 12 rodapés inclinados no V10; 7 "Continuação…"). Resíduos: posição fora do núcleo em páginas inclinadas [F], variantes OCR [F] e cabeçalho fundido com o título nas p69/p95/p96, todas com inclinação ≥ 4° [H: caixas infladas]. **Status**: CORRIGIDO — com resíduos.
+
+- **Confronto (AI-06, §0.9)**: risco confirmado no componente — "Seção N" um por página na faixa de borda é suprimido em OCR (6/6) e com fonte ≤ 1.1 × corpo (6/6); 11.5 e 12 pt preservados. Não observado nos 9 corpora. Proposta: sem evidência discriminante, preservar (§0.6, ação 2). OF-13 passa a RISCO MODERADO.
+
+### T3-P44 | CRÍTICO | Perda silenciosa de texto em página raster degradada — CORRIGIDO — COM RESÍDUOS (confirmado na RUN 015; registrado na auditoria da RUN 013)
 
 - **Corpora/páginas**: V11 p71 (`faint_text_stamp`: texto claro com carimbo, −2°, 220 dpi); parciais p63 (recall 0.766; −8°, escuro e de baixa resolução) e p75 (0.643; moiré).
 - **Evidência**: na p71 saem o título, o 1º parágrafo e restos ilegíveis da tabela ("FETIZ", "E", "FG7I3"); somem os parágrafos R201, R202 e R075 e os valores de massa. Recall 0.327, 746 de 1880 caracteres. A página é `success`/`clean`, sem nenhum aviso.
@@ -3364,6 +4065,10 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Atualização do ciclo pós-013 (§1.36)**: **causa localizada**. O Tesseract reconhece o texto na releitura endireitada de `_deskew_page` (295 palavras, cobertura 0.95), mas ela é descartada por `_DESKEW_MAX_CONFIDENCE_LOSS` (média 86.45 contra 90.11 da leitura direta, que tem 109 palavras e cobertura 0.33). Nas palavras comuns, a releitura tem confiança maior. Defeito geral: comparação de médias sobre conjuntos diferentes de palavras, sem cobertura, e decisão não registrada. Nenhuma perda depois do TSV escolhido. Correção separada proposta (prioridade CRÍTICA, não implementada).
 
 - **Ciclo pós-014 (§1.39)**: corrigido em `ocr/backends/tesseract.py`. Quando as médias rejeitam a releitura, `_compare_reads` compara as duas leituras no mesmo referencial (releitura desrotacionada) por palavras comuns na mesma posição; `_deskewed_read_is_more_complete` aceita a releitura se ela traz ≥ 25% de texto a mais onde a leitura direta não tem nada, com ≥ 20 palavras comuns, confiança nas palavras comuns não pior (−1.0), ≥ 90% do texto da leitura direta preservado no lugar, excedente lido com confiança ≥ 70 e sem divergir na maioria dos números comuns. Toda decisão vai para os fatos da página (`tesseract_deskew_decisions`, `tesseract_more_complete_read_discarded`). Em 96 pares reais (61 páginas, 7 corpora), só a V11 p71 muda; 0 alarmes falsos. **Status**: CORRIGIDO — VALIDADO PONTUALMENTE (1/5; não commitado); aguarda RUN 015.
+
+- **RUN 015 (§1.40)**: recuperação **confirmada** (V11 p71 recall 0.323 → 0.935; V11 70.4 → 71.7; nenhuma outra página mudou; 96 decisões idênticas às da validação pontual). **Resíduos**: o parágrafo R200, correto na 014, sai invertido (WER da página 0.681 → 0.712); "FG-711" perdido; tabela com lixo do carimbo (`cell_cer` 1.26) inserida no meio do 1º parágrafo; nenhum aviso ao consumidor (fatos não exportados, T3-P53); limiares com um único positivo real (§0.5 OF-06). **Status**: CORRIGIDO — com resíduos.
+
+- **Confronto (AI-05, §0.9)**: a salvaguarda descrita na §1.39 como preservação de "≥ 90% do texto da leitura direta" mede cobertura **geométrica**: o contraexemplo do relatório (todas as palavras trocadas na mesma posição) é aceito; na p71, "FG-711" (confiança 93) fica sem par e é contado como preservado. Contrato de evidência proposto na §0.9; prioridade: ação 4 da §0.6.
 
 ### T3-P45 | ALTO | Tabela nativa emitida duas vezes, com o título absorvido em células — NOVO (auditoria da RUN 013)
 
@@ -3379,6 +4084,8 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Relação**: análogo nativo de T3-P17 (OCR, resolvido); afeta também a ordem de leitura (T3-P22).
 - **Status**: NOVO — exige autorização (detector nativo compartilhado; risco para V5–V9).
 
+- **Auditoria pós-015**: inclui a V11 p120: a lista "Grupos de evidência", o parágrafo e a microtabela viram uma única tabela HTML, com palavras cortadas entre células ("av | aliação", "fa | mília", "t | exto"). Antes listada em T3-P47 ("não detectada"). **Status**: PENDENTE.
+
 ### T3-P47 | ALTO | Tabelas nativas sem borda empilhadas ou de formulário desmontadas — NOVO (auditoria da RUN 013)
 
 - **Corpora/páginas**: V11 p57 (3 tabelas empilhadas: só o cabeçalho vira tabela e as 32 células saem como parágrafos soltos, coluna a coluna), p9 (formulário em paisagem: campos fora de ordem), p37, p41, p54, p110, p115, p120 (não detectadas); p45, p60, p63 (parciais).
@@ -3386,13 +4093,17 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Relação**: família de T3-P37 (V9 p62/p72/p14).
 - **Status**: NOVO.
 
+- **Auditoria pós-015**: a V11 p120 passa a T3-P46 (a microtabela é detectada, mas fundida com a lista e o parágrafo). Demais páginas sem mudança. **Status**: PENDENTE.
+
 ### T3-P48 | MÉDIO | Estado de caixas de seleção vetoriais não representado — NOVO (auditoria da RUN 013)
 
 - **Corpora/páginas**: V11 p54 (tabela de inspeção com 15 caixas ☑/☐).
 - **Evidência**: as caixas são desenhos vetoriais, não texto (camada de texto nativo sem os símbolos); a saída não tem os estados e a tabela não é detectada. Sem aviso. Auditoria suplementar: `checkbox_states` fn 15.
 - **Status**: NOVO — recurso inexistente no extrator; fora do escopo da otimização do Tesseract.
 
-### T3-P49 | MÉDIO | Linhas de parágrafo em ordem invertida em página raster inclinada — NOVO (auditoria da RUN 013)
+- **Ciclo T3-P51 (§0.10)**: a detecção visual genérica de caixas (passo B de T3-P51, ação 9 da §0.6) atende também este problema; a sonda de viabilidade contou exatamente as caixas vetoriais de V11 p54 (15) e V8 p49/p61 (2 + 2), sem verificar a associação às células. O caminho RapidOCR já tem um detector visual próprio (`ocr/pipelines/rapidocr/policy.py`, `a12ee3f`) a avaliar como base. **Status**: RECURSO AINDA NÃO IMPLEMENTADO.
+
+### T3-P49 | ALTO (era MÉDIO) | Linhas de parágrafo em ordem invertida em página raster inclinada — PENDENTE: CAUSA DEMONSTRADA NA AUDITORIA PÓS-015 (registrado na auditoria da RUN 013)
 
 - **Corpora/páginas**: V11 p61 (−3°, caderno com espiral); possivelmente p72.
 - **Evidência**: as palavras estão corretas, mas as linhas de cada parágrafo saem de baixo para cima (a 1ª linha, "No expediente…", aparece no fim). CER 0.539.
@@ -3401,13 +4112,66 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 - **Pós-014 (§1.39)**: a V11 p71 recuperada por T3-P44 (releitura endireitada a 2°) sai com as linhas de cada um dos 4 parágrafos de baixo para cima, com palavras corretas (recall 0.935, CER 0.557). O defeito atinge conteúdo que agora é recuperado; prioridade sobe para P1. Hipótese mantida: ordem das linhas sobre caixas desrotacionadas (envoltórias) em vez do referencial retificado (proposta H1 da §1.26).
 
+- **Auditoria pós-015 (§0.2)**: **causa demonstrada no código** e severidade elevada a ALTO. `text/reading_order.py::_group_form_rows`/`_order_form_rows` agrupam linhas com tolerância `max(3.0, 0.75 × mediana da altura das linhas)`; nas páginas endireitadas, as caixas são envoltórias infladas (V11 p71: linhas de 21.8 pt para palavras de 6.8 pt e passo de ≈ 9.7 pt), cada parágrafo vira uma "linha de formulário" e a ordenação por x0 inverte as linhas quando a inclinação é negativa. Nas 61 páginas inclinadas, 54 das 55 regiões em modo FORM empilham linhas (22 páginas: V10 L01/L02, V11 p61, p62, p69, p71, p78, p95, p96, V4 p106, p156, V9 p17). Contrafactual offline E1 (geometria endireitada): V11 71.68 → 73.80, V10 78.32 → 79.88, recall idêntico; a p71 volta à ordem correta. A fusão de parágrafos da V11 p77 (−1.7°) e a tabela no meio do parágrafo da p71 entram na família como [H] apoiadas pelo E1. **Status**: PENDENTE (causa demonstrada).
+
 ### T3-P50 | INFO | Convenção de nível de título do gabarito V11 — REGISTRADO (auditoria da RUN 013)
 
 - O gabarito do V11 usa `#` em todos os títulos de página (100). A extração aplica a hierarquia do documento: o título da capa (maior) é `#`, e os títulos de página são `##`. `heading_level_match_rate` 0.056 (4/71), ≈ −1.9 na nota.
 - Resíduo real: o título da capa sai partido em dois `#` ("AMOSTRA SINTÉTICA DE CONTAS E REGISTROS —" / "EXERCÍCIO 2025").
 - **Não ajustar o extrator ao gabarito** (seria overfitting). Mesma natureza da convenção registrada para V3/V4 (§1.16, §1.31).
 
+### T3-P51 | CRÍTICO | Estados de caixa de seleção fabricados ou invertidos; fragmentos de célula convertidos em itens "☐" — CORRIGIDO — VALIDADO OFFLINE (passo A, §0.10; aguarda RUN 016)
+
+- **Registro completo na §0.4**; achado de overfitting OF-04 (§0.5); proposta de correção na §0.8.
+- **Resumo**: `ocr/tesseract/postprocess.py::_promote_post_table_checklist_items` e `_promote_ocr_checkbox_o_prefix` (Fix-F05, `483573b`) emitem "☐"/"☑" sem evidência visual: 25 estados errados ou inventados na 015 (V3 p88; V6 p3, p33, p89; V9 p18, p82, p90; V10 p15, p30, p54). Invisível na rubrica.
+- **Status**: PENDENTE — novo; causa demonstrada.
+
+- **Confronto (AI-04, §0.9) e proposta definitiva (§0.8)**: contraexemplos reproduzidos (o artigo "O" sai do texto; "☒ Aprovado" recebe "☐" na frente); atribuição causal confirmada pelo contrafactual; sonda visual: caixa real e estado correto em 17/17 itens, nenhuma caixa nos 18 fragmentos.
+
+- **Ciclo T3-P51 (§0.10)**: passo A implementado — `_promote_post_table_checklist_items`, `_promote_ocr_checkbox_o_prefix` e `_FIELD_VALUE_RE` removidos de `ocr/tesseract/postprocess.py`, sem regra substituta; 15 testes antigos substituídos por 30 casos novos (18 falham com o código de `1717bd5`). Validação offline nos 9 corpora: 25 estados errados ou inventados → 0; 136 estados explícitos preservados; 10 estados legítimos deixam de ser representados (limitação aceita); nenhuma palavra ou número perdido; V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08. **Status**: CORRIGIDO — VALIDADO OFFLINE (não commitado); aguarda a RUN 016 (§5). Resíduo: passo B (ação 9).
+
+### T3-P52 | MÉDIO | Título "Página N …" indistinguível do delimitador do Markdown paginado — NOVO (auditoria pós-015)
+
+- **Registro completo na §0.4**; achado OF-03 (§0.5).
+- **Resumo**: a supressão de todo bloco curto iniciado por "Página N" (`_suppress_pagina_separator_blocks`) é necessária para a avaliação de V3/V4 não falhar (`Duplicate page number`); em documentos reais apaga títulos legítimos sem aviso.
+- **Status**: PENDENTE — novo.
+
+- **Confronto (AI-02, §0.9)**: "Página 7 do contrato contém cláusula de reajuste." (uma linha, 49 caracteres) é suprimida sem aviso; o mesmo texto com uma segunda linha no bloco, não.
+
+### T3-P53 | ALTO | Página `valid`/`clean` sem aviso apesar de perda significativa; decisões do OCR não exportadas — NOVO (auditoria pós-015)
+
+- **Registro completo na §0.4**.
+- **Resumo**: 79 páginas dos 9 corpora com recall < 0.85 ou volume < 0.8 sem nenhum aviso na 015; os fatos de T3-P44 e das supressões do pós-processamento não chegam ao manifesto; supressões classificadas como mobília nunca avisam.
+- **Status**: PENDENTE — novo.
+
+### T3-P54 | ALTO | Pós-processamento Tesseract ignora `preserve_headers_footers` e altera páginas nativas — NOVO (confronto com a auditoria independente, AI-03)
+
+- **Registro completo na §0.4**; confronto na §0.9.
+- **Resumo**: com a flag padrão `True`, o pós-processamento ainda suprime cabeçalhos e separadores em 8 corpora; na configuração da RUN 015 altera páginas sem OCR em V3 e V5–V9.
+- **Status**: PENDENTE — novo.
+
+### T3-P55 | MÉDIO | Texto literal com sintaxe Markdown serializado sem escape — NOVO (confronto com a auditoria independente, AI-07)
+
+- **Registro completo na §0.4**; achado OF-21 (§0.5).
+- **Resumo**: o renderizador não escapa `**`, `*`, `[…](…)`, `<tag>`, crases nem "### " em texto de parágrafo, para casar o formato dos gabaritos; nos corpora, "### " literal do V5 vira título e "<limite>" da V6 p29 fica como HTML bruto.
+- **Status**: PENDENTE — novo.
+
 ## §3 Alterações de código
+
+### Ciclo T3-P51, passo A (2026-11-25, não commitado)
+
+- `src/structured_pdf_text/ocr/tesseract/postprocess.py`: removidas `_promote_post_table_checklist_items`, `_promote_ocr_checkbox_o_prefix` e a constante `_FIELD_VALUE_RE` (usada só pela segunda); as duas chamadas em `apply_tesseract_postprocessors` foram substituídas por um comentário que registra o contrato (nenhum estado de caixa inferido; glifos explícitos preservados pela detecção compartilhada de listas). 3 inserções, 236 remoções; nenhuma assinatura pública alterada; `api.py` e componentes compartilhados não alterados.
+- `tests/test_tesseract_postprocess.py`: removidos os 15 testes do Fix-F05 e os dois nomes do import; acrescentada a seção "T3-P51" com 12 funções de teste (30 casos), inclusive testes de pipeline real com páginas nativa, OCR e híbrida. Contratos na §0.10.
+- Fora do repositório versionado (`output/tesseract/_captures/`, ignorado pelo git): `assemble_input_1717bd5/V11/` (captura do V11 compatível com a RUN 015), `t3p51_1717bd5/` (validação), `checkbox_probe_1717bd5/` (sonda do passo B), `tools/audit_015/` (scripts da auditoria e do confronto), README atualizado.
+
+### Confronto com a auditoria independente (2026-11-25)
+
+- **Nenhuma alteração** de código, testes, PDFs, gabaritos, manifestos, avaliador, rubrica, configuração ou executor. Só este documento foi modificado.
+
+### Auditoria pós-015 (2026-11-25)
+
+- **Nenhuma alteração** de código de produção, testes, PDFs, gabaritos, manifestos, avaliador, rubrica, configuração ou executor. Só este documento foi modificado.
+- **RUN 015** executada com o commit `1717bd5` (2026-11-25 07:12 −03), que contém exatamente a alteração descrita abaixo em "Pós-014, ciclo T3-P44" (`src/structured_pdf_text/ocr/backends/tesseract.py`, `tests/test_tesseract_deskew_selection.py` e este documento).
 
 ### Pós-014, ciclo T3-P44 (2026-11-24, não commitado)
 
@@ -3574,6 +4338,26 @@ Avaliadas na RUN 006.
 
 ## §4 Testes executados
 
+### Ciclo T3-P51, passo A (2026-11-25)
+
+- `pytest tests/test_tesseract_postprocess.py`: **233 aprovados** (executado).
+- **Discriminância**: o mesmo arquivo contra o `src/` de `1717bd5` (`git archive`, diretório temporário): **18 dos 30 casos novos falham**, os outros 12 passam nas duas versões (proteções).
+- **Suíte completa** (executada, sem OCR concorrente): **3541 aprovados, 13 falhas, 4 ignorados, 4 xfail**, 129.6 s; as 13 falhas são exatamente as de T3-P14.
+- **Validação offline (sem OCR)**: reprodução dos 9 corpora com o `src/` de `1717bd5` idêntica byte a byte à RUN 015 (V11 com a p71 recuperada, captura nova `assemble_input_1717bd5/V11`); candidata comparada com avaliador oficial em memória, rubrica §1.16, auditoria suplementar, palavras e números (§0.10).
+- **Sonda do passo B** reexecutada a partir do local durável depois da remoção do Fix-F05: 17/17 e 18/18 (só renderização pelo pdfium).
+
+### Confronto com a auditoria independente (2026-11-25)
+
+- **Testes versionados**: nenhum executado nem alterado.
+- **OCR e rodadas**: nenhum.
+- **Executado (scripts no scratchpad, só leitura; nada gravado em `output/` nem no repositório)**: os contraexemplos AI-01 a AI-07 do relatório, como publicados, com `PYTHONPATH=src:tests` (os helpers de teste não chamam o Tesseract: `_decide` simula a leitura TSV), mais variantes de controle; AI-03 offline: montagem das capturas de 8 corpora com `preserve_headers_footers` `False` e `True`, contando as ações do pós-processamento por página com e sem OCR; AI-05: concordância textual dos pares por sobreposição nos 96 pares capturados e cobertura do gabarito das duas leituras (só avaliação); AI-07: contagem de sintaxe Markdown literal nos blocos de texto das capturas e leitura da camada de texto de V5 p4 e V6 p29 (pdfium); T3-P51: sonda de evidência visual de caixas com 16 páginas renderizadas pelo pdfium a 288 dpi (sem OCR).
+
+### Auditoria pós-015 (2026-11-25)
+
+- **Testes**: nenhum executado (auditoria sem alteração de código); a situação da suíte continua a de 2026-11-24 (T3-P14 passa a NÃO VERIFICÁVEL nesta auditoria).
+- **Extrações e OCR**: nenhum.
+- **Avaliações em memória e reproduções offline** (scripts no scratchpad, só leitura; nada gravado em `output/` nem no repositório): rubrica recalculada para 014 e 015 nos 9 corpora (implementação independente, igual à ferramenta anterior); reprodução da montagem a partir de `assemble_input_b541246` nos 9 corpora (V3–V10 idênticos à 015); censo das ações do pós-processamento Tesseract; contrafactuais sem as regras de corpus (V3, V4, V6), sem a supressão "Página NNN" (V3, V4: avaliação falha) e sem as regras Fix-F05 (V3, V6, V9, V10), com a auditoria suplementar; mecanismo FORM nas 61 páginas inclinadas (`geometry_1717bd5`); reavaliação dos resultados E1 de V11 e V10; confiança OCR × recall por página (V3, V4, V9, V10, V11).
+
 ### Pós-014 (2026-11-24)
 
 - `tests/test_tesseract_deskew_selection.py` (14, novo) + `tests/test_tesseract_run005_regressions.py` (12): **26 passam** (executados). Cada salvaguarda tem um teste que falha quando ela é desligada (verificado: ganho, palavras comuns, confiança nas palavras comuns, preservação da leitura direta, confiança do excedente, números).
@@ -3685,7 +4469,35 @@ Configuração: `build_config()` do executor (tesseract, balanced, pt-BR, adapti
 | 2026-11-19 | `pytest tests` (código com T3-P06 t3) | **3491 passed, 13 failed (exatamente as de T3-P14), 4 skipped, 4 xfailed**; 120 s |
 
 
-## §5 Próximo ciclo (pós-014)
+## §5 Próximo ciclo e critérios da RUN 016 (pós-T3-P51)
+
+**Situação**: T3-P51 passo A implementado e validado offline (§0.10), não commitado. A RUN 016, executada pelo responsável depois do commit, confirma o passo A. Baseline de comparação: `output/tesseract/015/` (commit `1717bd5`).
+
+### Critérios de aceitação da RUN 016
+
+A extração é determinística (a 014 e a 015 reproduziram exatamente as validações offline), então a RUN 016 deve reproduzir a candidata offline:
+
+- **Execução**: 9/9 com extração e métricas `exit 0`, `rank_eligible`; mesma configuração, avaliador e hashes de entrada da 015; `implementation_commit` = o commit do passo A.
+- **Saídas idênticas byte a byte à RUN 015**: V4 (`24c6fbb8be78…`), V5 (`ce469a68ea39…`), V7 (`13b4c45a2160…`), V8 (`f2d5ca42ec0b…`), V11 (`b0771828cf0c…`).
+- **Saídas idênticas à candidata offline** (`output/tesseract/_captures/t3p51_1717bd5/cand/`): V3 (`dfb26829f1f3…`), V6 (`864321df98f7…`), V9 (`2a9846a65c6e…`), V10 (`c74c8a517c5b…`). As diferenças em relação à 015 ficam restritas às 13 páginas da §0.10 (V3 p88; V6 p3, p22, p33, p43, p87, p89; V9 p18, p82, p90; V10 p15, p30, p54): retirada dos marcadores "- ☐"/"- ☑" e volta do "O" em V6 p22, p43 e p87.
+- **`checkbox_states` (critério obrigatório de integridade)**: fp = **0** em todos os corpora; tp V3 10, V5 8, V6 18, V7 21, V8 55, V9 21, V10 3 (136); fn V3 2, V6 15, V8 4, V11 15 (36).
+- **Notas (rubrica §1.16 inalterada)**: V3 92.88, V4 66.86, V5 86.49, V6 96.29, V7 99.44, V8 98.75, V9 76.16, V10 78.40, V11 71.68 (± 0.01).
+- **Conteúdo**: nenhuma palavra nem número perdido; recall menor que na 015 **só** nas 7 páginas com estado não representado (V3 p88 0.950 → 0.900; V6 p3, p33, p89 0.856 → 0.847; V6 p22 0.989 → 0.967, p43 0.989 → 0.966, p87 0.989 → 0.967); nenhuma outra página com recall menor.
+- **Integridade operacional**: avisos, status e páginas recuperadas ou degradadas iguais à 015; T3-P44 mantido (V11 idêntico; p71 recall 0.9346); tempo de extração dentro do ruído.
+- **Não declarar T3-P51 RESOLVIDO** sem esses critérios; mesmo depois, o resíduo dos 10 estados não representados continua registrado (passo B, ação 9).
+
+### Próximo ciclo recomendado (depois da RUN 016)
+
+Ação 2 da §0.6: **T3-P09, T3-P27 e T3-P54** — retirar as supressões por texto específico dos corpora, proteger conteúdo legítimo e respeitar `preserve_headers_footers` e a proveniência no pós-processamento; T3-P52 antecipado se for dependência (o avaliador falha sem a supressão "Página NNN"). Autorizações que serão necessárias: `ocr/tesseract/postprocess.py`, `api.py` (passagem do contrato e da proveniência), testes que hoje exigem as regras de corpus, decisão do responsável sobre a queda das notas infladas (V3 até −5.1, V6 −0.7, V4 −0.3) e, se T3-P52 for antecipado, renderizador e avaliador.
+
+## §5.0j (histórico) Próximo ciclo pós-015 — T3-P51 passo A implementado (§0.10)
+
+**Recomendação**: T3-P51, conforme a §0.8 (proposta técnica, conjuntos D/S/G, critérios de aceitação e autorizações). Sequência dos ciclos seguintes na §0.6; protocolo de generalização na §0.7. A RUN 016 só deve ser executada depois de um ciclo que produza uma candidata validada offline; os critérios específicos da RUN 016 serão escritos aqui por esse ciclo, antes da execução. Proposta definitiva de T3-P51 (passos A e B) e confronto com a auditoria independente, inclusive a divergência sobre a ordem dos ciclos: §0.8 e §0.9.
+
+- **Baseline de comparação da próxima rodada**: `output/tesseract/015/` (commit `1717bd5`).
+- **Critérios mínimos de qualquer RUN 016** (somam-se aos específicos): os da tabela "Critérios gerais para correções futuras" (§5.0g); V11 ≥ 71.7, V4 ≥ 66.9, V9 ≥ 75.6, V10 ≥ 78.3, demais iguais à 015, **salvo** quedas previstas e aprovadas pelo responsável na remoção de regras de corpus (§0.6, ação 3); nenhuma página com recall menor que na 015; nenhum estado de caixa novo sem evidência; T3-P44 mantido (V11 p71 recall ≥ 0.93).
+
+## §5.0i (histórico) Próximo ciclo pós-014 — T3-P44 confirmado na RUN 015 (§1.40)
 
 **Prioridade**: **V11**; V3–V10 são controles de regressão. Meta interna **mantida**: nota ≥ 85/100 em **cada um dos 9 corpora**, com a rubrica §1.16 inalterada. Critérios de integridade sempre obrigatórios: nenhuma perda de conteúdo, nenhum dado crítico corrompido, nenhuma duplicação, nenhuma falha grave silenciosa. Situação na 014: V11 **70.4**, V4 66.9, V9 75.6, V10 78.3 abaixo da meta; V3 93.1, V5 86.5, V6 96.7, V7 99.4, V8 98.8.
 
