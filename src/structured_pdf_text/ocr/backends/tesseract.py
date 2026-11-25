@@ -398,6 +398,28 @@ _DESKEW_MIN_LINE_WORDS = 4
 # re-read; it must not lose confidence nor recognized characters.
 _DESKEW_MAX_CONFIDENCE_LOSS = 1.0
 _DESKEW_MIN_CHAR_RATIO = 0.9
+# A skewed read can also miss whole blocks: its page segmentation stops early
+# and the deskewed read finds the rest (V11 p71: 109 words upright, 295
+# deskewed). The missing blocks are the harder ones, so the more complete read
+# has the lower mean confidence even when it reads the shared words better
+# (90.88 against 90.11 on the 100 words both reads hold); comparing means over
+# different word sets rejects it. The deskewed read is therefore also kept
+# when, on comparable evidence, it is more complete and not worse:
+# - it reads at least _DESKEW_MIN_COVERAGE_GAIN more characters, as words in
+#   places where the upright read has none;
+# - on the words both reads hold (mutual best overlap in page coordinates, at
+#   least _DESKEW_MIN_SHARED_WORDS of them) it loses at most
+#   _DESKEW_MAX_CONFIDENCE_LOSS of mean confidence;
+# - it keeps _DESKEW_MIN_CHAR_RATIO of the upright characters in place;
+# - its additional words are confidently read (mean of at least
+#   _ROTATION_ACCEPT_MIN_MEAN_CONF): noise recognized as text stays below it;
+# - the two reads do not disagree on most of the numbers they share
+#   (_DESKEW_MAX_NUMBER_DISAGREEMENT), where confidence cannot tell which
+#   one is right.
+_DESKEW_MIN_COVERAGE_GAIN = 0.25
+_DESKEW_MIN_SHARED_WORDS = 20
+_DESKEW_MAX_NUMBER_DISAGREEMENT = 0.5
+_DESKEW_MIN_COVERED_FRACTION = 0.5
 
 
 def _tsv_line_slope(tsv_text: str) -> float | None:
@@ -440,6 +462,80 @@ def _tsv_line_slope(tsv_text: str) -> float | None:
     if deviations[len(deviations) // 2] > max(0.004, abs(middle) * 0.35):
         return None
     return middle
+
+
+def _compare_reads(upright: str, deskewed: str) -> dict:
+    """Evidence comparing two reads of one page, both in page coordinates.
+
+    Shared words are mutual best overlaps (IoU ≥ ``_SAME_WORD_MIN_IOU``);
+    confidence is compared on them only. A word of one read is covered when a
+    word of the other read overlaps ``_DESKEW_MIN_COVERED_FRACTION`` of its
+    box; uncovered deskewed words are the additional text.
+    """
+    def words(tsv_text: str) -> list[tuple[str, float, BBox]]:
+        found = []
+        for row in _parse_tsv(tsv_text):
+            parsed = _valid_word_row(row)
+            if parsed is not None:
+                found.append((parsed[0], parsed[1], BBox(*parsed[2])))
+        return found
+
+    def best(box: BBox, pool: list[tuple[str, float, BBox]]) -> int | None:
+        scored = [(box.iou(item[2]), position) for position, item in enumerate(pool)]
+        if not scored:
+            return None
+        score, position = max(scored)
+        return position if score >= _SAME_WORD_MIN_IOU else None
+
+    def covered(box: BBox, pool: list[tuple[str, float, BBox]]) -> bool:
+        for _, _, other in pool:
+            overlap = box.intersection(other)
+            if overlap is not None and box.area > 0 and overlap.area >= _DESKEW_MIN_COVERED_FRACTION * box.area:
+                return True
+        return False
+
+    def mean(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    first, second = words(upright), words(deskewed)
+    shared = []
+    for index, (_, _, box) in enumerate(first):
+        partner = best(box, second)
+        if partner is not None and best(second[partner][2], first) == index:
+            shared.append((first[index], second[partner]))
+    numbers = [(a[0], b[0]) for a, b in shared if any(character.isdigit() for character in a[0] + b[0])]
+    first_chars = sum(len(text) for text, _, _ in first)
+    kept = sum(len(text) for text, _, box in first if covered(box, second))
+    extra = [word for word in second if not covered(word[2], first)]
+    return {
+        "upright_words": len(first), "deskewed_words": len(second),
+        "upright_chars": first_chars, "deskewed_chars": sum(len(text) for text, _, _ in second),
+        "upright_confidence": round(mean([conf for _, conf, _ in first]), 2),
+        "deskewed_confidence": round(mean([conf for _, conf, _ in second]), 2),
+        "shared_words": len(shared),
+        "shared_upright_confidence": round(mean([a[1] for a, _ in shared]), 2),
+        "shared_deskewed_confidence": round(mean([b[1] for _, b in shared]), 2),
+        "upright_kept_ratio": round(kept / first_chars, 4) if first_chars else 1.0,
+        "additional_chars": sum(len(text) for text, _, _ in extra),
+        "additional_confidence": round(mean([conf for _, conf, _ in extra]), 2),
+        "shared_numbers": len(numbers),
+        "shared_numbers_differing": sum(a != b for a, b in numbers),
+    }
+
+
+def _deskewed_read_is_more_complete(evidence: dict) -> bool:
+    """Whether the deskewed read adds substantial text without being worse (T3-P44)."""
+    numbers = evidence["shared_numbers"]
+    return (
+        evidence["upright_chars"] > 0
+        and evidence["additional_chars"] >= _DESKEW_MIN_COVERAGE_GAIN * evidence["upright_chars"]
+        and evidence["shared_words"] >= _DESKEW_MIN_SHARED_WORDS
+        and evidence["shared_deskewed_confidence"]
+        >= evidence["shared_upright_confidence"] - _DESKEW_MAX_CONFIDENCE_LOSS
+        and evidence["upright_kept_ratio"] >= _DESKEW_MIN_CHAR_RATIO
+        and evidence["additional_confidence"] >= _ROTATION_ACCEPT_MIN_MEAN_CONF
+        and (not numbers or evidence["shared_numbers_differing"] <= _DESKEW_MAX_NUMBER_DISAGREEMENT * numbers)
+    )
 
 
 def _tsv_recognized_chars(tsv_text: str) -> int:
@@ -910,7 +1006,10 @@ class TesseractBackend:
         drops by more than ``_DESKEW_MAX_CONFIDENCE_LOSS`` or it recognizes
         fewer than ``_DESKEW_MIN_CHAR_RATIO`` of the upright characters; its
         boxes are mapped back to the original image, so callers keep page
-        coordinates.
+        coordinates. A deskewed read rejected by these means is still kept when
+        it is more complete on comparable evidence
+        (``_deskewed_read_is_more_complete``, T3-P44). Every decision is
+        recorded for the page diagnostics.
         """
         slope = _tsv_line_slope(tsv)
         if slope is None:
@@ -922,12 +1021,58 @@ class TesseractBackend:
 
         rotated = pil.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor="white")
         candidate = self._read_tsv(rotated, dpi)
-        _, confidence = _tsv_word_confidence(tsv)
-        _, candidate_confidence = _tsv_word_confidence(candidate)
-        if (candidate_confidence < confidence - _DESKEW_MAX_CONFIDENCE_LOSS
-                or _tsv_recognized_chars(candidate) < _DESKEW_MIN_CHAR_RATIO * _tsv_recognized_chars(tsv)):
-            return tsv
-        return _unrotate_tsv(candidate, angle, rotated.size, pil.size)
+        unrotated = _unrotate_tsv(candidate, angle, rotated.size, pil.size)
+        words, confidence = _tsv_word_confidence(tsv)
+        candidate_words, candidate_confidence = _tsv_word_confidence(candidate)
+        chars, candidate_chars = _tsv_recognized_chars(tsv), _tsv_recognized_chars(candidate)
+        if not (candidate_confidence < confidence - _DESKEW_MAX_CONFIDENCE_LOSS
+                or candidate_chars < _DESKEW_MIN_CHAR_RATIO * chars):
+            decision = "deskewed"
+            evidence = {
+                "upright_words": words, "deskewed_words": candidate_words,
+                "upright_chars": chars, "deskewed_chars": candidate_chars,
+                "upright_confidence": round(confidence, 2), "deskewed_confidence": round(candidate_confidence, 2),
+            }
+        else:
+            # Word-level comparison only where the means reject the re-read.
+            evidence = _compare_reads(tsv, unrotated)
+            decision = "deskewed_more_complete" if _deskewed_read_is_more_complete(evidence) else "upright"
+        self._record_deskew_decision({
+            "angle": round(angle, 2), "image_size": list(pil.size), "decision": decision, **evidence,
+        })
+        return tsv if decision == "upright" else unrotated
+
+    def _record_deskew_decision(self, entry: dict) -> None:
+        decisions = getattr(self, "_deskew_decisions", None)
+        if decisions is None:
+            decisions = self._deskew_decisions = []
+        decisions.append(entry)
+
+    def reset_page_diagnostics(self) -> None:
+        self._deskew_decisions = []
+
+    def consume_page_diagnostics(self) -> dict:
+        """Deskew decisions of the page (T3-P44), then reset.
+
+        ``tesseract_more_complete_read_discarded`` flags a kept upright read
+        while the deskewed one held at least ``_DESKEW_MIN_COVERAGE_GAIN`` more
+        text, confidently read (mean of at least
+        ``_ROTATION_ACCEPT_MIN_MEAN_CONF``): content the engine recognized and
+        the page does not carry. Additional noise does not raise it.
+        """
+        decisions = list(getattr(self, "_deskew_decisions", None) or [])
+        self.reset_page_diagnostics()
+        if not decisions:
+            return {}
+        return {
+            "tesseract_deskew_decisions": decisions,
+            "tesseract_more_complete_read_discarded": any(
+                entry["decision"] == "upright" and entry["upright_chars"] > 0
+                and entry.get("additional_chars", 0) >= _DESKEW_MIN_COVERAGE_GAIN * entry["upright_chars"]
+                and entry.get("additional_confidence", 0.0) >= _ROTATION_ACCEPT_MIN_MEAN_CONF
+                for entry in decisions
+            ),
+        }
 
     def _read_tsv(self, pil: object, dpi: int) -> str:
         return _run_tesseract_tsv(

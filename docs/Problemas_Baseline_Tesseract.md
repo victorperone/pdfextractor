@@ -14,18 +14,18 @@ Resumo de todos os problemas (abertos e resolvidos). Ordenado por severidade (CR
 - **Severidade**: perda de conteúdo ou corrupção de dados > leitura/estrutura > problemas menores. **Prioridade**: ordem de trabalho (P0 primeiro); independe da severidade.
 - **Tentativas**: usadas / limite. O limite de 5 por problema vale desde o ciclo pós-006; "—" indica correção anterior a essa regra.
 - **Status**: "confirmado na RUN NNN" = validado em rodada completa; "**validado pontualmente**" = extração só de páginas selecionadas, **sem** confirmação integral (números marcados "Pontual" vêm de subconjuntos e não são comparáveis às métricas documentais).
-- **Última RUN**: última rodada completa em que o problema foi observado ou confirmado. Situação após a auditoria da RUN 013 (§1.32–§1.35, 2026-11-24; antes: RUN 012, §1.28–§1.30). **Prioridade** dos abertos = recomendação; a escolha do próximo problema é do responsável pelo projeto.
+- **Última RUN**: última rodada completa em que o problema foi observado ou confirmado. Situação após a auditoria da RUN 014 e o ciclo T3-P44 (§1.38–§1.39, 2026-11-24; antes: RUN 013, §1.32–§1.37). **Prioridade** dos abertos = recomendação; a escolha do próximo problema é do responsável pelo projeto.
 
 | ID | Descrição | Severidade | Prioridade | Documento / páginas | Impacto mensurado | Tentativas | Status | Última RUN | Próxima ação |
 |---|---|---|---|---|---|---|---|---|---|
-| T3-P44 | Perda silenciosa de texto: releitura endireitada mais completa descartada pela confiança média | CRÍTICO | **P0** (próximo ciclo; exige autorização) | V11 p71 (demonstrado); outras páginas inclinadas com releitura (1°–10°) possivelmente afetadas, sem medição | **Captura (§1.36)**: leitura direta 109 palavras / 638 caracteres / conf. 90.11 / cobertura 0.33; releitura endireitada 295 / 1727 / 86.45 / **0.95**, descartada porque a média caiu 3.7 > 1.0. Nas 100 palavras comuns, a releitura tem conf. **maior** (90.88) | 0 / 5 | **Causa localizada** (diagnóstico pós-013, 1 página, 1 execução): `ocr/backends/tesseract.py::_deskew_page`; nada se perde depois do TSV escolhido; sem aviso | 013 | Correção separada proposta na §1.36 (seleção por evidência comparável + observabilidade) |
+| T3-P44 | Perda silenciosa de texto: releitura endireitada mais completa descartada pela confiança média | CRÍTICO | **P0** (aguarda RUN 015) | V11 p71 (único caso entre 61 páginas inclinadas de 7 corpora) | **Pontual (§1.39)**: V11 p71 recall 0.323 → **0.935**, CER 0.666 → 0.557, ordem 0.818 → 0.914; 60 das 61 páginas inclinadas **idênticas**; 95 de 96 decisões de releitura idênticas; contrafactual documental V11 70.4 → **71.7** (penalidade −1.0 eliminada, recall 0.9672 → 0.9734) | 1 / 5 | **Corrigido — validado pontualmente** (não commitado): seleção por evidência comparável em `_deskew_page` + decisão registrada nos fatos da página; resíduos: ordem de linhas invertida na p71 (T3-P49) e "FG-711" perdido | 014 | RUN 015 (§5) |
 | T3-P36 | Tabela OCR suprimida silenciosamente pelo pós-processamento Tesseract (regra de "tabela girada ilegível") | CRÍTICO | — | V4 p167, p168 | **010**: p167 CER 0.901 → 0.194, recall 0.095 → 0.548, tabela 7 × 3 detectada; p168 CER 0.853 → 0.531, recall 0.071 → 0.476; aviso `suspected_ocr_garble` nas duas; V4 sem páginas com perda de volume (2 → 0); nenhuma outra página alterada | 1 / 5 | **Corrigido — confirmado na RUN 010** (p167/p168). Residual: coluna "Idioma" da p168 não lida pelo Tesseract, sem aviso; supressões anteriores ao pós-processamento continuam sem aviso | 010 | — (monitorar) |
 | T3-P00 | Executor sem tabelas e sem supressão de cabeçalho/rodapé | CRÍTICO | — | V3–V9: todas as páginas com tabela ou cabeçalho/rodapé repetido (ex.: V7 p2) | `table_detection_f1` 0.000 → 1.000 em V5–V8; V7 `cer_markdown_raw` 0.109 → 0.009 | 1 / — | Resolvido — confirmado na RUN 002 | 002 | — |
 | T3-P01 | OCR de página descartado por figuras | CRÍTICO | — | V9: 47 páginas mistas e p10, p16, p33, p61, p87 | V9 recall 0.664 → 0.948 | 1 / — | Resolvido — confirmado na RUN 003 | 003 | — |
 | T3-P10 | Linhas OCR fundidas entre colunas | CRÍTICO | — | V4 OCR de duas colunas (21 págs., p82–p142); V9 20 págs. multicoluna; V10 L01–L06 (35 págs.) e controles p41, p50 | CER multicoluna V4 0.743 → 0.178; V9 0.518 → 0.142 | 1 / — | Resolvido — confirmado na RUN 004 | 004 | — |
 | T3-P23 | Parser TSV engolia linhas após palavra iniciada por aspas | CRÍTICO | — | V3 p96, p97; V4 p107, p150 | V4 recall 0.832 → 0.877 | 1 / — | Resolvido — confirmado na RUN 004 | 004 | — |
 | T3-P27 | Página nativa inteira descartada como marcador do corpus | CRÍTICO | — | V4 p213, p214 | Recall das páginas 0.000 → 1.000 | 1 / — | Resolvido — confirmado na RUN 005 | 005 | — |
-| T3-P43 | Cabeçalho/rodapé corrente com contador de página sem o rótulo "Página" não é suprimido | ALTO | — (aguarda RUN 014) | V11: 181 linhas de mobília em 94 págs.; V10: 65 págs. ("Documento sintético … \| Folha NN/84") | **Offline (capturas completas, §1.37)**: V11 65.9 → **70.4** (contrafactual 71.0), linhas de mobília 181 → 18, `numeric` fp 250 → 100, recall **idêntico** (0.967214); V10 75.5 → **78.3** (contrafactual 78.9), 65 → 12 (as 12 inclinadas L01/L02), fp 135 → 31; **0 linhas do gabarito removidas** nos 9 corpora; controles V3–V9 conforme §1.37 | 1 / 5 | **Corrigido — validado offline sobre capturas completas** (não commitado); "Continuação…" do V11 preservada | 013 | RUN 014 (§5) |
+| T3-P43 | Cabeçalho/rodapé corrente com contador de página sem o rótulo "Página" não é suprimido | ALTO | — (resíduos P2) | V11: 182 linhas de mobília (185 ocorrências) em 94 págs.; V10: 65 págs. ("Documento sintético … \| Folha NN/84") | **RUN 014 (§1.38)**: V11 65.9 → **70.4**, linhas de mobília 182 → 18 (+3 cabeçalhos fundidos com títulos, p69/p95/p96), `numeric` fp 250 → 100, recall **idêntico** (0.967214); V10 75.5 → **78.3**, 65 → 12 (as inclinadas L01/L02), fp 135 → 31; V3–V9 idênticos; **saídas = reprodução offline byte a byte** | 1 / 5 | **Corrigido — confirmado na RUN 014** pelos critérios revisados (implementação conservadora); critérios originais não atingidos registrados; mobília residual **não** resolvida | 014 | Resíduos: páginas inclinadas (T3-P35/T3-P49), leituras OCR divergentes, cabeçalho fundido com título |
 | T3-P46 | Texto nativo em colunas e lista com marcador detectados como tabela sem borda | ALTO | P1 | V11 p5 (3 colunas), p98 (4 colunas), p86 (lista "•"); tabelas falsas em p3, p7, p102 | **013**: p98 CER 0.763 e p5 0.697 com recall 1.0 (linhas das colunas intercaladas em células); p5 + p98 = 12.8% das edições do V11 | 0 / 5 | **Novo (auditoria da RUN 013)** | 013 | 2º candidato estrutural; exige autorização (detector nativo) |
 | T3-P45 | Tabela nativa emitida duas vezes, com o título absorvido em células | ALTO | P1 | V11 p50, p93 | **013**: tabela inteira duplicada; título partido ("visibili \| dade") e perdido como título; 1 `currency` fp | 0 / 5 | **Novo (auditoria da RUN 013)** — hipótese: candidatos sobrepostos sem deduplicação | 013 | Diagnóstico por etapa (nativo, sem OCR) |
 | T3-P47 | Tabelas nativas sem borda empilhadas ou de formulário desmontadas | ALTO | P2 | V11 p57, p9, p37, p41, p54, p110, p115, p120 (não detectadas); p45, p60, p63 (parciais) | **013**: p57 com 3 tabelas → só o cabeçalho em tabela, 32 células soltas coluna a coluna; V11 `table_detection_recall` 0.759 | 0 / 5 | **Novo (auditoria da RUN 013)**; família de T3-P37 | 013 | Junto com T3-P37 (exige autorização) |
@@ -46,7 +46,7 @@ Resumo de todos os problemas (abertos e resolvidos). Ordenado por severidade (CR
 | T3-P28 | Valor monetário colado em célula de tabela | ALTO | — | V8 p4, p58 | `€ 98,4096,40` → `€ 98,40`; V8 `numeric` 0.988 → 0.991 | 1 / — | Resolvido — confirmado na RUN 006; **`€ 98,40` mantido na 009** | 009 | — (ver T3-P39, possível variante) |
 | T3-P42 | Linhas OCR descartadas na fusão de fragmentos de título (perda silenciosa de conteúdo) | ALTO | — | V10 p5, p31, p62 (inclinadas), p11 | **012**: +83 palavras do gabarito recuperadas; recall p62 0.924 → 0.996, p31 0.969 → 0.997, p5 0.936 → 0.941, p11 0.976 → 0.982; V10 0.9915 → 0.9938 | 1 / 5 (correção de integridade dentro de T3-P06 t3) | **Corrigido — confirmado na RUN 012** (§1.28); a perda existia na 011 e antes, sem aviso | 012 | — |
 | T3-P48 | Estado de caixas de seleção vetoriais (☑/☐) não representado | MÉDIO | P3 | V11 p54 | **013**: 15 estados ausentes (auditoria suplementar `checkbox_states` fn 15); tabela não detectada; sem aviso | 0 / 5 | **Novo (auditoria da RUN 013)** — recurso inexistente | 013 | Fora do escopo do Tesseract; registrar |
-| T3-P49 | Linhas de parágrafo em ordem invertida em página raster inclinada | MÉDIO | P2 | V11 p61 (−3°, espiral); possivelmente p72 | **013**: p61 CER 0.539 com palavras corretas | 0 / 5 | **Novo (auditoria da RUN 013)**; família de T3-P35 | 013 | Junto com T3-P35 |
+| T3-P49 | Linhas de parágrafo em ordem invertida em página raster inclinada | MÉDIO | **P1** (sobe: limita o ganho de T3-P44) | V11 p61 (−3°, espiral), **p71 depois de T3-P44** (2°); possivelmente p72 | **013**: p61 CER 0.539 com palavras corretas. **Pós-014**: a p71 recuperada por T3-P44 sai com os 4 parágrafos em ordem de linhas invertida (CER 0.557 com recall 0.935) | 0 / 5 | Novo (auditoria da RUN 013); família de T3-P35; afeta conteúdo recuperado | 014 | Junto com T3-P35 |
 | T3-P41 | Parágrafos de texto nativo denso fundidos num único bloco | MÉDIO | **P0** (exige autorização) | V4 p9–p40 (32 págs.; ex.: p9 com 10 parágrafos num bloco) | **011** (igual desde a 001): 38 de 316 parágrafos certos; **227 das 417 fusões do V4**; 227 das 430 fronteiras ausentes do V4. **Estimativa não oficial e não validada**: V4 Parágrafos ≈ 48.7 → 64, nota ≈ +1.6 | 0 / 5 | **Pendente — causa raiz identificada (§1.31)**: em `assemble/content.py::_native_paragraphs`, o piso de 0.75 × altura da linha (≈ 5.8 pt) impede a quebra no vão real de 4.5 pt (≈ 3.4 × o vão entre linhas); estimativa +1.6 na nota do V4 (teto +2.2) | 012 | Candidato do ciclo pós-012 (§1.31), **adiado pela prioridade ao V11** (§1.35); exige autorização (nativo compartilhado) |
 | T3-P38 | Fusão de parágrafos independentes em OCR denso de coluna única (regressão de T3-P20) | MÉDIO | — | V4 p83, p85, p99, p125, p129, p137, p138, p139, p141, p143; V10 p68 | **011**: V4 `paragraph_boundary_recall` 0.5595 → **0.5772** (008: 0.5782), `paragraph_detection_f1` 0.410 → 0.421; fusões V4 435 → **417** (008: 416), V10 44 → 43; 10 das 11 páginas-alvo iguais à 008; custo: +1 quebra em V4 p98/p118/p122/p128/p130 e V10 p37; palavras, conteúdo e dados idênticos | 3 / 5 | **Corrigido — confirmado na RUN 011** (t3, `2fdad33`). Resíduo: V4 p137 (137.04 + 137.05, atribuído à t5) | 011 | — (monitorar) |
 | T3-P20 | Parágrafos OCR quebrados no meio da frase | MÉDIO | — (encerrado) | Páginas OCR de V4, V9, V10 (63 páginas mudaram só a segmentação na 009) | **009**: `paragraph_detection_f1` V4 0.378 → 0.410, V9 0.525 → 0.595, V10 0.409 → 0.458; quebras indevidas V4 392 → 271, V9 142 → 80, V10 268 → 213. **011**: ganhos mantidos (quebras V4 278, V9 80, V10 220 pelo script da §1.22) com as fusões de volta ao nível da 008 (T3-P38) | 5 / 5 (encerrado) | Parcial — t2 (`b1202ee`) + t5 **confirmadas na RUN 009**; t2 revertida por T3-P38 na 011, ganho mantido | 011 | Encerrado |
@@ -76,13 +76,13 @@ Resumo de todos os problemas (abertos e resolvidos). Ordenado por severidade (CR
 
 | Campo | Valor |
 |---|---|
-| **Última atualização** | 2026-11-24 — **ciclo pós-013** (§1.36–§1.37): **T3-P44 diagnosticado** (causa localizada: a releitura endireitada com o texto completo é descartada por comparação de confiança média em `ocr/backends/tesseract.py::_deskew_page`; correção proposta, não implementada) e **T3-P43 implementado** (`assemble/repeated_regions.py`, contador de página confirmado por evidências convergentes; validado offline sobre capturas completas dos 9 corpora: V11 65.9 → 70.4, V10 75.5 → 78.3, nenhuma linha do gabarito removida; não commitado). Antes: 2026-11-24 — **auditoria da RUN 013 e inclusão do corpus V11** (§1.32–§1.35: V3–V10 idênticos byte a byte à 012; V11 = **65.9** na rubrica; 8 problemas novos, T3-P43 a T3-P50; prioridade passa ao V11; candidato único do próximo ciclo: **T3-P43**, mobília com contador de página não suprimida). Antes: 2026-11-19 — **meta interna de 85/100 por corpus e diagnóstico quantitativo do V4** (§1.31: decomposição de 66.9; 82% dos tokens ausentes do OCR de texto em segmentos adversariais; teto realista do V4 ≈ 80.7 com o Tesseract atual; candidato do próximo ciclo: T3-P41). Antes: **auditoria da RUN 012** (§1.28: T3-P06 **parcial — confirmado na RUN 012**, sem perda de conteúdo e com o caminho nativo idêntico; precisão do V4 e categorias de falso título não atendidas; novo T3-P42, perda antiga de conteúdo corrigida; §1.29: rubrica; §1.30: priorização). Antes: **T3-P06 t3 implementada** com autorização (§1.27; CORRIGIDO — VALIDADO PONTUALMENTE; alterações **não commitadas** em `layout/heading.py`, `layout/ocr_aware.py`, `ocr/reconstruct.py` e no teste novo). Antes: **ciclo pós-011** (§1.25: T3-P06; §1.26: diagnóstico de T3-P35). Antes: **auditoria da RUN 011** (§1.22: T3-P38 confirmado, sem regressão; §1.23: rubrica; §1.24: priorização; §5: controles de estabilidade × generalização; novo T3-P41). Antes: auditoria da RUN 010 (§1.20) e ciclo pós-010 (§1.21) |
-| **Branch** | `feat/tesseract-optimization` — pós-005 `dfbf5e9`; pós-006 `f03710a` e `4a732c6`; T3-P22 tentativas 1–2 `bec686a`; pós-007 (T3-P22 tentativas 3–5, T3-P35) `ad43cb1`; pós-008 (T3-P34 t4, T3-P20 t2) `b1202ee`; pós-009 (T3-P20 t5, T3-P36, T3-P39) `95a6f72`; pós-010 (T3-P38 t3) `2fdad33`; pós-011 (T3-P06 t3) `18ccfb0` |
+| **Última atualização** | 2026-11-24 — **auditoria da RUN 014 e ciclo T3-P44** (§1.38–§1.39): RUN 014 (`7df5285`) **reproduz byte a byte a validação offline** nos 9 corpora; **T3-P43 confirmado** pelos critérios revisados aprovados (V11 70.4, V10 78.3, V3–V9 idênticos), resíduos registrados; **T3-P44 corrigido em `ocr/backends/tesseract.py::_deskew_page`** (seleção por evidência comparável + decisão nos fatos da página), validado pontualmente em 61 páginas inclinadas de 7 corpora (só a V11 p71 muda; contrafactual documental V11 70.4 → 71.7); não commitado. Capturas offline preservadas em `output/tesseract/_captures/`. Antes: 2026-11-24 — **ciclo pós-013** (§1.36–§1.37): **T3-P44 diagnosticado** (causa localizada: a releitura endireitada com o texto completo é descartada por comparação de confiança média em `ocr/backends/tesseract.py::_deskew_page`; correção proposta, não implementada) e **T3-P43 implementado** (`assemble/repeated_regions.py`, contador de página confirmado por evidências convergentes; validado offline sobre capturas completas dos 9 corpora: V11 65.9 → 70.4, V10 75.5 → 78.3, nenhuma linha do gabarito removida; não commitado). Antes: 2026-11-24 — **auditoria da RUN 013 e inclusão do corpus V11** (§1.32–§1.35: V3–V10 idênticos byte a byte à 012; V11 = **65.9** na rubrica; 8 problemas novos, T3-P43 a T3-P50; prioridade passa ao V11; candidato único do próximo ciclo: **T3-P43**, mobília com contador de página não suprimida). Antes: 2026-11-19 — **meta interna de 85/100 por corpus e diagnóstico quantitativo do V4** (§1.31: decomposição de 66.9; 82% dos tokens ausentes do OCR de texto em segmentos adversariais; teto realista do V4 ≈ 80.7 com o Tesseract atual; candidato do próximo ciclo: T3-P41). Antes: **auditoria da RUN 012** (§1.28: T3-P06 **parcial — confirmado na RUN 012**, sem perda de conteúdo e com o caminho nativo idêntico; precisão do V4 e categorias de falso título não atendidas; novo T3-P42, perda antiga de conteúdo corrigida; §1.29: rubrica; §1.30: priorização). Antes: **T3-P06 t3 implementada** com autorização (§1.27; CORRIGIDO — VALIDADO PONTUALMENTE; alterações **não commitadas** em `layout/heading.py`, `layout/ocr_aware.py`, `ocr/reconstruct.py` e no teste novo). Antes: **ciclo pós-011** (§1.25: T3-P06; §1.26: diagnóstico de T3-P35). Antes: **auditoria da RUN 011** (§1.22: T3-P38 confirmado, sem regressão; §1.23: rubrica; §1.24: priorização; §5: controles de estabilidade × generalização; novo T3-P41). Antes: auditoria da RUN 010 (§1.20) e ciclo pós-010 (§1.21) |
+| **Branch** | `feat/tesseract-optimization` — pós-005 `dfbf5e9`; pós-006 `f03710a` e `4a732c6`; T3-P22 tentativas 1–2 `bec686a`; pós-007 (T3-P22 tentativas 3–5, T3-P35) `ad43cb1`; pós-008 (T3-P34 t4, T3-P20 t2) `b1202ee`; pós-009 (T3-P20 t5, T3-P36, T3-P39) `95a6f72`; pós-010 (T3-P38 t3) `2fdad33`; pós-011 (T3-P06 t3) `18ccfb0`; pós-013 (T3-P43) `7df5285` |
 | **Baseline imutável** | `output/tesseract/001/` |
 | **Baseline corrigida** | `output/tesseract/002/` (T3-P00) |
-| **Baseline atual** | `output/tesseract/013/` (commit `b541246` = código de `18ccfb0` + V11 no executor); primeira referência do V11 |
-| **Última rodada** | `output/tesseract/013/` (2026-11-23 15:45–17:22 UTC; commit `b541246`) — 9 corpora; V3–V10 idênticos à 012; V11 incluído (§1.32) |
-| **Próxima rodada** | RUN 014 — para confirmar T3-P43 (implementado, não commitado); critérios na §5 (pós-013, atualizados pela §1.37) |
+| **Baseline atual** | `output/tesseract/014/` (commit `7df5285`, T3-P43); antes `013/` (`b541246`, primeira referência do V11) |
+| **Última rodada** | `output/tesseract/014/` (2026-11-24 13:30–15:14 UTC; commit `7df5285`) — 9 corpora; V3–V9 idênticos à 013; V10/V11 iguais à reprodução offline (§1.38) |
+| **Próxima rodada** | RUN 015 (manual, pelo responsável) — para confirmar T3-P44 (implementado, não commitado); critérios na §5 (pós-014) |
 | **Configuração** | balanced · pt-BR · adaptive · tesseract · Markdown paginado · supplemental-audit. **Threads**: 6 até a 003; 8 desde a 005 (a 006 registra `threads: 8` e `tesseract_omp_thread_limit: 8`). O Tesseract 5.5.0 usa no máximo 4 threads OpenMP por chamada (`num_threads(4)` fixo no LSTM), então 6 e 8 equivalem a 4 (§1.10) |
 | **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0 — **não alterado** |
 | **Corpus/gabaritos/manifestos** | **não alterados por nós**. **V11** (`corpus/V11/`, edição V11-R1C, 120 págs.) adicionado pelo responsável antes da RUN 013 e incluído em `scripts/run_tesseract_batch_wsl.py` (`b541246`). O diretório `corpus/V10/` foi substituído externamente em 2026-11-12, entre 07:56 e 07:59, durante a RUN 003 (ver T3-P15) |
@@ -134,13 +134,13 @@ Resumo de todos os problemas (abertos e resolvidos). Ordenado por severidade (CR
 | T3-P40 | INFO | — | corpus/gabarito V5 | **RECLASSIFICADO** (§1.19): o PDF não contém os títulos exigidos pelo gabarito; sem alteração de código nem do corpus |
 | T3-P41 | MÉDIO | P0 | segmentação de parágrafos **nativa** (compartilhada) | **PENDENTE — CAUSA RAIZ IDENTIFICADA (§1.31); adiado pela prioridade ao V11 (§1.35)** (registrado na auditoria da RUN 011; desde a 001): V4 p9–p40 com os parágrafos de cada página num só bloco; 227 das 417 fusões do V4; impacto na nota só estimado (não oficial, não validado); exige autorização |
 | T3-P42 | ALTO | — | `layout/heading.py::_merge_heading_fragments` (descartava `ocr_lines` do 2º fragmento) | **CORRIGIDO — CONFIRMADO NA RUN 012** (§1.28): V10 p5/p11/p31/p62 recuperam 83 palavras do gabarito; perda silenciosa até a 011 |
-| T3-P43 | ALTO | — | `assemble/repeated_regions.py` (assinatura de mobília; compartilhado) | **CORRIGIDO — VALIDADO OFFLINE SOBRE CAPTURAS COMPLETAS** (§1.37; não commitado); aguarda RUN 014 |
-| T3-P44 | CRÍTICO | P0 | `ocr/backends/tesseract.py::_deskew_page` (seleção entre leituras) | **CAUSA LOCALIZADA** (§1.36) — releitura completa descartada pela confiança média; correção proposta, não implementada |
+| T3-P43 | ALTO | — | `assemble/repeated_regions.py` (assinatura de mobília; compartilhado) | **CORRIGIDO — CONFIRMADO NA RUN 014** (§1.38; critérios revisados; resíduos de mobília registrados) |
+| T3-P44 | CRÍTICO | P0 | `ocr/backends/tesseract.py::_deskew_page` (seleção entre leituras) | **CORRIGIDO — VALIDADO PONTUALMENTE** (§1.39; 61 páginas inclinadas, 7 corpora; não commitado); aguarda RUN 015 |
 | T3-P45 | ALTO | P1 | detecção/fusão de tabelas nativas (compartilhado) | **NOVO (RUN 013)** — duplicação na V11 p50/p93 |
 | T3-P46 | ALTO | P1 | detector de tabelas sem borda nativo (compartilhado) | **NOVO (RUN 013)** — colunas e lista nativas como tabela (V11 p5/p98/p86) |
 | T3-P47 | ALTO | P2 | detector de tabelas nativo (compartilhado) | **NOVO (RUN 013)** — tabelas empilhadas/formulário desmontadas (V11 p57 e outras) |
 | T3-P48 | MÉDIO | P3 | — (recurso inexistente) | **NOVO (RUN 013)** — checkboxes vetoriais (V11 p54) |
-| T3-P49 | MÉDIO | P2 | reconstrução OCR em página inclinada | **NOVO (RUN 013)** — ordem de linhas invertida (V11 p61) |
+| T3-P49 | MÉDIO | P1 | reconstrução OCR em página inclinada | **NOVO (RUN 013)** — ordem de linhas invertida (V11 p61; p71 depois de T3-P44) |
 | T3-P50 | INFO | — | gabarito V11 (convenção) | **REGISTRADO (RUN 013)** — nível `#` por página |
 
 ---
@@ -2438,6 +2438,141 @@ Capturas sequenciais (um processo OCR por vez) com a configuração da RUN 013; 
 - As capturas (`assemble_input.pkl` por corpus, scratchpad) permitem validar offline qualquer mudança futura **posterior ao OCR** (montagem, mobília, pós-processamento) sobre o contexto documental completo, sem OCR. Elas valem enquanto o código anterior à montagem não mudar.
 - A p71 de T3-P44 foi capturada dentro da extração do V11 (custo zero adicional).
 
+### §1.38 RUN 014: auditoria integral e confirmação de T3-P43 (2026-11-24)
+
+**Rodada**: `output/tesseract/014/`, 2026-11-24 13:30:11–15:14:07 UTC, commit `7df5285` (T3-P43), executada pelo responsável. Baseline de comparação: `output/tesseract/013/` (`b541246`).
+
+**Verificações operacionais**:
+
+| Item | Resultado |
+|---|---|
+| Status | 9/9 com `extract_exit_code 0` e `metrics_exit_code 0`; todos `rank_eligible`. V9 continua `partial_success`/`partial` (T3-P33, sem mudança); os demais `success`/`valid` |
+| Commit | `implementation_commit 7df5285` nos 9 JSONs de métricas |
+| Avaliador | `evaluation-3.0.0` / métricas 3.1.0; políticas idênticas às da 013 (só mudam `implementation_commit` e `created_at_utc`) |
+| Hashes | PDF, gabarito efetivo e manifesto idênticos aos da 013 nos 9 corpora |
+| Configuração | `settings` e `extractor_flags` idênticos (balanced, pt-BR, adaptive, 8 threads, OMP 8, `preserve_headers_footers: false`); o manifesto só difere no caminho `extracted_markdown` |
+| Cobertura | métricas aplicáveis iguais às da 013 (V3 61, V4 61, V5 67, V6 63, V7 65, V8 65, V9 67, V10 61, V11 60); páginas recuperadas, degradadas e avisos idênticos |
+| Saídas × 013 | **V3–V9 idênticas byte a byte** (mesmo `hypothesis_sha256`); V10 e V11 mudam |
+| Saídas × reprodução offline (§1.37) | **as 9 idênticas byte a byte**: a execução integral reproduz exatamente a validação offline |
+| Tempo de extração (013 → 014) | V3 355 → 347 s; V4 2361 → 2564; V5 81 → 83; V6 592 → 658; V7 161 → 166; V8 374 → 410; V9 610 → 634; V10 536 → 566; V11 556 → 617. Saídas de V3–V9 idênticas: a variação é do ambiente |
+
+**Notas da rubrica §1.16 (inalterada), recalculadas a partir dos JSONs oficiais**:
+
+| Corpus | 013 | **014** | Texto | Cobertura | Títulos | Parágrafos | Listas | Tab. estr. | Tab. cél. | Dados | Ordem | Penalidade |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| V3 | 93.1 | **93.1** | 94.9 | 95.2 | 68.0 | 92.0 | 97.3 | 99.9 | 99.1 | 98.0 | 98.3 | −0.5 |
+| V4 | 66.9 | **66.9** | 77.3 | 68.1 | 52.3 | 54.0 | 79.1 | 86.8 | 70.4 | 69.2 | 100.0 | −4.5 |
+| V5 | 86.5 | **86.5** | 67.3 | 83.5 | 83.8 | 83.8 | 92.1 | 100.0 | 100.0 | 98.5 | 87.1 | 0 |
+| V6 | 96.7 | **96.7** | 96.7 | 96.5 | 99.0 | 96.3 | 100.0 | 100.0 | 96.3 | 91.6 | 100.0 | 0 |
+| V7 | 99.4 | **99.4** | 99.4 | 99.5 | 98.8 | 97.6 | 100.0 | 100.0 | 100.0 | 100.0 | 100.0 | 0 |
+| V8 | 98.8 | **98.8** | 98.2 | 98.6 | 99.4 | 96.2 | 100.0 | 100.0 | 99.9 | 98.5 | 100.0 | 0 |
+| V9 | 75.6 | **75.6** | 77.8 | 96.8 | 54.5 | 65.8 | 84.7 | 79.9 | 63.9 | 86.3 | 58.4 | −1.0 |
+| V10 | 75.5 | **78.3** | 56.5 → 61.1 | 95.3 → 97.6 | 62.9 → 64.0 | 56.3 → 57.9 | 72.7 | 96.5 | 91.2 | 86.9 → 95.4 | 51.3 | 0 |
+| V11 | 65.9 | **70.4** | 61.9 → 70.6 | 84.3 → 88.6 | 53.1 | 58.4 → 66.8 | 43.4 | 79.6 | 75.9 | 65.1 → 71.3 | 64.5 → 71.0 | −1.0 |
+
+Métricas-chave que mudaram: V11 CER 0.1139 → 0.0869, WER 0.1528 → 0.1191, precisão 0.9315 → 0.9635, recall 0.967214 = 0.967214, `numeric` 0.935 (250 fp / 50 fn) → 0.963 (100 fp / 64 fn), `duplicate_excess_rate` 0.422 → 0.341. V10 CER 0.1373 → 0.1234, precisão 0.9741 → 0.9916, recall 0.993842 → 0.993717, `numeric` 0.945 (135 fp / 10 fn) → 0.983 (31 fp / 12 fn). Meta de 85: atingida por V3, V5–V8; **não** por V11 (70.4), V4 (66.9), V9 (75.6) e V10 (78.3).
+
+**Critérios revisados de T3-P43 (aprovados pelo responsável)**:
+
+| Critério | Resultado | |
+|---|---|---|
+| V11 nota 70.4 ± 0.1 | 70.4 | ✅ |
+| V11 recall 0.967214 | 0.967214 | ✅ |
+| V11 ≤ 18 linhas de mobília | **18** linhas só de mobília; mais **3 cabeçalhos raster fundidos com o título da página na mesma linha** (p69, p95, p96), presentes desde a 013 e **não contados** na §1.37. Contagem de ocorrências: 185 (013) → 21 (014). A contagem "181" da §1.37 para a 013 também omitiu a variante "-: 065" da p65: o valor correto é 182 linhas só de mobília | ✅ pelo critério como definido, com a ressalva |
+| V11 ≤ 100 números falsos, sem perda de dados legítimos | fp 100. O `numeric` fn documental sobe 50 → 64, mas **não é perda**: o multiconjunto documental ignora a página, e os contadores removidos ("· 040", "Folha 070"…) casavam números do gabarito que o OCR perde em **outras** páginas (p40, p70, p32…). Por página (`numeric_page`), fn 82 → 83, só na p75, onde o contador "75" casava "Motor Alfa-75", linha já ausente da leitura OCR | ✅ |
+| V11 sete linhas "Continuação…" | p15, 21, 24, 27, 30, 33, 36 | ✅ |
+| V10 nota 78.3 ± 0.1 | 78.3 | ✅ |
+| V10 ≤ 12 rodapés | 12, exatamente as inclinadas L01/L02 (p5, 13, 18, 25, 31, 45, 48, 53, 62, 68, 75, 83) | ✅ |
+| V3–V9 idênticos byte a byte | sim | ✅ |
+| Nenhuma perda de conteúdo legítimo | saídas = reprodução offline, onde 0 linhas do gabarito foram removidas (§1.37) | ✅ |
+
+**Critérios originais não atingidos** (registro preservado na §5.0h): V11 nota ≥ 70.5 (70.4), ≤ 10 linhas (18), `numeric` fp ≤ 80 (100); V10 nota ≥ 78.5 (78.3) e ≥ 60 dos 65 rodapés removidos (53). A mobília residual **não** é problema resolvido: páginas inclinadas (T3-P35/T3-P49), leituras OCR divergentes (p63 "V1I-A1", p66 "STITUTO"), página nativa girada (p112) e cabeçalhos fundidos com o título (p69/p95/p96).
+
+**Conclusão**: T3-P43 **confirmado na RUN 014**, sem regressão de integridade. Nenhuma divergência entre a execução integral e a validação offline. T3-P44 pôde ser iniciado.
+
+**Capturas offline preservadas (Fase 2)**: o scratchpad da sessão fica em `/tmp`, um `tmpfs` (apagado ao reiniciar o WSL). As capturas foram copiadas para `output/tesseract/_captures/` (ignorado pelo git pela regra `output/`; nada versionado nem enviado). Descrição completa, condições de invalidação e teste de validade em `output/tesseract/_captures/README.md`:
+
+| Captura | Local | Tamanho | Formato | Origem | Etapa | Reprodução | Invalidada por |
+|---|---|---|---|---|---|---|---|
+| Entrada da montagem, 9 corpora | `assemble_input_b541246/<V>/assemble_input.pkl` (+ `V11/diag_p071/`) | 272 MB (V4 88 MB … V5 5 MB); `SHA256SUMS` | `pickle` dos argumentos de `assemble_document` | `b541246`, configuração da RUN 013/014 (`build_config`) | depois do OCR, layout e tabelas por página; antes da montagem documental | `tools/replay.py`, `control.sh`, `compare.py`, `eval_rubric.py` | mudança em qualquer código anterior à montagem (OCR, layout, tabelas por página), nas classes serializadas, no PDF, na configuração ou no Tesseract |
+| Leituras do endireitamento, 61 páginas | `ocr_deskew_7df5285/<V>/` | 8.8 MB | `deskew_events.pkl`, `tsv_cache.pkl` (hash da imagem → TSV) | `7df5285` | cada `_deskew_page` (leitura direta, releitura, ângulo, decisão) e cada chamada `_run_tesseract_tsv` | `tools/ocr_capture.py --tsv-cache`, `deskew_*.py`, `level_*.py`, `splice_pages.py` | mudança na renderização, no pré-processamento ou nos parâmetros/versão do Tesseract (o hash da imagem muda e o cache é ignorado, sem erro silencioso) |
+
+Validade verificada nesta sessão: a reprodução de V5 e V11 a partir de `output/tesseract/_captures/` é idêntica byte a byte à RUN 014.
+
+### §1.39 Ciclo pós-014: T3-P44, seleção entre leitura direta e releitura endireitada (2026-11-24; não commitado)
+
+**Autorização**: alterações estritamente necessárias em `ocr/backends/tesseract.py` (especialmente `_deskew_page`) e testes. **Restrições**: nenhuma regra para a V11 p71; não comparar só a média global; não escolher a leitura com mais palavras; gabarito só na avaliação; ≤ 5 tentativas; um processo OCR por vez.
+
+**Nível 0 (sem OCR)**:
+- **Histórico**: T3-P18 rejeitou "palavras × confiança" porque a leitura inclinada fragmenta palavras e infla a contagem (V10 p25: 859 "palavras"); por isso a contagem de palavras não decide nada aqui. T3-P31/T3-P35 (ordem em páginas inclinadas) e T3-P49 tratam da reconstrução depois da escolha e não foram tocados. A captura da §1.36 (p71) foi reaproveitada.
+- **População afetável, sem OCR**: `tools/tilt_scan.py` reaplica o critério de `_tsv_line_slope` aos tokens OCR das capturas pré-montagem (agrupados por `layout_line_id`). Resultado: **61 páginas com texto OCR inclinado entre 1° e 10°** em 7 corpora (V3 3, V4 13, V6 5, V8 2, V9 10, V10 12, V11 16; V5 e V7 nenhuma). A V11 p71 aparece com 2.01°, o mesmo ângulo medido na §1.36. As capturas pré-montagem **não** servem para testar o backend (a escolha é anterior a elas), daí a captura nova abaixo.
+
+**Captura das leituras (única execução com OCR do ciclo)**: as 61 páginas, sequencialmente, com `tools/ocr_capture.py` (configuração oficial restrita por `page_indices`), registrando cada chamada de `_deskew_page` e cada TSV. **932 s, 304 chamadas ao Tesseract, 166 eventos**, dos quais **96 com releitura** (os demais são recortes sem inclinação na faixa). Regra atual: **76 releituras aceitas, 20 rejeitadas** (V11 3, V9 5, V8 5, V4 3, V6 3, V3 1, V10 0). A captura reproduz exatamente o TSV da releitura da p71 gravado na §1.36.
+
+**Hipóteses (formuladas antes de alterar o código)**:
+- **H1** — a confiança é comparável entre as duas leituras **nas mesmas palavras**: mesmo motor, mesma escala; basta levar a releitura ao referencial da página (`_unrotate_tsv`) e parear por sobreposição. As duas leituras dão envoltórias alinhadas aos eixos da palavra inclinada, o que torna as caixas comparáveis. A média global compara conjuntos diferentes e não é comparável.
+- **H2** — uma releitura que traz muito texto onde a leitura direta não tem nada, lendo as palavras comuns com confiança igual ou maior, é mais completa e não pior.
+- **H3** — ruído reconhecido como texto se distingue pela confiança do excedente.
+- **H4** — a regra nova, aplicada só onde a atual rejeita, não muda nenhuma das 76 decisões atuais.
+
+**Medidas nos 20 pares rejeitados** (gabarito só para avaliar): na p71, 103 palavras comuns com confiança 91.3 (direta) contra **92.7** (releitura); 99.7% do texto da leitura direta preservado no lugar; excedente de 1102 caracteres com confiança média 83.8; cobertura do gabarito 0.335 → 0.957. Nos casos de ruído: V11 p67 e p70 (excedente 136 e 48 caracteres com confiança ≈ 41; precisão cai), V4 p180 (46; cobertura e precisão caem), V9 p58 (ganho de 30%, mas confiança comum 90.5 → 72.3). **H1, H2 e H3 confirmadas.**
+
+**Regras avaliadas sobre os 20 pares rejeitados**:
+
+| Regra | Aceitaria | Avaliação |
+|---|---|---|
+| Atual (média −1.0 e caracteres ≥ 90%) | 0 | perde a p71 (§1.36) |
+| Mais palavras | 9 | aceita ruído: V11 p67/p70, V4 p180, V6 p6/p45, V9 p58 ×2 (precisão do gabarito cai) — **rejeitada** |
+| Mais caracteres | 8 | idem — **rejeitada** |
+| Só confiança nas palavras comuns | 10 | idem — **rejeitada** |
+| Ganho ≥ 25% sozinho | 2 | aceita V9 p58 (confiança comum 72.3 contra 90.5) — **rejeitada** |
+| Ganho ≥ 10% + confiança comum | 4 | aceita V4 p180 (cobertura 0.73 → 0.67) — **rejeitada** |
+| **Adotada** (abaixo) | **1: V11 p71** | sensibilidade: ganho 0.25–0.5 × palavras comuns 5–50 × confiança do excedente 50–80 → sempre só a p71; com ganho 0.10–0.15 entra a V9 p58, barrada pela confiança comum |
+
+**Regra adotada** (`_deskewed_read_is_more_complete`, aplicada **só** quando a regra atual rejeita; tentativa 1/5). A releitura, desrotacionada, é mantida quando:
+1. traz ≥ **25%** dos caracteres da leitura direta como palavras **sem sobreposição** com ela (cobertura espacial, `_DESKEW_MIN_COVERAGE_GAIN`); palavras duplicadas sobre a leitura direta não contam;
+2. tem ≥ **20 palavras comuns** (pares de melhor sobreposição mútua, IoU ≥ `_SAME_WORD_MIN_IOU` 0.3, constante já usada pelo backend), senão vale só a regra atual;
+3. a confiança média **nas palavras comuns** não cai mais que `_DESKEW_MAX_CONFIDENCE_LOSS` (1.0, a tolerância atual, agora sobre evidência comparável);
+4. preserva no lugar ≥ `_DESKEW_MIN_CHAR_RATIO` (0.9, constante atual) dos caracteres da leitura direta;
+5. o excedente tem confiança média ≥ `_ROTATION_ACCEPT_MIN_MEAN_CONF` (70, o piso de "leitura confiável" já usado na rotação);
+6. as leituras não divergem na **maioria** dos números que compartilham (`_DESKEW_MAX_NUMBER_DISAGREEMENT` 0.5), onde a confiança não decide qual está certa.
+
+Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da p71: a decisão é a mesma em toda a grade de sensibilidade. **Limitação honesta**: os limiares foram fixados depois de ver os 96 pares (a população foi definida antes, pela varredura de inclinação, mas não houve conjunto retido), e há **um único caso positivo real**. O comportamento positivo fora da p71 é coberto por testes sintéticos.
+
+**Números (pedido 7)**: nas 4 divergências numéricas da p71, a releitura está **certa** (FG-712, FG713 × FG7I3, 4D8AA6A3 ×2), embora tenha confiança **menor** em 4D8AA6A3 (69.6 contra 87.1 do "4D8AAGA3" errado). Por isso a confiança palavra a palavra não decide números, e só a divergência majoritária bloqueia. Adotar palavra a palavra o texto mais confiável (`_adopt_better_word_texts`) foi considerado e **rejeitado**: na p71 recuperaria "FG-711" e corromperia os dois "4D8AA6A3".
+
+**Observabilidade (separada da seleção)**: o backend passa a implementar `reset_page_diagnostics`/`consume_page_diagnostics`, o canal já usado pelo RapidOCR e que `api.py` mescla nos fatos da página. Cada página com releitura recebe `tesseract_deskew_decisions` (ângulo, decisão `deskewed`/`deskewed_more_complete`/`upright` e evidências) e `tesseract_more_complete_read_discarded`. Este último é verdadeiro quando a leitura direta é mantida embora a releitura traga ≥ 25% de texto a mais **lido com confiança ≥ 70**. A 1ª forma do sinal, sem a exigência de confiança, disparou na V9 p58 por ruído; corrigida antes da validação final. **Resultado: 0 alarmes nos 96 pares**; com a regra antiga, a p71 seria sinalizada. **Aviso de página não implementado**: emitir `warnings` exige `api.py`/executor, fora do escopo autorizado. Proposta: promover o fato a aviso `ocr_more_complete_read_discarded` e incluí-lo no manifesto de execução.
+
+**Validação progressiva**:
+
+| Nível | Conteúdo | Resultado | Custo |
+|---|---|---|---|
+| 1 | `_deskew_page` do repositório sobre os **96 pares reais** (releitura servida da captura) + 14 testes sintéticos | **95/96 saídas idênticas** à 7df5285; muda só a V11 p71 (`deskewed_more_complete`); decisão ≤ 0.4 s por página; cada salvaguarda tem um teste que falha quando ela é desligada | 12 s, 0 OCR |
+| 2 | V11 p67, p70, p71; V4 p180; V10 p48 (base 7df5285 × candidata, mesmo subconjunto) | p71 recall 0.327 → 0.938, ordem 0.742 → 0.924; as outras 4 **idênticas**; decisões nos fatos | 95 s, 1 chamada Tesseract |
+| 3 | 12 páginas raster do V11 em torno da p71 (p61–p78), efeitos entre páginas vizinhas | 11 idênticas; p71 muda | 220 s, 0 chamadas |
+| 4 | **As 61 páginas inclinadas** dos 7 corpora (degradadas V4/V9, multicoluna e tabelas V10/V9/V4, carimbo V11 p71, correções anteriores de inclinação de T3-P18) | **60 idênticas**; só a V11 p71 muda; decisões: 76 `deskewed`, 19 `upright`, 1 `deskewed_more_complete` | 580 s, 0 chamadas |
+| Contrafactual documental | p71 da candidata encaixada na captura pré-montagem completa do V11 e montagem reproduzida | V11 **70.4 → 71.7**: penalidade −1.0 eliminada, recall 0.9672 → 0.9734, Cobertura 88.6 → 89.7, Tab. estr. 79.6 → 80.2, `numeric` fp 100 → 101; só a p71 difere da 014 | 20 s, 0 chamadas |
+
+**Separação** (pedido 5): *desenvolvimento* = V11 p71; *estabilidade* = as 76 releituras aceitas e as 60 páginas idênticas; *generalização (negativa)* = os 19 pares rejeitados de V3, V4, V6, V8, V9 e V11 em que a regra é **acionada** e diz "não". Não há caso positivo de generalização nos corpora: só a p71 tem leitura direta que perde blocos inteiros.
+
+**V11 p71 depois da correção**:
+- **Recuperado**: os 3 parágrafos perdidos (R201, R202, R075) com as palavras corretas e os valores da tabela (6,8 kg, 11,4 kg, 2,1 kg, FG-712, FG713); a tabela passa a ser detectada.
+- **Resíduos**: as linhas de cada parágrafo saem **de baixo para cima** (T3-P49, já registrado na p61; por isso o CER fica em 0.557 com recall 0.935); a célula "FG-711", que a leitura direta tinha (conf. 93), é lida "em" (conf. 49) na releitura e se perde; a tabela carrega lixo do carimbo nas células.
+
+**Regressões identificadas**: nenhuma página fora da p71 muda; nenhuma tabela, valor ou ordem muda nas outras 60 páginas inclinadas. Na p71, `numeric_page` tp 1 → 3, fp 0 → 2 (lixo do carimbo nas células) e fn 5 → 3; o 1 identificador perdido está descrito acima.
+
+**Riscos remanescentes**:
+- Um único caso positivo real; a regra pode aceitar, em documento desconhecido, uma releitura mais completa com erros locais (como "FG-711") — mitigado por: confiança comum, preservação ≥ 90% e bloqueio por números divergentes.
+- A população das 61 páginas veio das leituras **escolhidas**; uma página cuja releitura só ocorra numa variante de qualidade não escolhida poderia ter escapado à varredura. Os fatos novos tornam isso visível na RUN 015 sem OCR extra.
+- `_retry_quarter_turns` também compara médias de confiança (não alterado; sem caso medido).
+- T3-P49 limita o ganho da recuperação na p71.
+
+**Tempo** (sempre um processo OCR por vez): captura 932 s (61 páginas, 304 chamadas); Níveis 2–4 e contrafactual ≈ 915 s com **1** chamada nova ao Tesseract (cache por hash da imagem: ≈ 415 chamadas ao Tesseract servidas do cache); suíte completa 120 s. **Evitadas**: a extração completa do V11 para o contrafactual (≈ 600 s) e a repetição do OCR para cada regra testada (as regras foram comparadas sobre os mesmos pares).
+
+**Arquivos modificados**: `src/structured_pdf_text/ocr/backends/tesseract.py`, `tests/test_tesseract_deskew_selection.py` (novo), este documento. `api.py` e componentes compartilhados não foram alterados.
+
+**Status**: T3-P44 **CORRIGIDO — VALIDADO PONTUALMENTE** (1/5; não commitado). **Não** declarado resolvido antes da RUN 015.
+
 ## §2 Problemas — detalhamento
 
 ### T3-P00 | CRÍTICO | Executor sem tabelas e sem supressão de cabeçalho/rodapé — RESOLVIDO
@@ -3216,6 +3351,8 @@ Capturas sequenciais (um processo OCR por vez) com a configuração da RUN 013; 
 
 - **Atualização do ciclo pós-013 (§1.37)**: implementado em `assemble/repeated_regions.py` (fase `_confirm_page_counters`), com evidências convergentes (borda, forma textual, contador com deslocamento único em todas as ocorrências, ≥ 3 páginas consecutivas, núcleo de posição estável, estilo, proeminência ≤ corpo). Validado offline sobre capturas completas: V11 65.9 → 70.4, V10 75.5 → 78.3, 0 linhas do gabarito removidas; a "Continuação…" é preservada por evidência estrutural. **Status**: CORRIGIDO — VALIDADO OFFLINE (não commitado); aguarda RUN 014.
 
+- **RUN 014 (§1.38)**: **confirmado** pelos critérios revisados aprovados pelo responsável. As 9 saídas são idênticas byte a byte às reproduções offline: V11 70.4, recall 0.967214, `numeric` fp 100, 18 linhas de mobília (mais 3 cabeçalhos fundidos com títulos nas p69/p95/p96, que a contagem da §1.37 não incluía; 21 ocorrências contra 185 na 013), "Continuação…" nas 7 páginas; V10 78.3, 12 rodapés (as inclinadas); V3–V9 idênticos. O aumento de `numeric` fn do V11 (50 → 64) é artefato do casamento documental (contadores removidos casavam números que o OCR perde em outras páginas); por página, fn 82 → 83 só na p75 ("Alfa-75" já perdido pelo OCR). **Critérios originais não atingidos** (preservados na §5.0h): V11 ≥ 70.5, ≤ 10 linhas, fp ≤ 80; V10 ≥ 78.5 e ≥ 60 de 65 rodapés removidos. **Status**: CORRIGIDO — CONFIRMADO NA RUN 014 (implementação conservadora); mobília residual **não** resolvida.
+
 ### T3-P44 | CRÍTICO | Perda silenciosa de texto em página raster degradada — NOVO (auditoria da RUN 013)
 
 - **Corpora/páginas**: V11 p71 (`faint_text_stamp`: texto claro com carimbo, −2°, 220 dpi); parciais p63 (recall 0.766; −8°, escuro e de baixa resolução) e p75 (0.643; moiré).
@@ -3225,6 +3362,8 @@ Capturas sequenciais (um processo OCR por vez) com a configuração da RUN 013; 
 - **Status**: NOVO — diagnóstico pendente (captura de 1 página, com autorização).
 
 - **Atualização do ciclo pós-013 (§1.36)**: **causa localizada**. O Tesseract reconhece o texto na releitura endireitada de `_deskew_page` (295 palavras, cobertura 0.95), mas ela é descartada por `_DESKEW_MAX_CONFIDENCE_LOSS` (média 86.45 contra 90.11 da leitura direta, que tem 109 palavras e cobertura 0.33). Nas palavras comuns, a releitura tem confiança maior. Defeito geral: comparação de médias sobre conjuntos diferentes de palavras, sem cobertura, e decisão não registrada. Nenhuma perda depois do TSV escolhido. Correção separada proposta (prioridade CRÍTICA, não implementada).
+
+- **Ciclo pós-014 (§1.39)**: corrigido em `ocr/backends/tesseract.py`. Quando as médias rejeitam a releitura, `_compare_reads` compara as duas leituras no mesmo referencial (releitura desrotacionada) por palavras comuns na mesma posição; `_deskewed_read_is_more_complete` aceita a releitura se ela traz ≥ 25% de texto a mais onde a leitura direta não tem nada, com ≥ 20 palavras comuns, confiança nas palavras comuns não pior (−1.0), ≥ 90% do texto da leitura direta preservado no lugar, excedente lido com confiança ≥ 70 e sem divergir na maioria dos números comuns. Toda decisão vai para os fatos da página (`tesseract_deskew_decisions`, `tesseract_more_complete_read_discarded`). Em 96 pares reais (61 páginas, 7 corpora), só a V11 p71 muda; 0 alarmes falsos. **Status**: CORRIGIDO — VALIDADO PONTUALMENTE (1/5; não commitado); aguarda RUN 015.
 
 ### T3-P45 | ALTO | Tabela nativa emitida duas vezes, com o título absorvido em células — NOVO (auditoria da RUN 013)
 
@@ -3260,6 +3399,8 @@ Capturas sequenciais (um processo OCR por vez) com a configuração da RUN 013; 
 - **Hipótese**: ordem das linhas no referencial inclinado (família de T3-P35).
 - **Status**: NOVO.
 
+- **Pós-014 (§1.39)**: a V11 p71 recuperada por T3-P44 (releitura endireitada a 2°) sai com as linhas de cada um dos 4 parágrafos de baixo para cima, com palavras corretas (recall 0.935, CER 0.557). O defeito atinge conteúdo que agora é recuperado; prioridade sobe para P1. Hipótese mantida: ordem das linhas sobre caixas desrotacionadas (envoltórias) em vez do referencial retificado (proposta H1 da §1.26).
+
 ### T3-P50 | INFO | Convenção de nível de título do gabarito V11 — REGISTRADO (auditoria da RUN 013)
 
 - O gabarito do V11 usa `#` em todos os títulos de página (100). A extração aplica a hierarquia do documento: o título da capa (maior) é `#`, e os títulos de página são `##`. `heading_level_match_rate` 0.056 (4/71), ≈ −1.9 na nota.
@@ -3268,7 +3409,13 @@ Capturas sequenciais (um processo OCR por vez) com a configuração da RUN 013; 
 
 ## §3 Alterações de código
 
-### Pós-013, ciclo T3-P43 / diagnóstico de T3-P44 (2026-11-24, não commitado)
+### Pós-014, ciclo T3-P44 (2026-11-24, não commitado)
+
+- `src/structured_pdf_text/ocr/backends/tesseract.py`: constantes `_DESKEW_MIN_COVERAGE_GAIN` (0.25), `_DESKEW_MIN_SHARED_WORDS` (20), `_DESKEW_MAX_NUMBER_DISAGREEMENT` (0.5), `_DESKEW_MIN_COVERED_FRACTION` (0.5); funções puras `_compare_reads` e `_deskewed_read_is_more_complete`; `_deskew_page` aceita a releitura mais completa por evidência comparável e registra a decisão; métodos novos `_record_deskew_decision`, `reset_page_diagnostics` e `consume_page_diagnostics` (canal de diagnóstico já existente, usado pelo RapidOCR, que `api.py` mescla nos fatos da página). Nenhuma assinatura existente alterada; `api.py` não alterado.
+- `tests/test_tesseract_deskew_selection.py`: novo (14 testes).
+- Fora do repositório versionado: `output/tesseract/_captures/` (capturas e ferramentas; ignorado pelo git).
+
+### Pós-013, ciclo T3-P43 / diagnóstico de T3-P44 (2026-11-24, commit `7df5285`)
 
 - `src/structured_pdf_text/assemble/repeated_regions.py`: nova fase `_confirm_page_counters` (com `_counter_form`, `_counter_slots`, `_has_consecutive_run`, `_stable_position_core`, `_not_more_prominent_than_body`), chamada no fim de `detect_repeated_headers_footers`. Nenhuma outra função nem assinatura alterada.
 - `tests/test_repeated_page_counters.py`: novo (21 testes positivos e negativos).
@@ -3427,6 +3574,11 @@ Avaliadas na RUN 006.
 
 ## §4 Testes executados
 
+### Pós-014 (2026-11-24)
+
+- `tests/test_tesseract_deskew_selection.py` (14, novo) + `tests/test_tesseract_run005_regressions.py` (12): **26 passam** (executados). Cada salvaguarda tem um teste que falha quando ela é desligada (verificado: ganho, palavras comuns, confiança nas palavras comuns, preservação da leitura direta, confiança do excedente, números).
+- Suíte completa (executada, sem OCR concorrente): **3526 aprovados, 13 falhas, 4 ignorados, 4 xfail**. As 13 falhas são as pré-existentes de T3-P14, as mesmas da §1.37.
+
 ### Pós-013 (2026-11-24)
 
 - `tests/test_repeated_page_counters.py` (21, novo) + `test_repeated_suppression.py`, `test_furniture_body_protection.py`, `test_candidate_lines_h004b.py` (26): **47 passam** (executados). Discriminância dos negativos verificada desligando cada evidência.
@@ -3533,7 +3685,31 @@ Configuração: `build_config()` do executor (tesseract, balanced, pt-BR, adapti
 | 2026-11-19 | `pytest tests` (código com T3-P06 t3) | **3491 passed, 13 failed (exatamente as de T3-P14), 4 skipped, 4 xfailed**; 120 s |
 
 
-## §5 Próximo ciclo (pós-013)
+## §5 Próximo ciclo (pós-014)
+
+**Prioridade**: **V11**; V3–V10 são controles de regressão. Meta interna **mantida**: nota ≥ 85/100 em **cada um dos 9 corpora**, com a rubrica §1.16 inalterada. Critérios de integridade sempre obrigatórios: nenhuma perda de conteúdo, nenhum dado crítico corrompido, nenhuma duplicação, nenhuma falha grave silenciosa. Situação na 014: V11 **70.4**, V4 66.9, V9 75.6, V10 78.3 abaixo da meta; V3 93.1, V5 86.5, V6 96.7, V7 99.4, V8 98.8.
+
+- **T3-P43**: confirmado na RUN 014 (§1.38); mobília residual registrada, não perseguida neste ciclo.
+- **T3-P44**: implementado e validado pontualmente (§1.39, não commitado); **a RUN 015, executada manualmente pelo responsável, confirma**.
+- **Depois da RUN 015, candidatos**: T3-P49 (ordem de linhas invertida em página inclinada; agora limita o ganho de T3-P44 e sobe para P1; tratar junto com T3-P35 pela abordagem do referencial retificado, §1.26); T3-P45 (duplicação), T3-P46 (colunas como tabela). Nenhum foi tocado neste ciclo.
+- **Aviso de página para leitura mais completa descartada**: proposto (§1.39), exige autorização para `api.py`/executor.
+- **Baseline de comparação da RUN 015**: `output/tesseract/014/` (commit `7df5285`).
+
+### Critérios da RUN 015 (T3-P44)
+
+A extração é determinística (RUN 014 = reprodução offline byte a byte), então a RUN 015 deve reproduzir a validação pontual:
+
+- **V11**: só a **p71** difere da 014. Nota **71.7 ± 0.1** (contrafactual documental); `text_coverage_recall` 0.9734 (± 0.0005); penalidade de perda de volume 0 (era −1.0); p71 com recall ≥ 0.93, nos fatos `tesseract_deskew_decisions` = `deskewed_more_complete`; os 3 parágrafos R201, R202, R075 presentes (ordem de linhas invertida esperada, T3-P49); demais critérios de T3-P43 mantidos (≤ 18 linhas de mobília, 7 "Continuação…", `numeric` fp ≤ 101).
+- **V3–V10**: Markdown **idêntico byte a byte** à 014 (nenhuma decisão de releitura muda nas 60 outras páginas inclinadas; as páginas sem inclinação não chegam ao código novo).
+- **Observabilidade**: `tesseract_more_complete_read_discarded` falso em todas as páginas dos 9 corpora. Qualquer página com o sinal verdadeiro é um caso **novo** de leitura mais completa descartada, a ser investigado. Páginas com `tesseract_deskew_decisions` devem ser as 61 da §1.39; uma página fora dessa lista revela releitura não vista pela varredura (risco registrado).
+- **Integridade**: nenhum aviso novo; nenhuma página com recall menor que na 014; tempo de extração dentro da variação do ambiente (a comparação só roda quando a regra atual rejeita: ≤ 0.4 s por página).
+- **Não declarar T3-P44 resolvido** antes dessa confirmação; a nota geral não é critério suficiente.
+
+### Protocolo (inalterado)
+
+Validação progressiva da §5.0g, controles de estabilidade × generalização e critérios gerais continuam em vigor. Reaproveitar `output/tesseract/_captures/` (README) antes de qualquer nova extração e verificar a validade da captura contra a última saída oficial.
+
+## §5.0h (histórico) Próximo ciclo pós-013 — T3-P43 confirmado na RUN 014 (§1.38)
 
 **Prioridade (decisão do responsável, 2026-11-24)**: **V11**. V3–V10 são controles de regressão. Meta interna: nota ≥ 85/100 em **cada um dos 9 corpora**, com a rubrica §1.16 **inalterada**. Critérios de integridade separados e sempre obrigatórios: nenhuma perda de conteúdo, nenhum dado crítico corrompido, nenhuma duplicação, nenhuma falha grave silenciosa. Situação na 013: V11 **65.9**, V4 66.9, V10 75.5, V9 75.6 abaixo da meta; demais ≥ 86.5.
 
