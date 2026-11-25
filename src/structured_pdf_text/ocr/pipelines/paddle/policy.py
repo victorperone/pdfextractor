@@ -41,11 +41,17 @@ FUSION_POLICY = CandidateFusionPolicy()
 FIGURE_ADMISSION_POLICY = FigureShapeAdmissionPolicy("paddle-figure-admission-v1", "paddle")
 # On pages without text (V10 seals, emblems, charts) PP-OCR reads the shapes
 # as lone glyphs: "O", "Q", "9", "典", "新场督局" (001-P1-02).
-ADMISSION_POLICY = IsolatedGlyphAdmissionPolicy("paddle-admission-v2", "paddle", base=FIGURE_ADMISSION_POLICY)
+# The rings of a spiral binding read as a column of "C" beside the text, which
+# joined the lines next to them (V11 p62, 007-P1-01).
+ADMISSION_POLICY = IsolatedGlyphAdmissionPolicy("paddle-admission-v3", "paddle", base=FIGURE_ADMISSION_POLICY,
+                                                binding_mark_run=4)
 
 # PP-OCR detects one box per column line; the shared row grouping joined the
 # rows of neighbouring columns on raster multi-column pages (V10, 001-P1-01).
-TEXT_COLUMN_POLICY = TextColumnPolicy("paddle-text-columns-v1", enabled=True)
+# Detector quadrilaterals give the tilt of lines on a straight page with a
+# crooked pasted image; such an area is read in its rectified frame even
+# without gutters (007-P0-01).
+TEXT_COLUMN_POLICY = TextColumnPolicy("paddle-text-columns-v2", enabled=True, order_tilted_flow=True)
 
 # Paddle reads a skewed page straightened (003-P0-01), so its observations are
 # in the straightened frame; table grids are found on the raster turned alike

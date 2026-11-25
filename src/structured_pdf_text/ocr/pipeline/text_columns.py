@@ -29,6 +29,12 @@ class TextColumnPolicy:
     leave it empty), so a table or a full-width line elsewhere is never split.
     Positions are measured in the frame rectified by the dominant text tilt,
     so the gutters of a skewed scan stay vertical.
+
+    With ``order_tilted_flow``, an area without gutters whose detector
+    quadrilaterals share one tilt is returned as one flow read in that
+    rectified frame: the tall axis-aligned boxes of
+    tilted lines overlap their neighbours, and an ordering of those boxes
+    swaps consecutive lines (V9 p81, 007-P0-01).
     """
 
     policy_id: str
@@ -42,6 +48,7 @@ class TextColumnPolicy:
     heading_maximum_lines: int = 3
     heading_maximum_chars: int = 120
     heading_minimum_gap: float = 1.5
+    order_tilted_flow: bool = False
 
     def arrange(self, lines: list[TextLine], tokens: list[OcrToken], page_index: int,
                 page_bbox: BBox) -> list[list[TextLine]] | None:
@@ -71,10 +78,15 @@ class TextColumnPolicy:
         if rotation and (rotation not in (90, 180, 270) or loose):
             return None
         view = _ReadingView(observed, page_bbox, rotation)
-        slope = _dominant_slope(view.tokens) or self._box_tilt(view.tokens, view.page)
+        detected_slope = _dominant_slope(view.tokens)
+        slope = detected_slope or self._box_tilt(view.tokens, view.page)
         frame = _RectifiedFrame(view.tokens, view.page, slope)
         gutters = self._gutters(frame, view.page.width)
         if not gutters:
+            # Only a tilt shared by the detector quadrilaterals; a perspective
+            # scan has none, and its box drift fits no single slope.
+            if self.order_tilted_flow and detected_slope and not rotation and not loose:
+                return [_flow_lines(frame, view.tokens, page_index, page_bbox)]
             return None
         bands = text_column_bands(gutters)
         if any(frame.crosses(line.bbox, bands) for line in loose):

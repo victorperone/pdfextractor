@@ -18,7 +18,7 @@ from structured_pdf_text.errors import (
     raise_if_resource_exhausted,
     is_resource_exhaustion,
 )
-from structured_pdf_text.geometry import BBox
+from structured_pdf_text.geometry import BBox, Point
 from structured_pdf_text.ocr.models import (
     PADDLE_OCR_FEATURE_DEFAULTS,
     get_profile,
@@ -1179,7 +1179,11 @@ def _tokens_from_result(
     document_angle, document_size = _document_preprocessor_frame(raw)
     turned_size, document_transform = _document_turn_to_input(document_angle, width, height)
     effective_rotation = ((rotation or record_rotation) + document_angle) % 360
-    for text, confidence, box, _ in records:
+    # The quadrilateral is kept only in the plain frame (no document turn, box
+    # transform or page rotation), where it maps like the box.
+    plain_frame = (document_transform is None and box_transform is None and page_rotation % 360 == 0
+                   and effective_rotation == 0 and (document_size is None or document_size == turned_size))
+    for text, confidence, box, line_rotation, quadrilateral in records:
         if not text or box is None:
             continue
         try:
@@ -1223,6 +1227,8 @@ def _tokens_from_result(
             if not all(math.isfinite(value) for value in coordinates):
                 continue
             bbox = BBox(*coordinates)
+            polygon = (_page_polygon(quadrilateral, bbox, target, scale_x, scale_y)
+                       if plain_frame and not line_rotation else None)
         except (TypeError, ValueError, IndexError, OverflowError):
             # A malformed detector row should not discard valid rows in the page.
             continue
@@ -1241,9 +1247,34 @@ def _tokens_from_result(
                 source=SourceKind.OCR_PAGE,
                 rotation=effective_rotation,
                 provenance=provenance or ("orientation_recovery" if rotation else "baseline"),
+                polygon=polygon,
             )
         )
     return tokens
+
+
+def _page_polygon(quadrilateral: Any, bbox: BBox, target: BBox, scale_x: float, scale_y: float) -> tuple[Point, ...] | None:
+    """Detector quadrilateral in page coordinates, clipped to its own box.
+
+    PaddleOCR orders the corners from the top left clockwise, so the first edge
+    is the top of the text line and carries its tilt (``reconstruct``'s
+    ``_dominant_slope``). Without a usable quadrilateral the token keeps only
+    its box, as before.
+    """
+    if quadrilateral is None:
+        return None
+    if hasattr(quadrilateral, "tolist"):
+        quadrilateral = quadrilateral.tolist()
+    points = [point for point in quadrilateral if isinstance(point, (list, tuple)) and len(point) >= 2]
+    if len(points) != 4:
+        return None
+    mapped = []
+    for point in points:
+        x, y = target.x0 + float(point[0]) * scale_x, target.y0 + float(point[1]) * scale_y
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        mapped.append(Point(min(max(x, bbox.x0), bbox.x1), min(max(y, bbox.y0), bbox.y1)))
+    return tuple(mapped)
 
 
 # Share of lines marked 180° above which the whole call is an upside-down page
@@ -2054,7 +2085,8 @@ def _document_preprocessor_frame(raw: Any) -> tuple[int, tuple[int, int] | None]
     return frames[0] if len(frames) == 1 else (0, None)
 
 
-def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
+def _records(raw: Any) -> list[tuple[str, float | None, Any, int, Any]]:
+    """(text, score, box, line rotation, detector quadrilateral or None)."""
     if raw is None:
         return []
     if isinstance(raw, (list, tuple)):
@@ -2062,7 +2094,7 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
             nested = _records(raw[0])
             if nested:
                 return nested
-        records: list[tuple[str, float | None, Any, int]] = []
+        records: list[tuple[str, float | None, Any, int, Any]] = []
         for item in raw:
             try:
                 if isinstance(item, dict):
@@ -2075,6 +2107,7 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
                             payload[1] if len(payload) > 1 else None,
                             box,
                             _as_rotation(payload[2]) if len(payload) > 2 else 0,
+                            None,
                         ))
                 else:
                     # PaddleOCR 3.x predict() yields PipelineResult objects inside a
@@ -2100,10 +2133,14 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
         texts = _field(raw, "rec_texts", "texts")
         scores = _field(raw, "rec_scores", "scores")
         boxes = _field(raw, "rec_boxes", "rec_polys", "boxes", "polys")
+        # The detector quadrilaterals keep the tilt that the axis-aligned
+        # ``rec_boxes`` (their bounds) lose.
+        polygons = _field(raw, "rec_polys", "polys")
         angles = _field(raw, "textline_orientation_angles", "orientation_angles", "angles")
         texts = [] if texts is None else texts
         scores = [] if scores is None else scores
         boxes = [] if boxes is None else boxes
+        polygons = [] if polygons is None else polygons
         angles = [] if angles is None else angles
         records = []
         try:
@@ -2113,7 +2150,8 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
                         continue
                     confidence = _as_float(scores[index]) if index < len(scores) else None
                     rotation = _as_rotation(angles[index]) if index < len(angles) else 0
-                    records.append((str(text), confidence, boxes[index], rotation))
+                    polygon = polygons[index] if index < len(polygons) and len(polygons) == len(boxes) else None
+                    records.append((str(text), confidence, boxes[index], rotation, polygon))
                 except (TypeError, ValueError, IndexError, OverflowError):
                     continue
         except TypeError:
@@ -2126,8 +2164,8 @@ def _records(raw: Any) -> list[tuple[str, float | None, Any, int]]:
             return []
     return []
 
-def _dominant_record_rotation(records: list[tuple[str, float | None, Any, int]]) -> int:
-    usable = [rotation for text, confidence, _, rotation in records if text and (confidence is None or confidence >= 0.50)]
+def _dominant_record_rotation(records: list[tuple[str, float | None, Any, int, Any]]) -> int:
+    usable = [rotation for text, confidence, _, rotation, _polygon in records if text and (confidence is None or confidence >= 0.50)]
     if not usable:
         return 0
     upside_down = sum(rotation == 180 for rotation in usable)

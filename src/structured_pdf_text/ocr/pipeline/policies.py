@@ -195,6 +195,14 @@ class IsolatedGlyphAdmissionPolicy:
     when the call read no body text) or a confidence below
     ``minimum_confidence``. Page numbers, check marks and labels next to text
     are untouched. Per-token decisions are delegated to ``base``.
+
+    With ``binding_mark_run`` set, a column of at least that many identical
+    one- or two-character observations is also rejected when every member is
+    taller than ``binding_mark_body_ratio`` body heights and lies beside the
+    text body, outside its horizontal extent: the rings of a spiral binding or
+    the holes of a punched sheet read as "C"/"O" (V11 p62, 007-P1-01). Such a
+    mark sits next to a line and would otherwise join it. Zero keeps the
+    legacy behaviour.
     """
 
     policy_id: str
@@ -209,9 +217,42 @@ class IsolatedGlyphAdmissionPolicy:
     minimum_confidence: float = .70
     mark_glyphs: str = "_~^`|"
     glyph_width_heights: float = 1.6
+    binding_mark_run: int = 0
+    binding_mark_body_ratio: float = 1.5
 
     def rejection_reason(self, token, request):
         return self.base.rejection_reason(token, request) if self.base is not None else None
+
+    def _binding_marks(self, tokens, body_height) -> set:
+        """Ids of the members of margin columns of identical tall glyphs."""
+        if self.binding_mark_run <= 0 or not body_height:
+            return set()
+        body = [token.bbox for token in tokens if len("".join(token.text.split())) > self.maximum_glyphs]
+        if not body:
+            return set()
+        left, right = min(box.x0 for box in body), max(box.x1 for box in body)
+        marks = {}
+        for token in tokens:
+            glyphs = "".join(token.text.split())
+            box = token.bbox
+            if (1 <= len(glyphs) <= 2 and glyphs.isalnum()
+                    and box.height >= self.binding_mark_body_ratio * body_height
+                    and box.width <= (self.glyph_width_heights * len(glyphs) + 1.0) * box.height
+                    and (box.x0 >= right or box.x1 <= left)):
+                marks.setdefault(glyphs.casefold(), []).append(token)
+        rejected = set()
+        for members in marks.values():
+            members.sort(key=lambda token: token.bbox.cx)
+            column = [members[0]]
+            for token in members[1:] + [None]:
+                if token is not None and token.bbox.x0 <= max(item.bbox.x1 for item in column):
+                    column.append(token)
+                    continue
+                if len(column) >= self.binding_mark_run:
+                    rejected.update(item.token_id for item in column)
+                if token is not None:
+                    column = [token]
+        return rejected
 
     def attempt_rejections(self, tokens, request) -> dict[str, str]:
         if request.goal not in self.goals:
@@ -219,8 +260,10 @@ class IsolatedGlyphAdmissionPolicy:
         bodies = [token.bbox.height for token in tokens if len("".join(token.text.split())) > self.maximum_glyphs]
         body = sorted(bodies)[len(bodies) // 2] if bodies else None
         tall = max(self.oversized_height, self.oversized_body_ratio * body) if body else self.oversized_height
-        reasons = {}
+        reasons = {token_id: f"{self.reason_prefix}_binding_mark" for token_id in self._binding_marks(tokens, body)}
         for token in tokens:
+            if token.token_id in reasons:
+                continue
             glyphs = "".join(token.text.split())
             if not glyphs or len(glyphs) > self.maximum_glyphs:
                 continue
