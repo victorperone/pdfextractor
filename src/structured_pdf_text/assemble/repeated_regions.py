@@ -199,11 +199,11 @@ def _candidate_lines(page: StructuredPage) -> list[tuple[str, TextLine]]:
 _SEMANTIC_CONTROL_RE = re.compile(
     # VQ-25: Lines that carry unique semantic identifiers must never be
     # treated as repeatable furniture, even if they appear in an edge band.
-    # Patterns: protocol numbers, page-control stamps (V5-P###, PROC-####),
-    # timestamps with unique values, and similar identifiers.
-    r"controle\s+de\s+p[áa]gina"   # explicit page-control label
-    r"|v\d+-p\d+"                   # corpus-style identifier (V5-P009)
-    r"|\bproc(?:esso)?\s*[nº:]\s*\d"  # process number
+    # Patterns: process numbers and dates. A per-page identifier of any other
+    # form already keeps a line out: its digits differ from page to page, so
+    # its signature never repeats (numbers other than the page counter stay
+    # in the signature, ``_normalize_signature``).
+    r"\bproc(?:esso)?\s*[nº:]\s*\d"  # process number
     r"|\b\d{2}/\d{2}/\d{4}\b"      # date with year (unique per document)
     r"|\b\d{4}-\d{2}-\d{2}\b",     # ISO date
     re.IGNORECASE,
