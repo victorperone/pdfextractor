@@ -20,30 +20,17 @@ if TYPE_CHECKING:
 # (with an optional dot for single-number prefixes ending with ".").
 _NUMBERED_PREFIX_RE = re.compile(r"^((?:\d+\.)+\d+|\d+\.)\s*\S")
 
-# "Página N" page label at the start of a block ("Página 7", "Página 7 de 40",
-# "Página 7/40", "Página 007 | Título"); group 1 is the page number. After the
-# number comes nothing, a separator or "de M": "Página 7 do contrato contém…" is
-# a sentence, not a label (AI-02). All 351 labels suppressed in RUN 015 (V3, V4)
-# have the "|" form. The text may contain an optional leading markdown "# "
-# that the OCR read literally.
-_PAGINA_SEP_RE = re.compile(r"(?i)^\s*(?:#\s+)?p[aá]gina\s+(\d+)(?=\s*(?:$|[|/·•–—-]|de\s+\d))")
-# A page separator is one short line ("Página 096 | OCR com rotação física de
-# 90 graus" has 47 characters). A longer block that merely starts with it also
-# carries body text; suppressing it deletes content (V3 p96 after the
-# quarter-turn retry: the whole page body), so only the separator shape is
-# suppressed.
-_PAGINA_SEP_MAX_CHARS = 160
-# A TITLE block may wrap the same label over two lines ("Página 001 | Corpus
-# integrado de validação: texto nativo,\nOCR e tabelas", V3); it is still the
-# label. Body text never forms a TITLE block.
-
 # No rule here recognises the text of a particular document. The rules that
 # suppressed the headers, footers and family markers of the V3/V4/V6 test
 # corpora by their wording were removed (T3-P09): they deleted whatever
 # matched, including a whole table for one cell and the title and body of
-# V3 p116 (T3-P27). Page furniture is suppressed only by structural evidence
-# (repetition across pages, the page's own number) and only when the
-# extraction does not preserve headers and footers (T3-P54).
+# V3 p116 (T3-P27). The rule that suppressed "Página N …" lines was removed
+# too: it existed so that a title such as "Página 7 | Resultados" would not be
+# read as the "## Página N" delimiter of the paginated Markdown, and the
+# renderer now writes such content so that it cannot be (T3-P52). Page
+# furniture is suppressed here only by structural evidence (repetition across
+# pages) and only when the extraction does not preserve headers and footers
+# (T3-P54); page counters are left to the shared detector (T3-P43).
 
 # Portuguese structural section terms: "Seção N" → H2, "Subseção N.M" → H3.
 # These are common in Brazilian government/legal documents and are unlikely to
@@ -61,14 +48,12 @@ def _prefix_depth(num_str: str) -> int:
     return len([p for p in num_str.split(".") if p])
 
 
-# Suppressions of recognised page furniture: running headers and the page's
-# own "Página N" label. They are the only suppressions made here, and only
-# when headers and footers are not preserved. Any other suppression would
-# remove content after the assembly ledger has accounted for every line, so
-# it is reported in the page diagnostics (T3-P36).
+# Suppression of recognised page furniture: running headers. It is the only
+# suppression made here, and only when headers and footers are not preserved.
+# Any other suppression would remove content after the assembly ledger has
+# accounted for every line, so it is reported in the page diagnostics (T3-P36).
 _FURNITURE_SUPPRESSION_REASONS = frozenset({
     "tesseract_running_header",
-    "tesseract_pagina_separator",
 })
 
 
@@ -86,14 +71,13 @@ def _furniture_suppression_allowed(document: "StructuredDocument") -> bool:
 def apply_tesseract_postprocessors(document: "StructuredDocument") -> None:
     """Run all Tesseract post-processors on *document* in order.
 
-    Only the furniture suppressors remove blocks, and they do nothing when
-    headers and footers are preserved. The other steps never remove text.
+    Only the running-header suppressor removes blocks, and it does nothing
+    when headers and footers are preserved. The other steps never remove text.
     """
     visible_before = {
         id(block) for page in document.pages for block in page.content_blocks if not block.suppressed
     }
     suppress_tesseract_running_headers(document)
-    _suppress_pagina_separator_blocks(document)
     _flag_rotated_table_garble(document)
     _normalize_brl_currency_spacing(document)
     _promote_numbered_bold_headings(document)
@@ -222,58 +206,6 @@ def suppress_tesseract_running_headers(
         print(
             f"[tesseract_post] suppressed running header on {suppressed_count}/{len(pages)} pages "
             f"(signatures: {sorted(running_headers)[:3]})",
-            flush=True,
-        )
-
-
-def _suppress_pagina_separator_blocks(document: "StructuredDocument") -> None:
-    """Suppress the page's own 'Página N' label ("Página 7 de 40", "Página 007 | Título").
-
-    A running page label carries the page number, so its text differs on
-    every page and the frequency-based suppressor
-    (``suppress_tesseract_running_headers``) cannot see it repeat. The
-    evidence used instead is the page counter itself: the label is suppressed
-    only on page N. A "Página 12 …" line on another page (a cross-reference,
-    a table of contents, a title) is content and is kept.
-
-    Targets both TITLE blocks (layout engine classified them) and TEXT blocks
-    whose raw text starts with "# Página N" (OCR read a literal ``#`` glyph).
-    Only label-shaped blocks are suppressed: at most ``_PAGINA_SEP_MAX_CHARS``
-    characters and either a TITLE block (a long title may wrap over two lines)
-    or a single line. A TEXT block that continues with body text is kept
-    (T3-P25, T3-P26). Nothing is suppressed when headers and footers are
-    preserved (T3-P54).
-
-    Known limit (T3-P52): the text after the counter ("| Título") goes with
-    it. The paginated Markdown uses "## Página N" as its page delimiter and
-    the evaluator also takes "## Página N | …" as one, so keeping such a title
-    would make the output ambiguous until the renderer and the evaluator can
-    tell a delimiter from a title.
-    Idempotent: already-suppressed blocks are skipped.
-    """
-    if not _furniture_suppression_allowed(document):
-        return
-    suppressed = 0
-    for page in document.pages:
-        page_index = getattr(page, "page_index", None)
-        if page_index is None:
-            continue
-        for block in page.content_blocks:
-            if block.suppressed:
-                continue
-            text = (block.text or "").strip()
-            if not text:
-                continue
-            label = _PAGINA_SEP_RE.match(text)
-            if (label and int(label.group(1)) == page_index + 1 and len(text) <= _PAGINA_SEP_MAX_CHARS
-                    and (getattr(block, "kind", None) == "title" or "\n" not in text)):
-                block.suppressed = True
-                block.suppression_reason = "tesseract_pagina_separator"
-                suppressed += 1
-
-    if suppressed:
-        print(
-            f"[tesseract_post] suppressed {suppressed} 'Página NNN' separator block(s)",
             flush=True,
         )
 

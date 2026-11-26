@@ -10,7 +10,7 @@
 
 ## Quadro principal de problemas
 
-Situação após a **auditoria integral pós-RUN 015** (2026-11-25, commit `1717bd5`; §0 e §1.40) e do confronto com a auditoria independente (§0.9); prioridades e T3-P51 atualizados pelo ciclo T3-P51 (§0.10; commit `db3a49d`); T3-P09, T3-P27, T3-P54 e T3-P52 atualizados pelo ciclo da §0.11 (validação offline, não commitado). Ordenado por severidade (CRÍTICO > ALTO > MÉDIO > BAIXO > INFO); dentro de cada severidade, os ativos vêm primeiro, por prioridade. Diagnósticos, tentativas e histórico completos em §2; o quadro anterior (pós-014) está preservado na §0-h.
+Situação após a **auditoria integral pós-RUN 015** (2026-11-25, commit `1717bd5`; §0 e §1.40) e do confronto com a auditoria independente (§0.9); prioridades e T3-P51 atualizados pelo ciclo T3-P51 (§0.10; commit `db3a49d`); T3-P09, T3-P27, T3-P54 e T3-P52 atualizados pelo ciclo da §0.11 (commit `c08cf7c`); T3-P09 e T3-P52 atualizados e T3-P56 registrado pelo ciclo da §0.12 (validação offline, não commitado). Ordenado por severidade (CRÍTICO > ALTO > MÉDIO > BAIXO > INFO); dentro de cada severidade, os ativos vêm primeiro, por prioridade. Diagnósticos, tentativas e histórico completos em §2; o quadro anterior (pós-014) está preservado na §0-h.
 
 - **Severidade**: perda de conteúdo ou corrupção de dados > leitura/estrutura > problemas menores. **Prioridade**: ordem de trabalho recomendada (P0 primeiro), independente da severidade; a escolha é do responsável.
 - **Tentativas**: usadas / limite (5 por problema desde o ciclo pós-006; "—" = correção anterior à regra).
@@ -31,7 +31,7 @@ Situação após a **auditoria integral pós-RUN 015** (2026-11-25, commit `1717
 | T3-P54 | Pós-processamento Tesseract ignora `preserve_headers_footers` e altera páginas nativas | ALTO | P0 (ciclo §0.11) | Todo documento com `ocr_engine="tesseract"`; medido offline nos 9 corpora | **Ciclo §0.11 (offline)**: com a flag `True`, supressões do pós-processamento 1 443 → **0** nos 9 corpora. Com `False`, só a mobília por estrutura. Em páginas nativas continuam dependentes do motor: promoções de título (V5 1, V6 16, V7 9, V8 10, V9 6) e, sem preservação, os rótulos "Página N" de V3/V4 | 1 / 5 | **CORRIGIDO — COM RESÍDUOS** (validado offline; proposta arquitetural na §0.11) | 015 (offline) | RUN 016 (§5); proposta da §0.11 |
 | T3-P49 | Linhas de parágrafo invertidas e colunas misturadas em páginas raster inclinadas (agrupamento FORM sobre caixas infladas) | ALTO (era MÉDIO) | P2 (ação 7) | V11 p61, p71 (mecanismo também em p62, p69, p78, p95, p96); V10 L01/L02 (12 págs.); V4 p106, p156; V9 p17 | **015**: 54 das 55 regiões em modo FORM das 61 páginas inclinadas empilham linhas da mesma coluna (22 páginas, 4 corpora); inversão só com inclinação negativa. Contrafactual offline E1 (geometria endireitada): V11 71.7 → 73.8, V10 78.3 → 79.9, recall idêntico | 0 / 5 | **PENDENTE** — causa demonstrada no código (§0.2) | 015 | Referencial retificado, junto com T3-P35; exige autorização (compartilhado) |
 | T3-P35 | Ordem de blocos em páginas raster multicoluna | ALTO | P2 (ação 7, com T3-P49) | V10 L01/L02 (12 págs.); resíduo p32 | Niveladas corrigidas (008) e mantidas; inclinadas com dois mecanismos: calhas inclinadas na reconstrução e FORM sobre caixas infladas na montagem | 2 / 5 | **PARCIAL** | 015 | Junto com T3-P49 |
-| T3-P09 | Regras de texto ajustadas aos corpora no pós-processamento Tesseract | **CRÍTICO** (era INFO; ALTO na 1ª versão desta auditoria) | P0 (ciclo §0.11; resta T3-P52) | `ocr/tesseract/postprocess.py`: marcadores V3/V4, IRINF do V6, "Página NNN" | **Ciclo §0.11 (offline)**: literais V3/V4/V6 removidos (OF-01, OF-02), assim como as supressões sem fundamento de despejo TSV e "$" + maiúscula (OF-20, OF-10). Notas V3 92.88 → 87.75, V4 66.86 → 66.56, V6 96.29 → 95.55: 42 blocos de mobília dos corpora voltam à saída; nenhuma palavra do gabarito, número ou tabela perdidos. A regra "Página N" (OF-03) fica restrita ao rótulo da própria página e é mantida por depender de T3-P52 | 1 / 5 | **PARCIAL — VALIDADO OFFLINE** (§0.11; não commitado) | 015 (offline: `db3a49d` + ciclo) | RUN 016 (§5); concluir com T3-P52 |
+| T3-P09 | Regras de texto ajustadas aos corpora no pós-processamento Tesseract | **CRÍTICO** (era INFO; ALTO na 1ª versão desta auditoria) | P0 (ciclos §0.11 e §0.12) | `ocr/tesseract/postprocess.py`: marcadores V3/V4, IRINF do V6, "Página NNN" | **§0.11 (commit `c08cf7c`)**: literais V3/V4/V6 e supressões sem fundamento removidos (OF-01, OF-02, OF-10, OF-20); V3 87.75, V4 66.56, V6 95.55. **§0.12 (offline)**: regra "Página N" (OF-03) removida; os 351 títulos de página voltam (V3 141, V4 210); V3 87.75 → 62.58 e V4 66.56 → 60.30 pela convenção dos gabaritos (T3-P56); nenhuma palavra do gabarito, número ou tabela perdidos | 2 / 5 | **CORRIGIDO — VALIDADO OFFLINE** (§0.12; não commitado) | 015 (offline: `c08cf7c` + ciclo) | RUN 016 (§5) |
 | T3-P45 | Tabela nativa emitida duas vezes, com o título absorvido em células | ALTO | P2 (ação 8) | V11 p50, p93 | 013 = 015: tabela duplicada, título partido em células; `numeric` fp 13 na p50 | 0 / 5 | **PENDENTE** | 015 | Diagnóstico por etapa (nativo, sem OCR) |
 | T3-P46 | Texto nativo em colunas e lista detectados como tabela sem borda | ALTO | P2 (ação 8) | V11 p5, p98, p86, p3, p7, p102 e **p120** (lista + parágrafo + microtabela numa só tabela, palavras cortadas entre células: "av \| aliação") | 013 = 015: p5 + p98 = 12.8% das edições do V11 | 0 / 5 | **PENDENTE** | 015 | Diagnóstico por etapa; exige autorização (detector nativo) |
 | T3-P47 | Tabelas nativas sem borda empilhadas ou de formulário desmontadas | ALTO | P2 (ação 8) | V11 p57, p9, p37, p41, p54, p110, p115; parciais p45, p60, p63 | V11 `table_detection_recall` 0.770 (015) | 0 / 5 | **PENDENTE** | 015 | Junto com T3-P37 |
@@ -52,7 +52,8 @@ Situação após a **auditoria integral pós-RUN 015** (2026-11-25, commit `1717
 | T3-P28 | Valor monetário colado em célula | ALTO | — | V8 p4, p58 | `€ 98,40` presente na 015 | 1 / — | **RESOLVIDO — confirmado** (006) | 015 | — |
 | T3-P39 | Valores corrompidos por duas leituras do mesmo ponto | ALTO | — | V9 p58, p66; V6 p11; V8 p49, p67 | V9 p58 `R$ 2.333,52`, `R$ 845,26`, `R$ 1.036,35` e V8 p67 `02/10/2026` corretos na 015 | 1 / 5 | **RESOLVIDO — confirmado** (010) | 015 | — |
 | T3-P42 | Linhas OCR descartadas na fusão de fragmentos de título | ALTO | — | V10 p5, p11, p31, p62 | +83 palavras do gabarito (012), mantidas | 1 / 5 | **RESOLVIDO — confirmado** (012) | 015 | — |
-| T3-P52 | Título "Página N …" indistinguível do delimitador do Markdown paginado; supressão acoplada ao avaliador | MÉDIO | **P1 (ação 4; dependência confirmada de T3-P09)** | Qualquer documento com títulos "Página N"; hoje V3 (141 blocos) e V4 (210) | **Ciclo §0.11 (offline)**: sem a regra "Página N", a avaliação de V3 (p98) e V4 (p96) falha ("Duplicate page number"), porque dois títulos de nível 2 viram delimitadores. Com preservação ligada, a ambiguidade aparece, porque o pós-processamento não apaga mais esses títulos (T3-P54). Proposta técnica na §0.11 | 0 / 5 | **PENDENTE** (dependência confirmada; proposta técnica) | 015 | Escape no renderizador + delimitador estrito e versionado no avaliador; exige autorização |
+| T3-P52 | Título "Página N …" indistinguível do delimitador do Markdown paginado; supressão acoplada ao avaliador | MÉDIO | P1 (ciclo §0.12) | Qualquer documento com títulos "Página N"; V3 p98 e V4 p96 | **§0.12 (offline)**: o renderizador escapa o conteúdo que colide com o delimitador (`## &#80;ágina …`; mesmo texto e nível para o avaliador); um só delimitador por página nos 9 corpora, nas duas configurações; com preservação, V3 e V4 voltam a ser avaliáveis (50.62 e 55.53). Avaliador inalterado: contar o sufixo do gabarito duplicaria títulos de V6–V8 | 1 / 5 | **CORRIGIDO — VALIDADO OFFLINE** (§0.12; não commitado) | 015 | RUN 016 (§5) |
+| T3-P56 | Gabaritos de V3/V4 guardam o título da página só no delimitador "## Página NNN \| Título", contra a própria regra 1 | MÉDIO | decisão do responsável | V3 (144 páginas), V4 (222) | **§0.12 [F]**: com os títulos mantidos, V3 −25.16 e V4 −6.26 sem nenhuma perda de conteúdo; no V3 o rótulo é 21% do texto da página | — | **LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO** (novo, §0.12) | 015 (offline) | corrigir os gabaritos (título no corpo, como V6–V8) ou manter a convenção; exige autorização |
 | T3-P55 | Texto literal com sintaxe Markdown serializado sem escape (política escolhida para reduzir o CER bruto) | MÉDIO | P1 (ação 4) | Renderizador (todos os motores e o caminho nativo); nos corpora: "### " literal em 16 blocos do V5 vira título; "<limite>" da V6 p29 fica como HTML bruto | AI-07 reproduzido: `**literal**`, `[descrição](url)`, `### Texto literal`, `<b>literal</b>` passam sem escape; `_detect_code_lang` rotula "{nota fiscal}" como JSON | 0 / 5 | **PENDENTE — novo** (AI-07, §0.9) | 015 | Contrato de ida e volta texto → Markdown → AST, junto com T3-P52 |
 | T3-P41 | Parágrafos de texto nativo denso fundidos num bloco | MÉDIO | P2 (ação 12) | V4 p9–p40 | 227 das 417 fusões do V4; estimativa não oficial +1.6 na nota do V4 | 0 / 5 | **PENDENTE** — causa identificada (§1.31) | 015 | Exige autorização (nativo) |
 | T3-P33 | Exceção `Invalid BBox` na tabela por trilhas OCR | MÉDIO | P2 (ação 8) | V9 p36 | única causa do `partial` do V9: −1.0 na nota | 0 / 5 | **PENDENTE** | 015 | Rejeitar candidato sem sequência vertical válida (compartilhado; baixo risco) |
@@ -88,13 +89,13 @@ Referência consolidada do projeto. Auditoria **sem alteração** de código, te
 
 | Campo | Valor |
 |---|---|
-| **Última atualização** | 2026-11-25 — auditoria integral da RUN 015, revisão de todos os T3-Pxx e auditoria de overfitting do repositório; confronto com a auditoria independente AI-01 a AI-07 (§0.9); ciclo T3-P51, passo A implementado e validado offline (§0.10; commit `db3a49d`); **ciclo T3-P09/T3-P27/T3-P54 implementado e validado offline (§0.11; não commitado)** |
+| **Última atualização** | 2026-11-26 — auditoria integral da RUN 015, revisão de todos os T3-Pxx e auditoria de overfitting do repositório; confronto com a auditoria independente AI-01 a AI-07 (§0.9); ciclo T3-P51, passo A implementado e validado offline (§0.10; commit `db3a49d`); ciclo T3-P09/T3-P27/T3-P54 (§0.11; commit `c08cf7c`); **ciclo T3-P52 implementado e validado offline (§0.12; não commitado)** |
 | **Commit auditado** | `1717bd5` (T3-P44), branch `feat/tesseract-optimization`; árvore limpa; `implementation_commit 1717bd5` nos 9 JSONs de métricas |
 | **Configuração** | balanced · pt-BR · adaptive · Tesseract 5.5.0 (`por`, `--oem 1`, `--psm 3`) · 8 threads (OMP 8, equivalente a 4, §1.10) · Markdown paginado · tabelas e mesclagem entre páginas ativas · `preserve_headers_footers: false` · auditoria suplementar; `settings` e `extractor_flags` idênticos aos da 014 |
 | **Avaliador** | `evaluation-3.0.0`, métricas 3.1.0; políticas idênticas às da 014 (só `implementation_commit` e `created_at_utc` mudam) |
 | **Rodada atual** | `output/tesseract/015/` (2026-11-25 10:15:18 → 11:55:40 UTC): 9/9 com extração e métricas `exit 0`, `rank_eligible`; V9 `partial` (T3-P33, sem mudança) |
 | **Baseline de comparação** | `output/tesseract/014/` (`7df5285`) |
-| **Baseline de desenvolvimento** | candidata T3-P51 (`db3a49d`, commitada); o ciclo da §0.11 foi validado sobre ela, sem OCR |
+| **Baseline de desenvolvimento** | `c08cf7c` (commitado; contém os ciclos §0.10 e §0.11); o ciclo da §0.12 foi validado sobre ele, sem OCR |
 | **Corpus** | 9 documentos, 975 páginas de referência (V3 144, V4 224, V5 42, V6 95, V7 80, V8 90, V9 96, V10 84, V11 120); hashes de PDF, gabarito efetivo e manifesto iguais aos da 014 e ao SHA-256 recalculado dos PDFs em disco |
 | **Resultado da RUN 015** | **V3–V10 idênticos byte a byte à 014**; no V11 **só a p71 mudou**. T3-P44 recupera o conteúdo da p71 como previsto (V11 70.4 → **71.7**), com resíduos de ordem, identificador e tabela (§1.40) |
 | **Capturas válidas** | `assemble_input_b541246/` reproduz byte a byte a RUN 015 em V3–V10 e a 014 no V11 (só a p71 difere); `geometry_1717bd5/` reproduz a 015 nas 61 páginas inclinadas (V3, V4, V6, V8, V9, V10, V11) |
@@ -114,21 +115,22 @@ Referência consolidada do projeto. Auditoria **sem alteração** de código, te
 | 9 | V4 | **66.9** | 0.0 | −18.1 | 77.3 | 68.1 | 52.3 | 54.0 | 79.1 | 86.8 | 70.4 | 69.2 | 100.0 | −4.5 |
 
 - **Meta de 85**: atingida por V7, V8, V6, V3 e V5; **não** por V11 (71.7), V4 (66.9), V9 (75.6) e V10 (78.3).
-- **Leitura honesta das notas altas [F]**: ≈ 5.1 pontos do V3 dependem de regras de texto específicas do corpus (sem elas, 88.0); V6 depende de 0.7 (96.0) e V4 de 0.3 (contrafactual offline, §0.5 OF-01/OF-02). V5 está 1.5 acima da meta com a perda de T3-P40 (gabarito). **Recalculado no ciclo §0.11** sobre a baseline com T3-P51, com as regras removidas: V3 92.88 → 87.75, V6 96.29 → 95.55, V4 66.86 → 66.56; nenhuma palavra do gabarito perdida. Nenhuma nota mede estados de caixa de seleção: V3, V6, V9 e V10 têm 25 estados errados ou inventados (T3-P51) que a rubrica não vê.
+- **Leitura honesta das notas altas [F]**: ≈ 5.1 pontos do V3 dependem de regras de texto específicas do corpus (sem elas, 88.0); V6 depende de 0.7 (96.0) e V4 de 0.3 (contrafactual offline, §0.5 OF-01/OF-02). V5 está 1.5 acima da meta com a perda de T3-P40 (gabarito). **Recalculado no ciclo §0.11** sobre a baseline com T3-P51, com as regras removidas: V3 92.88 → 87.75, V6 96.29 → 95.55, V4 66.86 → 66.56; nenhuma palavra do gabarito perdida. **Ciclo §0.12**: sem a regra "Página N", V3 62.58 e V4 60.30; a diferença vem da convenção dos gabaritos, que guardam o título da página só no delimitador (T3-P56), não de perda de conteúdo. Nenhuma nota mede estados de caixa de seleção: V3, V6, V9 e V10 têm 25 estados errados ou inventados (T3-P51) que a rubrica não vê.
 
-**Problemas por situação (56 identificadores; atualizado pelo confronto, §0.9)**:
+**Problemas por situação (57 identificadores; atualizado pelo confronto, §0.9)**:
 
 | Situação | CRÍTICO | ALTO | MÉDIO | BAIXO | INFO | Total |
 |---|---|---|---|---|---|---|
 | **Ativos** (PENDENTE, PARCIAL, CORRIGIDO com resíduos, LIMITAÇÃO DA ENGINE, RECURSO NÃO IMPLEMENTADO) | 6 (T3-P51, T3-P09, T3-P44, T3-P27, T3-P36, T3-P10) | 15 (T3-P53, T3-P54, T3-P49, T3-P35, T3-P45, T3-P46, T3-P47, T3-P37, T3-P43, T3-P06, T3-P21, T3-P34, T3-P32, T3-P22, T3-P17) | 13 (T3-P52, T3-P55, T3-P41, T3-P33, T3-P07, T3-P38, T3-P20, T3-P31, T3-P29, T3-P05, T3-P48, T3-P12, T3-P08) | 0 | 1 (T3-P04) | **35** |
 | RESOLVIDO — confirmado | 3 | 9 | 2 | 1 | 1 | **16** |
 | NÃO REPRODUZIDO | — | — | — | 1 (T3-P13) | — | 1 |
-| LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO | — | — | — | — | 3 (T3-P19, T3-P40, T3-P50) | 3 |
+| LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO | — | — | 1 (T3-P56) | — | 3 (T3-P19, T3-P40, T3-P50) | 4 |
 | NÃO VERIFICÁVEL | — | — | — | — | 1 (T3-P14) | 1 |
 
 - **Novos nesta auditoria**: 3 (T3-P51, T3-P52, T3-P53). **Reabertos ou com resíduo novo**: T3-P09 (INFO → ALTO), T3-P27 (V3 p116), T3-P10 (V11 p100). **Reclassificados**: T3-P49 (MÉDIO → ALTO), T3-P02 (V3 p116 reatribuída), T3-P46 (+ V11 p120, antes listada em T3-P47). **Confronto com a auditoria independente (§0.9)**: +2 novos (T3-P54, T3-P55); T3-P09 ALTO → CRÍTICO; riscos confirmados no componente em T3-P43 (AI-06) e T3-P44 (AI-05).
 - **Ciclo T3-P51 (§0.10)**: passo A implementado e validado offline — 25 estados errados ou inventados → 0; 136 explícitos preservados; 10 legítimos não representados; notas offline V3 92.88, V6 96.29, V9 76.16, V10 78.40, demais iguais. T3-P51 continua contado entre os ativos até a confirmação na RUN 016 (§5).
 - **Ciclo T3-P09/T3-P27/T3-P54 (§0.11)**: regras de texto dos corpora removidas; mobília só por estrutura e só sem preservação. Offline: V3 87.75 (−5.13), V4 66.56 (−0.30), V6 95.55 (−0.74), demais iguais; V3 p116 recuperada; nenhuma palavra do gabarito, número ou tabela perdidos; com preservação, 0 supressões (eram 1 443). T3-P09 fica PARCIAL (regra "Página N" restrita, dependente de T3-P52).
+- **Ciclo T3-P52 (§0.12)**: o renderizador reserva o delimitador `## Página N` (conteúdo que colide sai com `&#80;ágina`, mesmo texto para o avaliador); a regra "Página N" saiu do pós-processamento. Offline: V3 62.58 (−25.16), V4 60.30 (−6.26), demais idênticos; nenhuma palavra do gabarito, número ou tabela perdidos; um só delimitador por página nas duas configurações. Registrado T3-P56 (gabaritos). Avaliador inalterado.
 - **Nenhum problema foi declarado resolvido nesta auditoria** sem confirmação em rodada completa; T3-P44 passa a CORRIGIDO — com resíduos, não a RESOLVIDO.
 
 ### §0.2 Problemas ativos
@@ -144,7 +146,7 @@ Caminho de resolução de cada problema ativo. **Esforço** e **validação**: B
 | **T3-P10** (resíduo) | [H] `_GUTTER_MIN_ROWS = 3`: colunas com 2 linhas não formam calha e a reconstrução junta as 3 colunas (V11 p100) | `ocr/reconstruct.py::_validated_gutters` | Teste de componente com as linhas capturadas da p100; se confirmado, exigir evidência de calha por linha do texto e não por número fixo de linhas (ex.: alinhamento das margens esquerdas em ≥ 2 linhas e vão ≥ 1.5 altura). Descartado: baixar para 2 sem controle (risco de cortar tabelas e listas) | V11 p100 (CER 0.280) | B · B · não · sim | p100 com as 3 colunas separadas; páginas multicoluna niveladas de V4/V9/V10 idênticas | `ocr/reconstruct.py` (Tesseract/OCR) |
 | **T3-P53** | [F] o executor exporta só `ocr_outcome`, status e avisos; os fatos de qualidade (decisões de releitura, supressões do pós-processamento, confiança) ficam fora do manifesto; nenhum aviso de baixa confiança existe | `api.py` (avisos), `scripts/run_tesseract_batch_wsl.py` (manifesto) | Exportar por página: decisões de releitura, `tesseract_postprocess_suppressed_chars`, fração de palavras com confiança < 60 e média; aviso `ocr_low_confidence` com limiar documentado. Descartado: mudar `content_status` (altera contratos) | nenhum na nota; torna visíveis 79 páginas | M · B · não · sim (fatos nas capturas) | Markdown idêntico byte a byte; manifesto com os campos novos nas 975 páginas | `api.py` e executor |
 | **T3-P49** + **T3-P35** (inclinadas) | [F] caixas OCR desrotacionadas são envoltórias alinhadas aos eixos (altura da linha ≈ 2.5–3.2 × a das palavras); `_group_form_rows` usa 0.75 × essa altura (> passo entre linhas) e ordena por x0; [F] a ordem depende do sinal da inclinação; [H] na reconstrução, calhas inclinadas misturam colunas (V10) | `text/reading_order.py` (compartilhado), `ocr/reconstruct.py`, `api.py` | **Referencial retificado**: expressar a geometria das regiões só-OCR das páginas endireitadas no referencial da releitura (rotação inversa do ângulo medido pelo próprio motor) antes do layout e da montagem, devolvendo ao referencial da página só para a saída. Alternativa: altura das palavras no lugar da altura da linha (corrige só o FORM). Descartado: ajustar o 0.75 (continua dependente do ângulo) | V11 +2.1, V10 +1.6, V9 +0.4, V4 +0.35, V3 +0.1 [E: E1 offline, recall idêntico] | A · M · não · sim (`geometry_1717bd5`) | invariância: a mesma página a +θ e −θ com a mesma ordem; nenhuma página com recall menor; níveis de título fora das páginas inclinadas inalterados | `api.py`, ordem de leitura e layout compartilhados |
-| **T3-P09** (CRÍTICO) | [F] regras literais de V3/V4/V6 no caminho de produção (OF-01, OF-02, OF-03); suprimem frases de corpo e tabelas inteiras (AI-01, §0.9) | `ocr/tesseract/postprocess.py` | **Implementado no ciclo §0.11**: literais removidos; mobília só por estrutura e só sem preservação. A regra "Página N" fica restrita (rótulo da própria página) até T3-P52 | V3 −5.13, V4 −0.30, V6 −0.74 [F, offline] | M · M · não · sim | nenhum literal de corpus no pós-processamento [F]; nenhuma palavra do gabarito perdida [F, offline] | RUN 016; T3-P52 para concluir |
+| **T3-P09** (CRÍTICO) | [F] regras literais de V3/V4/V6 no caminho de produção (OF-01, OF-02, OF-03); suprimem frases de corpo e tabelas inteiras (AI-01, §0.9) | `ocr/tesseract/postprocess.py` | **Implementado** (§0.11, commit `c08cf7c`; §0.12): literais removidos; mobília só por estrutura e só sem preservação; regra "Página N" removida | §0.11: V3 −5.13, V4 −0.30, V6 −0.74; §0.12: V3 −25.16, V4 −6.26 (T3-P56) [F, offline] | M · M · não · sim | nenhuma regra de texto de corpus nem de convenção do avaliador no pós-processamento [F]; nenhuma palavra do gabarito perdida [F, offline] | RUN 016 |
 | **T3-P45** | [H] dois candidatos de tabela sobrepostos sem deduplicação | detecção/fusão de tabelas nativas (compartilhado) | Diagnóstico por etapa (páginas nativas, sem OCR); deduplicar por sobreposição de células e conteúdo | V11 p50/p93; `numeric` fp −13 [E] | M · B · não · sim | 1 tabela por região; título preservado | Detector nativo |
 | **T3-P46** | [H] detector sem borda aceita colunas de texto corrido e listas; a fronteira de coluna corta palavras (p120) | detector nativo sem borda (compartilhado) | Rejeitar candidato cujas "células" têm palavras cortadas ou frases contínuas entre colunas; exigir alinhamento de células em várias linhas | V11 p5/p98/p120 (12.8% das edições) [E: ≈ +2 a +3, não medido] | A · M · não · sim | p5/p98 como parágrafos; tabelas de V5–V9 idênticas | Detector nativo |
 | **T3-P47** + **T3-P37** | [H] segmentação de tabelas sem borda empilhadas ou lado a lado | detector nativo (compartilhado) | Diagnóstico conjunto; separar por faixas de cabeçalho e por calhas verticais com conteúdo | V11 p57 e outras; V9 p62/p72/p14 | A · M · não · sim | células associadas à linha certa (`cell_alignment_accuracy`) | Detector nativo |
@@ -153,7 +155,7 @@ Caminho de resolução de cada problema ativo. **Esforço** e **validação**: B
 | **T3-P21** | [F] limite de reconhecimento na configuração atual (IDs com O/0, I/1, S/5, B/8; moiré; −8°) | reconhecimento | Experimento autorizado: perfil de pré-processamento por condição e segunda passada só em regiões de baixa confiança; correção de identificadores **só** com evidência de formato declarada pelo usuário (nunca por padrão do gabarito) | V4 (grupos D = 85% das edições do V4, §1.31); V11 F04 | A · A · **sim** · parcial (TSV cache) | ganho em páginas de G sem perda em S | Experimento de OCR |
 | **T3-P34 / T3-P32 / T3-P22 / T3-P20** | [F] causas registradas na §2; limites de tentativa atingidos (exceto T3-P34, 4/5) | vários | Só com hipótese nova e aprovação | V9 principalmente | — | — | caso a caso |
 | **T3-P17** (resíduo), **T3-P31** | [H] mesma geometria inflada das inclinadas | reconstrução/listas | Reavaliar depois do referencial retificado (sem nova regra antes disso) | V10 listas 72.7 | — | — | — |
-| **T3-P52** | [F] o renderizador e o avaliador usam a mesma sintaxe para delimitador de página e para um título "Página N …"; [F] no ciclo §0.11, dois títulos de nível 2 (V3 p98, V4 p96) quebram a avaliação sem a regra "Página N" | `renderers/markdown.py`, avaliador | **Proposta técnica na §0.11**: escapar a 1ª letra do conteúdo que colide (`&#80;ágina`, mesmo texto na AST); delimitador estrito na hipótese, com política versionada e relatório duplo; formato do Markdown versionado | 0 na nota [E]; destrava a remoção completa de OF-03 | B–M · B · não · sim | V3/V4 avaliáveis sem a regra "Página N"; ida e volta texto → Markdown → AST | Renderizador e **avaliador** |
+| **T3-P52** | [F] o renderizador e o avaliador usavam a mesma sintaxe para o delimitador de página e para um título "Página N …" | `renderers/markdown.py`, `evaluation/markdown_syntax.py` | **Implementado (§0.12)**: escape da 1ª letra do conteúdo que colide (`&#80;ágina`); avaliador inalterado (delimitador estrito sem efeito; sufixo do gabarito como título descartado por evidência) | V3/V4: ver T3-P56; com preservação, V3/V4 avaliáveis [F, offline] | B · B · não · sim | um delimitador por página nos 9 corpora, nas duas configurações [F, offline]; mesmo texto e nível [F] | RUN 016 |
 | **T3-P54** | [F] `api.py:1618–1620` aplicava o pós-processamento sem consultar `preserve_headers_footers`; [F] o pós-processamento só roda com o Tesseract e age em páginas nativas | `ocr/tesseract/postprocess.py` (`api.py` não precisou mudar) | **Implementado no ciclo §0.11**: as supressões leem a configuração gravada pela montagem (a mesma que o renderizador usa); com preservação, nenhuma supressão. Resíduo: promoções de título, espaço em "R$" e aviso de tabela continuam dependentes do motor (proposta arquitetural na §0.11) | sem efeito na 015 (flag `False`) | M · B · não · sim | com a flag `True`, 0 supressões pelo pós-processamento [F, offline] | proposta: camada comum (compartilhado) |
 | **T3-P55** | [F] `_escape_inline_text` não escapa sintaxe literal para casar os gabaritos (`b407b8c`) | `renderers/markdown.py` (compartilhado) | Contrato de ida e volta texto → Markdown → AST; escapar o literal no contexto; testes de sintaxe literal | CER bruto pode subir contra os gabaritos atuais (limitação do gabarito); V5 e V6 afetados [E não medido] | M · B · não · sim | texto literal preservado depois da análise do Markdown | Renderizador (compartilhado) |
 | **T3-P41** | [F] piso de 0.75 × altura da linha impede a quebra no vão real (§1.31) | `assemble/content.py::_native_paragraphs` | Limiar relativo ao vão entre linhas do próprio bloco | V4 +1.6 [E, §1.31] | M · M · não · sim | fusões do V4 −227 [E]; V5–V8 idênticos | Nativo compartilhado |
@@ -251,6 +253,18 @@ Só os confirmados em rodada completa e verificados na 015 (saídas idênticas �
 - **T3-P09 → ALTO, reaberto [F]**: as regras de texto de corpus continuam no caminho de produção e causam perda (T3-P27); §0.5.
 - **T3-P02 [F]**: a V3 p116 sai do escopo restante; a tabela girada está exata.
 
+#### T3-P56 | MÉDIO | Gabaritos de V3/V4 guardam o título da página só no delimitador (convenção contrária à regra 1 do gabarito)
+
+- **Evidência [F]**:
+  - Os gabaritos de V3 (144 páginas) e V4 (222) escrevem cada página como `## Página NNN | Título`. O avaliador trata a linha inteira como delimitador, ou seja, metadado.
+  - A regra 1 do gabarito do V3 diz: "Cada página possui um título e um marcador QA-PNNN que devem aparecer uma única vez no resultado semântico". O cabeçalho do gabarito diz: "As linhas Página NNN são delimitadores canônicos".
+  - O PDF imprime "Página NNN | Título" na página. Mantido na saída (ciclo §0.12), esse texto conta como excedente: V3 87.75 → 62.58 e V4 66.56 → 60.30, sem nenhuma palavra do gabarito, número ou tabela perdidos.
+  - No V3, o rótulo é 21% do texto do gabarito da página (mediana: 49 de 234 caracteres); no V4, 3%.
+- **Outros gabaritos [F]**: V5 a V8 também usam delimitador com sufixo. Em V6, V7 e V8 o corpo repete o título como `# Título`; em V5 o corpo tem outro título. Por isso uma regra do avaliador que contasse o sufixo como conteúdo acertaria V3/V4 e duplicaria V6–V8.
+- **Risco**: as notas de V3 e V4 medem também a convenção. Antes, elas premiavam apagar os 351 títulos (regra "Página N", removida em T3-P09/T3-P52).
+- **Proposta**: (a) corrigir os gabaritos de V3 e V4, pondo o título da página no corpo, como fazem V6–V8, com nova versão e hash do gabarito efetivo e relatório das notas antes e depois; ou (b) manter a convenção e ler as notas de V3/V4 descontando o rótulo. Exige decisão e autorização do responsável (alteração de gabarito).
+- **Status**: LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO — novo (ciclo §0.12).
+
 ### §0.5 Auditoria de overfitting
 
 **Método**: (1) busca no código de produção (`src/structured_pdf_text/`, fora de `evaluation/` e `diagnostics/`) por nomes de corpus, identificadores V3–V11, nomes de arquivo, marcadores sintéticos e literais dos gabaritos; (2) leitura das regras de texto, supressão e promoção do pós-processamento Tesseract e das constantes criadas na Série 3 (`git diff db2ecb8..1717bd5`, 15 arquivos, +2072 linhas); (3) origem de cada regra por `git log -S`; (4) **censo offline** das ações do pós-processamento na 015 (capturas que reproduzem a 015 byte a byte) e **contrafactuais** com as regras desligadas, avaliados em memória pela rubrica; (5) teste do mecanismo geométrico nas 61 páginas inclinadas sem gabarito. Linhas citadas são do commit `1717bd5`.
@@ -267,7 +281,7 @@ Só os confirmados em rodada completa e verificados na 015 (saídas idênticas �
 | HEURÍSTICA JUSTIFICADA | 2 | OF-12, OF-14 |
 | EVIDÊNCIA INSUFICIENTE | 1 | OF-19 |
 
-**Situação após o ciclo §0.11 (validação offline, não commitado)**: a classificação acima fica como registro do estado auditado. OF-01, OF-02, OF-10 e OF-20 foram **removidos do código**. OF-09 foi restrito (bloco inteiro e só sem preservação). OF-03 foi restrito (rótulo da própria página, forma de rótulo, só sem preservação) e continua RISCO ALTO até T3-P52.
+**Situação após o ciclo §0.11 (commit `c08cf7c`)**: a classificação acima fica como registro do estado auditado. OF-01, OF-02, OF-10 e OF-20 foram **removidos do código**. OF-09 foi restrito (bloco inteiro e só sem preservação). OF-03 foi restrito (rótulo da própria página, forma de rótulo, só sem preservação) e continua RISCO ALTO até T3-P52.
 
 **Assimetria entre motores [F]**: `apply_tesseract_postprocessors` só roda com `ocr_engine == "tesseract"` (`api.py:1618–1620`). As supressões de marcadores de corpus e as promoções de título (OF-01 a OF-04, OF-09 a OF-12) existem só no caminho Tesseract: nos mesmos documentos, RapidOCR e EasyOCR mostram esses marcadores e outra estrutura. Comparações entre motores nos corpora V3/V4/V6 favorecem o Tesseract por motivo alheio ao reconhecimento. Além disso, o pós-processamento age em páginas **nativas** e ignora `preserve_headers_footers` (T3-P54, §0.9): a saída de um PDF nativo depende do motor de OCR configurado.
 
@@ -298,6 +312,7 @@ Só os confirmados em rodada completa e verificados na 015 (saídas idênticas �
 - **Proposta · validação · custo**: T3-P52 (escape no renderizador, delimitador estrito no avaliador) e detecção genérica de contador de página (T3-P43). Custo B–M; exige autorização para o avaliador.
 - **Relação**: T3-P25, T3-P26, T3-P52.
 - **Situação após o ciclo §0.11 (offline)**: restrito ao rótulo da própria página (número = página; depois do número, nada, separador ou "de M") e só sem preservação. Neutro nos 9 corpora (os 351 rótulos têm essa forma). A remoção completa depende de T3-P52: sem a regra, V3 p98 e V4 p96 quebram a avaliação.
+- **Situação após o ciclo §0.12 (offline, não commitado)**: **removido do código**. O renderizador reserva o delimitador (T3-P52); V3 e V4 continuam avaliáveis. V3 −25.16 e V4 −6.26 pela convenção dos gabaritos (T3-P56).
 
 #### OF-04 | RISCO ALTO DE OVERFIT (fabricação de dados para casar o gabarito) | CRÍTICO | Estados de caixa de seleção sem evidência (Fix-F05)
 
@@ -361,9 +376,9 @@ Só os confirmados em rodada completa e verificados na 015 (saídas idênticas �
 | Ordem | Ação | Problemas | Classe | Depende de | Ganho esperado [E] | Risco | Validação (sem OCR?) | Aceitação |
 |---|---|---|---|---|---|---|---|---|
 | **1** | **T3-P51 — eliminar estados inventados** | T3-P51 (OF-04) | corrupção de dados | — | **passo A implementado e validado offline (§0.10)**: 25 estados errados ou inventados → 0; 136 explícitos preservados; 10 legítimos não representados; V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08 | baixo | capturas, sem OCR | RUN 016 (§5) |
-| **2** | **Supressões específicas dos corpora → evidência genérica**; proteger conteúdo legítimo; respeitar `preserve_headers_footers` | T3-P09, T3-P27 (V3 p116), T3-P54; OF-01, OF-02, OF-03, OF-09, OF-10, OF-20 | perda silenciosa | T3-P52 para a regra "Página N" (dependência confirmada) | **implementado e validado offline (§0.11)**: V3 p116 recuperada; V3 −5.13, V4 −0.30, V6 −0.74 (mobília dos corpora visível); nenhuma palavra do gabarito perdida; com preservação, 0 supressões | médio (notas infladas caem) | capturas, sem OCR | RUN 016 (§5) |
+| **2** | **Supressões específicas dos corpora → evidência genérica**; proteger conteúdo legítimo; respeitar `preserve_headers_footers` | T3-P09, T3-P27 (V3 p116), T3-P54; OF-01, OF-02, OF-03, OF-09, OF-10, OF-20 | perda silenciosa | T3-P52 para a regra "Página N" (dependência confirmada) | **implementado (§0.11, commit `c08cf7c`); regra "Página N" removida na §0.12**: V3 p116 recuperada; V3 −5.13, V4 −0.30, V6 −0.74 (mobília dos corpora visível); nenhuma palavra do gabarito perdida; com preservação, 0 supressões | médio (notas infladas caem) | capturas, sem OCR | RUN 016 (§5) |
 | **3** | **Observabilidade** das perdas e das decisões de qualidade (fatos e avisos no manifesto) | T3-P53, T3-P44 (aviso), OF-06 | perda silenciosa (tornar visível) | — (pode acompanhar 2) | 0 na nota; 79 páginas hoje silenciosas passam a ter sinal | baixo (Markdown idêntico) | capturas e 1 extração de controle | Markdown idêntico byte a byte; campos novos nas 975 páginas |
-| **4** | **Fidelidade do Markdown desacoplada das convenções do avaliador** (ida e volta texto → Markdown → AST) | T3-P52, T3-P55; OF-03, OF-21 (T3-P52 é antecipado se for dependência da ação 2) | estrutura / integridade | — | 0 [E]; o CER bruto pode subir contra os gabaritos atuais | baixo; exige mudar renderizador e avaliador | capturas | literal preservado; V3/V4 avaliáveis sem a supressão "Página NNN" |
+| **4** | **Fidelidade do Markdown desacoplada das convenções do avaliador** (ida e volta texto → Markdown → AST) | T3-P52, T3-P55; OF-03, OF-21 | estrutura / integridade | — | **T3-P52 implementado (§0.12)**: V3 −25.16 e V4 −6.26 pela convenção dos gabaritos (T3-P56); T3-P55 pendente | baixo | capturas | literal preservado; V3/V4 avaliáveis sem a supressão "Página NNN" [F, offline] |
 | **5** | **T3-P44 residual — garantia de preservação textual** na escolha da releitura (contrato de evidência, AI-05) | T3-P44, OF-06, OF-19 | perda silenciosa / corrupção | 3 | p71 com "FG-711" [H]; nenhuma troca silenciosa de palavra confiável | baixo | 96 pares capturados, sem OCR | contraexemplo AI-05 rejeitado; 95 decisões idênticas |
 | 6 | **T3-P43 residual — proteger títulos legítimos** contra supressão (AI-06) | T3-P43, OF-13 | perda silenciosa | 2 | não observado nos corpora; protege documentos reais | baixo | capturas | contraexemplo AI-06 preservado; grupos confirmados de V10/V11 mantidos |
 | 7 | **Geometria das páginas inclinadas** (referencial retificado) | T3-P49, T3-P35, T3-P31, T3-P17 (resíduo), parte de T3-P06 e T3-P43; OF-07, OF-18 | arquitetural / ordem | 3 (ângulo exportado) | V11 +2.1, V10 +1.6, V9 +0.4, V4 +0.35 (E1) | médio-alto (compartilhado; níveis de título) | `geometry_1717bd5` + capturas completas | invariância ±θ; nenhuma página com recall menor; níveis fora das inclinadas inalterados |
@@ -375,7 +390,7 @@ Só os confirmados em rodada completa e verificados na 015 (saídas idênticas �
 | 13 | Experimento de reconhecimento | T3-P21, T3-P36 (resíduo), T3-P34 | limite do OCR | 3 | V4 e V11 F04 (maior massa de erro, não estimada) | alto (tempo e variantes) | **exige OCR** (cache por hash reaproveita o que não muda) | ganho em G sem perda em S |
 | 14 | Desempenho | T3-P12, T3-P04 | desempenho | — | tempo | baixo | 1 corpus | tabelas idênticas |
 
-**As cinco ações de maior prioridade** (ordem definida pelo responsável em 2026-11-25; revisável com novas evidências ou dependências técnicas): (1) T3-P51 — passo A implementado e validado offline (§0.10), aguarda a RUN 016; (2) T3-P09, T3-P27 e T3-P54 — implementado e validado offline (§0.11; T3-P09 parcial até T3-P52), aguarda a RUN 016; (3) T3-P53 — observabilidade das perdas e decisões de qualidade; (4) T3-P52 e T3-P55 — Markdown fiel e desacoplado das convenções do avaliador (T3-P52 antecipado se for dependência da ação 2); (5) T3-P44 residual — garantia de preservação textual. Seguem T3-P43 residual (6), geometria das inclinadas (7), tabelas nativas (8) e detecção visual genérica de caixas com T3-P48 (9). O V11 continua sendo a prioridade documental, mas defeitos gerais de integridade e de overfitting têm precedência.
+**As cinco ações de maior prioridade** (ordem definida pelo responsável em 2026-11-25; revisável com novas evidências ou dependências técnicas): (1) T3-P51 — passo A implementado e validado offline (§0.10), aguarda a RUN 016; (2) T3-P09, T3-P27 e T3-P54 — commitado em `c08cf7c` (§0.11) e concluído com T3-P52 (§0.12), aguarda a RUN 016; (3) T3-P53 — observabilidade das perdas e decisões de qualidade; (4) T3-P52 e T3-P55 — Markdown fiel e desacoplado das convenções do avaliador (T3-P52 antecipado se for dependência da ação 2); (5) T3-P44 residual — garantia de preservação textual. Seguem T3-P43 residual (6), geometria das inclinadas (7), tabelas nativas (8) e detecção visual genérica de caixas com T3-P48 (9). O V11 continua sendo a prioridade documental, mas defeitos gerais de integridade e de overfitting têm precedência.
 
 **V4, V9 e V10 (abaixo da meta)**:
 - **V4 (66.9; −18.1)**: o grosso é reconhecimento (T3-P21: recall 0.894, 1 642 `numeric` fp, penalidade −4.5 por páginas ilegíveis). Sem experimento de OCR, as ações estruturais somam poucos pontos (T3-P41 +1.6, referencial +0.35 [E]); o teto estimado na §1.31 (≈ 80.7 com o Tesseract atual) continua sendo a melhor estimativa. Atingir 85 no V4 **não** é plausível sem mudar o reconhecimento.
@@ -617,10 +632,10 @@ Arquivo de testes 0.2 s; discriminância contra `1717bd5` 0.9 s; suíte completa
 
 Scripts, resultados e README em `output/tesseract/_captures/checkbox_probe_1717bd5/` (sonda final independente do Fix-F05, reexecutada depois da remoção: 17/17 e 18/18; contagens vetoriais de V11 p54 e V8 p49/p61). A validação deste ciclo está em `output/tesseract/_captures/t3p51_1717bd5/` e os scripts da auditoria e do confronto em `output/tesseract/_captures/tools/audit_015/`. Nada disso é versionado (regra `output/` do `.gitignore`). **O resultado de 17/17 é demonstração de viabilidade, não validação independente de generalização.**
 
-**Status de T3-P51**: CORRIGIDO — VALIDADO OFFLINE (passo A; não commitado). Não será declarado resolvido antes da RUN 016; mesmo depois, permanece o resíduo dos 10 estados não representados (passo B).
+**Status de T3-P51**: CORRIGIDO — VALIDADO OFFLINE (passo A; commit `db3a49d`). Não será declarado resolvido antes da RUN 016; mesmo depois, permanece o resíduo dos 10 estados não representados (passo B).
 
 
-### §0.11 Ciclo T3-P09 / T3-P27 / T3-P54 — supressões por texto removidas e preservação respeitada (2026-11-25; não commitado)
+### §0.11 Ciclo T3-P09 / T3-P27 / T3-P54 — supressões por texto removidas e preservação respeitada (2026-11-25; commitado em `c08cf7c`)
 
 **Autorização (responsável, 2026-11-25)**:
 - **Escopo**: T3-P09, T3-P27 e T3-P54.
@@ -921,6 +936,131 @@ Extrações evitadas: as 9 completas (a RUN 015 levou ≈ 100 min).
 | **T3-P27** | **CORRIGIDO — VALIDADO OFFLINE** | V3 p116 recuperada; nenhum bloco é apagado por uma linha ou célula com redação de marcador; tabelas preservadas; nenhuma perda de palavra do gabarito nos 9 corpora |
 | **T3-P54** | **CORRIGIDO — COM RESÍDUOS (validado offline)** | preservação respeitada em todas as supressões do pós-processamento; dependência do motor nas operações que não suprimem, medida e com proposta |
 | **T3-P52** | **PENDENTE — dependência confirmada** | proposta técnica acima; exige autorização para renderizador e avaliador |
+
+### §0.12 Ciclo T3-P52 — delimitador de página reservado e regra "Página N" removida (2026-11-26; não commitado)
+
+**Autorização (responsável, 2026-11-26)**:
+- **Pedido**: "Siga na ordem recomendada, primeiro implemente 'a'". É o item 1 da ordem recomendada, T3-P52, que inclui renderizador e avaliador.
+- **Decisão depois da medição**: "faça apenas 1". Ficam o escape no renderizador e a remoção completa da regra "Página N"; os gabaritos não são alterados.
+- **Restrições mantidas**: sem OCR, sem RUN 016, sem commit.
+- **Baseline de desenvolvimento**: commit `c08cf7c`, que contém o ciclo da §0.11.
+
+**Convenções**: as da §0.11 ([F] fato, [H] hipótese, [E] estimativa). A confirmação em rodada completa depende da RUN 016 (§5).
+
+#### Implementação
+
+- **Renderizador** (`renderers/markdown.py::_render_page_section`):
+  - No Markdown paginado, todo conteúdo que a gramática do avaliador leria como delimitador sai com a primeira letra de "Página" escrita como referência de caractere: `## &#80;ágina 098 | OCR com rotação física de 270 graus`.
+  - O CommonMark decodifica a referência. O texto visível e o nível do título que o avaliador extrai ficam idênticos (verificado com `parse_page`), e a linha-fonte deixa de casar o delimitador.
+  - Só o delimitador real divide as páginas, inclusive para um título exatamente igual a ele ("Página 1" na página 1).
+  - A saída sem delimitadores (`diagnostic=False`) não muda.
+- **Gramática compartilhada** (`evaluation/markdown_syntax.py::escape_page_delimiter_collisions`):
+  - Função nova, que usa o próprio `page_markers` do avaliador; renderizador e avaliador não podem discordar.
+  - O renderizador a importa só no modo paginado.
+  - O avaliador não a usa. Comportamento, políticas (`top-level-page-markers-outside-code-html-v1`), métricas e hashes ficam iguais.
+- **Pós-processamento** (`ocr/tesseract/postprocess.py`):
+  - Removidos `_suppress_pagina_separator_blocks`, `_PAGINA_SEP_RE`, `_PAGINA_SEP_MAX_CHARS` e o motivo `tesseract_pagina_separator`.
+  - A única supressão que resta é o cabeçalho corrente repetido como bloco inteiro, e só sem preservação.
+  - Os contadores de página ficam com o detector compartilhado (T3-P43), que vê o documento inteiro e respeita a configuração.
+- **Diff**: `postprocess.py` −74 linhas líquidas; `renderers/markdown.py` +10; `markdown_syntax.py` +18.
+
+#### Desvio da proposta da §0.11: avaliador não alterado [F]
+
+- **Delimitador estrito na hipótese (política v2)**: com o escape, nenhuma saída deste renderizador tem colisão. Nas saídas dos 9 corpora, nas duas configurações, v1 e v2 dariam o mesmo resultado. Não foi implementado, porque não teria efeito.
+- **Sufixo do delimitador do gabarito contado como título da página**: descartado por evidência.
+  - Seis gabaritos usam delimitador com sufixo: V3 (144), V4 (222), V5 (42), V6 (95), V7 (80) e V8 (90).
+  - Em V6, V7 e V8 o corpo repete o título como `# Título`; em V5 o corpo tem outro título ("Headings e tipografia" no delimitador, "# Hierarquia, estilos e Unicode" no corpo).
+  - A regra acertaria V3 e V4 e duplicaria o título nos gabaritos de V6 a V8: seria um overfit novo, no avaliador.
+- **Consequência**: a comparabilidade histórica fica preservada por inteiro. O avaliador, as políticas e os hashes de gabarito são os mesmos da RUN 015.
+
+#### Validação offline (capturas, avaliador oficial em memória)
+
+**Baseline reproduzida [F]**: a árvore de `c08cf7c` reproduz byte a byte os hashes da §0.11 nos 9 corpora: V3 `879c5f6e4c1d`, V4 `eb41408b4718`, V5 `ce469a68ea39`, V6 `88ce4857651e`, V7 `13b4c45a2160`, V8 `f2d5ca42ec0b`, V9 `2a9846a65c6e`, V10 `c74c8a517c5b`, V11 `b0771828cf0c`.
+
+**Preservação desligada (configuração do lote) [F]**:
+
+| Corpus | Hash candidata | Nota (`c08cf7c` → candidata) | Rótulos de volta | Linhas escapadas | Delimitadores · duplicatas | Palavras do gabarito recuperadas · perdidas | Palavras fora do gabarito acrescentadas | Números + · − | Tabelas |
+|---|---|---|---|---|---|---|---|---|---|
+| V3 | `158d60fdc6fe` | 87.75 → **62.58** (−25.16) | 141 em 141 páginas | 1 (p98) | 144/144 · 0 | 3 · 0 | 1092 | +150 · 0 | 76 = 76 |
+| V4 | `f88f37ee121f` | 66.56 → **60.30** (−6.26) | 210 em 210 páginas | 1 (p96) | 224/224 · 0 | 43 · 0 | 1865 | +432 · 0 | 84 = 84 |
+| V5–V11 | idênticos byte a byte | iguais | 0 | 0 | 0 duplicatas | — | — | — | — |
+
+- **Categorias, V3**: Texto 87.73 → 22.01, Cobertura 92.08 → 67.69, Títulos 46.56 → 9.88, Parágrafos 89.88 → 89.24, Dados 95.96 → 77.13, Ordem 86.11 → 50.00. Listas e tabelas iguais.
+- **Categorias, V4**: Texto 76.80 → 70.53, Cobertura 67.85 → 65.14, Títulos 51.92 → 33.25, Parágrafos 53.45 → 50.47, Dados 68.74 → 65.09, Ordem 100.00 → 52.20. Listas e tabelas iguais.
+- **Integridade**: nenhuma página perde recall, nenhuma palavra do gabarito, número ou tabela se perde, e `checkbox_states` fica igual (V3 10/0/2, V4 0/0/0).
+- **Origem dos blocos que voltam**:
+  - V3: 141 blocos, sendo 96 nativos e 45 OCR; 136 títulos e 5 parágrafos.
+  - V4: 210 blocos, sendo 111 nativos e 99 OCR; 117 cabeçalhos, 81 títulos e 12 parágrafos.
+- **Como os rótulos aparecem agora**:
+  - V3: 95 `#`, 37 `####`, 5 parágrafos, 2 `###`, 1 `#####`, 1 em negrito e 1 `##` escapado (p98).
+  - V4: 133 parágrafos, 58 `######`, 18 `#####`, 2 `####`, 2 `#` e 1 `##` escapado (p96).
+
+**Preservação ligada (padrão da biblioteca e da CLI) [F]**:
+- **`c08cf7c`**: V3 e V4 não são avaliáveis. A V3 tem delimitador duplicado na p98 e a V4 na p96 (145 e 225 delimitadores para 144 e 224 páginas).
+- **Candidata**: sem duplicatas e avaliável. V3 **50.62**, V4 **55.53**.
+- **Diferença**: a candidata difere de `c08cf7c` só nas duas linhas escapadas. Com preservação, a regra removida já não agia (§0.11).
+- **V5–V11**: iguais nas duas versões.
+
+**Por que a nota cai sem perda de conteúdo [F]**:
+- **Convenção dos gabaritos**: os gabaritos de V3 e V4 guardam o rótulo "Página NNN | Título" só na linha delimitadora. Para o avaliador, essa linha é metadado; mantido na saída, o rótulo conta como texto excedente.
+- **V3**: o rótulo pesa 21% do texto do gabarito de cada página (mediana: 49 de 234 caracteres).
+  - CER sequencial 0.036 → 0.245; WER 0.050 → 0.297.
+  - Precisão de cobertura 0.961 → 0.775; recall 0.9864 → 0.9883.
+  - Títulos: heading F1 0.765 → 0.165; CER do texto de título 0.97 → 23.3.
+  - Números: 0.982 → 0.897; excesso de duplicação 0.070 → 0.269.
+  - "Ordem": as páginas que o indicador indireto da rubrica conta como ruins (CER > 0.15 com recall ≥ 0.95) vão de 8 para 125.
+- **V4**: o rótulo pesa 3% do texto da página (mediana: 57 de 2 754 caracteres). CER sequencial 0.039 → 0.059; WER 0.133 → 0.157; precisão de cobertura 0.918 → 0.896; recall 0.8941 → 0.8951; heading F1 0.698 → 0.554; CER do texto de título 0.50 → 1.58; parágrafos F1 0.483 → 0.459; números 0.895 → 0.879; ordem par a par 1.0 → 0.9999. "Ordem" 100 → 52.2 vem do indicador indireto da rubrica: páginas com CER > 0.15 e recall ≥ 0.95 vão de 0 para 42. A penalidade cai de 4.5 para 4.0.
+- **A nota anterior dependia de apagar os 351 títulos de página.**
+  - A regra 1 do próprio gabarito do V3 diz: "Cada página possui um título e um marcador QA-PNNN que devem aparecer uma única vez no resultado semântico".
+  - O gabarito guarda esse título só no delimitador, e o avaliador não o compara.
+  - A inconsistência está entre a convenção dos gabaritos de V3/V4 e o avaliador, não na extração. Fica registrada como T3-P56 (LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO).
+
+#### Testes: contratos alterados
+
+- **`tests/test_tesseract_postprocess.py`** (CRLF preservado; 280 → 301 casos, todos aprovados, sem xfail):
+  - **Seção 7 reescrita** ("Página N lines are content").
+    - Os 11 testes diretos da função removida deram lugar a `test_page_label_lines_are_never_suppressed`: as 10 formas que a regra suprimia, nas duas configurações.
+    - O contador "Página 3 de 10" e o título "Página 3" na página 3 agora ficam nas duas configurações. O contador fica com o detector compartilhado.
+    - Mantidos: corpo fundido ao rótulo, motivo de supressão anterior preservado, rótulo de outra página, títulos com números e frases que começam com "Página 7".
+  - **Pipeline**:
+    - O teste híbrido mantém os rótulos nas duas configurações.
+    - O xfail estrito de T3-P52 virou teste aprovado: 4 títulos × nativo/OCR × 2 configurações = 16 casos. A página tem um só delimitador, e o título mantém texto e nível 2.
+- **`tests/test_tesseract_run009_regressions.py`** (7 testes): a mobília contada sem aviso passa a ser o cabeçalho corrente (5 páginas); o rótulo "Página 167 | …" e "$Y $H $U" ficam.
+- **`tests/test_markdown_content_blocks.py`** (16 → 22 funções; 35 casos):
+  - escape das 7 formas que colidem, com texto e nível iguais e idempotência;
+  - 8 formas que não são delimitador ficam intactas (código, lista, citação, `###`, recuo, setext, frase, "Páginas");
+  - o Markdown paginado se divide só nos delimitadores reais;
+  - a saída sem colisão é igual byte a byte;
+  - a saída não paginada não é escapada;
+  - a avaliação de títulos "Página N | …" mantém todas as páginas.
+- **Discriminância [F]**: contra `c08cf7c`, 47 casos falham. Desses, 32 falham por comportamento e 15 porque a função de escape não existia.
+- **Execução [F]**:
+  - arquivos relacionados: **343 aprovados**;
+  - **suíte completa**: **3630 aprovados, 13 falhas, 4 ignorados, 4 xfail**, 156.8 s. As 13 falhas são exatamente as de T3-P14 (lista comparada com a do ciclo §0.11).
+
+#### Riscos residuais e limitações
+
+1. **Notas de V3 e V4 distorcidas por T3-P56**: até a decisão sobre os gabaritos, V3 (62.58) e V4 (60.30) medem também a convenção do delimitador. Comparações dessas notas com a RUN 015 ou anteriores precisam descontar a mudança de convenção, que não é regressão de extração.
+2. **Rótulo de página sem preservação**: "Página NNN | Título" é um título com contador. Fica na saída mesmo com `preserve_headers_footers=False`, porque o detector compartilhado não o confirma como mobília (o texto muda a cada página). Separar o contador do título exigiria uma regra de texto; não foi feito.
+3. **Escape visível na fonte**: cada linha escapada ganha 5 caracteres no Markdown bruto (V3 1, V4 1). Quem compara a linha-fonte literalmente vê `&#80;`; quem lê por um parser CommonMark vê o texto original.
+4. **Formato não versionado no manifesto**: o executor não foi alterado. Proposta: registrar `paginated-markdown-v2` no manifesto da extração, em ciclo autorizado.
+5. **Gramática no pacote do avaliador**: o renderizador importa `evaluation.markdown_syntax`. Mover a gramática para um módulo neutro é uma refatoração possível; não foi feita.
+6. **Mensagem enganosa do avaliador**: `reference_hash.split_pages` relata "Duplicate page number N in reference Markdown" também quando a duplicata está na saída da extração (visto na avaliação da `c08cf7c` com preservação). Só registrado.
+
+#### Material preservado
+
+`output/tesseract/_captures/t3p52_c08cf7c/` (não versionado; README):
+- `replay.py`, `compare.py`, `explain.py`, `eval_preserve.py`;
+- saídas `out/` e `out_preserve/`;
+- `compare_result.json` e os logs.
+
+#### Status ao fim do ciclo (validação offline; confirmação na RUN 016)
+
+| Problema | Status | Motivo |
+|---|---|---|
+| **T3-P09** | **CORRIGIDO — VALIDADO OFFLINE** | nenhuma regra do pós-processamento reconhece o texto de um corpus nem a convenção do avaliador (OF-01, OF-02, OF-03, OF-10 e OF-20 removidos; OF-09 restrito). As promoções de título (OF-11) não suprimem e seguem como risco próprio |
+| **T3-P52** | **CORRIGIDO — VALIDADO OFFLINE** | só o delimitador real divide as páginas, nas duas configurações, sem mudar o texto lido; avaliador inalterado |
+| **T3-P56** | **LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO** (novo) | gabaritos de V3/V4 guardam o título da página só no delimitador, contra a própria regra 1; decisão do responsável |
 ---
 
 ## §0-h (histórico) Estado em 2026-11-24 (pós-RUN 014) — substituído pela §0 de 2026-11-25
@@ -3676,9 +3816,11 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 - 002 → 003: `numeric` 0.852 → 0.934, `currency` 0.914 → 0.936, `dates` 0.859 → 0.964, `cpf`/`cnpj` 0.909 → 1.000. Monitorar.
 
-### T3-P09 | CRÍTICO (era INFO) | Regras ajustadas ao corpus em `ocr/tesseract/postprocess.py` — PARCIAL — VALIDADO OFFLINE (ciclo §0.11: literais removidos; regra "Página N" restrita e dependente de T3-P52)
+### T3-P09 | CRÍTICO (era INFO) | Regras ajustadas ao corpus em `ocr/tesseract/postprocess.py` — CORRIGIDO — VALIDADO OFFLINE (ciclos §0.11 e §0.12: nenhuma regra de texto de corpus nem de convenção do avaliador)
 
-- **Ciclo T3-P09 (§0.11, 2026-11-25, não commitado)**: removidas `_suppress_ocr_corpus_markers`, `_omitir_gabarito_split`, `_suppress_v6_irinf_artifacts`, `_suppress_tesseract_coordinate_dump` e `_suppress_dollar_letter_garble`, com as constantes. A mobília só sai por estrutura e só sem preservação. A regra "Página N" fica restrita e, por depender de T3-P52, impede declarar T3-P09 corrigido. Offline: V3 87.75 (−5.13), V4 66.56 (−0.30), V6 95.55 (−0.74); nenhuma palavra do gabarito, número ou tabela perdidos.
+- **Ciclo T3-P52 (§0.12, 2026-11-26, não commitado)**: removidos `_suppress_pagina_separator_blocks`, `_PAGINA_SEP_RE` e `_PAGINA_SEP_MAX_CHARS`. A única supressão do pós-processamento é o cabeçalho corrente repetido como bloco inteiro, e só sem preservação. V3 62.58 e V4 60.30 (convenção dos gabaritos, T3-P56); nenhuma perda de conteúdo.
+
+- **Ciclo T3-P09 (§0.11, 2026-11-25, commit `c08cf7c`)**: removidas `_suppress_ocr_corpus_markers`, `_omitir_gabarito_split`, `_suppress_v6_irinf_artifacts`, `_suppress_tesseract_coordinate_dump` e `_suppress_dollar_letter_garble`, com as constantes. A mobília só sai por estrutura e só sem preservação. A regra "Página N" fica restrita e, por depender de T3-P52, impede declarar T3-P09 corrigido. Offline: V3 87.75 (−5.13), V4 66.56 (−0.30), V6 95.55 (−0.74); nenhuma palavra do gabarito, número ou tabela perdidos.
 
 - O módulo tem regras ligadas a marcadores do corpus ("OMITIR NO GABARITO", cabeçalhos "OCR PURO * SCAN", "Página NNN |").
 - O risco se materializou duas vezes: a supressão de "dump de coordenadas" escondia o bug real do parser (T3-P23), e a supressão de separador "Página NNN" apagava corpo de texto (T3-P25). As duas foram tratadas.
@@ -4016,7 +4158,7 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 ### T3-P27 | CRÍTICO | Página nativa inteira descartada como marcador do corpus (V4 p213/p214) — RESOLVIDO (005); resíduo da V3 p116 CORRIGIDO — VALIDADO OFFLINE (ciclo §0.11; aguarda a RUN 016)
 
-- **Ciclo §0.11 (2026-11-25, não commitado)**: a regra que apagava o bloco foi removida. A V3 p116 recupera "OCR pareado de tabela financeira rotacionada", "Controle de página: QA-P116" e "Mesmo conjunto de células do cenário de controle pareado; variar apenas a condição visual.", com o cabeçalho do corpus na frente. Nenhum bloco é suprimido por uma linha ou célula; tabelas preservadas. Aguarda a RUN 016.
+- **Ciclo §0.11 (2026-11-25, commit `c08cf7c`)**: a regra que apagava o bloco foi removida. A V3 p116 recupera "OCR pareado de tabela financeira rotacionada", "Controle de página: QA-P116" e "Mesmo conjunto de células do cenário de controle pareado; variar apenas a condição visual.", com o cabeçalho do corpus na frente. Nenhum bloco é suprimido por uma linha ou célula; tabelas preservadas. Aguarda a RUN 016.
 
 - **RUN 005**: p213/p214 com CER 0.041 e recall 1.000; V4 `text_coverage_recall` 0.888. Mudaram só essas duas páginas.
 
@@ -4443,7 +4585,9 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 - **Ciclo T3-P51 (§0.10)**: passo A implementado — `_promote_post_table_checklist_items`, `_promote_ocr_checkbox_o_prefix` e `_FIELD_VALUE_RE` removidos de `ocr/tesseract/postprocess.py`, sem regra substituta; 15 testes antigos substituídos por 30 casos novos (18 falham com o código de `1717bd5`). Validação offline nos 9 corpora: 25 estados errados ou inventados → 0; 136 estados explícitos preservados; 10 estados legítimos deixam de ser representados (limitação aceita); nenhuma palavra ou número perdido; V3 −0.26, V6 −0.44, V9 +0.56, V10 +0.08. **Status**: CORRIGIDO — VALIDADO OFFLINE (não commitado); aguarda a RUN 016 (§5). Resíduo: passo B (ação 9).
 
-### T3-P52 | MÉDIO | Título "Página N …" indistinguível do delimitador do Markdown paginado — PENDENTE: dependência confirmada de T3-P09 (ciclo §0.11, com proposta técnica)
+### T3-P52 | MÉDIO | Título "Página N …" indistinguível do delimitador do Markdown paginado — CORRIGIDO — VALIDADO OFFLINE (ciclo §0.12: escape no renderizador; avaliador inalterado)
+
+- **Ciclo T3-P52 (§0.12, 2026-11-26, não commitado)**: `_render_page_section` escapa a 1ª letra do conteúdo que colide com o delimitador (`## &#80;ágina …`), com a gramática do avaliador (`escape_page_delimiter_collisions`). O texto e o nível lidos ficam iguais. Há um só delimitador por página nos 9 corpora, nas duas configurações (antes, V3 p98 e V4 p96 com preservação). O avaliador não mudou; desvio da proposta justificado na §0.12.
 
 - **Ciclo §0.11**: dependência confirmada. Sem a regra "Página N", os títulos de nível 2 da V3 p98 e da V4 p96 viram delimitadores e a avaliação falha. Proposta técnica (escape no renderizador, delimitador estrito e versionado no avaliador, formato versionado) e testes na §0.11. Um xfail estrito (`test_heading_like_the_page_delimiter_does_not_add_a_page`) registra o defeito.
 
@@ -4461,7 +4605,7 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 
 ### T3-P54 | ALTO | Pós-processamento Tesseract ignora `preserve_headers_footers` e altera páginas nativas — CORRIGIDO — COM RESÍDUOS (validado offline, ciclo §0.11)
 
-- **Ciclo §0.11 (2026-11-25, não commitado)**: as duas supressões de mobília que restam leem `diagnostics.facts["preserve_headers_footers"]`, gravado pela montagem e lido também pelo renderizador; com preservação, nada é suprimido. `api.py` não mudou. Resíduo: as operações que não suprimem continuam rodando só com o Tesseract e também em páginas nativas (medido; proposta arquitetural na §0.11).
+- **Ciclo §0.11 (2026-11-25, commit `c08cf7c`)**: as duas supressões de mobília que restam leem `diagnostics.facts["preserve_headers_footers"]`, gravado pela montagem e lido também pelo renderizador; com preservação, nada é suprimido. `api.py` não mudou. Resíduo: as operações que não suprimem continuam rodando só com o Tesseract e também em páginas nativas (medido; proposta arquitetural na §0.11).
 
 - **Registro completo na §0.4**; confronto na §0.9.
 - **Resumo**: com a flag padrão `True`, o pós-processamento ainda suprime cabeçalhos e separadores em 8 corpora; na configuração da RUN 015 altera páginas sem OCR em V3 e V5–V9.
@@ -4473,9 +4617,26 @@ Constantes novas: 0.25, 20, 0.5 (e 0.5 de área coberta). Nenhum número vem da 
 - **Resumo**: o renderizador não escapa `**`, `*`, `[…](…)`, `<tag>`, crases nem "### " em texto de parágrafo, para casar o formato dos gabaritos; nos corpora, "### " literal do V5 vira título e "<limite>" da V6 p29 fica como HTML bruto.
 - **Status**: PENDENTE — novo.
 
+### T3-P56 | MÉDIO | Gabaritos de V3/V4 guardam o título da página só no delimitador — LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO (novo, ciclo §0.12)
+
+- **Registro completo na §0.4**.
+- **Resumo**: "## Página NNN | Título" é delimitador (metadado) para o avaliador, mas a regra 1 do gabarito exige o título no resultado. Com os títulos mantidos, V3 −25.16 e V4 −6.26 sem perda de conteúdo. Decisão do responsável: corrigir os gabaritos ou manter a convenção.
+- **Status**: LIMITAÇÃO OU INCONSISTÊNCIA DO GABARITO — novo.
+
 ## §3 Alterações de código
 
-### Ciclo T3-P09 / T3-P27 / T3-P54 (2026-11-25, não commitado)
+### Ciclo T3-P52 (2026-11-26, não commitado)
+
+- **`src/structured_pdf_text/renderers/markdown.py`** (CRLF preservado): `_render_page_section` escapa o conteúdo que colide com o delimitador `## Página N` (docstring com o contrato).
+- **`src/structured_pdf_text/evaluation/markdown_syntax.py`**: nova `escape_page_delimiter_collisions`, sobre `page_markers`. O avaliador não a usa e seu comportamento não muda.
+- **`src/structured_pdf_text/ocr/tesseract/postprocess.py`**: removidos `_suppress_pagina_separator_blocks`, `_PAGINA_SEP_RE`, `_PAGINA_SEP_MAX_CHARS` e o motivo `tesseract_pagina_separator`; comentários e docstrings atualizados.
+- **Testes**:
+  - `tests/test_tesseract_postprocess.py` (CRLF preservado);
+  - `tests/test_tesseract_run009_regressions.py`;
+  - `tests/test_markdown_content_blocks.py`.
+- **Não alterados**: avaliador (comportamento, políticas e hashes), gabaritos, manifestos, rubrica, executor, `api.py` e componentes compartilhados de montagem.
+
+### Ciclo T3-P09 / T3-P27 / T3-P54 (2026-11-25, commitado em `c08cf7c`)
 
 - **`src/structured_pdf_text/ocr/tesseract/postprocess.py`** (+84/−341):
   - removidas `_suppress_ocr_corpus_markers`, `_omitir_gabarito_split`, `_suppress_v6_irinf_artifacts`, `_suppress_tesseract_coordinate_dump` e `_suppress_dollar_letter_garble`, com as 12 constantes usadas só por elas;
@@ -4675,6 +4836,13 @@ Avaliadas na RUN 006.
 
 ## §4 Testes executados
 
+### Ciclo T3-P52 (2026-11-26)
+
+- **Testes relacionados** (executados): `pytest tests/test_tesseract_postprocess.py tests/test_tesseract_run009_regressions.py tests/test_markdown_content_blocks.py` — **343 aprovados**, sem xfail.
+- **Discriminância** (executada): contra a árvore `src/` de `c08cf7c` (`git archive`, `pytest.ini` temporário com `pythonpath`), 47 casos falham. Desses, 32 por comportamento e 15 por função inexistente.
+- **Suíte completa** (executada): **3630 aprovados, 13 falhas, 4 ignorados, 4 xfail**, 156.8 s. As 13 falhas são exatamente as de T3-P14.
+- **Validação offline** (executada, sem OCR): 9 corpora nas duas configurações de preservação; avaliador oficial em memória para V3 e V4 (§0.12).
+
 ### Ciclo T3-P09 / T3-P27 / T3-P54 (2026-11-25)
 
 - **Testes relacionados**: `pytest tests/test_tesseract_postprocess.py tests/test_tesseract_run009_regressions.py`: **285 aprovados, 2 xfail** (executado).
@@ -4816,7 +4984,55 @@ Configuração: `build_config()` do executor (tesseract, balanced, pt-BR, adapti
 | 2026-11-19 | `pytest tests` (código com T3-P06 t3) | **3491 passed, 13 failed (exatamente as de T3-P14), 4 skipped, 4 xfailed**; 120 s |
 
 
-## §5 Próximo ciclo e critérios da RUN 016 (pós-T3-P09/T3-P27/T3-P54)
+## §5 Próximo ciclo e critérios da RUN 016 (pós-T3-P52)
+
+**Situação**:
+- **T3-P51 passo A**: commitado em `db3a49d` (§0.10).
+- **Ciclo T3-P09, T3-P27 e T3-P54**: commitado em `c08cf7c` (§0.11).
+- **Ciclo T3-P52**: implementado e validado offline (§0.12), não commitado.
+- **RUN 016**: executada pelo responsável depois do commit, confirma os três ciclos juntos.
+- **Comparação**: baseline `output/tesseract/015/` (commit `1717bd5`). A baseline imediata das notas é `c08cf7c` (§0.11).
+
+### Critérios de aceitação da RUN 016
+
+A extração é determinística: a 014 e a 015 reproduziram exatamente as validações offline. A RUN 016 deve, portanto, reproduzir a candidata offline da §0.12.
+
+- **Execução**: 9/9 com extração e métricas `exit 0`, `rank_eligible`. Configuração, avaliador e hashes de entrada iguais aos da 015, incluindo `preserve_headers_footers: false`. `implementation_commit` = o commit deste ciclo.
+- **Idênticas byte a byte à RUN 015**: V5 (`ce469a68ea39…`), V7 (`13b4c45a2160…`), V8 (`f2d5ca42ec0b…`) e V11 (`b0771828cf0c…`).
+- **Idênticas à candidata T3-P51** (`db3a49d`): V9 (`2a9846a65c6e…`) e V10 (`c74c8a517c5b…`).
+- **Idêntica a `c08cf7c`**: V6 (`88ce4857651e…`).
+- **Idênticas à candidata da §0.12** (`output/tesseract/_captures/t3p52_c08cf7c/out/cand/`): V3 (`158d60fdc6fe…`) e V4 (`f88f37ee121f…`).
+- **Delimitadores**:
+  - exatamente um `## Página N` por página em todos os corpora, sem duplicata;
+  - só V3 p98 e V4 p96 com a linha escapada (`## &#80;ágina …`).
+- **Conteúdo**:
+  - em relação a `c08cf7c`, só voltam os 351 rótulos de página (V3 141, V4 210);
+  - nenhuma palavra do gabarito, número ou tabela perdidos;
+  - nenhuma página com recall menor;
+  - a V3 p116 continua com o conteúdo recuperado na §0.11.
+- **`checkbox_states`**: igual à candidata T3-P51 (fp = 0 em todos os corpora; tp 136; fn 36).
+- **Notas (rubrica §1.16 inalterada)**: V3 62.58, V4 60.30, V5 86.49, V6 95.55, V7 99.44, V8 98.75, V9 76.16, V10 78.40, V11 71.68 (± 0.01).
+  - As quedas de V3 e V4 vêm da convenção dos gabaritos (T3-P56, §0.12), não de regressão de extração.
+  - As quedas de V3, V4 e V6 da §0.11 vêm da mobília dos corpora que deixou de ser apagada por texto.
+- **Integridade operacional**:
+  - avisos, status e páginas recuperadas ou degradadas iguais aos da candidata T3-P51;
+  - T3-P44 mantido (V11 idêntico; p71 recall 0.9346);
+  - tempo de extração dentro do ruído.
+- **Não declarar** RESOLVIDO sem esses critérios: T3-P09, T3-P27, T3-P52 e T3-P51 (passo A). T3-P54 continua com o resíduo da dependência do motor (§0.11).
+
+### Próximo ciclo recomendado
+
+Na ordem recomendada ao responsável (2026-11-26):
+1. **OF-05**: retirar de `assemble/repeated_regions.py` os literais "controle de página" e o identificador de corpus `v\d+-p\d+`. Exige autorização, porque é um componente compartilhado.
+2. **T3-P53**: observabilidade das perdas e das decisões de qualidade (prioridade 3 da §0.6).
+3. **OF-11**: promoções de título do pós-processamento, junto com T3-P06.
+4. **RUN 016**: consolida o que tiver sido feito.
+
+**Decisão pendente do responsável (T3-P56)**:
+- **Corrigir os gabaritos de V3 e V4**: pôr o título da página no corpo, como já fazem V6, V7 e V8.
+- **Ou manter a convenção**: nesse caso, ler as notas de V3 e V4 descontando o efeito do rótulo.
+
+## §5.0l (histórico) Próximo ciclo e critérios da RUN 016 (pós-T3-P09/T3-P27/T3-P54) — substituído pela §5 do ciclo T3-P52
 
 **Situação**:
 - **T3-P51 passo A**: commitado em `db3a49d` e validado offline (§0.10).

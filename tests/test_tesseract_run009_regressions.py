@@ -55,39 +55,53 @@ def test_legible_table_with_one_impossible_word_is_kept_and_reported():
     assert any(w.startswith("page 167: suspected_ocr_garble") for w in document.diagnostics.warnings)
 
 
+def _running_header_document(preserve_headers_footers):
+    pages = [SimpleNamespace(page_index=i, diagnostics=SimpleNamespace(warnings=[], facts={}),
+                             content_blocks=[_block("CABEÇALHO CORRENTE DO RELATÓRIO"), _block(f"Corpo {i}")])
+             for i in range(5)]
+    facts = {"preserve_headers_footers": preserve_headers_footers}
+    return SimpleNamespace(pages=pages, diagnostics=SimpleNamespace(warnings=[], facts=facts))
+
+
 def test_page_furniture_removed_by_postprocessing_is_counted_and_text_is_kept():
     """Supressões depois do registro de conservação ficam registradas no diagnóstico.
 
     Contrato anterior: o "$Y $H $U" era suprimido como lixo de OCR (Fix-P) e virava
-    aviso. A regra foi removida (T3-P27): "$" seguido de maiúscula também é `$PATH`
-    e `$A$1`. Só a mobília da página sai, contada nos fatos e sem aviso.
+    aviso; o rótulo "Página 167 | …" da própria página saía como mobília. As duas
+    regras foram removidas (T3-P27, T3-P52). Só o cabeçalho corrente sai, contado nos
+    fatos e sem aviso.
     """
     from structured_pdf_text.ocr.tesseract.postprocess import apply_tesseract_postprocessors
 
-    separator = _block("Página 167 | OCR de tabela", kind=ContentKind.TITLE)
+    label = _block("Página 167 | OCR de tabela", kind=ContentKind.TITLE)
     garbled = _block("$Y $H $U", kind=ContentKind.TEXT)
-    document = _document([separator, garbled])
-
+    document = _document([label, garbled])
     apply_tesseract_postprocessors(document)
-
-    assert separator.suppressed and separator.suppression_reason == "tesseract_pagina_separator"
+    assert not label.suppressed and label.text == "Página 167 | OCR de tabela"
     assert not garbled.suppressed and garbled.text == "$Y $H $U"
-    facts = document.pages[0].diagnostics.facts["tesseract_postprocess_suppressed_chars"]
-    assert facts == {"tesseract_pagina_separator": len("Página 167 | OCR de tabela")}
-    assert document.pages[0].diagnostics.warnings == []
+    assert "tesseract_postprocess_suppressed_chars" not in document.pages[0].diagnostics.facts
+
+    document = _running_header_document(preserve_headers_footers=False)
+    apply_tesseract_postprocessors(document)
+    for page in document.pages:
+        header, body = page.content_blocks
+        assert header.suppressed and header.suppression_reason == "tesseract_running_header"
+        assert not body.suppressed
+        assert page.diagnostics.facts["tesseract_postprocess_suppressed_chars"] == {
+            "tesseract_running_header": len("CABEÇALHO CORRENTE DO RELATÓRIO")}
+        assert page.diagnostics.warnings == []
+    assert document.diagnostics.warnings == []
 
 
 def test_page_furniture_is_kept_when_headers_and_footers_are_preserved():
     """T3-P54: com preserve_headers_footers=True nada é suprimido nem contado."""
     from structured_pdf_text.ocr.tesseract.postprocess import apply_tesseract_postprocessors
 
-    separator = _block("Página 167 | OCR de tabela", kind=ContentKind.TITLE)
-    document = _document([separator], preserve_headers_footers=True)
-
+    document = _running_header_document(preserve_headers_footers=True)
     apply_tesseract_postprocessors(document)
-
-    assert not separator.suppressed
-    assert "tesseract_postprocess_suppressed_chars" not in document.pages[0].diagnostics.facts
+    for page in document.pages:
+        assert not any(block.suppressed for block in page.content_blocks)
+        assert "tesseract_postprocess_suppressed_chars" not in page.diagnostics.facts
 
 
 def test_any_other_suppression_after_postprocessing_becomes_a_warning():

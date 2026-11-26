@@ -333,3 +333,103 @@ def test_render_table_single_row() -> None:
     rendered = _render_table(table)
     assert "| Only | Row |" in rendered
     assert "---" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Paginated Markdown: content never reads as a page delimiter (T3-P52)
+# ---------------------------------------------------------------------------
+
+_DELIMITER_COLLISIONS = [
+    "## Página 7 | Resultados",
+    "## Página 7",
+    "##\tpágina 3 de 9",
+    "## PÁGINA 007",
+    "## Página 4 | acento combinado",
+    "Texto anterior.\n\n## Página 2\n\nTexto seguinte.",
+    "<div>célula</div>\n## Página 9 | depois de HTML",
+]
+
+_NOT_DELIMITERS = [
+    "```\n## Página 7\n```",
+    "- ## Página 7",
+    "> ## Página 7",
+    "### Página 7",
+    "   ## Página 7",
+    "Página 7\n---",
+    "Página 7 do contrato contém cláusula de reajuste.",
+    "## Páginas 7 e 8",
+]
+
+
+def _visible(markdown: str) -> list[tuple[str, str, int | None]]:
+    from structured_pdf_text.evaluation.markdown_parser import parse_page
+
+    return [(node.kind.value, node.visible_text, node.heading_level) for node in parse_page(markdown, 1)]
+
+
+@pytest.mark.parametrize("text", _DELIMITER_COLLISIONS)
+def test_escape_makes_delimiter_like_content_literal_with_the_same_text(text) -> None:
+    from structured_pdf_text.evaluation.markdown_syntax import escape_page_delimiter_collisions, page_markers
+
+    assert page_markers(text)
+    escaped = escape_page_delimiter_collisions(text)
+    assert page_markers(escaped) == []
+    assert "&#" in escaped
+    assert _visible(escaped) == _visible(text)
+    assert escape_page_delimiter_collisions(escaped) == escaped
+
+
+@pytest.mark.parametrize("text", _NOT_DELIMITERS)
+def test_escape_leaves_content_that_is_not_a_delimiter_unchanged(text) -> None:
+    from structured_pdf_text.evaluation.markdown_syntax import escape_page_delimiter_collisions
+
+    assert escape_page_delimiter_collisions(text) == text
+
+
+def test_paginated_markdown_splits_only_at_real_delimiters() -> None:
+    """A level-2 title "Página 1" on page 1, a paragraph that is literally
+    "## Página 9 | …" and a title "Página 2 | …" on page 3 used to add, repeat or
+    move pages for any reader of the paginated Markdown (T3-P52)."""
+    from structured_pdf_text.evaluation.markdown_syntax import split_page_sources
+
+    pages = [
+        _page([_block(ContentKind.TITLE, "Página 1", 0, heading_level=2),
+               _block(ContentKind.TEXT, "Corpo um.", 1)], page_index=0),
+        _page([_block(ContentKind.TEXT, "## Página 9 | literal", 0, page_index=1)], page_index=1),
+        _page([_block(ContentKind.TITLE, "Página 2 | Resultados", 0, heading_level=2, page_index=2),
+               _block(ContentKind.TEXT, "Corpo três.", 1, page_index=2)], page_index=2),
+    ]
+    split = split_page_sources(render_markdown(_document(pages), diagnostic=True))
+    assert list(split) == [1, 2, 3]
+    assert _visible(split[1][0]) == [("heading", "Página 1", 2), ("paragraph", "Corpo um.", None)]
+    assert _visible(split[2][0]) == [("heading", "Página 9 | literal", 2)]
+    assert _visible(split[3][0]) == [("heading", "Página 2 | Resultados", 2), ("paragraph", "Corpo três.", None)]
+
+
+def test_paginated_markdown_without_collisions_is_unchanged() -> None:
+    pages = [_page([_block(ContentKind.TITLE, "Página de rosto", 0, heading_level=2),
+                    _block(ContentKind.TEXT, "Ver a Página 2.", 1)], page_index=0),
+             _page([_block(ContentKind.TITLE, "Página 2 | Resultados", 0, heading_level=3, page_index=1)],
+                   page_index=1)]
+    assert render_markdown(_document(pages), diagnostic=True) == (
+        "## Página 1\n\n## Página de rosto\n\nVer a Página 2.\n\n## Página 2\n\n### Página 2 | Resultados")
+
+
+def test_markdown_without_page_delimiters_is_not_escaped() -> None:
+    """Only the paginated Markdown reserves the delimiter syntax."""
+    page = _page([_block(ContentKind.TITLE, "Página 7 | Resultados", 0, heading_level=2)])
+    assert render_markdown(_document([page])) == "## Página 7 | Resultados"
+
+
+def test_evaluation_of_delimiter_like_titles_keeps_every_page() -> None:
+    from structured_pdf_text.evaluation import EvaluationRequest, evaluate
+
+    pages = [_page([_block(ContentKind.TITLE, f"Página {n + 1} | Título {n + 1}", 0, heading_level=2, page_index=n),
+                    _block(ContentKind.TEXT, f"Corpo da página {n + 1}.", 1, page_index=n)], page_index=n)
+             for n in range(2)]
+    hypothesis = render_markdown(_document(pages), diagnostic=True)
+    reference = "## Página 1\n\nPágina 1 | Título 1\n\nCorpo da página 1.\n\n" \
+                "## Página 2\n\nPágina 2 | Título 2\n\nCorpo da página 2."
+    result = evaluate(EvaluationRequest(ref_text=reference, hyp_text=hypothesis))
+    assert result["inputs"]["selected_pages"] == [1, 2]
+    assert result["quality"]["text"]["cer_sequential_visible"]["value"] == 0.0

@@ -101,6 +101,24 @@ def page_markers(text: str) -> list[PageMarker]:
     return result
 
 
+_DELIMITER_PREFIX = re.compile(r"##[ \t]+")
+
+
+def escape_page_delimiter_collisions(text: str) -> str:
+    """Make page content that this grammar would take for a delimiter literal.
+
+    ``text`` is the content of one page, without its delimiter. On every line
+    that ``page_markers`` would report, the first letter of "Página" becomes a
+    numeric character reference (``## &#80;ágina 7 | Resultados``). CommonMark
+    decodes the reference, so the heading or HTML text is unchanged, while the
+    source line no longer matches the delimiter (T3-P52).
+    """
+    for marker in reversed(page_markers(text)):
+        letter = _DELIMITER_PREFIX.match(text, marker.start).end()
+        text = f"{text[:letter]}&#{ord(text[letter])};{text[letter + 1:]}"
+    return text
+
+
 def split_page_sources(text: str, *, implicit_page: int = 1) -> dict[int, tuple[str, int]]:
     """Preserve observed page order and body offsets; reject real duplicates."""
     markers = page_markers(text)

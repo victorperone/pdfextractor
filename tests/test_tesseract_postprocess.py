@@ -80,7 +80,6 @@ from structured_pdf_text.ocr.tesseract.postprocess import (
     _promote_numbered_bold_headings,
     _promote_seção_subseção_headings,
     _promote_short_bold_column_headers,
-    _suppress_pagina_separator_blocks,
     _flag_rotated_table_garble,
     _table_has_q_without_u,
     _text_is_md_bold,
@@ -382,57 +381,40 @@ def test_apply_entry_point_calls_numbered_promoter():
 
 
 # ---------------------------------------------------------------------------
-# 7. _suppress_pagina_separator_blocks
+# 7. "Página N" lines are content (T3-P09/OF-03, T3-P52)
 # ---------------------------------------------------------------------------
 
-# Contract change (T3-P09/OF-03): the label is suppressed only on its own page
-# (N = page_index + 1) and only when headers and footers are not preserved. The
-# tests below used to put "Página 005" on page 1; they now place it on page 5.
+# Contract change (T3-P52): the post-processing no longer suppresses "Página N"
+# lines. The rule existed so that a title such as "Página 7 | Resultados" would
+# not be read as the "## Página N" delimiter of the paginated Markdown; the
+# renderer now writes such content so that it cannot be. It also took the page
+# title after "|" (351 titles in V3/V4, RUN 015). The shapes it suppressed are
+# now kept, in both preservation settings; page counters are left to the shared
+# furniture detector (T3-P43), which sees the whole document.
 
-def test_pagina_title_block_suppressed():
-    """TITLE block 'Página 005 | Title' on page 5 (V3 pattern) is suppressed."""
-    b = _Block(order_index=0, text="Página 005 | Português com acentos", kind="title")
-    page = _Page([b], page_index=4)
-    doc = _Doc([page])
-    _suppress_pagina_separator_blocks(doc)
-    assert b.suppressed is True
-    assert b.suppression_reason == "tesseract_pagina_separator"
-
-
-def test_pagina_text_block_with_hash_prefix_suppressed():
-    """TEXT block '# Página 005 | Title' (OCR-read hash prefix) is suppressed."""
-    b = _Block(order_index=0, text="# Página 005 | Title", kind="text")
-    page = _Page([b], page_index=4)
-    doc = _Doc([page])
-    _suppress_pagina_separator_blocks(doc)
-    assert b.suppressed is True
-
-
-def test_pagina_bare_number_suppressed():
-    """'Página 001' without pipe title is also suppressed."""
-    b = _Block(order_index=0, text="Página 001", kind="title")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_pagina_separator_blocks(doc)
-    assert b.suppressed is True
+_FORMER_LABEL_SHAPES = [
+    # (text, kind, page_index): what the removed rule suppressed on its own page.
+    ("Página 005 | Português com acentos", "title", 4),
+    ("# Página 005 | Title", "text", 4),
+    ("Página 001", "title", 0),
+    ("pagina 003 | content", "title", 2),
+    ("Página 001 | Corpus integrado de validação: texto nativo,\nOCR e tabelas", "title", 0),
+    ("Página 7", "text", 6),
+    ("Página 7/40", "text", 6),
+    ("Página 7 de 40", "text", 6),
+    ("Página 7 — Relatório anual", "text", 6),
+    ("PÁGINA 007 | Anexo", "text", 6),
+]
 
 
-def test_pagina_case_insensitive():
-    """'pagina 003' (lowercase, no accent) is suppressed."""
-    b = _Block(order_index=0, text="pagina 003 | content", kind="title")
-    page = _Page([b], page_index=2)
-    doc = _Doc([page])
-    _suppress_pagina_separator_blocks(doc)
-    assert b.suppressed is True
-
-
-def test_body_text_with_pagina_word_not_suppressed():
-    """Body text that merely CONTAINS 'Página' mid-sentence is NOT suppressed."""
-    b = _Block(order_index=0, text="Consultar a Página 42 do manual.", kind="text")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_pagina_separator_blocks(doc)
-    assert b.suppressed is False
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+@pytest.mark.parametrize("text,kind,page_index", _FORMER_LABEL_SHAPES)
+def test_page_label_lines_are_never_suppressed(text, kind, page_index, preserve):
+    block = _Block(order_index=0, text=text, kind=kind)
+    doc = _Doc([_Page([block], page_index=page_index)], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert block.suppressed is False
+    assert block.text == text
 
 
 def test_pagina_block_that_continues_with_body_text_is_kept():
@@ -443,85 +425,54 @@ def test_pagina_block_that_continues_with_body_text_is_kept():
     b = _Block(order_index=0, text=text, kind="text")
     multi = _Block(order_index=0, text="Página 097 | Título\nCorpo da página.", kind="text")
     doc = _Doc([_Page([b], page_index=95), _Page([multi], page_index=96)])
-    _suppress_pagina_separator_blocks(doc)
+    apply_tesseract_postprocessors(doc)
     assert b.suppressed is False
     assert multi.suppressed is False
 
 
-def test_wrapped_pagina_title_block_is_suppressed():
-    """T3-P26/RUN 004: título-separador longo quebrado em duas linhas (V3 p1) é suprimido."""
-    title = _Block(order_index=0, kind="title",
-                   text="Página 001 | Corpus integrado de validação: texto nativo,\nOCR e tabelas")
-    doc = _Doc([_Page([title])])
-    _suppress_pagina_separator_blocks(doc)
-    assert title.suppressed is True
-    assert title.suppression_reason == "tesseract_pagina_separator"
-
-
-def test_pagina_suppressor_skips_already_suppressed():
+def test_block_suppressed_before_the_postprocessing_keeps_its_reason():
     """Already-suppressed blocks are not re-processed."""
     b = _Block(order_index=0, text="Página 001", kind="title",
                suppressed=True, suppression_reason="prior_reason")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_pagina_separator_blocks(doc)
-    assert b.suppression_reason == "prior_reason"  # not overwritten
-
-
-def test_pagina_suppressor_is_idempotent():
-    """Calling _suppress_pagina_separator_blocks twice gives the same result."""
-    b = _Block(order_index=0, text="Página 005 | Title", kind="title")
-    page = _Page([b], page_index=4)
-    doc = _Doc([page])
-    _suppress_pagina_separator_blocks(doc)
-    _suppress_pagina_separator_blocks(doc)
+    doc = _Doc([_Page([b])])
+    apply_tesseract_postprocessors(doc)
     assert b.suppressed is True
-    assert b.suppression_reason == "tesseract_pagina_separator"
-
-
-def test_apply_entry_point_calls_pagina_suppressor():
-    """apply_tesseract_postprocessors must also run the Página suppressor."""
-    texts = ["RUNNING HDR"] * 3 + ["body A", "body B"]
-    base_doc = _make_doc(texts)
-    pagina_page = _Page([_Block(order_index=0, text="Página 006 | Intro", kind="title")], page_index=5)
-    full_doc = _Doc(base_doc.pages + [pagina_page])
-    apply_tesseract_postprocessors(full_doc)
-    assert full_doc.pages[-1].content_blocks[0].suppressed is True
+    assert b.suppression_reason == "prior_reason"
 
 
 def test_pagina_label_of_another_page_is_content():
-    """T3-P09/OF-03: "Página N" is the page label only on page N. A table of
-    contents, a cross-reference or a title on another page is content; the old
-    contract deleted any short line starting with "Página N"."""
-    texts = ["Página 12 | Resultados", "Página 5 | Introdução", "Página 9 de 40", "# Página 7"]
+    """T3-P09/OF-03: a table of contents, a cross-reference or a title "Página N"
+    is content; the RUN 015 contract deleted any short line starting with it."""
+    texts = ["Página 12 | Resultados", "Página 5 | Introdução", "Página 9 de 40", "# Página 7",
+             "Consultar a Página 42 do manual."]
     blocks = [_Block(order_index=i, text=t, kind="title" if i == 0 else "text") for i, t in enumerate(texts)]
     doc = _Doc([_Page(blocks, page_index=2)])
     apply_tesseract_postprocessors(doc)
-    assert [b.suppressed for b in blocks] == [False] * 4
+    assert [b.suppressed for b in blocks] == [False] * len(texts)
     assert [b.text for b in blocks] == texts
 
 
 @pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
-def test_page_counter_of_the_page_is_suppressed_only_when_not_preserved(preserve):
-    """T3-P54: "Página 3 de 10" on page 3 is page furniture; it is kept when
-    headers and footers are preserved (the old contract ignored the setting)."""
+def test_page_counter_is_left_to_the_shared_furniture_detector(preserve):
+    """"Página 3 de 10" on page 3 is page furniture, but a counter is recognised by
+    its recurrence across pages, which the shared detector (T3-P43) checks before
+    this step; the Tesseract post-processing keeps it."""
     footer = _Block(order_index=1, text="Página 3 de 10", kind="footer")
     body = _Block(order_index=0, text="Corpo da página três.")
     doc = _Doc([_Page([body, footer], page_index=2)], preserve_headers_footers=preserve)
     apply_tesseract_postprocessors(doc)
-    assert footer.suppressed is (not preserve)
+    assert footer.suppressed is False
     assert body.suppressed is False
 
 
 @pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
-def test_title_equal_to_the_page_label_follows_the_preservation_setting(preserve):
+def test_title_equal_to_the_page_label_is_kept(preserve):
     """A title whose text is exactly the page's delimiter text ("Página 3" on page 3)
-    is the page label when furniture is not preserved and is kept otherwise. Telling
-    it apart from the delimiter in the Markdown is T3-P52 (xfail test below)."""
+    is content; the renderer keeps it apart from the delimiter (T3-P52)."""
     title = _Block(order_index=0, text="Página 3", kind="title", heading_level=2)
     doc = _Doc([_Page([title], page_index=2)], preserve_headers_footers=preserve)
     apply_tesseract_postprocessors(doc)
-    assert title.suppressed is (not preserve)
+    assert title.suppressed is False
     assert title.text == "Página 3"
 
 
@@ -541,22 +492,12 @@ def test_titles_with_numbers_are_kept(preserve):
     "Página 7: ver anexo II",
     "Página 7\nResultados do trimestre",
 ])
-def test_sentence_starting_with_the_page_number_is_not_a_label(text, preserve):
-    """AI-02 on its own page: after the number a label has nothing, a separator or
-    "de M"; a sentence that starts with "Página 7" on page 7 is content."""
+def test_sentence_starting_with_the_page_number_is_content(text, preserve):
+    """AI-02 on its own page: a sentence that starts with "Página 7" on page 7."""
     block = _Block(order_index=0, text=text, kind="title" if "\n" in text else "text")
     doc = _Doc([_Page([block], page_index=6)], preserve_headers_footers=preserve)
     apply_tesseract_postprocessors(doc)
     assert block.suppressed is False and block.text == text
-
-
-@pytest.mark.parametrize("text", ["Página 7", "Página 7/40", "Página 7 de 40", "Página 7 — Relatório anual", "PÁGINA 007 | Anexo"])
-def test_label_shapes_of_the_page_are_suppressed_only_when_not_preserved(text):
-    for preserve in (False, True):
-        block = _Block(order_index=0, text=text)
-        doc = _Doc([_Page([block], page_index=6)], preserve_headers_footers=preserve)
-        apply_tesseract_postprocessors(doc)
-        assert block.suppressed is (not preserve), (text, preserve)
 
 
 # ---------------------------------------------------------------------------
@@ -2048,34 +1989,39 @@ def test_corpus_wording_and_technical_lines_survive_the_pipeline(ocr, preserve):
 
 
 @pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
-def test_hybrid_pages_lose_only_their_own_page_label_and_only_when_not_preserved(preserve):
+def test_hybrid_pages_keep_their_page_labels_and_content(preserve):
+    """T3-P52: the page labels are content of the Tesseract post-processing in both
+    settings (two pages are too few for the shared detector to confirm a counter)."""
     page_1 = [("Página 1 de 2", False), ("Relatório de inspeção", False), ("Omitir no gabarito", True),
               ("Valor: $A$1", True)]
     page_2 = [("Página 7 | Resultados", True), ("Conclusão do laudo", False)]
     markdown = _pipeline_markdown([page_1, page_2], preserve_headers_footers=preserve)
-    expected = [text for text, _ in page_1 + page_2]
-    if not preserve:
-        expected.remove("Página 1 de 2")
-    assert _body_lines(markdown) == expected
+    assert _body_lines(markdown) == [text for text, _ in page_1 + page_2]
 
 
-@pytest.mark.xfail(strict=True, reason="T3-P52: a heading that starts like the page delimiter is read as one; "
-                                       "telling them apart needs the renderer and the evaluator")
-@pytest.mark.parametrize("title", ["Página 1", "Página 5 | Resultados"])
-def test_heading_like_the_page_delimiter_does_not_add_a_page(title):
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+@pytest.mark.parametrize("ocr", [False, True], ids=["native", "ocr"])
+@pytest.mark.parametrize("title", ["Página 1", "Página 1 | Resultados", "Página 5 | Resultados", "página 2 de 9"])
+def test_heading_like_the_page_delimiter_does_not_add_a_page(title, ocr, preserve):
     """A level-2 title "Página 1" on page 1 (exactly the delimiter) or "Página 5 | …"
-    renders as "## Página …", which readers of the paginated Markdown take as a page
-    delimiter (a duplicate or a phantom page). With preservation on, the post-processing
-    no longer deletes it to hide that (T3-P54), so the ambiguity is visible here."""
+    used to render as "## Página …", which readers of the paginated Markdown take as
+    a page delimiter (a duplicate or a phantom page). It is now written with a
+    character reference, so only the real delimiter splits the pages, and the
+    heading keeps its text and level (T3-P52)."""
     from structured_pdf_text.document import ContentKind
-    from structured_pdf_text.evaluation.markdown_syntax import page_markers
+    from structured_pdf_text.evaluation.markdown_parser import parse_page
+    from structured_pdf_text.evaluation.markdown_syntax import split_page_sources
     from structured_pdf_text.renderers.markdown import render_markdown
 
-    document = _pipeline_document([[(title, False), ("Corpo da página.", False)]], preserve_headers_footers=True)
+    document = _pipeline_document([[(title, ocr), ("Corpo da página.", ocr)]], preserve_headers_footers=preserve)
     block = next(b for b in document.pages[0].content_blocks if b.text == title)
     block.kind, block.heading_level = ContentKind.TITLE, 2
     apply_tesseract_postprocessors(document)
-    assert [marker.page for marker in page_markers(render_markdown(document, diagnostic=True))] == [1]
+    pages = split_page_sources(render_markdown(document, diagnostic=True))
+    assert list(pages) == [1]
+    nodes = parse_page(pages[1][0], 1)
+    assert [(node.kind.value, node.visible_text, node.heading_level) for node in nodes] == [
+        ("heading", title, 2), ("paragraph", "Corpo da página.", None)]
 
 
 # ---------------------------------------------------------------------------

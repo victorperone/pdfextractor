@@ -319,10 +319,20 @@ def _region_has_renderable_table(region, page_index, rendered_tables) -> bool:
 # ---------------------------------------------------------------------------
 
 def _render_page_section(page_index: int, parts: list[str]) -> str:
+    """One page of the paginated Markdown: the ``## Página N`` delimiter and its content.
+
+    Content that would read as a delimiter (a level-2 title "Página 7 |
+    Resultados", or exactly "Página 7") is written with a character reference
+    for its first letter; its text is unchanged for any CommonMark reader, and
+    only real delimiters split the pages (T3-P52). The grammar is the
+    evaluator's, so the two cannot disagree.
+    """
     heading = f"## Página {page_index + 1}"
     if not parts:
         return heading
-    return heading + "\n\n" + "\n\n".join(parts)
+    from structured_pdf_text.evaluation.markdown_syntax import escape_page_delimiter_collisions
+
+    return heading + "\n\n" + escape_page_delimiter_collisions("\n\n".join(parts))
 
 
 def _render_table(table: StructuredTable) -> str:
