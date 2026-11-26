@@ -23,10 +23,11 @@ def _block(text, kind=ContentKind.TEXT, suppressed=False, reason=None):
                            heading_level=None, list_items=[])
 
 
-def _document(blocks):
+def _document(blocks, preserve_headers_footers=False):
     page = SimpleNamespace(page_index=166, content_blocks=blocks,
                            diagnostics=SimpleNamespace(warnings=[], facts={}))
-    return SimpleNamespace(pages=[page], diagnostics=SimpleNamespace(warnings=[], facts={}))
+    facts = {"preserve_headers_footers": preserve_headers_footers}
+    return SimpleNamespace(pages=[page], diagnostics=SimpleNamespace(warnings=[], facts=facts))
 
 
 _P167_TABLE = (
@@ -54,8 +55,13 @@ def test_legible_table_with_one_impossible_word_is_kept_and_reported():
     assert any(w.startswith("page 167: suspected_ocr_garble") for w in document.diagnostics.warnings)
 
 
-def test_content_removed_by_postprocessing_is_reported_but_page_furniture_is_not():
-    """Supressões depois do registro de conservação ficam visíveis no diagnóstico."""
+def test_page_furniture_removed_by_postprocessing_is_counted_and_text_is_kept():
+    """Supressões depois do registro de conservação ficam registradas no diagnóstico.
+
+    Contrato anterior: o "$Y $H $U" era suprimido como lixo de OCR (Fix-P) e virava
+    aviso. A regra foi removida (T3-P27): "$" seguido de maiúscula também é `$PATH`
+    e `$A$1`. Só a mobília da página sai, contada nos fatos e sem aviso.
+    """
     from structured_pdf_text.ocr.tesseract.postprocess import apply_tesseract_postprocessors
 
     separator = _block("Página 167 | OCR de tabela", kind=ContentKind.TITLE)
@@ -64,15 +70,39 @@ def test_content_removed_by_postprocessing_is_reported_but_page_furniture_is_not
 
     apply_tesseract_postprocessors(document)
 
-    assert separator.suppressed and garble_suppressed(garbled)
+    assert separator.suppressed and separator.suppression_reason == "tesseract_pagina_separator"
+    assert not garbled.suppressed and garbled.text == "$Y $H $U"
     facts = document.pages[0].diagnostics.facts["tesseract_postprocess_suppressed_chars"]
-    assert set(facts) == {"tesseract_pagina_separator", "tesseract_dollar_letter_garble"}
-    warnings = document.pages[0].diagnostics.warnings
-    assert warnings == ["content_suppressed_by_postprocess: tesseract_dollar_letter_garble (8 chars)"]
+    assert facts == {"tesseract_pagina_separator": len("Página 167 | OCR de tabela")}
+    assert document.pages[0].diagnostics.warnings == []
 
 
-def garble_suppressed(block):
-    return block.suppressed and block.suppression_reason == "tesseract_dollar_letter_garble"
+def test_page_furniture_is_kept_when_headers_and_footers_are_preserved():
+    """T3-P54: com preserve_headers_footers=True nada é suprimido nem contado."""
+    from structured_pdf_text.ocr.tesseract.postprocess import apply_tesseract_postprocessors
+
+    separator = _block("Página 167 | OCR de tabela", kind=ContentKind.TITLE)
+    document = _document([separator], preserve_headers_footers=True)
+
+    apply_tesseract_postprocessors(document)
+
+    assert not separator.suppressed
+    assert "tesseract_postprocess_suppressed_chars" not in document.pages[0].diagnostics.facts
+
+
+def test_any_other_suppression_after_postprocessing_becomes_a_warning():
+    """T3-P36: uma supressão que não é mobília vira aviso da página e do documento."""
+    from structured_pdf_text.ocr.tesseract.postprocess import _report_postprocess_suppressions
+
+    block = _block("conteúdo")
+    document = _document([block])
+    visible_before = {id(block)}
+    block.suppressed, block.suppression_reason = True, "regra_futura"
+
+    _report_postprocess_suppressions(document, visible_before)
+
+    assert document.pages[0].diagnostics.warnings == ["content_suppressed_by_postprocess: regra_futura (8 chars)"]
+    assert document.diagnostics.warnings == ["page 167: content_suppressed_by_postprocess: regra_futura (8 chars)"]
 
 
 def _token(text, box, confidence, call):

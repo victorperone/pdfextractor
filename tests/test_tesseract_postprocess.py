@@ -33,43 +33,55 @@ class _Block:
 @dataclass
 class _Page:
     content_blocks: list[_Block] = field(default_factory=list)
+    page_index: int = 0
 
 
 class _Doc:
-    def __init__(self, pages: list[_Page]):
+    """Stub document.
+
+    ``assemble_document`` records ``preserve_headers_footers`` in
+    ``diagnostics.facts``; the post-processing suppresses page furniture only
+    when it is False (T3-P54). These unit tests model the batch extraction
+    (False) unless a test passes True.
+    """
+
+    def __init__(self, pages: list[_Page], preserve_headers_footers: bool = False):
         self.pages = pages
+        self.diagnostics = SimpleNamespace(
+            facts={"preserve_headers_footers": preserve_headers_footers}, warnings=[]
+        )
 
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
-def _make_doc(page_texts: list[str], kind: str = "text") -> _Doc:
-    """One block per page, with the given text and optional kind."""
-    return _Doc([_Page([_Block(order_index=0, text=t, kind=kind)]) for t in page_texts])
+def _make_doc(page_texts: list[str], kind: str = "text", preserve_headers_footers: bool = False) -> _Doc:
+    """One block per page (page_index = position), with the given text and optional kind."""
+    return _Doc(
+        [_Page([_Block(order_index=0, text=t, kind=kind)], page_index=i) for i, t in enumerate(page_texts)],
+        preserve_headers_footers,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Import the function under test
 # ---------------------------------------------------------------------------
 
+import pytest
+
 from structured_pdf_text.ocr.tesseract.postprocess import (
     _block_is_bold,
     _next_block_is_unordered_list,
     _normalize_brl_currency_spacing,
-    _omitir_gabarito_split,
     _promote_allcaps_section_headers,
     _promote_bold_pipe_title,
     _promote_bold_pre_table_heading,
     _promote_numbered_bold_headings,
     _promote_seção_subseção_headings,
     _promote_short_bold_column_headers,
-    _suppress_dollar_letter_garble,
-    _suppress_ocr_corpus_markers,
     _suppress_pagina_separator_blocks,
     _flag_rotated_table_garble,
-    _suppress_tesseract_coordinate_dump,
-    _suppress_v6_irinf_artifacts,
     _table_has_q_without_u,
     _text_is_md_bold,
     apply_tesseract_postprocessors,
@@ -170,6 +182,40 @@ def test_apply_entry_point_calls_suppressor():
     apply_tesseract_postprocessors(doc)
     suppressed_count = sum(b.suppressed for p in doc.pages for b in p.content_blocks)
     assert suppressed_count == 3
+
+
+def test_running_header_merged_with_body_keeps_the_body():
+    """T3-P27: only a block that is wholly the repeated header is suppressed. The
+    old contract compared the first line only, so the paragraph merged with the
+    header line went with it."""
+    merged = "HEADER CORP\nParágrafo do corpo que começa logo abaixo do cabeçalho."
+    doc = _make_doc(["HEADER CORP", "HEADER CORP", "HEADER CORP", merged, "Different text B"])
+    suppress_tesseract_running_headers(doc)
+    assert [p.content_blocks[0].suppressed for p in doc.pages] == [True, True, True, False, False]
+    assert doc.pages[3].content_blocks[0].text == merged
+
+
+def test_two_line_running_header_repeated_whole_is_suppressed():
+    doc = _make_doc(["RELATÓRIO ANUAL\nVOLUME I"] * 3 + ["body A", "body B"])
+    suppress_tesseract_running_headers(doc)
+    assert [p.content_blocks[0].suppressed for p in doc.pages] == [True, True, True, False, False]
+
+
+def test_running_headers_are_kept_when_preserved():
+    """T3-P54: with preserve_headers_footers=True nothing repeated is suppressed."""
+    doc = _make_doc(["HEADER CORP"] * 4 + ["body"], preserve_headers_footers=True)
+    apply_tesseract_postprocessors(doc)
+    assert not any(b.suppressed for p in doc.pages for b in p.content_blocks)
+    assert [p.content_blocks[0].text for p in doc.pages] == ["HEADER CORP"] * 4 + ["body"]
+
+
+def test_furniture_is_kept_when_the_document_has_no_preservation_fact():
+    """Without diagnostics.facts["preserve_headers_footers"] the default is to
+    preserve, as in ExtractionConfig and the Markdown renderer (T3-P54)."""
+    pages = [SimpleNamespace(page_index=i, content_blocks=[_Block(order_index=0, text=t)])
+             for i, t in enumerate(["Página 1 de 5"] + ["CABEÇALHO"] * 4)]
+    apply_tesseract_postprocessors(SimpleNamespace(pages=pages))
+    assert not any(b.suppressed for p in pages for b in p.content_blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -339,10 +385,14 @@ def test_apply_entry_point_calls_numbered_promoter():
 # 7. _suppress_pagina_separator_blocks
 # ---------------------------------------------------------------------------
 
+# Contract change (T3-P09/OF-03): the label is suppressed only on its own page
+# (N = page_index + 1) and only when headers and footers are not preserved. The
+# tests below used to put "Página 005" on page 1; they now place it on page 5.
+
 def test_pagina_title_block_suppressed():
-    """TITLE block 'Página 005 | Title' (exact V3 pattern) is suppressed."""
+    """TITLE block 'Página 005 | Title' on page 5 (V3 pattern) is suppressed."""
     b = _Block(order_index=0, text="Página 005 | Português com acentos", kind="title")
-    page = _Page([b])
+    page = _Page([b], page_index=4)
     doc = _Doc([page])
     _suppress_pagina_separator_blocks(doc)
     assert b.suppressed is True
@@ -352,7 +402,7 @@ def test_pagina_title_block_suppressed():
 def test_pagina_text_block_with_hash_prefix_suppressed():
     """TEXT block '# Página 005 | Title' (OCR-read hash prefix) is suppressed."""
     b = _Block(order_index=0, text="# Página 005 | Title", kind="text")
-    page = _Page([b])
+    page = _Page([b], page_index=4)
     doc = _Doc([page])
     _suppress_pagina_separator_blocks(doc)
     assert b.suppressed is True
@@ -370,7 +420,7 @@ def test_pagina_bare_number_suppressed():
 def test_pagina_case_insensitive():
     """'pagina 003' (lowercase, no accent) is suppressed."""
     b = _Block(order_index=0, text="pagina 003 | content", kind="title")
-    page = _Page([b])
+    page = _Page([b], page_index=2)
     doc = _Doc([page])
     _suppress_pagina_separator_blocks(doc)
     assert b.suppressed is True
@@ -391,8 +441,8 @@ def test_pagina_block_that_continues_with_body_text_is_kept():
             "O lote OCR-2026-0007 apresenta ação, informação, coração e saúde. "
             "Valor: R$ 9.876,54; desconto: -2,15%; quantidade: 00042.")
     b = _Block(order_index=0, text=text, kind="text")
-    multi = _Block(order_index=1, text="Página 097 | Título\nCorpo da página.", kind="text")
-    doc = _Doc([_Page([b, multi])])
+    multi = _Block(order_index=0, text="Página 097 | Título\nCorpo da página.", kind="text")
+    doc = _Doc([_Page([b], page_index=95), _Page([multi], page_index=96)])
     _suppress_pagina_separator_blocks(doc)
     assert b.suppressed is False
     assert multi.suppressed is False
@@ -421,7 +471,7 @@ def test_pagina_suppressor_skips_already_suppressed():
 def test_pagina_suppressor_is_idempotent():
     """Calling _suppress_pagina_separator_blocks twice gives the same result."""
     b = _Block(order_index=0, text="Página 005 | Title", kind="title")
-    page = _Page([b])
+    page = _Page([b], page_index=4)
     doc = _Doc([page])
     _suppress_pagina_separator_blocks(doc)
     _suppress_pagina_separator_blocks(doc)
@@ -433,10 +483,80 @@ def test_apply_entry_point_calls_pagina_suppressor():
     """apply_tesseract_postprocessors must also run the Página suppressor."""
     texts = ["RUNNING HDR"] * 3 + ["body A", "body B"]
     base_doc = _make_doc(texts)
-    pagina_page = _Page([_Block(order_index=0, text="Página 001 | Intro", kind="title")])
+    pagina_page = _Page([_Block(order_index=0, text="Página 006 | Intro", kind="title")], page_index=5)
     full_doc = _Doc(base_doc.pages + [pagina_page])
     apply_tesseract_postprocessors(full_doc)
     assert full_doc.pages[-1].content_blocks[0].suppressed is True
+
+
+def test_pagina_label_of_another_page_is_content():
+    """T3-P09/OF-03: "Página N" is the page label only on page N. A table of
+    contents, a cross-reference or a title on another page is content; the old
+    contract deleted any short line starting with "Página N"."""
+    texts = ["Página 12 | Resultados", "Página 5 | Introdução", "Página 9 de 40", "# Página 7"]
+    blocks = [_Block(order_index=i, text=t, kind="title" if i == 0 else "text") for i, t in enumerate(texts)]
+    doc = _Doc([_Page(blocks, page_index=2)])
+    apply_tesseract_postprocessors(doc)
+    assert [b.suppressed for b in blocks] == [False] * 4
+    assert [b.text for b in blocks] == texts
+
+
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+def test_page_counter_of_the_page_is_suppressed_only_when_not_preserved(preserve):
+    """T3-P54: "Página 3 de 10" on page 3 is page furniture; it is kept when
+    headers and footers are preserved (the old contract ignored the setting)."""
+    footer = _Block(order_index=1, text="Página 3 de 10", kind="footer")
+    body = _Block(order_index=0, text="Corpo da página três.")
+    doc = _Doc([_Page([body, footer], page_index=2)], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert footer.suppressed is (not preserve)
+    assert body.suppressed is False
+
+
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+def test_title_equal_to_the_page_label_follows_the_preservation_setting(preserve):
+    """A title whose text is exactly the page's delimiter text ("Página 3" on page 3)
+    is the page label when furniture is not preserved and is kept otherwise. Telling
+    it apart from the delimiter in the Markdown is T3-P52 (xfail test below)."""
+    title = _Block(order_index=0, text="Página 3", kind="title", heading_level=2)
+    doc = _Doc([_Page([title], page_index=2)], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert title.suppressed is (not preserve)
+    assert title.text == "Página 3"
+
+
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+def test_titles_with_numbers_are_kept(preserve):
+    texts = ["Página 3 | Resultados", "Capítulo 3", "2025 em números", "Seção 4 — Página 4 do contrato"]
+    blocks = [_Block(order_index=i, text=t, kind="title", heading_level=2) for i, t in enumerate(texts)]
+    doc = _Doc([_Page(blocks, page_index=6)], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert not any(b.suppressed for b in blocks)
+    assert [b.text for b in blocks] == texts
+
+
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+@pytest.mark.parametrize("text", [
+    "Página 7 do contrato contém cláusula de reajuste.",
+    "Página 7: ver anexo II",
+    "Página 7\nResultados do trimestre",
+])
+def test_sentence_starting_with_the_page_number_is_not_a_label(text, preserve):
+    """AI-02 on its own page: after the number a label has nothing, a separator or
+    "de M"; a sentence that starts with "Página 7" on page 7 is content."""
+    block = _Block(order_index=0, text=text, kind="title" if "\n" in text else "text")
+    doc = _Doc([_Page([block], page_index=6)], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert block.suppressed is False and block.text == text
+
+
+@pytest.mark.parametrize("text", ["Página 7", "Página 7/40", "Página 7 de 40", "Página 7 — Relatório anual", "PÁGINA 007 | Anexo"])
+def test_label_shapes_of_the_page_are_suppressed_only_when_not_preserved(text):
+    for preserve in (False, True):
+        block = _Block(order_index=0, text=text)
+        doc = _Doc([_Page([block], page_index=6)], preserve_headers_footers=preserve)
+        apply_tesseract_postprocessors(doc)
+        assert block.suppressed is (not preserve), (text, preserve)
 
 
 # ---------------------------------------------------------------------------
@@ -510,438 +630,167 @@ def test_apply_entry_point_calls_brl_normalizer():
 
 
 # ---------------------------------------------------------------------------
-# 9. _suppress_ocr_corpus_markers
+# T3-P09 / T3-P27: no block is suppressed for its wording
+#
+# These tests replace those of the rules removed in this cycle:
+# _suppress_ocr_corpus_markers (sections 9 and 10, Fix D1, Fix-N with
+# _omitir_gabarito_split), _suppress_v6_irinf_artifacts (section 10),
+# _suppress_tesseract_coordinate_dump (section 11, Fix G) and
+# _suppress_dollar_letter_garble (Fix-P). The old contract deleted every block
+# whose text matched wording of the V3/V4/V6 test corpora ("OCR PURO",
+# "CORPUS INTEGRADO V3 / LABORATÓRIO", "ADVERSARIAL •", "OMITIR NO GABARITO",
+# "IRINF / DOSSIÊ", "Processo IRINF-…"), a whole table when one row held
+# "OMITIR NO" and a nearby row "GABARITO", any table or text block with two "$"
+# followed by a capital letter ("$PATH", "$A$1") and any block with a line of
+# eleven tab-separated numbers. Those rules followed the reference conventions
+# of three corpora, not evidence of page furniture or noise: in RUN 015 they
+# deleted the title and body of V3 p116 without a warning (T3-P27). The new
+# contract: no wording causes a suppression, in any configuration; page
+# furniture is suppressed only by structure (sections 1 and 7) and only when
+# headers and footers are not preserved (T3-P54).
 # ---------------------------------------------------------------------------
 
-def test_ocr_puro_header_suppressed():
-    """Block starting with 'OCR PURO' is suppressed as corpus running header."""
-    b = _Block(order_index=0, text="OCR PURO * SCAN")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is True
-    assert b.suppression_reason == "tesseract_ocr_corpus_marker"
+_CORPUS_LIKE_TEXTS = [
+    "OCR PURO * SCAN",
+    "ocr tabelas * scan",
+    "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO",
+    "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO ADVERSARIAL * SCAN DUPLICATE",
+    "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO\nTEXTO NATIVO • NATIVE",
+    "CORPUS INTEGRADO V12 / LABORATÓRIO CLÍNICO",
+    "ADVERSARIAL • REDACTED",
+    "ADVERSARIAL * OFFPAGE",
+    "TEXTO NATIVO • NATIVE",
+    "RODAPÉ DECORATIVO • OMITIR NO GABARITO\nPágina 29 de 144",
+    "omitir na gabarito",
+    "**IRINF / DOSSIÊ DE INFRAESTRUTURA**\nVOLUME I · OUT 2026",
+    "IRINF / DOSSIE DE INFRAESTRUTURA",
+    "VOLUME II · OUT 2026",
+    "Processo IRINF-2026-0084 | Material institucional simulado\n031 / 095",
+]
+
+_GENERIC_TEXTS = [
+    "Instrução ao revisor: omitir no gabarito os campos marcados com asterisco.",
+    "Relatório Técnico / Laboratório Central de Ensaios",
+    "CORPUS INTEGRADO V3 não é cabeçalho repetido e deve permanecer.",
+    "O identificador OCR PURO foi gerado pelo sistema.",
+    "Consultar o Volume I para detalhes adicionais.",
+    "O processo IRINF-2026-0108 foi concluído com sucesso.",
+]
 
 
-def test_ocr_tabelas_header_suppressed():
-    """Block starting with 'OCR TABELAS' is suppressed."""
-    b = _Block(order_index=0, text="OCR TABELAS * SCAN")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is True
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+@pytest.mark.parametrize("text", _CORPUS_LIKE_TEXTS + _GENERIC_TEXTS)
+def test_wording_never_suppresses_a_block(text, preserve):
+    """Corpus-like headers and footers and ordinary sentences with the same words."""
+    for kind in ("text", "title", "header", "footer", "footnote"):
+        block = _Block(order_index=0, text=text, kind=kind)
+        doc = _Doc([_Page([block])], preserve_headers_footers=preserve)
+        apply_tesseract_postprocessors(doc)
+        assert block.suppressed is False, kind
+        assert block.text == text, kind
 
 
-def test_ocr_hibrido_header_suppressed():
-    """Block starting with 'OCR HÍBRIDO' is suppressed."""
-    b = _Block(order_index=0, text="OCR HÍBRIDO * SCAN")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is True
+_V3_P116_BLOCK = (
+    "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO OCR TABELAS * SCAN Página 116 | OCR pareado de "
+    "tabela financeira rotacionada Controle de página: QA-P116 Mesmo conjunto de células do cenário "
+    "de controle pareado; variar apenas a condição visual."
+)
 
 
-def test_ocr_header_case_insensitive():
-    """OCR corpus header matching is case-insensitive."""
-    b = _Block(order_index=0, text="ocr puro * scan")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is True
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+def test_v3_p116_title_and_body_merged_with_the_corpus_header_are_kept(preserve):
+    """T3-P27, RUN 015: this one-line block held the corpus header, the page title,
+    the page control id and the first sentence of V3 p116; the header rule deleted
+    all of it, silently. The page keeps it, its table and its footer line."""
+    block = _Block(order_index=0, text=_V3_P116_BLOCK)
+    table = _Block(order_index=1, text="Centro\tOrçado\nTI\tR$ 12.500,00", kind="table")
+    footer = _Block(order_index=2, text="RODAPÉ DECORATIVO * OMITIR NO GABARITO Página 116 de 144")
+    doc = _Doc([_Page([block, table, footer], page_index=115)], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert [b.suppressed for b in (block, table, footer)] == [False, False, False]
+    assert block.text == _V3_P116_BLOCK
 
 
-def test_omitir_gabarito_suppressed():
-    """Block containing 'OMITIR NO GABARITO' is suppressed."""
-    b = _Block(order_index=0, text="RODAPÉ DECORATIVO – OMITIR NO GABARITO\nPágina 29 de 144")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is True
-    assert b.suppression_reason == "tesseract_ocr_corpus_marker"
-
-
-def test_omitir_na_gabarito_suppressed():
-    """'omitir na gabarito' variant (na instead of no) is also suppressed."""
-    b = _Block(order_index=0, text="omitir na gabarito")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is True
-
-
-def test_body_text_not_suppressed_by_corpus_marker():
-    """Normal body text is not affected by the OCR corpus marker suppressor."""
-    b = _Block(order_index=0, text="O resultado foi aprovado. Página 3 de 10.")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is False
-
-
-def test_ocr_prefix_mid_sentence_not_suppressed():
-    """'OCR' appearing mid-sentence does NOT trigger the header suppressor."""
-    b = _Block(order_index=0, text="O identificador OCR PURO foi gerado pelo sistema.")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is False
-
-
-def test_corpus_marker_suppressor_skips_already_suppressed():
-    """Already-suppressed blocks are not re-processed."""
-    b = _Block(order_index=0, text="OCR PURO * SCAN",
-               suppressed=True, suppression_reason="prior_reason")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppression_reason == "prior_reason"  # not overwritten
-
-
-def test_corpus_marker_suppressor_is_idempotent():
-    """Calling twice gives the same result."""
-    b = _Block(order_index=0, text="OCR TABELAS * SCAN")
-    page = _Page([b])
-    doc = _Doc([page])
-    _suppress_ocr_corpus_markers(doc)
-    _suppress_ocr_corpus_markers(doc)
-    assert b.suppressed is True
-    assert b.suppression_reason == "tesseract_ocr_corpus_marker"
-
-
-def test_apply_entry_point_calls_corpus_marker_suppressor():
-    """apply_tesseract_postprocessors must also run the OCR corpus marker suppressor."""
-    texts = ["RUNNING HDR"] * 3 + ["body A", "body B"]
-    base_doc = _make_doc(texts)
-    marker_page = _Page([_Block(order_index=0, text="OCR PURO * SCAN")])
-    full_doc = _Doc(base_doc.pages + [marker_page])
-    apply_tesseract_postprocessors(full_doc)
-    assert full_doc.pages[-1].content_blocks[0].suppressed is True
-
-
-# ---------------------------------------------------------------------------
-# 10. Corpus document-header and family-suffix suppression (Fix D1)
-# ---------------------------------------------------------------------------
-
-def test_corpus_doc_header_suppressed():
-    """Block starting with 'CORPUS INTEGRADO V3 / LABORAT...' is suppressed."""
-    doc = _make_doc(["CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO"])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_ocr_corpus_marker"
-
-
-def test_corpus_doc_header_with_adversarial_suffix_suppressed():
-    """Compound header ending with 'ADVERSARIAL * SCAN DUPLICATE' is suppressed."""
-    text = "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO ADVERSARIAL * SCAN DUPLICATE"
-    doc = _make_doc([text])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_corpus_doc_header_v4_suppressed():
-    """Document header for V4 corpus is also suppressed."""
-    doc = _make_doc(["CORPUS INTEGRADO V4 / LABORATÓRIO SINTÉTICO"])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_corpus_body_mention_not_suppressed():
-    """Adversarial body paragraph 'CORPUS INTEGRADO V3…' without '/' is NOT suppressed."""
-    text = "CORPUS INTEGRADO V3 não é cabeçalho repetido e deve permanecer."
-    doc = _make_doc([text])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_adversarial_bullet_redacted_suppressed():
-    """'ADVERSARIAL • REDACTED' standalone marker is suppressed."""
-    doc = _make_doc(["ADVERSARIAL • REDACTED"])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_adversarial_bullet_watermark_suppressed():
-    """'ADVERSARIAL • WATERMARK' standalone marker is suppressed."""
-    doc = _make_doc(["ADVERSARIAL • WATERMARK"])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_adversarial_bullet_scrambled_suppressed():
-    """'ADVERSARIAL • SCRAMBLED' standalone marker is suppressed."""
-    doc = _make_doc(["ADVERSARIAL • SCRAMBLED"])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_adversarial_asterisk_variant_suppressed():
-    """'ADVERSARIAL * OFFPAGE' (asterisk separator) is suppressed."""
-    doc = _make_doc(["ADVERSARIAL * OFFPAGE"])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_texto_nativo_native_suppressed():
-    """'TEXTO NATIVO • NATIVE' family-suffix marker is suppressed."""
-    doc = _make_doc(["TEXTO NATIVO • NATIVE"])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_adversarial_mid_sentence_not_suppressed():
-    """Body sentence containing 'adversarial' mid-sentence is NOT suppressed."""
-    text = "Este parágrafo contém adversarial como parte do texto."
-    doc = _make_doc([text])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_corpus_multiline_block_suppressed():
-    """Two-line block 'CORPUS INTEGRADO V3 / LABORAT...\nTEXTO NATIVO • NATIVE' is suppressed."""
-    text = "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO\nTEXTO NATIVO • NATIVE"
-    doc = _make_doc([text])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_marker_inside_whole_page_block_does_not_suppress_page_content():
-    """T3-P27/RUN 004: página nativa com /Rotate 90 (V4 p213) virou um único bloco
-    que contém o cabeçalho e o rodapé do corpus; o bloco não pode ser descartado."""
+def test_whole_page_block_with_corpus_header_and_footer_is_kept():
+    """T3-P27/RUN 004 (V4 p213): a native page with /Rotate 90 became one block that
+    holds the corpus header, the body and the decorative footer; it is page content."""
     body = "\n".join(f"Parágrafo 213.{i:02d}: Análise e normalização devem preservar a leitura." for i in range(1, 30))
     text = ("CORPUS STRESS OCR MARKDOWN V4 / LABORATÓRIO SINTÉTICO\nPágina 213 | Adversarial: rotation_metadata_90\n"
             + body + "\nRODAPÉ DECORATIVO • OMITIR NO GABARITO")
-    doc = _make_doc([text])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_marker_sized_blocks_are_still_suppressed():
-    """Os maiores marcadores observados (V3 p116: 239 caracteres) continuam suprimidos."""
-    text = ("CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO OCR TABELAS * SCAN Página 116 | OCR tabelas "
-            "com ruído e contraste baixo, colunas numéricas, totais e descrições curtas em células "
-            "estreitas — RODAPÉ DECORATIVO * OMITIR NO GABARITO Página 116 de 144")
-    doc = _make_doc([text])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-# ---------------------------------------------------------------------------
-# 10. V6 IRINF artifact suppression
-# ---------------------------------------------------------------------------
-
-def test_irinf_dossi_header_suppressed():
-    """**IRINF / DOSSIÊ DE INFRAESTRUTURA** running header is suppressed."""
-    text = "**IRINF / DOSSIÊ DE INFRAESTRUTURA** \nVOLUME I — OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_v6_irinf_artifact"
-
-
-def test_irinf_dossi_header_volume_ii_suppressed():
-    """IRINF header with VOLUME II variant is also suppressed."""
-    text = "**IRINF / DOSSIÊ DE INFRAESTRUTURA** \nVOLUME II — OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_irinf_header_case_insensitive():
-    """IRINF suppressor is case-insensitive on the DOSSIÊ variant."""
-    text = "**IRINF / DOSSIE DE INFRAESTRUTURA**\nVOLUME III — OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_processo_irinf_material_footer_suppressed():
-    """Processo IRINF footer with Material institucional simulado is suppressed."""
-    text = "Processo IRINF-2026-0084 | Material institucional simulado\n031 / 095"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_v6_irinf_artifact"
-
-
-def test_processo_irinf_different_number_suppressed():
-    """Processo IRINF footer with any 4-digit number is suppressed."""
-    text = "Processo IRINF-2026-0314 | Material institucional simulado"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_irinf_artifact_skips_already_suppressed():
-    """Already-suppressed blocks are not touched by IRINF suppressor."""
-    text = "**IRINF / DOSSIÊ DE INFRAESTRUTURA**"
-    doc = _make_doc([text])
-    doc.pages[0].content_blocks[0].suppressed = True
-    doc.pages[0].content_blocks[0].suppression_reason = "prior_suppressor"
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppression_reason == "prior_suppressor"
-
-
-def test_irinf_artifact_suppressor_is_idempotent():
-    """Calling the IRINF suppressor twice does not change the result."""
-    text = "**IRINF / DOSSIÊ DE INFRAESTRUTURA**\nVOLUME I — OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_regular_bold_text_not_suppressed_by_irinf():
-    """A regular bold heading is not suppressed by the IRINF suppressor."""
-    text = "**Quadro de coordenadas, quantitativos e cotas**"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_processo_body_mention_not_suppressed():
-    """A body paragraph mentioning 'Processo' is not suppressed."""
-    text = "O processo IRINF-2026-0108 foi concluído com sucesso."
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_apply_entry_point_calls_irinf_suppressor():
-    """apply_tesseract_postprocessors suppresses IRINF header via entry point."""
-    texts = ["**IRINF / DOSSIÊ DE INFRAESTRUTURA**\nVOLUME I — OUT 2026"] + [
-        "Content page " + str(i) for i in range(4)
-    ]
-    doc = _make_doc(texts)
+    block = _Block(order_index=0, text=text)
+    doc = _Doc([_Page([block], page_index=212)])
     apply_tesseract_postprocessors(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_v6_irinf_artifact"
+    assert block.suppressed is False and block.text == text
 
 
-def test_irinf_without_bold_prefix_suppressed():
-    """IRINF header without ** bold prefix is also suppressed (Fix F: rotation pages)."""
-    text = "IRINF / DOSSIÊ DE INFRAESTRUTURA"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_v6_irinf_artifact"
-
-
-def test_irinf_without_bold_prefix_dossie_variant():
-    """IRINF/DOSSIE (no accent) without ** prefix is suppressed."""
-    text = "IRINF / DOSSIE DE INFRAESTRUTURA"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_volume_subtitle_i_suppressed():
-    """VOLUME I · OUT YYYY standalone block is suppressed (Fix F: VOLUME regex)."""
-    text = "VOLUME I · OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_v6_irinf_artifact"
-
-
-def test_volume_subtitle_ii_suppressed():
-    """VOLUME II · OUT YYYY is suppressed."""
-    text = "VOLUME II · OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_volume_subtitle_iii_suppressed():
-    """VOLUME III · OUT YYYY is suppressed."""
-    text = "VOLUME III · OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_volume_bullet_variant_suppressed():
-    """VOLUME I • OUT YYYY (bullet separator) is suppressed."""
-    text = "VOLUME I • OUT 2026"
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_regular_volume_body_text_not_suppressed():
-    """A body sentence mentioning 'Volume I' is not suppressed."""
-    text = "Consultar o Volume I para detalhes adicionais."
-    doc = _make_doc([text])
-    _suppress_v6_irinf_artifacts(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-# ---------------------------------------------------------------------------
-# 11. Tesseract coordinate dump suppression (Fix G)
-# ---------------------------------------------------------------------------
-
-_COORD_LINE = "5\t1\t2\t1\t1\t2\t553\t2107\t17\t74\t24.107033\t:ojexa"
-_COORD_BLOCK = "\n".join([
-    "5\t1\t2\t1\t1\t2\t553\t2107\t17\t74\t24.107033\t:ojexa",
-    "5\t1\t2\t1\t1\t3\t551\t2190\t19\t152\t12.635422\tJopeoyyuap|",
-    "4\t1\t2\t1\t2\t0\t478\t1631\t24\t713\t-1\t",
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+@pytest.mark.parametrize("table", [
+    "Campo\tValor\nOMITIR NO\tA\nGABARITO\tB",
+    "Campo\tValor\nNota\tomitir no gabarito os totais",
+    "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO\tOCR TABELAS\nCentro\tOrçado\nTI\tR$ 12.500,00",
+    "Processo\tSituação\nIRINF-2026-0084 | Material institucional simulado\tArquivado",
+    "Item\tFórmula\nTotal\t=SOMA($A$1:$B$10)\nMédia\t=MÉDIA($C$2:$C$9)",
+    "Variável\tValor\n$PATH\t/usr/bin\n$HOME\t/home/ana",
 ])
+def test_a_table_is_never_suppressed_for_one_cell(table, preserve):
+    """Old Fix-N/Fix-P contract: one cell (or two rows) decided the fate of the table."""
+    block = _Block(order_index=0, text=table, kind="table")
+    doc = _Doc([_Page([block])], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert block.suppressed is False and block.text == table
 
 
-def test_coordinate_dump_block_suppressed():
-    """A block containing Tesseract coordinate/confidence data is suppressed."""
-    doc = _make_doc([_COORD_BLOCK])
-    _suppress_tesseract_coordinate_dump(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_coordinate_dump"
+@pytest.mark.parametrize("kind", ["text", "table"])
+@pytest.mark.parametrize("text", [
+    "export PATH=$PATH:$HOME/bin",
+    "echo $USER em $HOSTNAME",
+    "=PROCV($A$2;$D$2:$F$100;3;FALSO)",
+    "Use $A$1 para fixar a célula.",
+    "$Y $H $U",
+    "5\t1\t2\t1\t1\t2\t553\t2107\t17\t74\t24.107033\t:ojexa",
+    "Item\tQuantidade\tValor\nA\t10\tR$ 1.234,56\nB\t5\tR$ 987,00",
+])
+def test_technical_text_is_never_suppressed_for_looking_unusual(text, kind):
+    """Shell variables, spreadsheet references and tab-separated numbers are content.
+    The shapes the removed Fix-P and Fix-G rules deleted ("$Y $H $U", a Tesseract
+    TSV row) are kept too: their wording is no evidence of noise."""
+    for preserve in (False, True):
+        block = _Block(order_index=0, text=text, kind=kind)
+        doc = _Doc([_Page([block])], preserve_headers_footers=preserve)
+        apply_tesseract_postprocessors(doc)
+        assert block.suppressed is False and block.text == text
 
 
-def test_coordinate_dump_single_line_suppressed():
-    """A single coordinate line in a block triggers suppression."""
-    doc = _make_doc([_COORD_LINE])
-    _suppress_tesseract_coordinate_dump(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
+_AUDIT_COUNTEREXAMPLES = [
+    # AI-01 (independent audit, RUN 015): corpus markers anywhere in a block, at its start, in a TITLE, in one cell
+    ("O professor deve omitir no gabarito apenas o exemplo.", "text"),
+    ("OCR híbrido permite recuperar texto de documentos mistos.", "text"),
+    ("VOLUME II · OUT 2025 — Relatório de auditoria", "title"),
+    ("\n".join(["item | valor | situação"] * 30 + ["Omitir no gabarito | não"]), "table"),
+    # AI-02: "$" + capital letter in prose; a TSV example in technical documentation
+    ("Variáveis $HOME e $PATH definem o ambiente.", "text"),
+    ("Exemplo de saída TSV:\n5\t1\t2\t1\t1\t2\t553\t2107\t17\t74\t24.107033\tpalavra", "text"),
+]
 
 
-def test_coordinate_dump_mixed_block_suppressed():
-    """A block mixing garbled text and coordinate lines is suppressed."""
-    text = "PPT ap\n96 euibed\n" + _COORD_LINE
-    doc = _make_doc([text])
-    _suppress_tesseract_coordinate_dump(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+@pytest.mark.parametrize("text,kind", _AUDIT_COUNTEREXAMPLES)
+def test_independent_audit_counterexamples_are_kept(text, kind, preserve):
+    """The AI-01/AI-02 counterexamples, as published, on page 7 of a seven-page document."""
+    pages = [_Page([_Block(order_index=0, text=f"Corpo da página {i + 1}.")], page_index=i) for i in range(6)]
+    block = _Block(order_index=0, text=text, kind=kind)
+    doc = _Doc(pages + [_Page([block], page_index=6)], preserve_headers_footers=preserve)
+    apply_tesseract_postprocessors(doc)
+    assert block.suppressed is False and block.text == text
 
 
-def test_legitimate_tab_table_not_suppressed():
-    """A regular tab-separated table without coordinate format is not suppressed."""
-    text = "Item\tQuantidade\tValor\nA\t10\tR$ 1.234,56\nB\t5\tR$ 987,00"
-    doc = _make_doc([text])
-    _suppress_tesseract_coordinate_dump(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_coordinate_dump_skips_already_suppressed():
-    """Already-suppressed blocks are not touched by the coordinate dump suppressor."""
-    doc = _make_doc([_COORD_BLOCK])
-    doc.pages[0].content_blocks[0].suppressed = True
-    doc.pages[0].content_blocks[0].suppression_reason = "prior_suppressor"
-    _suppress_tesseract_coordinate_dump(doc)
-    assert doc.pages[0].content_blocks[0].suppression_reason == "prior_suppressor"
-
-
-def test_coordinate_dump_suppressor_is_idempotent():
-    """Calling the coordinate suppressor twice is safe."""
-    doc = _make_doc([_COORD_BLOCK])
-    _suppress_tesseract_coordinate_dump(doc)
-    _suppress_tesseract_coordinate_dump(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_apply_entry_point_calls_coordinate_suppressor():
-    """apply_tesseract_postprocessors suppresses coordinate dump blocks."""
-    texts = [_COORD_BLOCK] + ["Content page " + str(i) for i in range(4)]
+def test_independent_audit_repeated_first_line_with_unique_content_is_kept():
+    """AI-02: five blocks "Procedimento padrão" + one unique line each; the old rule
+    counted the first line and deleted all five blocks."""
+    texts = ["Procedimento padrão\n" + f"Conteúdo exclusivo da página {i}" for i in range(5)]
     doc = _make_doc(texts)
     apply_tesseract_postprocessors(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_coordinate_dump"
+    assert [p.content_blocks[0].suppressed for p in doc.pages] == [False] * 5
 
 
 # ---------------------------------------------------------------------------
@@ -1595,88 +1444,6 @@ def test_apply_entry_point_calls_seção_promoter():
 
 
 # ---------------------------------------------------------------------------
-# Fix-N: _omitir_gabarito_split — split-row OMITIR NO GABARITO detection
-# ---------------------------------------------------------------------------
-
-def test_omitir_gabarito_split_exact_adjacent():
-    """'OMITIR NO' and 'GABARITO' on consecutive lines → True."""
-    text = "RODAPÉ\tIdentificador R$Valor:\nOMITIR NO\tdesconto:\nGABARITO\tOCR-VAL"
-    assert _omitir_gabarito_split(text) is True
-
-
-def test_omitir_gabarito_split_gap_of_two():
-    """'OMITIR NO' and 'GABARITO' within 3 lines → True."""
-    text = "RODAPÉ\nDECORATIVO\nOMITIR NO\talgo\nGABARITO\t..."
-    assert _omitir_gabarito_split(text) is True
-
-
-def test_omitir_gabarito_split_gap_of_four_is_false():
-    """'OMITIR NO' and 'GABARITO' more than 3 lines apart → False."""
-    lines = ["OMITIR NO\talgo", "linha1", "linha2", "linha3", "GABARITO\t..."]
-    text = "\n".join(lines)
-    assert _omitir_gabarito_split(text) is False
-
-
-def test_omitir_gabarito_split_same_line():
-    """On the same line, the existing _OMITIR_GABARITO_RE already matches
-    and _omitir_gabarito_split also returns True (no regression)."""
-    text = "OMITIR NO GABARITO"
-    assert _omitir_gabarito_split(text) is True
-
-
-def test_omitir_gabarito_split_only_omitir_no():
-    """Only 'OMITIR NO' present without 'GABARITO' → False."""
-    text = "OMITIR NO\talgo\noutro texto"
-    assert _omitir_gabarito_split(text) is False
-
-
-def test_omitir_gabarito_split_only_gabarito():
-    """Only 'GABARITO' present without 'OMITIR NO' → False."""
-    text = "RODAPÉ\nGABARITO\t..."
-    assert _omitir_gabarito_split(text) is False
-
-
-def test_omitir_gabarito_split_case_insensitive():
-    """Match is case-insensitive; both 'no' and 'na' are accepted (n[ao])."""
-    # 'omitir na' matches n[ao] pattern, and 'gabarito' is within 3 lines
-    text = "omitir na\ngarantia\ngabarito\t..."
-    assert _omitir_gabarito_split(text) is True
-    # lowercase 'omitir no' also matches
-    text2 = "OMITIR NO\tnada\nGABARITO"
-    assert _omitir_gabarito_split(text2) is True
-
-
-def test_suppress_corpus_markers_table_with_split_omitir():
-    """TABLE block with split OMITIR NO / GABARITO rows is suppressed (Fix-N)."""
-    # Simulate page 98 table block.text: rows joined with \n, cells with \t
-    table_text = (
-        "RODAPÉ\tIdentificador R$Valor:\tOlote Controle Página CORPUS\n"
-        "DECORATIVO *\texato: 9.876,54;\tOCR-2026-0007 página:de 098 INTEGRADO\n"
-        "OMITIR NO\tdesconto:\tV3 apresenta QA-P098 |OCR /\n"
-        "GABARITO\tOCR-VALIDAÇÃO-2026-007. -2,75%; ação,\tLABORATÓRIO"
-    )
-    doc = _make_doc([table_text])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_ocr_corpus_marker"
-
-
-def test_suppress_corpus_markers_normal_table_not_suppressed():
-    """A normal table without OMITIR NO GABARITO is not suppressed."""
-    normal_table = "Nome\tValor\nProduto A\tR$ 100,00\nProduto B\tR$ 200,00"
-    doc = _make_doc([normal_table])
-    _suppress_ocr_corpus_markers(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_suppress_corpus_markers_split_omitir_lowercase():
-    """Case-insensitive split detection — 'omitir no' and 'gabarito' lowercase."""
-    table_text = "rodapé\ndecoratTIVO\nomitir no\toutro\ngabarito\tlorem"
-    doc = _make_doc([table_text])
-    _suppress_ocr_corpus_markers(doc)
-
-
-# ---------------------------------------------------------------------------
 # 11. Fix-O: _table_has_q_without_u and _flag_rotated_table_garble (T3-P36: flag, never suppress)
 # ---------------------------------------------------------------------------
 
@@ -1774,95 +1541,6 @@ def test_flag_rotated_table_garble_skips_already_suppressed():
     doc.pages[0].content_blocks[0].suppression_reason = "prior_reason"
     _flag_rotated_table_garble(doc)
     assert doc.pages[0].content_blocks[0].suppression_reason == "prior_reason"
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-# ---------------------------------------------------------------------------
-# Fix-P: _suppress_dollar_letter_garble
-# ---------------------------------------------------------------------------
-
-def test_suppress_dollar_letter_garble_table_block_with_3_patterns():
-    """TABLE block with ≥2 '$[A-Z]' patterns is suppressed (Fix-P)."""
-    garbled_table = (
-        "NVOS\tbhap\n"
-        "HDO ejusJasa 00'00S+$Y 00'0SE-$H 00'0ST+$U\teulbed"
-    )
-    doc = _make_doc([garbled_table], kind="table")
-    _suppress_dollar_letter_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_dollar_letter_garble"
-
-
-def test_suppress_dollar_letter_garble_text_block_with_3_patterns():
-    """TEXT block '$Y $H $U' (3 dollar-letter patterns) is suppressed (Fix-P)."""
-    garbled_text = "$Y $H $U"
-    doc = _make_doc([garbled_text], kind="text")
-    _suppress_dollar_letter_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-    assert doc.pages[0].content_blocks[0].suppression_reason == "tesseract_dollar_letter_garble"
-
-
-def test_suppress_dollar_letter_garble_two_patterns_threshold():
-    """Exactly 2 '$[A-Z]' patterns meets the threshold and is suppressed."""
-    text = "00'0SE-$H 00'0ST+$U"
-    doc = _make_doc([text], kind="text")
-    _suppress_dollar_letter_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is True
-
-
-def test_suppress_dollar_letter_garble_one_pattern_not_suppressed():
-    """Only 1 '$[A-Z]' pattern is below threshold — NOT suppressed."""
-    text = "Resultado final $Y aprovado"
-    doc = _make_doc([text], kind="text")
-    _suppress_dollar_letter_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_suppress_dollar_letter_garble_normal_currency_not_suppressed():
-    """Normal 'R$ 12.500,00' currency ($ followed by digit) is NOT suppressed."""
-    table = (
-        "Orçado\tRealizado\n"
-        "R$ 12.500,00\tR$ 13.000,00\n"
-        "R$ 7.250,00\tR$ 6.900,00"
-    )
-    doc = _make_doc([table], kind="table")
-    _suppress_dollar_letter_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_suppress_dollar_letter_garble_skips_non_table_text_kinds():
-    """TITLE and CAPTION blocks are NOT targeted by Fix-P."""
-    for kind in ("title", "caption"):
-        doc = _make_doc(["$Y $H $U garbled"], kind=kind)
-        _suppress_dollar_letter_garble(doc)
-        assert doc.pages[0].content_blocks[0].suppressed is False, f"kind={kind} should not be suppressed"
-
-
-def test_suppress_dollar_letter_garble_skips_already_suppressed():
-    """Already-suppressed blocks are not re-processed."""
-    doc = _make_doc(["$Y $H $U"], kind="text")
-    doc.pages[0].content_blocks[0].suppressed = True
-    doc.pages[0].content_blocks[0].suppression_reason = "prior_reason"
-    _suppress_dollar_letter_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppression_reason == "prior_reason"
-
-
-def test_suppress_dollar_letter_garble_lowercase_dollar_not_matched():
-    """'$y $h' (lowercase) does NOT match '$[A-Z]' — regex requires uppercase."""
-    text = "$y $h $u"
-    doc = _make_doc([text], kind="text")
-    _suppress_dollar_letter_garble(doc)
-    assert doc.pages[0].content_blocks[0].suppressed is False
-
-
-def test_suppress_dollar_letter_garble_p116_table_pattern():
-    """Simulated V3 page 116 TABLE content is suppressed by Fix-P."""
-    garbled_p116 = (
-        "HO\t\u0000jensia eSussosa 00'005+ 00'0SE- 00'0ST+\n"
-        "eis\toB5ipuo&gt; $ $H $U"
-    )
-    doc = _make_doc([garbled_p116], kind="table")
-    _suppress_dollar_letter_garble(doc)
     assert doc.pages[0].content_blocks[0].suppressed is True
 
 
@@ -2275,8 +1953,8 @@ def test_common_list_after_table_is_kept_unchanged():
 
 # --- full pipeline: assembly → Tesseract post-processing → Markdown ----------
 
-def _pipeline_markdown(pages_spec: list[list[tuple[str, bool]]]) -> str:
-    """Render pages whose lines are (text, is_ocr); each line is its own region."""
+def _pipeline_document(pages_spec: list[list[tuple[str, bool]]], *, preserve_headers_footers: bool = True):
+    """Assemble pages whose lines are (text, is_ocr); each line is its own region."""
     from structured_pdf_text.assemble.document import assemble_document
     from structured_pdf_text.document import (
         Baseline, DocumentMetadata, EvidenceRef, LayoutRegion, PageDiagnostics, PageStrategy,
@@ -2284,7 +1962,6 @@ def _pipeline_markdown(pages_spec: list[list[tuple[str, bool]]]) -> str:
         WritingDirection,
     )
     from structured_pdf_text.geometry import BBox
-    from structured_pdf_text.renderers.markdown import render_markdown
 
     pages = []
     for page_index, lines in enumerate(pages_spec):
@@ -2313,10 +1990,17 @@ def _pipeline_markdown(pages_spec: list[list[tuple[str, bool]]]) -> str:
             diagnostics=PageDiagnostics(page_index=page_index, strategy=PageStrategy.NATIVE, reasons=[],
                                         native_chars=0, native_text_length=0),
         ))
-    document = assemble_document(
+    return assemble_document(
         pages=pages, metadata=DocumentMetadata(source_path="t3p51.pdf", page_count=len(pages), pdfium_version=None),
-        merge_cross_page_tables=False, preserve_headers_footers=True, document_warnings=[],
+        merge_cross_page_tables=False, preserve_headers_footers=preserve_headers_footers, document_warnings=[],
     )
+
+
+def _pipeline_markdown(pages_spec: list[list[tuple[str, bool]]], *, preserve_headers_footers: bool = True) -> str:
+    """Assembly → Tesseract post-processing → Markdown for (text, is_ocr) lines."""
+    from structured_pdf_text.renderers.markdown import render_markdown
+
+    document = _pipeline_document(pages_spec, preserve_headers_footers=preserve_headers_footers)
     apply_tesseract_postprocessors(document)
     return render_markdown(document, diagnostic=True)
 
@@ -2343,6 +2027,55 @@ def test_hybrid_page_keeps_the_explicit_state_once_and_the_ocr_text():
     markdown = _pipeline_markdown([[("☑ Aprovado", False), ("O contrato vigente", True), ("Entrega prevista", True)]])
     assert _body_lines(markdown) == ["☑ Aprovado", "O contrato vigente", "Entrega prevista"]
     assert len(_STATE_GLYPHS.findall(markdown)) == 1
+
+
+# --- full pipeline, T3-P09 / T3-P27 / T3-P54: both preservation settings ---------------
+
+_PIPELINE_LINES = [
+    "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO OCR TABELAS * SCAN",
+    "Rodapé decorativo • omitir no gabarito",
+    "IRINF / Dossiê de infraestrutura",
+    "export PATH=$PATH:$HOME/bin",
+    "Fórmula =SOMA($A$1:$B$10)",
+]
+
+
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+@pytest.mark.parametrize("ocr", [False, True], ids=["native", "ocr"])
+def test_corpus_wording_and_technical_lines_survive_the_pipeline(ocr, preserve):
+    markdown = _pipeline_markdown([[(text, ocr) for text in _PIPELINE_LINES]], preserve_headers_footers=preserve)
+    assert _body_lines(markdown) == _PIPELINE_LINES
+
+
+@pytest.mark.parametrize("preserve", [False, True], ids=["not-preserved", "preserved"])
+def test_hybrid_pages_lose_only_their_own_page_label_and_only_when_not_preserved(preserve):
+    page_1 = [("Página 1 de 2", False), ("Relatório de inspeção", False), ("Omitir no gabarito", True),
+              ("Valor: $A$1", True)]
+    page_2 = [("Página 7 | Resultados", True), ("Conclusão do laudo", False)]
+    markdown = _pipeline_markdown([page_1, page_2], preserve_headers_footers=preserve)
+    expected = [text for text, _ in page_1 + page_2]
+    if not preserve:
+        expected.remove("Página 1 de 2")
+    assert _body_lines(markdown) == expected
+
+
+@pytest.mark.xfail(strict=True, reason="T3-P52: a heading that starts like the page delimiter is read as one; "
+                                       "telling them apart needs the renderer and the evaluator")
+@pytest.mark.parametrize("title", ["Página 1", "Página 5 | Resultados"])
+def test_heading_like_the_page_delimiter_does_not_add_a_page(title):
+    """A level-2 title "Página 1" on page 1 (exactly the delimiter) or "Página 5 | …"
+    renders as "## Página …", which readers of the paginated Markdown take as a page
+    delimiter (a duplicate or a phantom page). With preservation on, the post-processing
+    no longer deletes it to hide that (T3-P54), so the ambiguity is visible here."""
+    from structured_pdf_text.document import ContentKind
+    from structured_pdf_text.evaluation.markdown_syntax import page_markers
+    from structured_pdf_text.renderers.markdown import render_markdown
+
+    document = _pipeline_document([[(title, False), ("Corpo da página.", False)]], preserve_headers_footers=True)
+    block = next(b for b in document.pages[0].content_blocks if b.text == title)
+    block.kind, block.heading_level = ContentKind.TITLE, 2
+    apply_tesseract_postprocessors(document)
+    assert [marker.page for marker in page_markers(render_markdown(document, diagnostic=True))] == [1]
 
 
 # ---------------------------------------------------------------------------

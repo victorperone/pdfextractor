@@ -20,98 +20,30 @@ if TYPE_CHECKING:
 # (with an optional dot for single-number prefixes ending with ".").
 _NUMBERED_PREFIX_RE = re.compile(r"^((?:\d+\.)+\d+|\d+\.)\s*\S")
 
-# "Página NNN" pattern: matches page-separator heading blocks produced by Tesseract
-# on V3/V4-style test documents.  These blocks appear as H1 headings in the
-# extracted output but the reference corpus treats them as section separators
-# (not content), creating one excess block per page.  The text may contain an
-# optional leading markdown "# " that the OCR read literally.
-_PAGINA_SEP_RE = re.compile(r"(?i)^\s*(?:#\s+)?p[aá]gina\s+\d+")
+# "Página N" page label at the start of a block ("Página 7", "Página 7 de 40",
+# "Página 7/40", "Página 007 | Título"); group 1 is the page number. After the
+# number comes nothing, a separator or "de M": "Página 7 do contrato contém…" is
+# a sentence, not a label (AI-02). All 351 labels suppressed in RUN 015 (V3, V4)
+# have the "|" form. The text may contain an optional leading markdown "# "
+# that the OCR read literally.
+_PAGINA_SEP_RE = re.compile(r"(?i)^\s*(?:#\s+)?p[aá]gina\s+(\d+)(?=\s*(?:$|[|/·•–—-]|de\s+\d))")
 # A page separator is one short line ("Página 096 | OCR com rotação física de
 # 90 graus" has 47 characters). A longer block that merely starts with it also
 # carries body text; suppressing it deletes content (V3 p96 after the
 # quarter-turn retry: the whole page body), so only the separator shape is
 # suppressed.
 _PAGINA_SEP_MAX_CHARS = 160
-# A TITLE block may wrap the same separator over two lines ("Página 001 |
-# Corpus integrado de validação: texto nativo,\nOCR e tabelas", V3); it is
-# still the separator. Body text never forms a TITLE block.
+# A TITLE block may wrap the same label over two lines ("Página 001 | Corpus
+# integrado de validação: texto nativo,\nOCR e tabelas", V3); it is still the
+# label. Body text never forms a TITLE block.
 
-# OCR corpus-type header: "OCR PURO * SCAN", "OCR TABELAS * SCAN" etc.
-# These appear in V3/V4-style test documents as running headers identifying
-# the page family; the reference corpus omits them entirely.
-_OCR_CORPUS_HEADER_RE = re.compile(r"(?i)^ocr\s+(?:puro|tabelas?|h[ií]brido)\b")
-
-# Adversarial footer marker: "OMITIR NO GABARITO".  The corpus embeds this
-# phrase in decorative footers that are explicitly excluded from the reference.
-_OMITIR_GABARITO_RE = re.compile(r"(?i)\bomitir\s+n[ao]\s+gabarito\b")
-
-# Half-phrase matchers for the split-row table case (Fix-N): on pages rotated
-# 90°/270°, Tesseract OCRs the decorative footer as a multi-row table where
-# "OMITIR NO" lands in one row and "GABARITO" in the row immediately below.
-# The plain-text representation (rows joined with \n) never places the two
-# words adjacent, so _OMITIR_GABARITO_RE misses the block.  We detect the
-# pair by matching each half independently within a 3-line sliding window.
-_OMITIR_NO_RE = re.compile(r"(?i)\bomitir\s+n[ao]\b")
-_GABARITO_RE = re.compile(r"(?i)\bgabarito\b")
-
-# Document-level corpus header: "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO"
-# (with any suffix, e.g. "ADVERSARIAL * SCAN DUPLICATE").  These appear as
-# multi-page running headers in V3/V4-style test documents and are omitted
-# from the reference.  The anchor "/ laborat" safely distinguishes them from
-# adversarial body paragraphs ("CORPUS INTEGRADO V3… não é cabeçalho") which
-# never include the slash-separated laboratory name.
-_CORPUS_DOC_HEADER_RE = re.compile(r"(?i)^corpus\s+integrado\s+v\d+\s*/\s*laborat")
-
-# Adversarial and family-suffix marker lines: "ADVERSARIAL • REDACTED",
-# "ADVERSARIAL • WATERMARK", "TEXTO NATIVO • NATIVE", etc.  These are
-# standalone lines at the start of a content block that identify the page's
-# test-family type; the reference corpus does not include them.  The
-# separator character (• or *) distinguishes these markers from body
-# sentences that happen to contain the word "adversarial" mid-sentence.
-# Corpus marker blocks are short: 39 to 239 characters, at most two lines, on
-# the V3/V4 pages measured after RUN 004. A longer block that contains a marker
-# also carries page content: on native pages with /Rotate 90 (V4 p213/p214) the
-# whole page (about 3.9k characters, 35 lines) became one block that includes
-# the corpus header and the "OMITIR NO GABARITO" footer, and suppressing it
-# emptied the page (T3-P27). Table blocks keep the split-marker rule.
-_MARKER_BLOCK_MAX_CHARS = 400
-
-_FAMILY_SUFFIX_RE = re.compile(r"(?i)^(?:adversarial|texto\s+nativo)\s*[•*]\s*\S")
-
-# IRINF / DOSSIÊ DE INFRAESTRUTURA running header: appears in V6-style
-# inspection-report documents on rotation-family pages.  On non-rotation
-# pages it is caught by the frequency-based running-header suppressor
-# (appearing on >40% of pages).  On rotation pages (31/47/75) it is NOT
-# the first block (garbled OCR precedes it), so frequency detection misses
-# it.  The text may or may not carry markdown bold markers depending on the
-# OCR path, so "**" is made optional here.
-# The reference corpus omits these headers entirely.
-_IRINF_DOSSI_RE = re.compile(r"(?i)^(?:\*\*)?IRINF\s*/\s*DOSSI[EÊ]")
-
-# "VOLUME I/II/III · OUT YYYY" subtitle: on non-rotation pages it is part
-# of the same block as the IRINF header and is suppressed together.  On
-# rotation pages it appears as a separate second block that the running-
-# header suppressor and Fix-E (IRINF regex) both miss.
-_VOLUME_SUBTITLE_RE = re.compile(r"(?i)^VOLUME\s+[IVX]+\s*[·•]\s*OUT\s+\d{4}")
-
-# "Processo IRINF-YYYY-NNNN | Material institucional simulado" footer:
-# appears at the bottom of the same rotation-family pages in V6-style
-# documents.  The reference corpus omits these footers entirely.
-_PROCESSO_IRINF_MATERIAL_RE = re.compile(
-    r"(?i)^Processo\s+IRINF-\d{4}-\d{4}\s*\|\s*Material\s+institucional\s+simulado"
-)
-
-# Tesseract internal coordinate/confidence dump: on heavily rotated pages
-# Tesseract occasionally outputs its bounding-box + confidence data as
-# text content.  Each line has 11 tab-separated fields:
-#   level page_num block_num par_num line_num word_num left top width height conf text
-# Columns 7-8 (left/top) are pixel coordinates (≥3 digits for a typical
-# scan), column 11 is a float confidence value followed by a tab.
-# This format never appears in legitimate PDF content.
-_TESSERACT_COORD_RE = re.compile(
-    r"^\d+\t\d+\t\d+\t\d+\t\d+\t\d+\t\d{3,}\t\d{3,}\t\d+\t\d+\t[-\d.]+\t",
-    re.MULTILINE,
-)
+# No rule here recognises the text of a particular document. The rules that
+# suppressed the headers, footers and family markers of the V3/V4/V6 test
+# corpora by their wording were removed (T3-P09): they deleted whatever
+# matched, including a whole table for one cell and the title and body of
+# V3 p116 (T3-P27). Page furniture is suppressed only by structural evidence
+# (repetition across pages, the page's own number) and only when the
+# extraction does not preserve headers and footers (T3-P54).
 
 # Portuguese structural section terms: "Seção N" → H2, "Subseção N.M" → H3.
 # These are common in Brazilian government/legal documents and are unlikely to
@@ -123,45 +55,46 @@ _SUBSEÇÃO_RE = re.compile(r"(?i)^subse[çc][aã]o\s+\d+(?:\.\d+)*\b")
 # Used by _table_has_q_without_u to find long-word candidates.
 _LONG_ALPHA_RE = re.compile(r"[A-Za-z]{7,}")
 
-# Dollar sign immediately followed by an uppercase letter: "$Y", "$H", "$U".
-# In Brazilian Portuguese, "$" appears only in "R$ " (followed by digit/space),
-# never followed by a capital letter.  Two or more such patterns in a single
-# block indicate rotated OCR where currency amounts were read sideways (the
-# OCR interprets the rotated "R" as "$" and the neighbouring letter as the
-# next token).  Used by _suppress_dollar_letter_garble (Fix-P).
-_DOLLAR_LETTER_RE = re.compile(r"\$[A-Z]")
-
 
 def _prefix_depth(num_str: str) -> int:
     """Return the depth of a numbered prefix (e.g. '1.1.1' → 3)."""
     return len([p for p in num_str.split(".") if p])
 
 
-# Suppressions of recognised page furniture: running headers, "Página NNN"
-# separators, corpus markers and IRINF header/footer artifacts. Any other
-# suppression made here removes content after the assembly ledger has
-# accounted for every line, so it is reported in the page diagnostics
-# (T3-P36).
+# Suppressions of recognised page furniture: running headers and the page's
+# own "Página N" label. They are the only suppressions made here, and only
+# when headers and footers are not preserved. Any other suppression would
+# remove content after the assembly ledger has accounted for every line, so
+# it is reported in the page diagnostics (T3-P36).
 _FURNITURE_SUPPRESSION_REASONS = frozenset({
     "tesseract_running_header",
     "tesseract_pagina_separator",
-    "tesseract_ocr_corpus_marker",
-    "tesseract_v6_irinf_artifact",
 })
 
 
+def _furniture_suppression_allowed(document: "StructuredDocument") -> bool:
+    """True only when the extraction asked not to preserve headers and footers.
+
+    The assembly records the choice in ``diagnostics.facts`` and the Markdown
+    renderer reads it from there; without the fact, headers and footers are
+    preserved, as in the configuration default (T3-P54).
+    """
+    facts = getattr(getattr(document, "diagnostics", None), "facts", None) or {}
+    return not facts.get("preserve_headers_footers", True)
+
+
 def apply_tesseract_postprocessors(document: "StructuredDocument") -> None:
-    """Run all Tesseract post-processors on *document* in order."""
+    """Run all Tesseract post-processors on *document* in order.
+
+    Only the furniture suppressors remove blocks, and they do nothing when
+    headers and footers are preserved. The other steps never remove text.
+    """
     visible_before = {
         id(block) for page in document.pages for block in page.content_blocks if not block.suppressed
     }
     suppress_tesseract_running_headers(document)
     _suppress_pagina_separator_blocks(document)
-    _suppress_ocr_corpus_markers(document)
-    _suppress_v6_irinf_artifacts(document)
-    _suppress_tesseract_coordinate_dump(document)
     _flag_rotated_table_garble(document)
-    _suppress_dollar_letter_garble(document)   # Fix-P — NEW
     _normalize_brl_currency_spacing(document)
     _promote_numbered_bold_headings(document)
     _promote_allcaps_section_headers(document)
@@ -214,15 +147,21 @@ def suppress_tesseract_running_headers(
 ) -> None:
     """Frequency-based running-header suppressor for Tesseract output.
 
-    Collects the first visible text line from each page and counts how often
-    each normalised line appears across all pages.  Any line appearing on
+    Takes the first visible text block of each page and counts how often each
+    normalised block text appears across all pages. A block text appearing on
     ≥ ``min_frequency`` fraction of pages is treated as a running header and
     marked suppressed on every page where it is the first content block.
+
+    The whole block must repeat: a block whose first line is the header but
+    that also carries other lines (a header merged with the body) is kept, as
+    in the shared detector (``assemble.document._apply_repeated_suppression``).
+    A repeated first line used to take the paragraph merged with it (T3-P27).
 
     This compensates for the geometry-based detector (``_stable_edge_position``)
     which rejects signatures when even one page places the header slightly
     outside the 8 % edge band.  Frequency detection is robust to small layout
-    variations without changing shared pipeline modules.
+    variations without changing shared pipeline modules. Nothing is suppressed
+    when headers and footers are preserved (T3-P54).
 
     Mutates ``block.suppressed = True`` and sets
     ``block.suppression_reason = "tesseract_running_header"`` on matched blocks.
@@ -230,7 +169,7 @@ def suppress_tesseract_running_headers(
     from collections import Counter
 
     pages = document.pages
-    if len(pages) < 5:
+    if len(pages) < 5 or not _furniture_suppression_allowed(document):
         return
 
     try:
@@ -239,7 +178,7 @@ def suppress_tesseract_running_headers(
     except Exception:
         _skip_kinds = set()
 
-    first_lines: list[str | None] = []
+    first_blocks: list[str | None] = []
     for page in pages:
         blocks = sorted(page.content_blocks, key=lambda b: b.order_index)
         found = None
@@ -248,17 +187,16 @@ def suppress_tesseract_running_headers(
                 continue
             if getattr(block, "kind", None) in _skip_kinds:
                 continue
-            text = (block.text or "").strip()
+            text = " ".join((block.text or "").split())
             if not text:
                 continue
-            first_line = text.splitlines()[0].strip()
-            if first_line and len(first_line) >= 3:
-                found = first_line.casefold()
+            if len(text) >= 3:
+                found = text.casefold()
             break
-        first_lines.append(found)
+        first_blocks.append(found)
 
     min_pages = max(2, int(min_frequency * len(pages)))
-    freq = Counter(t for t in first_lines if t is not None)
+    freq = Counter(t for t in first_blocks if t is not None)
     running_headers = {text for text, count in freq.items() if count >= min_pages}
     if not running_headers:
         return
@@ -271,11 +209,10 @@ def suppress_tesseract_running_headers(
                 continue
             if getattr(block, "kind", None) in _skip_kinds:
                 continue
-            text = (block.text or "").strip()
+            text = " ".join((block.text or "").split())
             if not text:
                 continue
-            first_line = text.splitlines()[0].strip().casefold()
-            if first_line in running_headers:
+            if text.casefold() in running_headers:
                 block.suppressed = True
                 block.suppression_reason = "tesseract_running_header"
                 suppressed_count += 1
@@ -290,35 +227,45 @@ def suppress_tesseract_running_headers(
 
 
 def _suppress_pagina_separator_blocks(document: "StructuredDocument") -> None:
-    """Suppress 'Página NNN' blocks that are page-separator artifacts.
+    """Suppress the page's own 'Página N' label ("Página 7 de 40", "Página 007 | Título").
 
-    V3/V4-style test documents have a running page header of the form
-    "Página NNN | Title text" which Tesseract extracts as a content block.
-    The reference corpus treats these as section delimiters (not body content),
-    so each extracted instance contributes one *excess* block to the
-    ``duplicate_excess_rate`` metric.
-
-    The frequency-based running-header suppressor (``suppress_tesseract_running_headers``)
-    does NOT catch these because every page has a different number, making
-    the normalized form unique per page.  This function matches by pattern.
+    A running page label carries the page number, so its text differs on
+    every page and the frequency-based suppressor
+    (``suppress_tesseract_running_headers``) cannot see it repeat. The
+    evidence used instead is the page counter itself: the label is suppressed
+    only on page N. A "Página 12 …" line on another page (a cross-reference,
+    a table of contents, a title) is content and is kept.
 
     Targets both TITLE blocks (layout engine classified them) and TEXT blocks
-    whose raw text starts with "# Página NNN" (OCR read a literal ``#`` glyph).
-    Only separator-shaped blocks are suppressed: at most
-    ``_PAGINA_SEP_MAX_CHARS`` characters and either a TITLE block (a long
-    title may wrap over two lines) or a single line. A TEXT block that
-    continues with body text is kept (T3-P25, T3-P26).
+    whose raw text starts with "# Página N" (OCR read a literal ``#`` glyph).
+    Only label-shaped blocks are suppressed: at most ``_PAGINA_SEP_MAX_CHARS``
+    characters and either a TITLE block (a long title may wrap over two lines)
+    or a single line. A TEXT block that continues with body text is kept
+    (T3-P25, T3-P26). Nothing is suppressed when headers and footers are
+    preserved (T3-P54).
+
+    Known limit (T3-P52): the text after the counter ("| Título") goes with
+    it. The paginated Markdown uses "## Página N" as its page delimiter and
+    the evaluator also takes "## Página N | …" as one, so keeping such a title
+    would make the output ambiguous until the renderer and the evaluator can
+    tell a delimiter from a title.
     Idempotent: already-suppressed blocks are skipped.
     """
+    if not _furniture_suppression_allowed(document):
+        return
     suppressed = 0
     for page in document.pages:
+        page_index = getattr(page, "page_index", None)
+        if page_index is None:
+            continue
         for block in page.content_blocks:
             if block.suppressed:
                 continue
             text = (block.text or "").strip()
             if not text:
                 continue
-            if (_PAGINA_SEP_RE.match(text) and len(text) <= _PAGINA_SEP_MAX_CHARS
+            label = _PAGINA_SEP_RE.match(text)
+            if (label and int(label.group(1)) == page_index + 1 and len(text) <= _PAGINA_SEP_MAX_CHARS
                     and (getattr(block, "kind", None) == "title" or "\n" not in text)):
                 block.suppressed = True
                 block.suppression_reason = "tesseract_pagina_separator"
@@ -327,132 +274,6 @@ def _suppress_pagina_separator_blocks(document: "StructuredDocument") -> None:
     if suppressed:
         print(
             f"[tesseract_post] suppressed {suppressed} 'Página NNN' separator block(s)",
-            flush=True,
-        )
-
-
-def _omitir_gabarito_split(text: str) -> bool:
-    """Return True when 'OMITIR NO' and 'GABARITO' appear within 3 lines of each other.
-
-    Handles the rotated-page table case where the 'OMITIR NO GABARITO' marker
-    is split across adjacent table rows: _OMITIR_GABARITO_RE matches the phrase
-    only when both words are on the same line, so we use a sliding window over
-    the row-joined plain text for TABLE blocks.
-    """
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        if _OMITIR_NO_RE.search(line):
-            window = "\n".join(lines[i : i + 4])  # current line + next 3
-            if _GABARITO_RE.search(window):
-                return True
-    return False
-
-
-def _suppress_ocr_corpus_markers(document: "StructuredDocument") -> None:
-    """Suppress OCR corpus running-header and adversarial-footer marker blocks.
-
-    V3/V4-style test documents contain several categories of content that the
-    reference corpus intentionally omits:
-
-    1. *Running OCR-family headers* — blocks whose raw text starts with
-       "OCR PURO", "OCR TABELAS", "OCR HÍBRIDO" etc.  These identify the
-       page's OCR-difficulty family but are not body content.
-
-    2. *Adversarial footer markers* — blocks containing the phrase
-       "OMITIR NO GABARITO" (Portuguese for "omit from reference key").
-
-    3. *Document-level corpus headers* — blocks starting with
-       "CORPUS INTEGRADO V3 / LABORATÓRIO SINTÉTICO" (with any suffix).
-       These appear as per-page running headers identifying the test corpus;
-       adversarial body paragraphs that mention the corpus name never
-       include the "/ LABORAT" separator and are therefore not suppressed.
-
-    4. *Family-suffix marker lines* — standalone blocks starting with
-       "ADVERSARIAL • REDACTED", "ADVERSARIAL • WATERMARK",
-       "TEXTO NATIVO • NATIVE", etc.  The bullet/asterisk separator is the
-       key discriminator: body sentences that include the word "adversarial"
-       never start with "adversarial •".
-
-    The frequency-based running-header suppressor does not catch these because
-    each variant text is unique per page (different family names, OCR noise).
-
-    Only marker-sized blocks are suppressed (at most ``_MARKER_BLOCK_MAX_CHARS``
-    characters); a larger non-table block that merely contains a marker holds
-    page content and is kept (T3-P27).
-    """
-    suppressed = 0
-    for page in document.pages:
-        for block in page.content_blocks:
-            if block.suppressed:
-                continue
-            text = (block.text or "").strip()
-            if not text:
-                continue
-            if len(text) > _MARKER_BLOCK_MAX_CHARS and getattr(block, "kind", None) != "table":
-                continue
-            if (
-                _OCR_CORPUS_HEADER_RE.match(text)
-                or _OMITIR_GABARITO_RE.search(text)
-                or _omitir_gabarito_split(text)
-                or _CORPUS_DOC_HEADER_RE.match(text)
-                or _FAMILY_SUFFIX_RE.match(text)
-            ):
-                block.suppressed = True
-                block.suppression_reason = "tesseract_ocr_corpus_marker"
-                suppressed += 1
-
-    if suppressed:
-        print(
-            f"[tesseract_post] suppressed {suppressed} OCR corpus marker block(s)",
-            flush=True,
-        )
-
-
-def _suppress_v6_irinf_artifacts(document: "StructuredDocument") -> None:
-    """Suppress IRINF running-header, VOLUME subtitle and process-footer blocks.
-
-    V6 inspection-report (IRINF corpus) documents contain three block categories
-    that the reference intentionally omits:
-
-    1. *Running header* — a block beginning with
-       "IRINF / DOSSIÊ DE INFRAESTRUTURA" (with or without bold ``**`` markers).
-       On non-rotation pages this block is first and is caught by the frequency-
-       based running-header suppressor.  On rotation pages (31/47/75 in the V6
-       corpus) it is not the first block (garbled OCR precedes it), so it escapes
-       the frequency detector and must be caught here.
-
-    2. *VOLUME subtitle* — a separate block "VOLUME I/II/III · OUT YYYY" that on
-       rotation pages appears immediately after the IRINF header as an independent
-       block.  On non-rotation pages it is merged into the IRINF block and
-       suppressed with it by the frequency detector.
-
-    3. *Process footer* — a block starting with
-       "Processo IRINF-YYYY-NNNN | Material institucional simulado"
-       at the bottom of those same rotation pages.
-
-    All patterns are absent from V3/V5/V7 corpora, so the regexes carry no
-    false-positive risk across document families.
-    """
-    suppressed = 0
-    for page in document.pages:
-        for block in page.content_blocks:
-            if block.suppressed:
-                continue
-            text = (block.text or "").strip()
-            if not text:
-                continue
-            if (
-                _IRINF_DOSSI_RE.match(text)
-                or _VOLUME_SUBTITLE_RE.match(text)
-                or _PROCESSO_IRINF_MATERIAL_RE.match(text)
-            ):
-                block.suppressed = True
-                block.suppression_reason = "tesseract_v6_irinf_artifact"
-                suppressed += 1
-
-    if suppressed:
-        print(
-            f"[tesseract_post] suppressed {suppressed} IRINF artifact block(s)",
             flush=True,
         )
 
@@ -608,38 +429,6 @@ def _promote_numbered_bold_headings(document: "StructuredDocument") -> None:
     if promoted:
         print(
             f"[tesseract_post] promoted {promoted} numbered bold heading(s) to TITLE",
-            flush=True,
-        )
-
-
-def _suppress_tesseract_coordinate_dump(document: "StructuredDocument") -> None:
-    """Suppress blocks that contain Tesseract internal coordinate/confidence data.
-
-    On heavily rotated or otherwise unreadable pages Tesseract occasionally
-    outputs its bounding-box and word-confidence table as text.  Each line of
-    this dump has 11 tab-separated fields (level, page_num, block_num, par_num,
-    line_num, word_num, left, top, width, height, conf, text) that are
-    identifiable by the pattern: ``N<TAB>N<TAB>…<TAB>NNN<TAB>NNN<TAB>…<TAB>F<TAB>``
-    where columns 7-8 are pixel coordinates (≥3 digits) and column 11 is a
-    floating-point confidence score.
-
-    This pattern never appears in legitimate PDF content, so it is safe to
-    suppress globally across all document families.  V3 pages 96 and 97 are
-    the canonical examples.
-    """
-    suppressed = 0
-    for page in document.pages:
-        for block in page.content_blocks:
-            if block.suppressed:
-                continue
-            text = block.text or ""
-            if _TESSERACT_COORD_RE.search(text):
-                block.suppressed = True
-                block.suppression_reason = "tesseract_coordinate_dump"
-                suppressed += 1
-    if suppressed:
-        print(
-            f"[tesseract_post] suppressed {suppressed} Tesseract coordinate dump block(s)",
             flush=True,
         )
 
@@ -1076,53 +865,6 @@ def _flag_rotated_table_garble(document: "StructuredDocument") -> None:
     if flagged_total:
         print(
             f"[tesseract_post] flagged {flagged_total} table block(s) with suspected garble (kept)",
-            flush=True,
-        )
-
-
-def _suppress_dollar_letter_garble(document: "StructuredDocument") -> None:
-    """Suppress TABLE and TEXT blocks with ≥2 occurrences of '$' followed by an uppercase letter.
-
-    In Brazilian Portuguese, '$' appears exclusively in the currency symbol
-    'R$ ' followed by a digit or space ('R$ 12.500,00').  The pattern '$[A-Z]'
-    (dollar sign immediately followed by a capital letter) is orthographically
-    impossible in any real document.  It arises when Tesseract reads a page
-    that is rotated ~90°: horizontal currency rows become vertical columns and
-    the OCR interprets the sideways 'R' glyph as '$' while assigning the
-    adjacent rotated letter as the next token.
-
-    A threshold of 2 matches per block avoids suppressing legitimate blocks
-    that might coincidentally contain one unusual character while reliably
-    targeting the garbled rotated pages (which contain 3+ matches: '$Y',
-    '$H', '$U').
-
-    Targets both TABLE blocks (where the pattern appears in cell text) and
-    TEXT blocks (where whole lines of rotated financial data are garbled),
-    completing the suppression of pages 99 and 116 in V3 that Fix-O partially
-    addressed via the Q-not-U heuristic.
-    """
-    try:
-        from structured_pdf_text.document import ContentKind
-        _target_kinds = {ContentKind.TABLE, ContentKind.TEXT}
-    except Exception:
-        return
-
-    suppressed = 0
-    for page in document.pages:
-        for block in page.content_blocks:
-            if block.suppressed:
-                continue
-            if getattr(block, "kind", None) not in _target_kinds:
-                continue
-            text = block.text or ""
-            if len(_DOLLAR_LETTER_RE.findall(text)) >= 2:
-                block.suppressed = True
-                block.suppression_reason = "tesseract_dollar_letter_garble"
-                suppressed += 1
-
-    if suppressed:
-        print(
-            f"[tesseract_post] suppressed {suppressed} dollar-letter garble block(s)",
             flush=True,
         )
 
